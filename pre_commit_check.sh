@@ -1,67 +1,117 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "CLI help works"
-cargo run --quiet -- --help > /dev/null
+LOG_FILE="./pre_commit.log"
 
-echo "No args fails"
-if cargo run --quiet > /dev/null 2>&1; then
-  echo "no args incorrectly accepted" >&2
-  exit 1
-fi
+# Initialize/clear log file
+> "$LOG_FILE"
 
-echo "Valid constructor test fixture parses and resolves"
-cargo run --quiet -- tests/fixtures/constructor_parse.cnb
+# ANSI color formatting
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-echo "AST dump contains Const nodes"
-cargo run --quiet -- tests/fixtures/constructor_parse.cnb --dump-ast | grep -q 'Const('
+run_check() {
+  local description="$1"
+  shift
+  echo -e "${BLUE}[CHECK]${NC} ${description}..."
+  echo -e "\n=== [CHECK] ${description} ===" >> "$LOG_FILE"
+  if "$@" >> "$LOG_FILE" 2>&1; then
+    echo -e "${GREEN}[PASS]${NC} ${description}"
+    echo "=== [PASS] ${description} ===" >> "$LOG_FILE"
+  else
+    echo -e "${RED}[FAIL]${NC} ${description}" >&2
+    echo "=== [FAIL] ${description} ===" >> "$LOG_FILE"
+    exit 1
+  fi
+}
 
-echo "AST dump contains Path nodes"
-cargo run --quiet -- tests/fixtures/constructor_parse.cnb --dump-ast | grep -q 'Path('
+run_check_ast() {
+  local description="$1"
+  shift
+  echo -e "${BLUE}[CHECK]${NC} ${description}..."
+  echo -e "\n=== [CHECK] ${description} (AST dump excluded from log) ===" >> "$LOG_FILE"
+  local tmp_out
+  tmp_out=$(mktemp)
+  if "$@" > "$tmp_out" 2>&1; then
+    echo "(AST dump verified successfully - raw AST omitted from log)" >> "$LOG_FILE"
+    rm -f "$tmp_out"
+    echo -e "${GREEN}[PASS]${NC} ${description}"
+    echo "=== [PASS] ${description} ===" >> "$LOG_FILE"
+  else
+    cat "$tmp_out" >> "$LOG_FILE"
+    rm -f "$tmp_out"
+    echo -e "${RED}[FAIL]${NC} ${description}" >&2
+    echo "=== [FAIL] ${description} ===" >> "$LOG_FILE"
+    exit 1
+  fi
+}
 
-echo "pub use re-export parses and preserves is_pub: true"
-cargo run --quiet -- tests/fixtures/pub_use.cnb --dump-ast | grep -q 'is_pub: true'
+expect_failure() {
+  local description="$1"
+  shift
+  echo -e "${BLUE}[CHECK]${NC} ${description} (expecting rejection)..."
+  echo -e "\n=== [CHECK] ${description} (expecting rejection) ===" >> "$LOG_FILE"
+  local tmp_out
+  tmp_out=$(mktemp)
+  if "$@" > "$tmp_out" 2>&1; then
+    cat "$tmp_out" >> "$LOG_FILE"
+    rm -f "$tmp_out"
+    echo -e "${RED}[FAIL]${NC} ${description} was incorrectly accepted!" >&2
+    echo "=== [FAIL] ${description} was incorrectly accepted! ===" >> "$LOG_FILE"
+    exit 1
+  else
+    cat "$tmp_out" >> "$LOG_FILE"
+    rm -f "$tmp_out"
+    echo -e "${GREEN}[PASS]${NC} ${description}"
+    echo "=== [PASS] ${description} ===" >> "$LOG_FILE"
+  fi
+}
 
-echo "Invalid native modifier on const is rejected"
-if cargo run --quiet -- tests/fixtures/invalid_native_const.cnb > /dev/null 2>&1; then
-  echo "invalid native const incorrectly accepted" >&2
-  exit 1
-fi
+echo "=================================================="
+echo "=== Cinnabar Toolchain Pre-Commit Test Suite ==="
+echo "=================================================="
+echo ""
 
-echo "Mixed struct field and enum variant type is rejected"
-if cargo run --quiet -- tests/fixtures/invalid_mixed_type.cnb > /dev/null 2>&1; then
-  echo "invalid mixed type declaration incorrectly accepted" >&2
-  exit 1
-fi
+# 1. Code Quality & Lint Gates
+run_check "Cargo check" cargo check --quiet
+run_check "Cargo clippy (zero warnings policy)" cargo clippy --quiet -- -D warnings
+run_check "Cargo unit test suite" cargo test --quiet
 
-echo "Local pub val is rejected"
-if cargo run --quiet -- tests/fixtures/pub_local_val.cnb > /dev/null 2>&1; then
-  echo "local pub val incorrectly accepted" >&2
-  exit 1
-fi
+# 2. CLI Invocation Checks
+run_check "CLI help display" cargo run --quiet -- --help
+expect_failure "CLI with no arguments" cargo run --quiet
 
-echo "Unknown variable reference is rejected"
-if cargo run --quiet -- tests/fixtures/unknown_var.cnb > /dev/null 2>&1; then
-  echo "unknown variable reference incorrectly accepted" >&2
-  exit 1
-fi
+# 3. Positive Test Fixtures
+run_check "Constructor fixture parses, resolves, and type-checks" cargo run --quiet -- tests/fixtures/constructor_parse.cnb
+run_check "pub use re-export parses, resolves, and type-checks" cargo run --quiet -- tests/fixtures/pub_use.cnb
+run_check "Multi-file external module import parses, loads, resolves, and type-checks" cargo run --quiet -- tests/fixtures/multi_file/main.cnb
+run_check "Reference specification (spec.cnb) parses, resolves, and type-checks cleanly" cargo run --quiet -- tests/fixtures/spec.cnb
 
-echo "Reference specification (spec.cnb) parses and resolves cleanly"
-cargo run --quiet -- tests/fixtures/spec.cnb
+# AST Dump Verification (AST pattern checked, raw AST omitted from log)
+run_check_ast "AST dump for constructor_parse.cnb contains Const nodes" bash -c "cargo run --quiet -- tests/fixtures/constructor_parse.cnb --dump-ast | grep -q 'Const('"
+run_check_ast "AST dump for constructor_parse.cnb contains Path nodes" bash -c "cargo run --quiet -- tests/fixtures/constructor_parse.cnb --dump-ast | grep -q 'Path('"
+run_check_ast "AST dump for pub_use.cnb preserves is_pub: true" bash -c "cargo run --quiet -- tests/fixtures/pub_use.cnb --dump-ast | grep -q 'is_pub: true'"
+run_check_ast "AST dump for spec.cnb works" cargo run --quiet -- tests/fixtures/spec.cnb --dump-ast
 
-echo "AST dump for spec.cnb works"
-cargo run --quiet -- tests/fixtures/spec.cnb --dump-ast > /dev/null
+# 4. Negative Test Fixtures (All Diagnostic Errors Logged to pre_commit.log)
+expect_failure "Rejecting invalid native modifier on const" cargo run --quiet -- tests/fixtures/invalid_native_const.cnb
+expect_failure "Rejecting invalid native modifiers on non-native items" cargo run --quiet -- tests/fixtures/invalid_native_modifiers.cnb
+expect_failure "Rejecting mixed struct field and enum variant type" cargo run --quiet -- tests/fixtures/invalid_mixed_type.cnb
+expect_failure "Rejecting pub modifier on local val/var (pub_local_val.cnb)" cargo run --quiet -- tests/fixtures/pub_local_val.cnb
+expect_failure "Rejecting pub modifier inside local scope (invalid_pub_local.cnb)" cargo run --quiet -- tests/fixtures/invalid_pub_local.cnb
+expect_failure "Rejecting assignment to immutable val" cargo run --quiet -- tests/fixtures/immutable_assign.cnb
+expect_failure "Rejecting unknown variable reference" cargo run --quiet -- tests/fixtures/unknown_var.cnb
+expect_failure "Rejecting qualified path struct initialization" cargo run --quiet -- tests/fixtures/invalid_qualified_struct_init.cnb
+expect_failure "Rejecting casing rule violations" cargo run --quiet -- tests/fixtures/invalid_casing.cnb
+expect_failure "Rejecting invalid hex literals" cargo run --quiet -- tests/fixtures/invalid_hex_literal.cnb
+expect_failure "Rejecting nested block comment (lexer)" cargo run --quiet -- tests/fixtures/nested_block_comment.cnb
+expect_failure "Rejecting nested block comment (standalone)" cargo run --quiet -- tests/fixtures/invalid_nested_block_comment.cnb
+expect_failure "Rejecting comprehensive resolver & typechecker error suite" cargo run --quiet -- tests/fixtures/invalid_resolver_and_typechecker.cnb
+expect_failure "Rejecting missing input file" cargo run --quiet -- tests/fixtures/does_not_exist.cnb
 
-echo "Nested block comment is rejected"
-if cargo run --quiet -- tests/fixtures/nested_block_comment.cnb > /dev/null 2>&1; then
-  echo "nested block comment incorrectly accepted" >&2
-  exit 1
-fi
-
-echo "Missing file is rejected"
-if cargo run --quiet -- tests/fixtures/does_not_exist.cnb > /dev/null 2>&1; then
-  echo "missing file incorrectly accepted" >&2
-  exit 1
-fi
-
-echo "All pre-commit checks passed."
+echo ""
+echo -e "${GREEN}=================================================="
+echo "=== All pre-commit checks passed cleanly! ==="
+echo -e "==================================================${NC}"

@@ -1,0 +1,149 @@
+#!|
+  Comprehensive TypeChecker & Resolver Error Path Test Suite.
+  This file passes Tokenization and Parsing cleanly, allowing the Resolver
+  and TypeChecker passes to execute completely and report every semantic error.
+|#
+
+# --- Resolver Errors ---
+
+# 1. Unknown module in use import
+use NonExistentModule.some_func
+
+# 2. Duplicate symbol declaration in scope
+pub const DUPLICATE_CONST: Int = 10
+pub const DUPLICATE_CONST: Int = 20
+
+# Declarations for type checking
+pub type Point
+  pub x: Int
+  pub y: Int
+end
+
+pub type Option(T)
+  pub Some(T)
+  pub None
+end
+
+pub type Result(T, E)
+  pub Ok(T)
+  pub Err(E)
+end
+
+# --- TypeChecker: Item-Level & Constant Errors ---
+
+# 3. Constant initializer type mismatch
+pub const BAD_CONST: Int = true
+
+# --- TypeChecker: Statement & Assignment Errors ---
+
+pub fun test_statement_errors() Unit
+  # 4. Local val type mismatch
+  val bad_val: Int = true
+
+  # 5. Local var type mismatch
+  var bad_var: Int = true
+
+  # 6. Assignment to undeclared variable
+  undeclared_var = 100
+
+  # 7. Assignment requires var (val is immutable)
+  val immutable_val: Int = 10
+  immutable_val = 20
+
+  # 8. Assignment type mismatch
+  var mutable_var: Int = 10
+  mutable_var = true
+
+  # 9. While condition non-Bool
+  while 123
+    break
+  end
+end
+
+# --- TypeChecker: Expression, Unary, and Binary Errors ---
+
+pub fun test_binary_and_unary_errors() Unit
+  # 10. Binary operator requires integer operands
+  val bad_add = true + false
+
+  # 11. Logical AND/OR requires Bool operands
+  val bad_and = 100 && 200
+
+  # 12. Unary negation requires integer operand
+  val bad_neg = -true
+
+  # 13. Unary NOT requires Bool operand
+  val bad_not = !100
+end
+
+# --- TypeChecker: Control Flow & Try Operator Errors ---
+
+# 14. Return type mismatch
+pub fun test_return_mismatch() Int
+  return true
+end
+
+# 15. Empty return type mismatch
+pub fun test_empty_return_mismatch() Int
+  return
+end
+
+# 16. 'try' on Result in function returning non-Result
+pub fun test_try_result_in_int_func() Int
+  val x = try Ok(10)
+  return x
+end
+
+# 17. 'try' on Option in function returning non-Option
+pub fun test_try_option_in_int_func() Int
+  val x = try Some(10)
+  return x
+end
+
+# 18. 'try' on non-Result/Option type
+pub fun test_try_on_int() Option(Int)
+  val x = try 100
+  return Some(x)
+end
+
+# --- TypeChecker: Pattern Matching & If Errors ---
+
+# 19. Empty match expression
+pub fun test_empty_match(target: Int) Int
+  return match target
+  end
+end
+
+# 20. Match arm type mismatch (arm 0 evaluates to Int, arm 1 evaluates to Bool)
+pub fun test_match_arm_mismatch(target: Int) Int
+  return match target
+    1 => 100
+    2 => true
+  end
+end
+
+# 21. If condition non-Bool
+pub fun test_if_condition() Unit
+  if 999
+    val x = 1
+  end
+end
+
+# --- TypeChecker: Struct Initialization Errors ---
+
+# 22. Struct field type mismatch
+pub fun test_struct_field_mismatch() Point
+  return Point(x: true, y: 10)
+end
+
+# --- Resolver: Unknown Symbols and Paths ---
+
+pub fun test_resolver_unknown_symbols() Int
+  # 23. Unknown variable reference
+  val x = unknown_variable_name
+
+  # 24. Unknown root symbol in path
+  val y = UnknownRootModule.some_function
+
+  return x
+end

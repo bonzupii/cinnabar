@@ -1,0 +1,5 @@
+pub fun test_func() Int
+  val x: Int = 10
+  x = 20
+  return x
+end

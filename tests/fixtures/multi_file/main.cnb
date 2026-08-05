@@ -1,0 +1,5 @@
+use Math.add
+
+pub fun main() Int
+  return add(10, 20)
+end

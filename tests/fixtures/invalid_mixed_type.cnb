@@ -1,4 +1,4 @@
-pub type BadType
+pub type BadMixedType
   pub x: Int
   pub BadVariant(U32)
 end

@@ -1,0 +1,6 @@
+#|
+  Outer comment
+  #|
+    Nested inner comment (forbidden)
+  |#
+|#

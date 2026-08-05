@@ -1,0 +1,12 @@
+# Snake case violation
+pub fun camelCaseFunction() Int
+  return 1
+end
+
+# SCREAMING_SNAKE_CASE violation
+pub const Bad_Const_Name: Int = 2
+
+# PascalCase violation
+pub type bad_type_name
+  pub Unit
+end

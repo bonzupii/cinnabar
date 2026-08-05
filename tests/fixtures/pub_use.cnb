@@ -1,1 +1,7 @@
+pub mod Binary
+  pub fun check_magic() Unit
+    return Unit
+  end
+end
+
 pub use Binary.check_magic as verify_magic
