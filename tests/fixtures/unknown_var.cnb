@@ -1,0 +1,3 @@
+pub fun test_func() Int
+  return unknown_variable
+end

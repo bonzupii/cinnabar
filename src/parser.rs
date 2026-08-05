@@ -644,6 +644,22 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
+        let start_span = self.current_span();
+
+        if self.match_kind(&TokenKind::Pub) {
+            self.advance();
+            if self.match_kind(&TokenKind::Val) || self.match_kind(&TokenKind::Var) {
+                return Err(ParseError {
+                    message: "pub cannot appear on local val/var".to_string(),
+                    span: start_span,
+                });
+            } else {
+                return Err(ParseError {
+                    message: "Unexpected 'pub' modifier inside local scope".to_string(),
+                    span: start_span,
+                });
+            }
+        }
         if self.match_kind(&TokenKind::Val) {
             self.advance();
             let name = self.expect_snake_ident()?;

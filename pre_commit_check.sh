@@ -10,7 +10,7 @@ if cargo run --quiet > /dev/null 2>&1; then
   exit 1
 fi
 
-echo "Valid constructor test fixture parses"
+echo "Valid constructor test fixture parses and resolves"
 cargo run --quiet -- tests/fixtures/constructor_parse.cnb
 
 echo "AST dump contains Const nodes"
@@ -34,7 +34,19 @@ if cargo run --quiet -- tests/fixtures/invalid_mixed_type.cnb > /dev/null 2>&1; 
   exit 1
 fi
 
-echo "Reference specification (spec.cnb) parses cleanly"
+echo "Local pub val is rejected"
+if cargo run --quiet -- tests/fixtures/pub_local_val.cnb > /dev/null 2>&1; then
+  echo "local pub val incorrectly accepted" >&2
+  exit 1
+fi
+
+echo "Unknown variable reference is rejected"
+if cargo run --quiet -- tests/fixtures/unknown_var.cnb > /dev/null 2>&1; then
+  echo "unknown variable reference incorrectly accepted" >&2
+  exit 1
+fi
+
+echo "Reference specification (spec.cnb) parses and resolves cleanly"
 cargo run --quiet -- tests/fixtures/spec.cnb
 
 echo "AST dump for spec.cnb works"

@@ -1,6 +1,7 @@
 mod ast;
 mod lexer;
 mod parser;
+mod resolver;
 
 use ariadne::Color;
 use ariadne::Label;
@@ -10,6 +11,7 @@ use ariadne::Source;
 use clap::Parser as ClapParser;
 use lexer::Lexer;
 use parser::Parser;
+use resolver::Resolver;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -61,27 +63,8 @@ fn main() -> ExitCode {
     };
 
     let mut parser = Parser::new(&tokens);
-    match parser.parse_program() {
-        Ok(ast) => {
-            let stdout = io::stdout();
-            let mut handle = stdout.lock();
-
-            let write_result = if cli.dump_ast {
-                writeln!(handle, "{:#?}", ast)
-            } else {
-                writeln!(handle, "Successfully parsed {} top-level items.", ast.len())
-            };
-
-            if let Err(io_err) = write_result {
-                if io_err.kind() == io::ErrorKind::BrokenPipe {
-                    return ExitCode::SUCCESS;
-                }
-                eprintln!("Failed to write output: {}", io_err);
-                return ExitCode::FAILURE;
-            }
-
-            ExitCode::SUCCESS
-        }
+    let ast = match parser.parse_program() {
+        Ok(parsed_ast) => parsed_ast,
         Err(parse_err) => {
             let span_range = parse_err.span.start..parse_err.span.end;
             let report_res = Report::build(ReportKind::Error, (file_id.as_str(), span_range.clone()))
@@ -96,6 +79,52 @@ fn main() -> ExitCode {
 
             if let Err(render_err) = report_res {
                 eprintln!("Failed to render syntax error diagnostic: {}", render_err);
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut resolver = Resolver::new();
+    match resolver.resolve_program(&ast) {
+        Ok(()) => {
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+
+            let write_result = if cli.dump_ast {
+                writeln!(handle, "{:#?}", ast)
+            } else {
+                writeln!(handle, "Successfully parsed and resolved {} top-level items.", ast.len())
+            };
+
+            if let Err(io_err) = write_result {
+                if io_err.kind() == io::ErrorKind::BrokenPipe {
+                    return ExitCode::SUCCESS;
+                }
+                eprintln!("Failed to write output: {}", io_err);
+                return ExitCode::FAILURE;
+            }
+
+            ExitCode::SUCCESS
+        }
+        Err(resolve_errors) => {
+            let mut err_idx = 0;
+            while err_idx < resolve_errors.len() {
+                let resolve_err = &resolve_errors[err_idx];
+                let span_range = resolve_err.span.start..resolve_err.span.end;
+                let report_res = Report::build(ReportKind::Error, (file_id.as_str(), span_range.clone()))
+                    .with_message(resolve_err.message.clone())
+                    .with_label(
+                        Label::new((file_id.as_str(), span_range))
+                            .with_message("Resolution error")
+                            .with_color(Color::Red),
+                    )
+                    .finish()
+                    .print((file_id.as_str(), Source::from(&source)));
+
+                if let Err(render_err) = report_res {
+                    eprintln!("Failed to render resolution error diagnostic: {}", render_err);
+                }
+                err_idx += 1;
             }
             ExitCode::FAILURE
         }
