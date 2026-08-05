@@ -89,7 +89,7 @@ pub enum TokenKind {
     // Comments
     DocComment(String),
 
-    EOF,
+    Eof,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,7 +141,7 @@ impl<'a> Lexer<'a> {
             self.skip_whitespace();
             if self.is_at_end() {
                 tokens.push(Token {
-                    kind: TokenKind::EOF,
+                    kind: TokenKind::Eof,
                     span: Span::new(self.source.len(), self.source.len(), self.line, self.col),
                 });
                 break;

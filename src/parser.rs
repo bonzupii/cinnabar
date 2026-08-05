@@ -46,9 +46,9 @@ impl<'a> Parser<'a> {
 
     pub fn parse_program(&mut self) -> Result<Vec<Spanned<Item>>, ParseError> {
         let mut items = Vec::new();
-        while !self.is_at_end() && self.peek_kind() != Some(&TokenKind::EOF) {
+        while !self.is_at_end() && self.peek_kind() != Some(&TokenKind::Eof) {
             let doc_comment = self.collect_doc_comments();
-            if self.is_at_end() || self.peek_kind() == Some(&TokenKind::EOF) {
+            if self.is_at_end() || self.peek_kind() == Some(&TokenKind::Eof) {
                 break;
             }
             let start_span = self.current_span();
