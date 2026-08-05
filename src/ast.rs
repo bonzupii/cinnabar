@@ -147,6 +147,7 @@ pub enum ItemKind {
         items: Vec<Spanned<Item>>,
     },
     Use {
+        is_pub: bool,
         path: Vec<String>,
         alias: Option<String>,
     },

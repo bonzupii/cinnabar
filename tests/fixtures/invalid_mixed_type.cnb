@@ -1,0 +1,4 @@
+pub type BadType
+  pub x: Int
+  pub BadVariant(U32)
+end

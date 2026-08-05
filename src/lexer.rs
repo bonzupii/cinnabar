@@ -173,7 +173,7 @@ impl<'a> Lexer<'a> {
                 ',' => { self.advance(); TokenKind::Comma }
                 '@' => { self.advance(); TokenKind::At }
                 '+' => { self.advance(); TokenKind::Plus }
-                '-' => { self.advance(); TokenKind::Minus } // Always emit Minus!
+                '-' => { self.advance(); TokenKind::Minus }
                 '*' => { self.advance(); TokenKind::Star }
                 '/' => { self.advance(); TokenKind::Slash }
                 '^' => { self.advance(); TokenKind::Caret }
@@ -275,34 +275,8 @@ impl<'a> Lexer<'a> {
         let end_pos = self.current_pos();
         let ident_str = &self.source[start_pos..end_pos];
 
-        match ident_str {
-            "pub" => return Ok(TokenKind::Pub),
-            "const" => return Ok(TokenKind::Const),
-            "val" => return Ok(TokenKind::Val),
-            "var" => return Ok(TokenKind::Var),
-            "type" => return Ok(TokenKind::Type),
-            "end" => return Ok(TokenKind::End),
-            "mod" => return Ok(TokenKind::Mod),
-            "native" => return Ok(TokenKind::Native),
-            "fun" => return Ok(TokenKind::Fun),
-            "impure" => return Ok(TokenKind::Impure),
-            "try" => return Ok(TokenKind::Try),
-            "return" => return Ok(TokenKind::Return),
-            "match" => return Ok(TokenKind::Match),
-            "if" => return Ok(TokenKind::If),
-            "else" => return Ok(TokenKind::Else),
-            "while" => return Ok(TokenKind::While),
-            "break" => return Ok(TokenKind::Break),
-            "continue" => return Ok(TokenKind::Continue),
-            "use" => return Ok(TokenKind::Use),
-            "as" => return Ok(TokenKind::As),
-            "trait" => return Ok(TokenKind::Trait),
-            "impl" => return Ok(TokenKind::Impl),
-            "for" => return Ok(TokenKind::For),
-            "mut" => return Ok(TokenKind::Mut),
-            "true" => return Ok(TokenKind::BoolLit(true)),
-            "false" => return Ok(TokenKind::BoolLit(false)),
-            _user_ident => {}
+        if let Some(keyword_kind) = self.lookup_keyword(ident_str) {
+            return Ok(keyword_kind);
         }
 
         let first = match ident_str.chars().next() {
@@ -351,6 +325,36 @@ impl<'a> Lexer<'a> {
                 span: Span::new(start_pos, end_pos, start_line, start_col),
             })
         }
+    }
+
+    fn lookup_keyword(&self, ident_str: &str) -> Option<TokenKind> {
+        if ident_str == "pub" { Some(TokenKind::Pub) }
+        else if ident_str == "const" { Some(TokenKind::Const) }
+        else if ident_str == "val" { Some(TokenKind::Val) }
+        else if ident_str == "var" { Some(TokenKind::Var) }
+        else if ident_str == "type" { Some(TokenKind::Type) }
+        else if ident_str == "end" { Some(TokenKind::End) }
+        else if ident_str == "mod" { Some(TokenKind::Mod) }
+        else if ident_str == "native" { Some(TokenKind::Native) }
+        else if ident_str == "fun" { Some(TokenKind::Fun) }
+        else if ident_str == "impure" { Some(TokenKind::Impure) }
+        else if ident_str == "try" { Some(TokenKind::Try) }
+        else if ident_str == "return" { Some(TokenKind::Return) }
+        else if ident_str == "match" { Some(TokenKind::Match) }
+        else if ident_str == "if" { Some(TokenKind::If) }
+        else if ident_str == "else" { Some(TokenKind::Else) }
+        else if ident_str == "while" { Some(TokenKind::While) }
+        else if ident_str == "break" { Some(TokenKind::Break) }
+        else if ident_str == "continue" { Some(TokenKind::Continue) }
+        else if ident_str == "use" { Some(TokenKind::Use) }
+        else if ident_str == "as" { Some(TokenKind::As) }
+        else if ident_str == "trait" { Some(TokenKind::Trait) }
+        else if ident_str == "impl" { Some(TokenKind::Impl) }
+        else if ident_str == "for" { Some(TokenKind::For) }
+        else if ident_str == "mut" { Some(TokenKind::Mut) }
+        else if ident_str == "true" { Some(TokenKind::BoolLit(true)) }
+        else if ident_str == "false" { Some(TokenKind::BoolLit(false)) }
+        else { None }
     }
 
     fn lex_number(&mut self, start_line: usize, start_col: usize) -> Result<TokenKind, LexerError> {
@@ -505,7 +509,7 @@ impl<'a> Lexer<'a> {
         if self.cursor >= self.chars.len() {
             return None;
         }
-        let (_, character) = self.chars[self.cursor];
+        let character = self.chars[self.cursor].1;
         self.cursor += 1;
         if character == '\n' {
             self.line += 1;

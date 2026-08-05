@@ -34,6 +34,12 @@ impl fmt::Display for ParseError {
     }
 }
 
+enum DeclKind {
+    Unknown,
+    Struct,
+    Enum,
+}
+
 pub struct Parser<'a> {
     tokens: &'a [Token],
     cursor: usize,
@@ -98,13 +104,53 @@ impl<'a> Parser<'a> {
         };
 
         let kind = match self.peek_kind() {
-            Some(TokenKind::Const) => self.parse_const(is_pub)?,
+            Some(TokenKind::Const) => {
+                if is_native {
+                    return Err(ParseError {
+                        message: "The 'native' modifier cannot be used on 'const' declarations".to_string(),
+                        span: start_span,
+                    });
+                }
+                self.parse_const(is_pub)?
+            }
             Some(TokenKind::Type) => self.parse_type_decl(is_pub, is_native)?,
-            Some(TokenKind::Mod) => self.parse_module(is_pub)?,
-            Some(TokenKind::Use) => self.parse_use()?,
+            Some(TokenKind::Mod) => {
+                if is_native {
+                    return Err(ParseError {
+                        message: "The 'native' modifier cannot be used on 'mod' declarations".to_string(),
+                        span: start_span,
+                    });
+                }
+                self.parse_module(is_pub)?
+            }
+            Some(TokenKind::Use) => {
+                if is_native {
+                    return Err(ParseError {
+                        message: "The 'native' modifier cannot be used on 'use' imports".to_string(),
+                        span: start_span,
+                    });
+                }
+                self.parse_use(is_pub)?
+            }
             Some(TokenKind::Fun) | Some(TokenKind::Impure) => self.parse_function(is_pub, is_native)?,
-            Some(TokenKind::Trait) => self.parse_trait(is_pub)?,
-            Some(TokenKind::Impl) => self.parse_impl(is_pub)?,
+            Some(TokenKind::Trait) => {
+                if is_native {
+                    return Err(ParseError {
+                        message: "The 'native' modifier cannot be used on 'trait' declarations".to_string(),
+                        span: start_span,
+                    });
+                }
+                self.parse_trait(is_pub)?
+            }
+            Some(TokenKind::Impl) => {
+                if is_native {
+                    return Err(ParseError {
+                        message: "The 'native' modifier cannot be used on 'impl' blocks".to_string(),
+                        span: start_span,
+                    });
+                }
+                self.parse_impl(is_pub)?
+            }
             Some(unexpected_token) => return Err(ParseError {
                 message: format!("Expected item declaration, found {:?}", unexpected_token),
                 span: start_span,
@@ -173,7 +219,7 @@ impl<'a> Parser<'a> {
 
         let mut fields = Vec::new();
         let mut variants = Vec::new();
-        let mut is_struct = false;
+        let mut decl_kind = DeclKind::Unknown;
 
         while !self.match_kind(&TokenKind::End) && !self.is_at_end() {
             self.collect_doc_comments();
@@ -181,6 +227,7 @@ impl<'a> Parser<'a> {
                 break;
             }
 
+            let start_item_span = self.current_span();
             let field_or_variant_pub = if self.match_kind(&TokenKind::Pub) {
                 self.advance();
                 true
@@ -189,7 +236,17 @@ impl<'a> Parser<'a> {
             };
 
             if let Ok(field_name) = self.expect_snake_ident() {
-                is_struct = true;
+                match decl_kind {
+                    DeclKind::Enum => {
+                        return Err(ParseError {
+                            message: "Cannot mix enum variants and struct fields in type declaration".to_string(),
+                            span: start_item_span,
+                        });
+                    }
+                    DeclKind::Unknown => decl_kind = DeclKind::Struct,
+                    DeclKind::Struct => {}
+                }
+
                 self.expect(&TokenKind::Colon)?;
                 let field_ty = self.parse_spanned_type()?;
                 fields.push(StructField {
@@ -198,6 +255,17 @@ impl<'a> Parser<'a> {
                     ty: field_ty,
                 });
             } else if let Ok(variant_name) = self.expect_pascal_ident() {
+                match decl_kind {
+                    DeclKind::Struct => {
+                        return Err(ParseError {
+                            message: "Cannot mix struct fields and enum variants in type declaration".to_string(),
+                            span: start_item_span,
+                        });
+                    }
+                    DeclKind::Unknown => decl_kind = DeclKind::Enum,
+                    DeclKind::Enum => {}
+                }
+
                 let mut tuple_types = Vec::new();
                 if self.match_kind(&TokenKind::LParen) {
                     self.advance();
@@ -226,12 +294,10 @@ impl<'a> Parser<'a> {
 
         self.expect(&TokenKind::End)?;
 
-        let kind = if is_struct {
-            TypeKind::Struct(fields)
-        } else if !variants.is_empty() {
-            TypeKind::Enum(variants)
-        } else {
-            TypeKind::Unit
+        let kind = match decl_kind {
+            DeclKind::Struct => TypeKind::Struct(fields),
+            DeclKind::Enum => TypeKind::Enum(variants),
+            DeclKind::Unknown => TypeKind::Unit,
         };
 
         Ok(ItemKind::TypeDecl {
@@ -362,7 +428,7 @@ impl<'a> Parser<'a> {
         Ok(ItemKind::Module { is_pub, name, items })
     }
 
-    fn parse_use(&mut self) -> Result<ItemKind, ParseError> {
+    fn parse_use(&mut self, is_pub: bool) -> Result<ItemKind, ParseError> {
         self.expect(&TokenKind::Use)?;
         let mut path = Vec::new();
         path.push(self.expect_pascal_ident()?);
@@ -383,7 +449,7 @@ impl<'a> Parser<'a> {
             None
         };
 
-        Ok(ItemKind::Use { path, alias })
+        Ok(ItemKind::Use { is_pub, path, alias })
     }
 
     fn parse_function(&mut self, is_pub: bool, is_native: bool) -> Result<ItemKind, ParseError> {
@@ -578,67 +644,62 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
-        match self.peek_kind() {
-            Some(TokenKind::Val) => {
+        if self.match_kind(&TokenKind::Val) {
+            self.advance();
+            let name = self.expect_snake_ident()?;
+            let ty = if self.match_kind(&TokenKind::Colon) {
                 self.advance();
-                let name = self.expect_snake_ident()?;
-                let ty = if self.match_kind(&TokenKind::Colon) {
-                    self.advance();
-                    Some(self.parse_spanned_type()?)
-                } else {
-                    None
-                };
-                self.expect(&TokenKind::Eq)?;
-                let init = self.parse_spanned_expr()?;
-                Ok(Stmt::Val { name, ty, init })
-            }
-            Some(TokenKind::Var) => {
+                Some(self.parse_spanned_type()?)
+            } else {
+                None
+            };
+            self.expect(&TokenKind::Eq)?;
+            let init = self.parse_spanned_expr()?;
+            Ok(Stmt::Val { name, ty, init })
+        } else if self.match_kind(&TokenKind::Var) {
+            self.advance();
+            let name = self.expect_snake_ident()?;
+            let ty = if self.match_kind(&TokenKind::Colon) {
                 self.advance();
-                let name = self.expect_snake_ident()?;
-                let ty = if self.match_kind(&TokenKind::Colon) {
-                    self.advance();
-                    Some(self.parse_spanned_type()?)
-                } else {
-                    None
-                };
-                self.expect(&TokenKind::Eq)?;
-                let init = self.parse_spanned_expr()?;
-                Ok(Stmt::Var { name, ty, init })
-            }
-            Some(TokenKind::While) => {
-                self.advance();
-                let cond = self.parse_spanned_expr()?;
-                let mut body = Vec::new();
-                while !self.match_kind(&TokenKind::End) && !self.is_at_end() {
-                    self.collect_doc_comments();
-                    if self.match_kind(&TokenKind::End) || self.is_at_end() {
-                        break;
-                    }
-                    body.push(self.parse_spanned_stmt()?);
+                Some(self.parse_spanned_type()?)
+            } else {
+                None
+            };
+            self.expect(&TokenKind::Eq)?;
+            let init = self.parse_spanned_expr()?;
+            Ok(Stmt::Var { name, ty, init })
+        } else if self.match_kind(&TokenKind::While) {
+            self.advance();
+            let cond = self.parse_spanned_expr()?;
+            let mut body = Vec::new();
+            while !self.match_kind(&TokenKind::End) && !self.is_at_end() {
+                self.collect_doc_comments();
+                if self.match_kind(&TokenKind::End) || self.is_at_end() {
+                    break;
                 }
-                self.expect(&TokenKind::End)?;
-                Ok(Stmt::While { cond, body })
+                body.push(self.parse_spanned_stmt()?);
             }
-            Some(TokenKind::SnakeIdent(name)) => {
-                let var_name = name.clone();
-                if self.peek_next_kind() == Some(&TokenKind::Eq) {
-                    self.advance();
-                    self.advance();
-                    let expr = self.parse_spanned_expr()?;
-                    Ok(Stmt::Assign { name: var_name, expr })
-                } else {
-                    let expr = self.parse_spanned_expr()?;
-                    Ok(Stmt::Expr(expr))
-                }
-            }
-            Some(_) => {
+            self.expect(&TokenKind::End)?;
+            Ok(Stmt::While { cond, body })
+        } else if let Some(TokenKind::SnakeIdent(name)) = self.peek_kind() {
+            let var_name = name.clone();
+            if self.peek_next_kind() == Some(&TokenKind::Eq) {
+                self.advance();
+                self.advance();
+                let expr = self.parse_spanned_expr()?;
+                Ok(Stmt::Assign { name: var_name, expr })
+            } else {
                 let expr = self.parse_spanned_expr()?;
                 Ok(Stmt::Expr(expr))
             }
-            None => Err(ParseError {
+        } else if !self.is_at_end() {
+            let expr = self.parse_spanned_expr()?;
+            Ok(Stmt::Expr(expr))
+        } else {
+            Err(ParseError {
                 message: "Unexpected EOF while parsing statement".to_string(),
                 span: self.current_span(),
-            }),
+            })
         }
     }
 
@@ -934,9 +995,20 @@ impl<'a> Parser<'a> {
 
                 while self.match_kind(&TokenKind::Dot) {
                     self.advance();
-                    let segment = self
-                        .expect_pascal_ident()
-                        .or_else(|_| self.expect_snake_ident())?;
+                    let segment = match self.expect_pascal_ident() {
+                        Ok(pascal_seg) => pascal_seg,
+                        Err(pascal_err) => {
+                            match self.expect_snake_ident() {
+                                Ok(snake_seg) => snake_seg,
+                                Err(snake_err) => {
+                                    return Err(ParseError {
+                                        message: format!("Expected path segment, got {}", snake_err.message),
+                                        span: pascal_err.span,
+                                    });
+                                }
+                            }
+                        }
+                    };
                     path.push(segment);
                 }
 
@@ -1039,30 +1111,27 @@ impl<'a> Parser<'a> {
                     let end_span = self.previous_span();
                     let full_span = Span::new(start_span.start, end_span.end, start_span.line, start_span.col);
 
-                    match primary_expr.node {
-                        Expr::Path(path) => {
-                            if path.len() != 1 {
-                                return Err(ParseError {
-                                    message: "Struct initialization requires an unqualified type name".to_string(),
-                                    span: full_span,
-                                });
-                            }
-
-                            let struct_name = match path.into_iter().next() {
-                                Some(name_val) => name_val,
-                                None => return Err(ParseError {
-                                    message: "Path expected to contain at least one segment".to_string(),
-                                    span: full_span,
-                                }),
-                            };
-                            primary_expr = Spanned::new(Expr::StructInit(struct_name, fields), full_span);
-                        }
-                        _not_path => {
+                    if let Expr::Path(path) = primary_expr.node {
+                        if path.len() != 1 {
                             return Err(ParseError {
-                                message: "Struct initialization requires a type name".to_string(),
+                                message: "Struct initialization requires an unqualified type name".to_string(),
                                 span: full_span,
                             });
                         }
+
+                        let struct_name = match path.into_iter().next() {
+                            Some(name_val) => name_val,
+                            None => return Err(ParseError {
+                                message: "Path expected to contain at least one segment".to_string(),
+                                span: full_span,
+                            }),
+                        };
+                        primary_expr = Spanned::new(Expr::StructInit(struct_name, fields), full_span);
+                    } else {
+                        return Err(ParseError {
+                            message: "Struct initialization requires a type name".to_string(),
+                            span: full_span,
+                        });
                     }
                 } else {
                     let mut args = Vec::new();
@@ -1105,19 +1174,18 @@ impl<'a> Parser<'a> {
         let mut bracket_depth = 1;
 
         while idx < self.tokens.len() {
-            match &self.tokens[idx].kind {
-                TokenKind::LBracket => bracket_depth += 1,
-                TokenKind::RBracket => {
-                    bracket_depth -= 1;
-                    if bracket_depth == 0 {
-                        if idx + 1 < self.tokens.len() {
-                            return self.tokens[idx + 1].kind == TokenKind::LParen;
-                        } else {
-                            return false;
-                        }
+            let token_kind = &self.tokens[idx].kind;
+            if *token_kind == TokenKind::LBracket {
+                bracket_depth += 1;
+            } else if *token_kind == TokenKind::RBracket {
+                bracket_depth -= 1;
+                if bracket_depth == 0 {
+                    if idx + 1 < self.tokens.len() {
+                        return self.tokens[idx + 1].kind == TokenKind::LParen;
+                    } else {
+                        return false;
                     }
                 }
-                _non_bracket => {}
             }
             idx += 1;
         }
@@ -1125,26 +1193,25 @@ impl<'a> Parser<'a> {
     }
 
     fn peek_binary_op(&self) -> Option<BinOp> {
-        match self.peek_kind()? {
-            TokenKind::Plus => Some(BinOp::Add),
-            TokenKind::Minus => Some(BinOp::Sub),
-            TokenKind::Star => Some(BinOp::Mul),
-            TokenKind::Slash => Some(BinOp::Div),
-            TokenKind::EqEq => Some(BinOp::Eq),
-            TokenKind::NotEq => Some(BinOp::NotEq),
-            TokenKind::Lt => Some(BinOp::Lt),
-            TokenKind::Gt => Some(BinOp::Gt),
-            TokenKind::LtEq => Some(BinOp::LtEq),
-            TokenKind::GtEq => Some(BinOp::GtEq),
-            TokenKind::Ampersand => Some(BinOp::BitAnd),
-            TokenKind::Pipe => Some(BinOp::BitOr),
-            TokenKind::Caret => Some(BinOp::BitXor),
-            TokenKind::Shl => Some(BinOp::Shl),
-            TokenKind::Shr => Some(BinOp::Shr),
-            TokenKind::AmpAmp => Some(BinOp::And),
-            TokenKind::PipePipe => Some(BinOp::Or),
-            _non_operator => None,
-        }
+        let kind = self.peek_kind()?;
+        if *kind == TokenKind::Plus { Some(BinOp::Add) }
+        else if *kind == TokenKind::Minus { Some(BinOp::Sub) }
+        else if *kind == TokenKind::Star { Some(BinOp::Mul) }
+        else if *kind == TokenKind::Slash { Some(BinOp::Div) }
+        else if *kind == TokenKind::EqEq { Some(BinOp::Eq) }
+        else if *kind == TokenKind::NotEq { Some(BinOp::NotEq) }
+        else if *kind == TokenKind::Lt { Some(BinOp::Lt) }
+        else if *kind == TokenKind::Gt { Some(BinOp::Gt) }
+        else if *kind == TokenKind::LtEq { Some(BinOp::LtEq) }
+        else if *kind == TokenKind::GtEq { Some(BinOp::GtEq) }
+        else if *kind == TokenKind::Ampersand { Some(BinOp::BitAnd) }
+        else if *kind == TokenKind::Pipe { Some(BinOp::BitOr) }
+        else if *kind == TokenKind::Caret { Some(BinOp::BitXor) }
+        else if *kind == TokenKind::Shl { Some(BinOp::Shl) }
+        else if *kind == TokenKind::Shr { Some(BinOp::Shr) }
+        else if *kind == TokenKind::AmpAmp { Some(BinOp::And) }
+        else if *kind == TokenKind::PipePipe { Some(BinOp::Or) }
+        else { None }
     }
 
     fn op_precedence(&self, op: &BinOp) -> u8 {
