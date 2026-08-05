@@ -113,34 +113,8 @@ impl Resolver {
         );
     }
 
-    fn use_ref<T>(&self, value: &T) {
-        let pointer = value as *const T;
-        let address = pointer as usize;
-        if address == 0 {
-            eprintln!("Null reference encountered");
-        }
-    }
-
-    fn touch_symbol(&self, symbol: &Symbol) {
-        self.use_ref(&symbol.name);
-        self.use_ref(&symbol.kind);
-        self.use_ref(&symbol.is_pub);
-        self.use_ref(&symbol.span);
-        self.use_ref(&symbol.is_builtin);
-    }
-
-    fn touch_scope(&self, scope: &Scope) {
-        self.use_ref(&scope.kind);
-        for symbol_ref in scope.symbols.values() {
-            self.touch_symbol(symbol_ref);
-        }
-    }
-
     pub fn resolve_program(&mut self, items: &[Spanned<Item>]) -> Result<(), Vec<ResolveError>> {
-        // Pass 1: Declare top-level items and enum variants
         self.declare_items(items);
-
-        // Pass 2: Resolve bodies, statements, and child scopes
         self.resolve_items(items);
 
         if self.errors.is_empty() {
@@ -163,13 +137,11 @@ impl Resolver {
         match &item.node.kind {
             ItemKind::Const { is_pub, name, ty, init } => {
                 self.declare_symbol(name.clone(), SymbolKind::Const, *is_pub, item.span);
-                self.use_ref(ty);
-                self.use_ref(init);
+                self.resolve_type(ty);
+                self.resolve_expr(init);
             }
-            ItemKind::TypeDecl { is_pub, name, generics, kind } => {
+            ItemKind::TypeDecl { is_pub, name, kind, .. } => {
                 self.declare_symbol(name.clone(), SymbolKind::Type, *is_pub, item.span);
-                self.use_ref(generics);
-
                 if let TypeKind::Enum(variants) = kind {
                     let mut variant_idx = 0;
                     while variant_idx < variants.len() {
@@ -184,27 +156,11 @@ impl Resolver {
                     }
                 }
             }
-            ItemKind::Function {
-                is_pub,
-                is_native,
-                is_impure,
-                name,
-                generics,
-                params,
-                return_ty,
-                body,
-            } => {
+            ItemKind::Function { is_pub, name, .. } => {
                 self.declare_symbol(name.clone(), SymbolKind::Function, *is_pub, item.span);
-                self.use_ref(is_native);
-                self.use_ref(is_impure);
-                self.use_ref(generics);
-                self.use_ref(params);
-                self.use_ref(return_ty);
-                self.use_ref(body);
             }
-            ItemKind::Module { is_pub, name, items: child_items } => {
+            ItemKind::Module { is_pub, name, .. } => {
                 self.declare_symbol(name.clone(), SymbolKind::Module, *is_pub, item.span);
-                self.use_ref(child_items);
             }
             ItemKind::Use { is_pub, path, alias } => {
                 let local_name = match alias {
@@ -216,15 +172,12 @@ impl Resolver {
                 };
                 self.declare_symbol(local_name, SymbolKind::Import, *is_pub, item.span);
             }
-            ItemKind::Trait { is_pub, name, methods } => {
+            ItemKind::Trait { is_pub, name, .. } => {
                 self.declare_symbol(name.clone(), SymbolKind::Trait, *is_pub, item.span);
-                self.use_ref(methods);
             }
-            ItemKind::Impl { is_pub, trait_name, target_type, methods } => {
-                self.use_ref(is_pub);
-                self.use_ref(trait_name);
-                self.use_ref(target_type);
-                self.use_ref(methods);
+            ItemKind::Impl { trait_name, target_type, .. } => {
+                self.resolve_path(std::slice::from_ref(trait_name), item.span);
+                self.resolve_type(target_type);
             }
         }
     }
@@ -256,7 +209,10 @@ impl Resolver {
             }
 
             self.errors.push(ResolveError {
-                message: format!("Duplicate declaration of symbol '{}' in this scope", name),
+                message: format!(
+                    "Duplicate declaration of symbol '{}' in this scope (originally declared at line {}, col {})",
+                    name, existing_symbol.span.line, existing_symbol.span.col
+                ),
                 span,
             });
             return;
@@ -286,15 +242,11 @@ impl Resolver {
 
     fn resolve_item(&mut self, item: &Spanned<Item>) {
         match &item.node.kind {
-            ItemKind::Const { is_pub, name, ty, init } => {
-                self.use_ref(is_pub);
-                self.use_ref(name);
+            ItemKind::Const { ty, init, .. } => {
                 self.resolve_type(ty);
                 self.resolve_expr(init);
             }
-            ItemKind::TypeDecl { is_pub, name, generics, kind } => {
-                self.use_ref(is_pub);
-                self.use_ref(name);
+            ItemKind::TypeDecl { generics, kind, .. } => {
                 self.push_scope(ScopeKind::Block);
                 let mut idx = 0;
                 while idx < generics.len() {
@@ -328,18 +280,13 @@ impl Resolver {
                 self.pop_scope();
             }
             ItemKind::Function {
-                is_pub,
-                is_native,
-                is_impure,
                 name,
                 generics,
                 params,
                 return_ty,
                 body,
+                ..
             } => {
-                self.use_ref(is_pub);
-                self.use_ref(is_native);
-                self.use_ref(is_impure);
                 self.push_scope(ScopeKind::Function(name.clone()));
 
                 let mut gen_idx = 0;
@@ -367,26 +314,22 @@ impl Resolver {
 
                 self.pop_scope();
             }
-            ItemKind::Module { is_pub, name, items: child_items } => {
+            ItemKind::Module { name, is_pub, items: child_items } => {
                 self.push_scope(ScopeKind::Module(name.clone(), *is_pub));
                 self.declare_items(child_items);
                 self.resolve_items(child_items);
                 self.pop_scope();
             }
-            ItemKind::Use { is_pub, path, alias } => {
-                self.use_ref(is_pub);
-                self.use_ref(alias);
+            ItemKind::Use { path, .. } => {
                 self.resolve_use_path(path, item.span);
             }
-            ItemKind::Trait { is_pub, name, methods } => {
-                self.use_ref(is_pub);
+            ItemKind::Trait { name, methods, .. } => {
                 self.push_scope(ScopeKind::Trait(name.clone()));
                 self.declare_items(methods);
                 self.resolve_items(methods);
                 self.pop_scope();
             }
-            ItemKind::Impl { is_pub, trait_name, target_type, methods } => {
-                self.use_ref(is_pub);
+            ItemKind::Impl { trait_name, target_type, methods, .. } => {
                 self.push_scope(ScopeKind::Impl);
                 self.resolve_path(std::slice::from_ref(trait_name), item.span);
                 self.resolve_type(target_type);
@@ -452,30 +395,18 @@ impl Resolver {
 
     fn resolve_expr(&mut self, expr: &Spanned<Expr>) {
         match &expr.node {
-            Expr::Lit(lit_val) => {
-                self.use_ref(lit_val);
-            }
-            Expr::Break => {}
-            Expr::Continue => {}
-            Expr::Var(name) => {
-                self.resolve_symbol_reference(name, expr.span);
-            }
-            Expr::Const(name) => {
+            Expr::Lit(_) | Expr::Break | Expr::Continue => {}
+            Expr::Var(name) | Expr::Const(name) => {
                 self.resolve_symbol_reference(name, expr.span);
             }
             Expr::Path(path) => {
                 self.resolve_path(path, expr.span);
             }
-            Expr::Binary(left, bin_op, right) => {
-                self.use_ref(bin_op);
+            Expr::Binary(left, _, right) => {
                 self.resolve_expr(left);
                 self.resolve_expr(right);
             }
-            Expr::Unary(un_op, inner) => {
-                self.use_ref(un_op);
-                self.resolve_expr(inner);
-            }
-            Expr::Try(inner) => {
+            Expr::Unary(_, inner) | Expr::Try(inner) => {
                 self.resolve_expr(inner);
             }
             Expr::Return(opt_expr) => {
@@ -506,8 +437,7 @@ impl Resolver {
                     field_idx += 1;
                 }
             }
-            Expr::FieldAccess(target, field_name) => {
-                self.use_ref(field_name);
+            Expr::FieldAccess(target, _) => {
                 self.resolve_expr(target);
             }
             Expr::ArrayLit(elements) => {
@@ -546,13 +476,8 @@ impl Resolver {
 
     fn resolve_pattern(&mut self, pattern: &Spanned<Pattern>) {
         match &pattern.node {
-            Pattern::Lit(lit_val) => {
-                self.use_ref(lit_val);
-            }
-            Pattern::Var(name) => {
-                self.declare_symbol(name.clone(), SymbolKind::Val, false, pattern.span);
-            }
-            Pattern::Rest(name) => {
+            Pattern::Lit(_) => {}
+            Pattern::Var(name) | Pattern::Rest(name) => {
                 self.declare_symbol(name.clone(), SymbolKind::Val, false, pattern.span);
             }
             Pattern::Variant(variant_name, sub_patterns) => {
@@ -605,8 +530,7 @@ impl Resolver {
                     idx += 1;
                 }
             }
-            Type::Array(inner_type, array_size) => {
-                self.use_ref(array_size);
+            Type::Array(inner_type, _) => {
                 self.resolve_type(inner_type);
             }
             Type::Slice(inner_type) | Type::Ref(inner_type) | Type::RefMut(inner_type) => {
@@ -615,8 +539,39 @@ impl Resolver {
         }
     }
 
+    fn lookup_symbol(&self, name: &str) -> Option<(&Symbol, &ScopeKind)> {
+        let mut idx = self.scopes.len();
+        while idx > 0 {
+            idx -= 1;
+            if let Some(sym) = self.scopes[idx].symbols.get(name) {
+                return Some((sym, &self.scopes[idx].kind));
+            }
+        }
+        None
+    }
+
+    fn is_inside_scope(&self, target_scope_kind: &ScopeKind) -> bool {
+        let mut idx = 0;
+        while idx < self.scopes.len() {
+            if &self.scopes[idx].kind == target_scope_kind {
+                return true;
+            }
+            idx += 1;
+        }
+        false
+    }
+
     fn resolve_symbol_reference(&mut self, name: &str, span: Span) {
-        if self.symbol_exists(name) {
+        if let Some((symbol, decl_scope_kind)) = self.lookup_symbol(name) {
+            if let ScopeKind::Module(mod_name, is_mod_pub) = decl_scope_kind
+                && (!symbol.is_pub || !is_mod_pub)
+                && !self.is_inside_scope(decl_scope_kind)
+            {
+                self.errors.push(ResolveError {
+                    message: format!("Symbol '{}' is private in module '{}'", symbol.name, mod_name),
+                    span,
+                });
+            }
             self.mark_symbol_used(name);
         } else {
             self.errors.push(ResolveError {
@@ -640,14 +595,7 @@ impl Resolver {
     }
 
     fn symbol_exists(&self, name: &str) -> bool {
-        let mut idx = self.scopes.len();
-        while idx > 0 {
-            idx -= 1;
-            if self.scopes[idx].symbols.contains_key(name) {
-                return true;
-            }
-        }
-        false
+        self.lookup_symbol(name).is_some()
     }
 
     fn mark_symbol_used(&mut self, name: &str) {
@@ -670,8 +618,7 @@ impl Resolver {
 
     fn pop_scope(&mut self) {
         if self.scopes.len() > 1 {
-            let popped_opt = self.scopes.pop();
-            if let Some(popped_scope) = popped_opt { self.touch_scope(&popped_scope) }
+            self.scopes.pop();
         }
     }
 }

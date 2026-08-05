@@ -3,7 +3,7 @@ mod lexer;
 mod module_loader;
 mod parser;
 mod resolver;
-mod typechecker;
+mod typecheck;
 
 use ariadne::Color;
 use ariadne::Label;
@@ -15,7 +15,7 @@ use lexer::Lexer;
 use module_loader::ModuleLoader;
 use parser::Parser;
 use resolver::Resolver;
-use typechecker::TypeChecker;
+use typecheck::TypeChecker;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;

@@ -29,14 +29,7 @@ impl ModuleLoader {
         let mut loaded_paths = HashSet::new();
         let canonical_root = match root_file_path.canonicalize() {
             Ok(path) => path,
-            Err(io_err) => {
-                let pointer = &io_err as *const std::io::Error;
-                let address = pointer as usize;
-                if address == 0 {
-                    eprintln!("Null reference encountered");
-                }
-                root_file_path.to_path_buf()
-            }
+            Err(_) => root_file_path.to_path_buf(),
         };
         loaded_paths.insert(canonical_root);
 
@@ -46,72 +39,9 @@ impl ModuleLoader {
         }
     }
 
-    fn use_ref<T>(&self, value: &T) {
-        let pointer = value as *const T;
-        let address = pointer as usize;
-        if address == 0 {
-            eprintln!("Null reference encountered");
-        }
-    }
-
     pub fn load_external_modules(&mut self, items: &mut Vec<Spanned<Item>>) -> Result<(), ModuleLoaderError> {
         let mut required_modules = Vec::new();
-
-        let mut idx = 0;
-        while idx < items.len() {
-            let item = &items[idx];
-            match &item.node.kind {
-                ItemKind::Use { is_pub, path, alias } => {
-                    self.use_ref(is_pub);
-                    self.use_ref(alias);
-                    if !path.is_empty() {
-                        let root_mod = &path[0];
-                        if !self.has_module_declaration(items, root_mod) && !required_modules.contains(root_mod) {
-                            required_modules.push(root_mod.clone());
-                        }
-                    }
-                }
-                ItemKind::Module { is_pub, name, items: child_items } => {
-                    self.use_ref(is_pub);
-                    self.use_ref(name);
-                    self.use_ref(child_items);
-                }
-                ItemKind::Const { is_pub, name, ty, init } => {
-                    self.use_ref(is_pub);
-                    self.use_ref(name);
-                    self.use_ref(ty);
-                    self.use_ref(init);
-                }
-                ItemKind::TypeDecl { is_pub, name, generics, kind } => {
-                    self.use_ref(is_pub);
-                    self.use_ref(name);
-                    self.use_ref(generics);
-                    self.use_ref(kind);
-                }
-                ItemKind::Function { is_pub, is_native, is_impure, name, generics, params, return_ty, body } => {
-                    self.use_ref(is_pub);
-                    self.use_ref(is_native);
-                    self.use_ref(is_impure);
-                    self.use_ref(name);
-                    self.use_ref(generics);
-                    self.use_ref(params);
-                    self.use_ref(return_ty);
-                    self.use_ref(body);
-                }
-                ItemKind::Trait { is_pub, name, methods } => {
-                    self.use_ref(is_pub);
-                    self.use_ref(name);
-                    self.use_ref(methods);
-                }
-                ItemKind::Impl { is_pub, trait_name, target_type, methods } => {
-                    self.use_ref(is_pub);
-                    self.use_ref(trait_name);
-                    self.use_ref(target_type);
-                    self.use_ref(methods);
-                }
-            }
-            idx += 1;
-        }
+        self.collect_required_modules(items, &mut required_modules);
 
         let mut req_idx = 0;
         while req_idx < required_modules.len() {
@@ -125,15 +55,102 @@ impl ModuleLoader {
         Ok(())
     }
 
+    fn collect_required_modules(&self, items: &[Spanned<Item>], required_modules: &mut Vec<String>) {
+        let mut idx = 0;
+        while idx < items.len() {
+            let item = &items[idx];
+            match &item.node.kind {
+                ItemKind::Use { path, .. } => {
+                    if !path.is_empty() {
+                        let root_mod = &path[0];
+                        if !self.has_module_declaration(items, root_mod) && !required_modules.contains(root_mod) {
+                            required_modules.push(root_mod.clone());
+                        }
+                    }
+                }
+                ItemKind::Module { items: child_items, .. } => {
+                    self.collect_required_modules(child_items, required_modules);
+                }
+                ItemKind::Const { ty, .. } => {
+                    self.inspect_type(ty, items, required_modules);
+                }
+                ItemKind::TypeDecl { kind, .. } => {
+                    match kind {
+                        crate::ast::TypeKind::Struct(fields) => {
+                            let mut f_idx = 0;
+                            while f_idx < fields.len() {
+                                self.inspect_type(&fields[f_idx].ty, items, required_modules);
+                                f_idx += 1;
+                            }
+                        }
+                        crate::ast::TypeKind::Enum(variants) => {
+                            let mut v_idx = 0;
+                            while v_idx < variants.len() {
+                                let variant = &variants[v_idx];
+                                let mut t_idx = 0;
+                                while t_idx < variant.types.len() {
+                                    self.inspect_type(&variant.types[t_idx], items, required_modules);
+                                    t_idx += 1;
+                                }
+                                v_idx += 1;
+                            }
+                        }
+                        crate::ast::TypeKind::Native | crate::ast::TypeKind::Unit => {}
+                    }
+                }
+                ItemKind::Function { params, return_ty, .. } => {
+                    let mut p_idx = 0;
+                    while p_idx < params.len() {
+                        self.inspect_type(&params[p_idx].ty, items, required_modules);
+                        p_idx += 1;
+                    }
+                    if let Some(ret_type) = return_ty {
+                        self.inspect_type(ret_type, items, required_modules);
+                    }
+                }
+                ItemKind::Trait { methods, .. } => {
+                    self.collect_required_modules(methods, required_modules);
+                }
+                ItemKind::Impl { target_type, methods, .. } => {
+                    self.inspect_type(target_type, items, required_modules);
+                    self.collect_required_modules(methods, required_modules);
+                }
+            }
+            idx += 1;
+        }
+    }
+
+    fn inspect_type(&self, ty: &Spanned<crate::ast::Type>, items: &[Spanned<Item>], required_modules: &mut Vec<String>) {
+        match &ty.node {
+            crate::ast::Type::Path(path) | crate::ast::Type::GenericPath(path, _) => {
+                if !path.is_empty() {
+                    let root_mod = &path[0];
+                    if !self.has_module_declaration(items, root_mod) && !required_modules.contains(root_mod) {
+                        required_modules.push(root_mod.clone());
+                    }
+                }
+            }
+            crate::ast::Type::Generic(_, args) => {
+                let mut a_idx = 0;
+                while a_idx < args.len() {
+                    self.inspect_type(&args[a_idx], items, required_modules);
+                    a_idx += 1;
+                }
+            }
+            crate::ast::Type::Array(inner, _) | crate::ast::Type::Slice(inner) | crate::ast::Type::Ref(inner) | crate::ast::Type::RefMut(inner) => {
+                self.inspect_type(inner, items, required_modules);
+            }
+            crate::ast::Type::Named(_) => {}
+        }
+    }
+
     fn has_module_declaration(&self, items: &[Spanned<Item>], mod_name: &str) -> bool {
         let mut idx = 0;
         while idx < items.len() {
-            if let ItemKind::Module { name, is_pub, items: child_items } = &items[idx].node.kind {
-                self.use_ref(is_pub);
-                self.use_ref(child_items);
-                if name == mod_name {
-                    return true;
-                }
+            if let ItemKind::Module { name, .. } = &items[idx].node.kind
+                && name == mod_name
+            {
+                return true;
             }
             idx += 1;
         }
@@ -144,9 +161,11 @@ impl ModuleLoader {
         let pascal_filename = format!("{}.cnb", mod_name);
         let snake_filename = format!("{}.cnb", self.to_snake_case(mod_name));
 
-        let candidate_paths = [self.base_dir.join(&pascal_filename),
+        let candidate_paths = [
+            self.base_dir.join(&pascal_filename),
             self.base_dir.join(&snake_filename),
-            self.base_dir.join(mod_name).join("mod.cnb")];
+            self.base_dir.join(mod_name).join("mod.cnb"),
+        ];
 
         let mut found_path: Option<PathBuf> = None;
         let mut path_idx = 0;
@@ -166,14 +185,7 @@ impl ModuleLoader {
 
         let canonical_path = match file_path.canonicalize() {
             Ok(path) => path,
-            Err(io_err) => {
-                let pointer = &io_err as *const std::io::Error;
-                let address = pointer as usize;
-                if address == 0 {
-                    eprintln!("Null reference encountered");
-                }
-                file_path.clone()
-            }
+            Err(_) => file_path.clone(),
         };
 
         if self.loaded_paths.contains(&canonical_path) {
