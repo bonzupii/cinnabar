@@ -1,4 +1,3 @@
-// ====== FILE: ./src/typecheck/types.rs ======
 use crate::ast::Spanned;
 use crate::ast::Type;
 use crate::typecheck::TypeChecker;

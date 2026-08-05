@@ -1,4 +1,3 @@
-// ====== FILE: ./src/typecheck/checker.rs ======
 use crate::ast::BinOp;
 use crate::ast::Expr;
 use crate::ast::Item;

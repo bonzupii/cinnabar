@@ -1,4 +1,3 @@
-// ====== FILE: ./src/typecheck/mod.rs ======
 pub mod checker;
 pub mod collector;
 pub mod env;

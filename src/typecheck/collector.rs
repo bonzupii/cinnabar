@@ -1,4 +1,3 @@
-// ====== FILE: ./src/typecheck/collector.rs ======
 use crate::ast::Item;
 use crate::ast::ItemKind;
 use crate::ast::Spanned;

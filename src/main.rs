@@ -1,4 +1,5 @@
 mod ast;
+mod borrow;
 mod lexer;
 mod module_loader;
 mod parser;
@@ -10,6 +11,7 @@ use ariadne::Label;
 use ariadne::Report;
 use ariadne::ReportKind;
 use ariadne::Source;
+use borrow::BorrowChecker;
 use clap::Parser as ClapParser;
 use lexer::Lexer;
 use module_loader::ModuleLoader;
@@ -149,44 +151,69 @@ fn main() -> ExitCode {
     }
 
     let mut typechecker = TypeChecker::new();
-    match typechecker.check_program(&ast) {
-        Ok(()) => {
-            let stdout = io::stdout();
-            let mut handle = stdout.lock();
+    if let Err(type_errors) = typechecker.check_program(&ast) {
+        let mut err_idx = 0;
+        while err_idx < type_errors.len() {
+            let type_err = &type_errors[err_idx];
+            let span_range = type_err.span.start..type_err.span.end;
+            let report_res = Report::build(ReportKind::Error, (file_id.as_str(), span_range.clone()))
+                .with_message(type_err.message.clone())
+                .with_label(
+                    Label::new((file_id.as_str(), span_range))
+                        .with_message("Type error")
+                        .with_color(Color::Red),
+                )
+                .finish()
+                .print((file_id.as_str(), Source::from(&source)));
 
-            let write_result = writeln!(handle, "Successfully parsed, resolved, and type-checked {} top-level items.", ast.len());
-
-            if let Err(io_err) = write_result {
-                if io_err.kind() == io::ErrorKind::BrokenPipe {
-                    return ExitCode::SUCCESS;
-                }
-                eprintln!("Failed to write output: {}", io_err);
-                return ExitCode::FAILURE;
+            if let Err(render_err) = report_res {
+                eprintln!("Failed to render type error diagnostic: {}", render_err);
             }
-
-            ExitCode::SUCCESS
+            err_idx += 1;
         }
-        Err(type_errors) => {
-            let mut err_idx = 0;
-            while err_idx < type_errors.len() {
-                let type_err = &type_errors[err_idx];
-                let span_range = type_err.span.start..type_err.span.end;
-                let report_res = Report::build(ReportKind::Error, (file_id.as_str(), span_range.clone()))
-                    .with_message(type_err.message.clone())
-                    .with_label(
-                        Label::new((file_id.as_str(), span_range))
-                            .with_message("Type error")
-                            .with_color(Color::Red),
-                    )
-                    .finish()
-                    .print((file_id.as_str(), Source::from(&source)));
-
-                if let Err(render_err) = report_res {
-                    eprintln!("Failed to render type error diagnostic: {}", render_err);
-                }
-                err_idx += 1;
-            }
-            ExitCode::FAILURE
-        }
+        return ExitCode::FAILURE;
     }
+
+    let mut borrow_checker = BorrowChecker::new();
+    if let Err(borrow_errors) = borrow_checker.check_program(&ast) {
+        let mut err_idx = 0;
+        while err_idx < borrow_errors.len() {
+            let borrow_err = &borrow_errors[err_idx];
+            let span_range = borrow_err.span.start..borrow_err.span.end;
+            let report_res = Report::build(ReportKind::Error, (file_id.as_str(), span_range.clone()))
+                .with_message(borrow_err.message.clone())
+                .with_label(
+                    Label::new((file_id.as_str(), span_range))
+                        .with_message("Borrow check error")
+                        .with_color(Color::Red),
+                )
+                .finish()
+                .print((file_id.as_str(), Source::from(&source)));
+
+            if let Err(render_err) = report_res {
+                eprintln!("Failed to render borrow error diagnostic: {}", render_err);
+            }
+            err_idx += 1;
+        }
+        return ExitCode::FAILURE;
+    }
+
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
+
+    let write_result = writeln!(
+        handle,
+        "Successfully parsed, resolved, type-checked, and borrow-checked {} top-level items.",
+        ast.len()
+    );
+
+    if let Err(io_err) = write_result {
+        if io_err.kind() == io::ErrorKind::BrokenPipe {
+            return ExitCode::SUCCESS;
+        }
+        eprintln!("Failed to write output: {}", io_err);
+        return ExitCode::FAILURE;
+    }
+
+    ExitCode::SUCCESS
 }
