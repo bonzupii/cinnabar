@@ -1,998 +1,948 @@
-use crate::ast::Expr;
-use crate::ast::Item;
-use crate::ast::ItemKind;
-use crate::ast::Pattern;
-use crate::ast::Spanned;
-use crate::ast::Stmt;
-use crate::ast::Type;
-use crate::ast::TypeKind;
-use crate::ast::UnOp;
-use crate::lexer::Span;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::fmt;
+//! Cinnabar borrow checker.
+//!
+//! Runs on the type-attributed arena (after the typechecker).  Flows
+//! through each function body tracking every binding's move and borrow
+//! state:
+//!
+//! - linear handles (the native surfaces `Memory.Block`, `Collections.Vec`,
+//!   `Collections.String`, `Collections.HashMap`) must be consumed exactly
+//!   once on every path;
+//! - a moved linear value cannot be used again;
+//! - a linear value cannot be copied (used by value where the callee does
+//!   not consume it);
+//! - `&T` and `&mut T` borrows are exclusive while live; a borrow is
+//!   invalidated when its owner is moved;
+//! - returning a borrow when more than one reference parameter could be
+//!   the source is an error (an ambiguous returned borrow).
+//!
+//! Linearity and borrow kinds are read from the typechecker's attached
+//! keys and the declared callee signatures; nothing is re-inferred.
 
-#[derive(Debug, Clone)]
-pub struct BorrowError {
-    pub message: String,
-    pub span: Span,
+use crate::ast::*;
+
+/// A binding's borrow-check state.
+/// `(key, is_linear, is_param, is_moved, holds, file, start, end)` where
+/// `holds` records the `(owner name, borrow kind)` borrows this binding's
+/// value currently holds (made by passing the owner by reference into a
+/// call), and `file`/`start`/`end` are the binding's declaration span so
+/// every diagnostic points at the real source origin.
+type Binding = (i64, bool, bool, bool, Vec<(i64, i64)>, i64, i64, i64);
+
+/// One lexical scope: `(name id, binding)` entries.
+type Scope = Vec<(i64, Binding)>;
+
+pub const BORROW_MUT: i64 = 1;
+
+fn push_scope(scopes: &mut Vec<Scope>) {
+    scopes.push(Vec::new());
 }
 
-impl fmt::Display for BorrowError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Borrow Check Error at line {}, col {}: {}",
-            self.span.line, self.span.col, self.message
-        )
-    }
+fn pop_scope(scopes: &mut Vec<Scope>) {
+    scopes.pop();
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BorrowKind {
-    Shared,
-    Mutable,
+fn lookup(scopes: &[Scope], name: i64) -> Option<&Binding> {
+    let mut s_idx = scopes.len();
+    while s_idx > 0 {
+        s_idx -= 1;
+        let scope = scopes.get(s_idx)?;
+        let mut idx = scope.len();
+        while idx > 0 {
+            idx -= 1;
+            {
+                let entry = scope.get(idx)?;
+                if entry.0 == name {
+                    return Some(&entry.1);
+                }
+            }
+        }
+    }
+    None
 }
 
-#[derive(Debug, Clone)]
-pub struct BindingInfo {
-    pub ty: Type,
-    pub is_mutable: bool,
-    pub is_linear: bool,
-    pub is_moved: bool,
-    pub is_param: bool,
-    pub holds_borrows_of: Vec<(String, BorrowKind)>,
-    pub active_borrows: Vec<BorrowKind>,
-    pub last_used_stmt: usize,
-    pub span: Span,
-}
-
-pub struct NewBinding {
-    pub name: String,
-    pub ty: Type,
-    pub is_mutable: bool,
-    pub is_linear: bool,
-    pub is_param: bool,
-    pub holds_borrows_of: Vec<(String, BorrowKind)>,
-    pub span: Span,
-}
-
-pub struct BorrowChecker {
-    linear_types: HashSet<String>,
-    linear_functions: HashSet<String>,
-    scopes: Vec<HashMap<String, BindingInfo>>,
-    module_stack: Vec<String>,
-    current_stmt_idx: usize,
-    errors: Vec<BorrowError>,
-}
-
-impl BorrowChecker {
-    pub fn new() -> Self {
-        Self {
-            linear_types: HashSet::new(),
-            linear_functions: HashSet::new(),
-            scopes: vec![HashMap::new()],
-            module_stack: Vec::new(),
-            current_stmt_idx: 0,
-            errors: Vec::new(),
-        }
-    }
-
-    pub fn check_program(&mut self, items: &[Spanned<Item>]) -> Result<(), Vec<BorrowError>> {
-        self.collect_linear_types(items);
-
-        let mut idx = 0;
-        while idx < items.len() {
-            self.check_item(&items[idx]);
-            idx += 1;
-        }
-
-        if self.errors.is_empty() {
-            Ok(())
-        } else {
-            Err(self.errors.clone())
-        }
-    }
-
-    fn collect_linear_types(&mut self, items: &[Spanned<Item>]) {
-        let mut idx = 0;
-        while idx < items.len() {
-            let item = &items[idx];
-            match &item.node.kind {
-                ItemKind::TypeDecl { name, kind, .. } => {
-                    if let TypeKind::Native = kind {
-                        self.linear_types.insert(name.clone());
-                        if !self.module_stack.is_empty() {
-                            let full_name = format!("{}.{}", self.module_stack.join("."), name);
-                            self.linear_types.insert(full_name);
-                        }
-                    }
-                }
-                ItemKind::Module { name, items: child_items, .. } => {
-                    self.module_stack.push(name.clone());
-                    self.collect_linear_types(child_items);
-                    self.module_stack.pop();
-                }
-                ItemKind::Trait { methods, .. } | ItemKind::Impl { methods, .. } => {
-                    self.collect_linear_types(methods);
-                }
-                ItemKind::Function { .. } | ItemKind::Const { .. } | ItemKind::Use { .. } => {}
-            }
-            idx += 1;
-        }
-
-        let mut f_idx = 0;
-        while f_idx < items.len() {
-            let item = &items[f_idx];
-            self.collect_linear_functions(item);
-            f_idx += 1;
-        }
-    }
-
-    fn collect_linear_functions(&mut self, item: &Spanned<Item>) {
-        match &item.node.kind {
-            ItemKind::Function { name, return_ty, .. } => {
-                if let Some(ret_ty) = return_ty
-                    && self.is_linear_type(&ret_ty.node)
-                {
-                    self.linear_functions.insert(name.clone());
-                    if !self.module_stack.is_empty() {
-                        let full_name = format!("{}.{}", self.module_stack.join("."), name);
-                        self.linear_functions.insert(full_name);
-                    }
-                }
-            }
-            ItemKind::Module { name, items: child_items, .. } => {
-                self.module_stack.push(name.clone());
-                let mut idx = 0;
-                while idx < child_items.len() {
-                    self.collect_linear_functions(&child_items[idx]);
-                    idx += 1;
-                }
-                self.module_stack.pop();
-            }
-            ItemKind::Trait { methods, .. } | ItemKind::Impl { methods, .. } => {
-                let mut idx = 0;
-                while idx < methods.len() {
-                    self.collect_linear_functions(&methods[idx]);
-                    idx += 1;
-                }
-            }
-            ItemKind::TypeDecl { .. } | ItemKind::Const { .. } | ItemKind::Use { .. } => {}
-        }
-    }
-
-    fn is_linear_type(&self, ty: &Type) -> bool {
-        match ty {
-            Type::Named(name) => self.linear_types.contains(name),
-            Type::Path(path) => {
-                let full_path = path.join(".");
-                if self.linear_types.contains(&full_path) {
-                    true
-                } else if let Some(last_seg) = path.last() {
-                    self.linear_types.contains(last_seg)
-                } else {
-                    false
-                }
-            }
-            Type::Generic(name, args) => {
-                if self.linear_types.contains(name) {
-                    return true;
-                }
-                let mut idx = 0;
-                while idx < args.len() {
-                    if self.is_linear_type(&args[idx].node) {
-                        return true;
-                    }
-                    idx += 1;
-                }
-                false
-            }
-            Type::GenericPath(path, args) => {
-                let full_path = path.join(".");
-                if self.linear_types.contains(&full_path) {
-                    return true;
-                }
-                let mut idx = 0;
-                while idx < args.len() {
-                    if self.is_linear_type(&args[idx].node) {
-                        return true;
-                    }
-                    idx += 1;
-                }
-                false
-            }
-            Type::Array(inner, _) | Type::Slice(inner) => self.is_linear_type(&inner.node),
-            Type::Ref(_) | Type::RefMut(_) => false,
-        }
-    }
-
-    fn is_linear_expr(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::Var(name) => {
-                if let Some(info) = self.lookup_binding(name) {
-                    info.is_linear
-                } else {
-                    self.linear_types.contains(name)
-                }
-            }
-            Expr::Path(path) => {
-                let full_path = path.join(".");
-                if self.linear_types.contains(&full_path) {
-                    return true;
-                }
-                if let Some(last_seg) = path.last()
-                    && self.linear_types.contains(last_seg) {
-                        return true;
-                    }
-                false
-            }
-            Expr::Try(inner) => self.is_linear_expr(&inner.node),
-            Expr::Call(func, _, _) => {
-                let func_name = match &func.node {
-                    Expr::Var(name) => name.clone(),
-                    Expr::Path(path) => path.join("."),
-                    Expr::Lit(_) | Expr::Const(_) | Expr::Binary(..) | Expr::Unary(..) | Expr::Try(..) | Expr::Return(_) | Expr::Break | Expr::Continue | Expr::Call(..) | Expr::StructInit(..) | Expr::FieldAccess(..) | Expr::ArrayLit(_) | Expr::Match(..) | Expr::If(..) => String::new(),
-                };
-                if self.linear_functions.contains(&func_name) {
-                    return true;
-                }
-                if let Expr::Path(path) = &func.node
-                    && let Some(last_seg) = path.last()
-                        && self.linear_functions.contains(last_seg) {
-                            return true;
-                        }
-                false
-            }
-            Expr::Unary(_, inner) => self.is_linear_expr(&inner.node),
-            Expr::Lit(_) | Expr::Const(_) | Expr::Binary(..) | Expr::Return(_) | Expr::Break | Expr::Continue | Expr::StructInit(..) | Expr::FieldAccess(..) | Expr::ArrayLit(_) | Expr::Match(..) | Expr::If(..) => false,
-        }
-    }
-
-    fn check_item(&mut self, item: &Spanned<Item>) {
-        match &item.node.kind {
-            ItemKind::Function {
-                params,
-                return_ty,
-                body,
-                ..
-            } => {
-                self.push_scope();
-                self.current_stmt_idx = 0;
-
-                let mut ref_param_count = 0;
-                let mut p_idx = 0;
-                while p_idx < params.len() {
-                    let param = &params[p_idx];
-                    let is_linear = self.is_linear_type(&param.ty.node);
-
-                    if matches!(param.ty.node, Type::Ref(_) | Type::RefMut(_)) {
-                        ref_param_count += 1;
-                    }
-
-                    self.declare_binding(NewBinding {
-                        name: param.name.clone(),
-                        ty: param.ty.node.clone(),
-                        is_mutable: false,
-                        is_linear,
-                        is_param: true,
-                        holds_borrows_of: Vec::new(),
-                        span: item.span,
-                    });
-                    p_idx += 1;
-                }
-
-                if let Some(ret_type) = return_ty
-                    && matches!(ret_type.node, Type::Ref(_) | Type::RefMut(_))
-                    && ref_param_count > 1
-                {
-                    self.errors.push(BorrowError {
-                        message: "Ambiguous returned reference from function with multiple reference parameters".to_string(),
-                        span: ret_type.span,
-                    });
-                }
-
-                if let Some(body_stmts) = body {
-                    self.update_last_used_stmts(body_stmts);
-                    self.check_stmts(body_stmts);
-                    self.verify_linear_handles_consumed();
-                }
-
-                self.pop_scope();
-            }
-            ItemKind::Module { name, items: child_items, .. } => {
-                self.module_stack.push(name.clone());
-                let mut idx = 0;
-                while idx < child_items.len() {
-                    self.check_item(&child_items[idx]);
-                    idx += 1;
-                }
-                self.module_stack.pop();
-            }
-            ItemKind::Trait { methods: child_items, .. } | ItemKind::Impl { methods: child_items, .. } => {
-                let mut idx = 0;
-                while idx < child_items.len() {
-                    self.check_item(&child_items[idx]);
-                    idx += 1;
-                }
-            }
-            ItemKind::Const { init, .. } => {
-                self.check_expr(init, false);
-            }
-            ItemKind::TypeDecl { .. } | ItemKind::Use { .. } => {}
-        }
-    }
-
-    fn update_last_used_stmts(&mut self, stmts: &[Spanned<Stmt>]) {
-        let mut idx = 0;
-        while idx < stmts.len() {
-            self.collect_vars_in_stmt(&stmts[idx], idx);
-            idx += 1;
-        }
-    }
-
-    fn collect_vars_in_stmt(&mut self, stmt: &Spanned<Stmt>, stmt_idx: usize) {
-        match &stmt.node {
-            Stmt::Val { init, .. } | Stmt::Var { init, .. } => {
-                self.collect_vars_in_expr(init, stmt_idx);
-            }
-            Stmt::Assign { name, expr } => {
-                self.mark_var_used(name, stmt_idx);
-                self.collect_vars_in_expr(expr, stmt_idx);
-            }
-            Stmt::Expr(expr) => {
-                self.collect_vars_in_expr(expr, stmt_idx);
-            }
-            Stmt::While { cond, body } => {
-                self.collect_vars_in_expr(cond, stmt_idx);
-                let mut b_idx = 0;
-                while b_idx < body.len() {
-                    self.collect_vars_in_stmt(&body[b_idx], stmt_idx);
-                    b_idx += 1;
-                }
-            }
-        }
-    }
-
-    fn collect_vars_in_expr(&mut self, expr: &Spanned<Expr>, stmt_idx: usize) {
-        match &expr.node {
-            Expr::Var(name) => {
-                self.mark_var_used(name, stmt_idx);
-            }
-            Expr::Const(_) => {}
-            Expr::Path(path) => {
-                if path.len() == 1 {
-                    self.mark_var_used(&path[0], stmt_idx);
-                }
-            }
-            Expr::Binary(left, _, right) => {
-                self.collect_vars_in_expr(left, stmt_idx);
-                self.collect_vars_in_expr(right, stmt_idx);
-            }
-            Expr::Unary(_, inner) | Expr::Try(inner) => {
-                self.collect_vars_in_expr(inner, stmt_idx);
-            }
-            Expr::Return(opt_expr) => {
-                if let Some(inner) = opt_expr {
-                    self.collect_vars_in_expr(inner, stmt_idx);
-                }
-            }
-            Expr::Call(func, _, args) => {
-                self.collect_vars_in_expr(func, stmt_idx);
-                let mut idx = 0;
-                while idx < args.len() {
-                    self.collect_vars_in_expr(&args[idx], stmt_idx);
-                    idx += 1;
-                }
-            }
-            Expr::StructInit(_, fields) => {
-                let mut idx = 0;
-                while idx < fields.len() {
-                    self.collect_vars_in_expr(&fields[idx].1, stmt_idx);
-                    idx += 1;
-                }
-            }
-            Expr::FieldAccess(target, _) => {
-                self.collect_vars_in_expr(target, stmt_idx);
-            }
-            Expr::ArrayLit(elements) => {
-                let mut idx = 0;
-                while idx < elements.len() {
-                    self.collect_vars_in_expr(&elements[idx], stmt_idx);
-                    idx += 1;
-                }
-            }
-            Expr::Match(target, arms) => {
-                self.collect_vars_in_expr(target, stmt_idx);
-                let mut idx = 0;
-                while idx < arms.len() {
-                    self.collect_vars_in_expr(&arms[idx].1, stmt_idx);
-                    idx += 1;
-                }
-            }
-            Expr::If(cond, then_body, else_body) => {
-                self.collect_vars_in_expr(cond, stmt_idx);
-                let mut idx = 0;
-                while idx < then_body.len() {
-                    self.collect_vars_in_stmt(&then_body[idx], stmt_idx);
-                    idx += 1;
-                }
-                if let Some(else_stmts) = else_body {
-                    let mut e_idx = 0;
-                    while e_idx < else_stmts.len() {
-                        self.collect_vars_in_stmt(&else_stmts[e_idx], stmt_idx);
-                        e_idx += 1;
-                    }
-                }
-            }
-            Expr::Lit(_) | Expr::Break | Expr::Continue => {}
-        }
-    }
-
-    fn mark_var_used(&mut self, name: &str, stmt_idx: usize) {
-        if let Some(info) = self.lookup_binding_mut(name)
-            && stmt_idx > info.last_used_stmt
-        {
-            info.last_used_stmt = stmt_idx;
-        }
-    }
-
-    fn expire_borrows(&mut self) {
-        let curr_idx = self.current_stmt_idx;
-        let mut scope_idx = 0;
-        while scope_idx < self.scopes.len() {
-            let keys: Vec<String> = self.scopes[scope_idx].keys().cloned().collect();
-            let mut k_idx = 0;
-            while k_idx < keys.len() {
-                let holder_name = &keys[k_idx];
-                let should_expire = if let Some(info) = self.scopes[scope_idx].get(holder_name) {
-                    info.last_used_stmt < curr_idx && !info.holds_borrows_of.is_empty()
-                } else {
-                    false
-                };
-
-                if should_expire {
-                    let holds = if let Some(info) = self.scopes[scope_idx].get_mut(holder_name) {
-                        std::mem::take(&mut info.holds_borrows_of)
-                    } else {
-                        Vec::new()
-                    };
-
-                    let mut h_idx = 0;
-                    while h_idx < holds.len() {
-                        let (origin_name, kind) = &holds[h_idx];
-                        if let Some(origin_info) = self.lookup_binding_mut(origin_name)
-                            && let Some(pos) = origin_info.active_borrows.iter().position(|b| b == kind)
-                        {
-                            origin_info.active_borrows.remove(pos);
-                        }
-                        h_idx += 1;
-                    }
-                }
-                k_idx += 1;
-            }
-            scope_idx += 1;
-        }
-    }
-
-    fn check_stmts(&mut self, stmts: &[Spanned<Stmt>]) {
-        let mut idx = 0;
-        while idx < stmts.len() {
-            self.current_stmt_idx = idx;
-            self.expire_borrows();
-            self.check_stmt(&stmts[idx]);
-            idx += 1;
-        }
-    }
-
-    fn check_stmt(&mut self, stmt: &Spanned<Stmt>) {
-        match &stmt.node {
-            Stmt::Val { name, ty, init } => {
-                self.check_expr(init, false);
-                let is_linear = match ty {
-                    Some(spanned_ty) => self.is_linear_type(&spanned_ty.node),
-                    None => self.is_linear_expr(&init.node),
-                };
-                let binding_ty = match ty {
-                    Some(spanned_ty) => spanned_ty.node.clone(),
-                    None => Type::Named("Unit".to_string()),
-                };
-                let mut holds = Vec::new();
-                self.extract_borrows_from_expr(init, &mut holds);
-
-                self.declare_binding(NewBinding {
-                    name: name.clone(),
-                    ty: binding_ty,
-                    is_mutable: false,
-                    is_linear,
-                    is_param: false,
-                    holds_borrows_of: holds,
-                    span: stmt.span,
-                });
-            }
-            Stmt::Var { name, ty, init } => {
-                self.check_expr(init, false);
-                let is_linear = match ty {
-                    Some(spanned_ty) => self.is_linear_type(&spanned_ty.node),
-                    None => self.is_linear_expr(&init.node),
-                };
-                let binding_ty = match ty {
-                    Some(spanned_ty) => spanned_ty.node.clone(),
-                    None => Type::Named("Unit".to_string()),
-                };
-                let mut holds = Vec::new();
-                self.extract_borrows_from_expr(init, &mut holds);
-
-                self.declare_binding(NewBinding {
-                    name: name.clone(),
-                    ty: binding_ty,
-                    is_mutable: true,
-                    is_linear,
-                    is_param: false,
-                    holds_borrows_of: holds,
-                    span: stmt.span,
-                });
-            }
-            Stmt::Assign { name, expr } => {
-                self.check_expr(expr, false);
-                let mut is_immutable_err = false;
-                if let Some(info) = self.lookup_binding_mut(name) {
-                    if !info.is_mutable {
-                        is_immutable_err = true;
-                    }
-                    if info.is_moved {
-                        info.is_moved = false;
-                    }
-                }
-                if is_immutable_err {
-                    self.errors.push(BorrowError {
-                        message: format!("Cannot assign to immutable variable '{}'", name),
-                        span: stmt.span,
-                    });
-                }
-            }
-            Stmt::Expr(expr) => {
-                self.check_expr(expr, false);
-            }
-            Stmt::While { cond, body } => {
-                self.check_expr(cond, false);
-                self.push_scope();
-                self.check_stmts(body);
-                self.verify_linear_handles_consumed();
-                self.pop_scope();
-            }
-        }
-    }
-
-    fn extract_borrows_from_expr(&self, expr: &Spanned<Expr>, holds: &mut Vec<(String, BorrowKind)>) {
-        match &expr.node {
-            Expr::Unary(UnOp::Ref, inner) => {
-                if let Expr::Var(ref var_name) = inner.node {
-                    holds.push((var_name.clone(), BorrowKind::Shared));
-                }
-            }
-            Expr::Unary(UnOp::RefMut, inner) => {
-                if let Expr::Var(ref var_name) = inner.node {
-                    holds.push((var_name.clone(), BorrowKind::Mutable));
-                }
-            }
-            Expr::Unary(UnOp::Not, inner) | Expr::Unary(UnOp::Neg, inner) => {
-                self.extract_borrows_from_expr(inner, holds);
-            }
-            Expr::Call(func, _, args) => {
-                self.extract_borrows_from_expr(func, holds);
-                let mut idx = 0;
-                while idx < args.len() {
-                    self.extract_borrows_from_expr(&args[idx], holds);
-                    idx += 1;
-                }
-            }
-            Expr::Try(inner) | Expr::FieldAccess(inner, _) => {
-                self.extract_borrows_from_expr(inner, holds);
-            }
-            Expr::Var(_) | Expr::Const(_) | Expr::Path(_) | Expr::Lit(_) | Expr::Binary(..) | Expr::Return(_) | Expr::Break | Expr::Continue | Expr::StructInit(..) | Expr::ArrayLit(_) | Expr::Match(..) | Expr::If(..) => {}
-        }
-    }
-
-    fn check_expr(&mut self, expr: &Spanned<Expr>, is_inside_ref: bool) {
-        match &expr.node {
-            Expr::Lit(_) | Expr::Break | Expr::Continue => {}
-            Expr::Var(name) => {
-                if is_inside_ref {
-                    self.verify_variable_access(name, expr.span);
-                } else {
-                    self.consume_variable_if_linear(name, expr.span);
-                }
-            }
-            Expr::Const(_) => {}
-            Expr::Path(path) => {
-                if path.len() == 1 {
-                    if is_inside_ref {
-                        self.verify_variable_access(&path[0], expr.span);
-                    } else {
-                        self.consume_variable_if_linear(&path[0], expr.span);
-                    }
-                }
-            }
-            Expr::Binary(left, _, right) => {
-                self.check_expr(left, false);
-                self.check_expr(right, false);
-            }
-            Expr::Unary(op, inner) => match op {
-                UnOp::Ref => {
-                    if let Expr::Var(ref var_name) = inner.node {
-                        self.verify_borrow(var_name, BorrowKind::Shared, inner.span);
-                    } else if let Expr::Path(ref path) = inner.node {
-                        if path.len() == 1 {
-                            self.verify_borrow(&path[0], BorrowKind::Shared, inner.span);
-                        }
-                    } else {
-                        self.check_expr(inner, true);
-                    }
-                }
-                UnOp::RefMut => {
-                    if let Expr::Var(ref var_name) = inner.node {
-                        self.verify_borrow(var_name, BorrowKind::Mutable, inner.span);
-                    } else if let Expr::Path(ref path) = inner.node {
-                        if path.len() == 1 {
-                            self.verify_borrow(&path[0], BorrowKind::Mutable, inner.span);
-                        }
-                    } else {
-                        self.check_expr(inner, true);
-                    }
-                }
-                UnOp::Not | UnOp::Neg => {
-                    self.check_expr(inner, false);
-                }
-            },
-            Expr::Try(inner) => {
-                self.check_expr(inner, false);
-            }
-            Expr::Return(opt_expr) => {
-                if let Some(inner_expr) = opt_expr {
-                    if let Expr::Unary(UnOp::Ref, ref inner_var) = inner_expr.node
-                        && let Expr::Var(ref var_name) = inner_var.node
-                        && let Some(info) = self.lookup_binding(var_name)
-                        && !info.is_param
-                    {
-                        self.errors.push(BorrowError {
-                            message: format!("Cannot return reference to local variable '{}'", var_name),
-                            span: expr.span,
-                        });
-                    }
-                    self.check_expr(inner_expr, false);
-                }
-            }
-            Expr::Call(func, type_args, args) => {
-                self.check_expr(func, false);
-                if let Some(t_args) = type_args {
-                    let mut t_idx = 0;
-                    while t_idx < t_args.len() {
-                        t_idx += 1;
-                    }
-                }
-                let mut arg_idx = 0;
-                while arg_idx < args.len() {
-                    self.check_expr(&args[arg_idx], false);
-                    arg_idx += 1;
-                }
-            }
-            Expr::StructInit(_, fields) => {
-                let mut field_idx = 0;
-                while field_idx < fields.len() {
-                    self.check_expr(&fields[field_idx].1, false);
-                    field_idx += 1;
-                }
-            }
-            Expr::FieldAccess(target, _) => {
-                self.check_expr(target, is_inside_ref);
-            }
-            Expr::ArrayLit(elements) => {
-                let mut elem_idx = 0;
-                while elem_idx < elements.len() {
-                    self.check_expr(&elements[elem_idx], false);
-                    elem_idx += 1;
-                }
-            }
-            Expr::Match(target, arms) => {
-                self.check_expr(target, false);
-                let parent_snapshot = self.snapshot_scopes();
-                let mut branch_states = Vec::new();
-
-                let mut arm_idx = 0;
-                while arm_idx < arms.len() {
-                    let (pattern, body_expr) = &arms[arm_idx];
-                    self.restore_scopes(&parent_snapshot);
-                    self.push_scope();
-                    self.check_pattern(pattern);
-                    self.check_expr(body_expr, false);
-                    self.verify_linear_handles_consumed();
-
-                    let is_diverging = self.is_diverging_expr(&body_expr.node);
-                    let state = self.snapshot_scopes();
-                    branch_states.push((state, is_diverging));
-
-                    self.pop_scope();
-                    arm_idx += 1;
-                }
-
-                self.restore_scopes(&parent_snapshot);
-                self.merge_branch_states(&parent_snapshot, &branch_states, expr.span);
-            }
-            Expr::If(cond, then_body, else_body) => {
-                self.check_expr(cond, false);
-                let parent_snapshot = self.snapshot_scopes();
-                let mut branch_states = Vec::new();
-
-                self.push_scope();
-                self.check_stmts(then_body);
-                self.verify_linear_handles_consumed();
-
-                let then_diverges = !then_body.is_empty() && self.is_diverging_stmt(&then_body.last().unwrap().node);
-                branch_states.push((self.snapshot_scopes(), then_diverges));
-                self.pop_scope();
-
-                self.restore_scopes(&parent_snapshot);
-
-                if let Some(else_stmts) = else_body {
-                    self.push_scope();
-                    self.check_stmts(else_stmts);
-                    self.verify_linear_handles_consumed();
-
-                    let else_diverges = !else_stmts.is_empty() && self.is_diverging_stmt(&else_stmts.last().unwrap().node);
-                    branch_states.push((self.snapshot_scopes(), else_diverges));
-                    self.pop_scope();
-                }
-
-                self.restore_scopes(&parent_snapshot);
-                self.merge_branch_states(&parent_snapshot, &branch_states, expr.span);
-            }
-        }
-    }
-
-    fn snapshot_scopes(&self) -> Vec<HashMap<String, BindingInfo>> {
-        self.scopes.clone()
-    }
-
-    fn restore_scopes(&mut self, snapshot: &[HashMap<String, BindingInfo>]) {
-        self.scopes = snapshot.to_vec();
-    }
-
-    fn is_diverging_expr(&self, expr: &Expr) -> bool {
-        matches!(expr, Expr::Return(_) | Expr::Break | Expr::Continue)
-    }
-
-    fn is_diverging_stmt(&self, stmt: &Stmt) -> bool {
-        match stmt {
-            Stmt::Expr(expr) => self.is_diverging_expr(&expr.node),
-            _ => false,
-        }
-    }
-
-    fn merge_branch_states(&mut self, parent_snapshot: &[HashMap<String, BindingInfo>], branch_states: &[(Vec<HashMap<String, BindingInfo>>, bool)], span: Span) {
-        if branch_states.is_empty() {
-            return;
-        }
-
-        let non_diverging_branches: Vec<&Vec<HashMap<String, BindingInfo>>> = branch_states
-            .iter()
-            .filter(|(_, is_diverging)| !*is_diverging)
-            .map(|(state, _)| state)
-            .collect();
-
-        if non_diverging_branches.is_empty() {
-            return;
-        }
-
-        let mut s_idx = 0;
-        while s_idx < parent_snapshot.len() {
-            let scope = &parent_snapshot[s_idx];
-            let keys: Vec<String> = scope.keys().cloned().collect();
-            let mut k_idx = 0;
-            while k_idx < keys.len() {
-                let name = &keys[k_idx];
-                if let Some(parent_info) = scope.get(name)
-                    && parent_info.is_linear
-                    && !parent_info.is_moved
-                {
-                    let moved_in_all = non_diverging_branches.iter().all(|branch| {
-                        if s_idx < branch.len() {
-                            branch[s_idx].get(name).is_some_and(|info| info.is_moved)
-                        } else {
-                            false
-                        }
-                    });
-
-                    let moved_in_some = non_diverging_branches.iter().any(|branch| {
-                        if s_idx < branch.len() {
-                            branch[s_idx].get(name).is_some_and(|info| info.is_moved)
-                        } else {
-                            false
-                        }
-                    });
-
-                    if moved_in_all {
-                        if let Some(target_info) = self.lookup_binding_mut(name) {
-                            target_info.is_moved = true;
-                        }
-                    } else if moved_in_some {
-                        self.errors.push(BorrowError {
-                            message: format!("Linear value '{}' must be consumed on all execution paths", name),
-                            span,
-                        });
-                    }
-                }
-                k_idx += 1;
-            }
-            s_idx += 1;
-        }
-    }
-
-    fn check_pattern(&mut self, pattern: &Spanned<Pattern>) {
-        match &pattern.node {
-            Pattern::Lit(_) => {}
-            Pattern::Var(name) | Pattern::Rest(name) => {
-                let dummy_ty = Type::Named("Unit".to_string());
-                self.declare_binding(NewBinding {
-                    name: name.clone(),
-                    ty: dummy_ty,
-                    is_mutable: false,
-                    is_linear: false,
-                    is_param: false,
-                    holds_borrows_of: Vec::new(),
-                    span: pattern.span,
-                });
-            }
-            Pattern::Variant(_, sub_patterns) | Pattern::PathVariant(_, sub_patterns) => {
-                let mut sub_idx = 0;
-                while sub_idx < sub_patterns.len() {
-                    self.check_pattern(&sub_patterns[sub_idx]);
-                    sub_idx += 1;
-                }
-            }
-            Pattern::Array(elements) => {
-                let mut elem_idx = 0;
-                while elem_idx < elements.len() {
-                    self.check_pattern(&elements[elem_idx]);
-                    elem_idx += 1;
-                }
-            }
-        }
-    }
-
-    fn verify_variable_access(&mut self, name: &str, span: Span) {
-        if let Some(info) = self.lookup_binding(name)
-            && info.is_moved
-        {
-            self.errors.push(BorrowError {
-                message: format!("Use of moved value '{}'", name),
-                span,
-            });
-        }
-    }
-
-    fn consume_variable_if_linear(&mut self, name: &str, span: Span) {
-        let mut is_already_moved = false;
-
-        if let Some(info) = self.lookup_binding_mut(name) {
-            if info.is_moved {
-                is_already_moved = true;
-            } else if info.is_linear {
-                info.is_moved = true;
-            }
-        }
-
-        if is_already_moved {
-            self.errors.push(BorrowError {
-                message: format!("Use of moved value '{}'", name),
-                span,
-            });
-        }
-    }
-
-    fn verify_borrow(&mut self, name: &str, kind: BorrowKind, span: Span) {
-        let mut err_msg: Option<String> = None;
-
-        if let Some(info) = self.lookup_binding_mut(name) {
-            if info.is_moved {
-                err_msg = Some(format!("Cannot borrow moved value '{}'", name));
-            } else {
-                match kind {
-                    BorrowKind::Shared => {
-                        let mut has_mut_borrow = false;
-                        let mut b_idx = 0;
-                        while b_idx < info.active_borrows.len() {
-                            if info.active_borrows[b_idx] == BorrowKind::Mutable {
-                                has_mut_borrow = true;
-                                break;
-                            }
-                            b_idx += 1;
-                        }
-                        if has_mut_borrow {
-                            err_msg = Some(format!("Cannot borrow '{}' as shared because it is already mutably borrowed", name));
-                        } else {
-                            info.active_borrows.push(BorrowKind::Shared);
-                        }
-                    }
-                    BorrowKind::Mutable => {
-                        if !info.is_mutable && !info.is_linear {
-                            err_msg = Some(format!("Cannot borrow immutable variable '{}' as mutable", name));
-                        } else if !info.active_borrows.is_empty() {
-                            err_msg = Some(format!("Cannot borrow '{}' as mutable because it is already borrowed", name));
-                        } else {
-                            info.active_borrows.push(BorrowKind::Mutable);
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(message) = err_msg {
-            self.errors.push(BorrowError { message, span });
-        }
-    }
-
-    fn verify_linear_handles_consumed(&mut self) {
-        if let Some(current_scope) = self.scopes.last() {
-            for (name, info) in current_scope {
-                if info.is_linear && !info.is_moved {
-                    self.errors.push(BorrowError {
-                        message: format!("Linear value '{}' of type {:?} must be consumed", name, info.ty),
-                        span: info.span,
-                    });
-                }
-            }
-        }
-    }
-
-    fn declare_binding(&mut self, binding: NewBinding) {
-        if let Some(current_scope) = self.scopes.last_mut() {
-            current_scope.insert(
-                binding.name,
-                BindingInfo {
-                    ty: binding.ty,
-                    is_mutable: binding.is_mutable,
-                    is_linear: binding.is_linear,
-                    is_moved: false,
-                    is_param: binding.is_param,
-                    holds_borrows_of: binding.holds_borrows_of,
-                    active_borrows: Vec::new(),
-                    last_used_stmt: self.current_stmt_idx,
-                    span: binding.span,
+fn lookup_mut(scopes: &mut [Scope], name: i64) -> Option<&mut Binding> {
+    let mut s_idx = scopes.len();
+    while s_idx > 0 {
+        s_idx -= 1;
+        let mut idx = match scopes.get(s_idx) {
+            Some(scope) => scope.len(),
+            None => 0,
+        };
+        while idx > 0 {
+            idx -= 1;
+            let found = match scopes.get(s_idx) {
+                Some(scope) => match scope.get(idx) {
+                    Some(entry) => entry.0 == name,
+                    None => false,
                 },
+                None => false,
+            };
+            if found {
+                return match scopes.get_mut(s_idx) {
+                    Some(scope) => match scope.get_mut(idx) {
+                        Some(entry) => Some(&mut entry.1),
+                        None => None,
+                    },
+                    None => None,
+                };
+            }
+        }
+    }
+    None
+}
+
+fn bind(scopes: &mut [Scope], name: i64, key: i64, is_linear: bool, is_param: bool, span: (i64, i64, i64)) {
+    if let Some(scope) = scopes.last_mut() {
+        scope.push((name, (key, is_linear, is_param, false, Vec::new(), span.0, span.1, span.2)));
+    }
+}
+
+fn snapshot(scopes: &[Scope]) -> Vec<Scope> {
+    let mut out: Vec<Scope> = Vec::new();
+    let mut idx = 0usize;
+    while idx < scopes.len() {
+        match scopes.get(idx) {
+            Some(scope) => out.push(scope.clone()),
+            None => break,
+        }
+        idx += 1;
+    }
+    out
+}
+
+fn restore(scopes: &mut Vec<Scope>, state: &[Scope]) {
+    scopes.clear();
+    let mut idx = 0usize;
+    while idx < state.len() {
+        match state.get(idx) {
+            Some(scope) => scopes.push(scope.clone()),
+            None => break,
+        }
+        idx += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Key reads.
+// ---------------------------------------------------------------------------
+
+fn key_kind(nodes: &[i64], key: i64) -> i64 {
+    let row = find_tyinfo(nodes, key);
+    if row == NONE {
+        TYD_UNKNOWN
+    } else {
+        node_b(nodes, row)
+    }
+}
+
+fn key_sym_of(nodes: &[i64], key: i64) -> i64 {
+    let row = find_tyinfo(nodes, key);
+    if row == NONE {
+        NONE
+    } else {
+        node_c(nodes, row)
+    }
+}
+
+/// True when a key is a linear native handle: one of the four surfaces
+/// whose runtime allocation must be released by explicit consumption.
+fn key_is_linear(nodes: &[i64], names: &[String], key: i64) -> bool {
+    if key_kind(nodes, key) != TYD_NATIVE {
+        return false;
+    }
+    let sym = key_sym_of(nodes, key);
+    if sym == NONE {
+        return false;
+    }
+    let name = node_b(nodes, sym);
+    name_is(names, name, "Memory.Block")
+        || name_is(names, name, "Collections.Vec")
+        || name_is(names, name, "Collections.String")
+        || name_is(names, name, "Collections.HashMap")
+}
+
+fn list_len(lists: &[Vec<i64>], id: i64) -> i64 {
+    match lists.get(id as usize) {
+        Some(items) => items.len() as i64,
+        None => 0,
+    }
+}
+
+fn list_get(lists: &[Vec<i64>], id: i64, idx: i64) -> i64 {
+    match lists.get(id as usize) {
+        Some(items) => match items.get(idx as usize) {
+            Some(value) => *value,
+            None => NONE,
+        },
+        None => NONE,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry: walk every function in the program.
+// ---------------------------------------------------------------------------
+
+pub fn borrow_check(
+    names: &mut Vec<String>,
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    errors: &mut Vec<Diag>,
+    root: i64,
+    ext_mods: &[(String, i64)],
+) -> bool {
+    check_item_list(names, nodes, lists, errors, root);
+    let mut idx = 0usize;
+    while idx < ext_mods.len() {
+        match ext_mods.get(idx) {
+            Some(pair) => check_item_list(names, nodes, lists, errors, pair.1),
+            None => break,
+        }
+        idx += 1;
+    }
+    errors.is_empty()
+}
+
+fn check_item_list(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, list: i64) {
+    let count = list_len(lists, list);
+    let mut idx = 0i64;
+    while idx < count {
+        check_item(names, nodes, lists, errors, list_get(lists, list, idx));
+        idx += 1;
+    }
+}
+
+fn check_item(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, item: i64) {
+    if node_tag(nodes, item) != NODE_ITEM {
+        return;
+    }
+    let kind = node_a(nodes, item);
+    if kind == ITEM_MODULE {
+        check_item_list(names, nodes, lists, errors, node_e(nodes, item));
+        return;
+    }
+    if kind == ITEM_IMPL {
+        check_fn_list(names, nodes, lists, errors, node_f(nodes, item));
+        return;
+    }
+    if kind == ITEM_FUN || kind == ITEM_NATIVE_FUN {
+        check_fn(names, nodes, lists, errors, node_d(nodes, item));
+    }
+}
+
+fn check_fn_list(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, list: i64) {
+    let count = list_len(lists, list);
+    let mut idx = 0i64;
+    while idx < count {
+        check_fn(names, nodes, lists, errors, list_get(lists, list, idx));
+        idx += 1;
+    }
+}
+
+fn check_fn(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, fn_node: i64) {
+    if node_tag(nodes, fn_node) != NODE_FN {
+        return;
+    }
+    let body = node_f(nodes, fn_node);
+    if body == NONE {
+        return;
+    }
+    let mut scopes: Vec<Scope> = Vec::new();
+    push_scope(&mut scopes);
+    let params = node_c(nodes, fn_node);
+    let pcount = list_len(lists, params);
+    let mut idx = 0i64;
+    while idx < pcount {
+        let param = list_get(lists, params, idx);
+        let name = node_a(nodes, param);
+        let key = ty_key_of(nodes, node_b(nodes, param));
+        let linear = key_is_linear(nodes, names, key);
+        bind(&mut scopes, name, key, linear, true, (node_file(nodes, param), node_start(nodes, param), node_end(nodes, param)));
+        idx += 1;
+    }
+    check_stmt_list(names, nodes, lists, errors, &mut scopes, body);
+    // Every linear binding must be consumed on the fall-off path.
+    check_unconsumed(names, errors, &scopes);
+    pop_scope(&mut scopes);
+}
+
+/// Reports linear bindings in the topmost scope that reach the end of
+/// their scope unmoved.  Inner blocks (match arms, loop bodies) only
+/// check the bindings they introduce; outer bindings are consumed by the
+/// statements after the block, so flagging them mid-function would be a
+/// false positive.  Every diagnostic carries the binding's declaration
+/// span.
+fn check_unconsumed(names: &[String], errors: &mut Vec<Diag>, scopes: &[Scope]) {
+    let scope = match scopes.last() {
+        Some(scope) => scope,
+        None => return,
+    };
+    let mut e_idx = 0usize;
+    while e_idx < scope.len() {
+        match scope.get(e_idx) {
+            Some(entry) => {
+                let binding = &entry.1;
+                if binding.1 && !binding.3 {
+                    push_error(
+                        errors,
+                        &format!("linear value '{}' must be consumed", name_text(names, entry.0)),
+                        binding.5,
+                        binding.6,
+                        binding.7,
+                    );
+                }
+            }
+            None => break,
+        }
+        e_idx += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Statements.
+// ---------------------------------------------------------------------------
+
+fn check_stmt_list(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, scopes: &mut Vec<Scope>, list: i64) {
+    let count = list_len(lists, list);
+    let mut idx = 0i64;
+    while idx < count {
+        check_stmt(names, nodes, lists, errors, scopes, list_get(lists, list, idx));
+        idx += 1;
+    }
+}
+
+fn check_stmt(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, scopes: &mut Vec<Scope>, stmt: i64) {
+    if node_tag(nodes, stmt) != NODE_STMT {
+        return;
+    }
+    let kind = node_a(nodes, stmt);
+    if kind == STMT_LET {
+        let name = node_c(nodes, stmt);
+        let init = node_e(nodes, stmt);
+        let key = stmt_ty_of(nodes, stmt);
+        let linear = key_is_linear(nodes, names, key);
+        check_expr(names, nodes, lists, errors, scopes, init);
+        bind(scopes, name, key, linear, false, (node_file(nodes, stmt), node_start(nodes, stmt), node_end(nodes, stmt)));
+        return;
+    }
+    if kind == STMT_ASSIGN {
+        let target = node_b(nodes, stmt);
+        let value = node_c(nodes, stmt);
+        check_expr(names, nodes, lists, errors, scopes, value);
+        // Assignment replaces the old value: a linear target's old value
+        // is dropped here (a consumption).
+        if let Some(binding) = lookup_mut(scopes, target)
+            && binding.1 {
+                binding.3 = false;
+            }
+        return;
+    }
+    if kind == STMT_WHILE {
+        let cond = node_b(nodes, stmt);
+        let body = node_c(nodes, stmt);
+        check_expr(names, nodes, lists, errors, scopes, cond);
+        push_scope(scopes);
+        check_stmt_list(names, nodes, lists, errors, scopes, body);
+        check_unconsumed(names, errors, scopes);
+        pop_scope(scopes);
+        return;
+    }
+    if kind == STMT_IF {
+        let cond = node_b(nodes, stmt);
+        let then_list = node_c(nodes, stmt);
+        let else_list = node_d(nodes, stmt);
+        check_expr(names, nodes, lists, errors, scopes, cond);
+        let parent = snapshot(scopes);
+        push_scope(scopes);
+        check_stmt_list(names, nodes, lists, errors, scopes, then_list);
+        let then_state = snapshot(scopes);
+        pop_scope(scopes);
+        restore(scopes, &parent);
+        let else_state;
+        if else_list != NONE {
+            push_scope(scopes);
+            check_stmt_list(names, nodes, lists, errors, scopes, else_list);
+            else_state = snapshot(scopes);
+            pop_scope(scopes);
+        } else {
+            else_state = snapshot(scopes);
+        }
+        restore(scopes, &parent);
+        merge_branch(names, errors, &parent, &then_state, &else_state);
+        return;
+    }
+    if kind == STMT_RETURN {
+        let value = node_b(nodes, stmt);
+        if value != NONE {
+            check_expr(names, nodes, lists, errors, scopes, value);
+        }
+        return;
+    }
+    let expr = node_b(nodes, stmt);
+    check_expr(names, nodes, lists, errors, scopes, expr);
+}
+
+/// After a branch, a linear binding moved on some paths but not all is an
+/// error: linear values must be consumed on every path.
+fn merge_branch(names: &[String], errors: &mut Vec<Diag>, parent: &[Scope], a: &[Scope], b: &[Scope]) {
+    let mut s_idx = 0usize;
+    while s_idx < parent.len() {
+        let scope = match parent.get(s_idx) {
+            Some(scope) => scope,
+            None => break,
+        };
+        let mut e_idx = 0usize;
+        while e_idx < scope.len() {
+            match scope.get(e_idx) {
+                Some(entry) => {
+                    let name = entry.0;
+                    let binding = &entry.1;
+                    if !binding.1 {
+                        e_idx += 1;
+                        continue;
+                    }
+                    let moved_a = binding_moved(a, s_idx, name);
+                    let moved_b = binding_moved(b, s_idx, name);
+                    if moved_a != moved_b {
+                        push_error(
+                            errors,
+                            &format!("linear value '{}' is not consumed on every path", name_text(names, name)),
+                            -1,
+                            -1,
+                            -1,
+                        );
+                    }
+                }
+                None => break,
+            }
+            e_idx += 1;
+        }
+        s_idx += 1;
+    }
+}
+
+fn binding_moved(state: &[Scope], s_idx: usize, name: i64) -> bool {
+    match state.get(s_idx) {
+        Some(scope) => {
+            let mut idx = scope.len();
+            while idx > 0 {
+                idx -= 1;
+                match scope.get(idx) {
+                    Some(entry) => {
+                        if entry.0 == name {
+                            return entry.1 .3;
+                        }
+                    }
+                    None => return false,
+                }
+            }
+            false
+        }
+        None => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Expressions.
+// ---------------------------------------------------------------------------
+
+fn check_expr(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, scopes: &mut Vec<Scope>, expr: i64) {
+    if node_tag(nodes, expr) != NODE_EXPR {
+        return;
+    }
+    let kind = node_a(nodes, expr);
+    if kind == EXPR_PATH {
+        check_path(names, nodes, lists, errors, scopes, expr);
+        return;
+    }
+    if kind == EXPR_UNARY {
+        check_expr(names, nodes, lists, errors, scopes, node_c(nodes, expr));
+        return;
+    }
+    if kind == EXPR_BINARY {
+        check_expr(names, nodes, lists, errors, scopes, node_c(nodes, expr));
+        check_expr(names, nodes, lists, errors, scopes, node_d(nodes, expr));
+        return;
+    }
+    if kind == EXPR_CALL {
+        check_call(names, nodes, lists, errors, scopes, expr);
+        return;
+    }
+    if kind == EXPR_STRUCT_LIT {
+        let values = node_d(nodes, expr);
+        let count = list_len(lists, values);
+        let mut idx = 0i64;
+        while idx < count {
+            check_expr(names, nodes, lists, errors, scopes, list_get(lists, values, idx));
+            idx += 1;
+        }
+        return;
+    }
+    if kind == EXPR_ARRAY {
+        let elems = node_b(nodes, expr);
+        let count = list_len(lists, elems);
+        let mut idx = 0i64;
+        while idx < count {
+            check_expr(names, nodes, lists, errors, scopes, list_get(lists, elems, idx));
+            idx += 1;
+        }
+        return;
+    }
+    if kind == EXPR_MATCH {
+        let scrutinee = node_b(nodes, expr);
+        let arms = node_c(nodes, expr);
+        check_expr(names, nodes, lists, errors, scopes, scrutinee);
+        let parent = snapshot(scopes);
+        let mut branch_states: Vec<(Vec<Scope>, i64)> = Vec::new();
+        let count = list_len(lists, arms);
+        let mut idx = 0i64;
+        while idx < count {
+            let arm = list_get(lists, arms, idx);
+            push_scope(scopes);
+            check_pattern(names, nodes, lists, scopes, node_a(nodes, arm));
+            // An arm body is a single statement (the parser stores it
+            // directly in the arm row, not as a list).
+            check_stmt(names, nodes, lists, errors, scopes, node_b(nodes, arm));
+            consume_arm_result(nodes, lists, scopes, arm);
+            check_unconsumed(names, errors, scopes);
+            let diverges = stmt_diverges(nodes, lists, node_b(nodes, arm));
+            branch_states.push((snapshot(scopes), diverges));
+            pop_scope(scopes);
+            restore(scopes, &parent);
+            idx += 1;
+        }
+        restore(scopes, &parent);
+        merge_arms(names, errors, scopes, &parent, &branch_states);
+        return;
+    }
+    if kind == EXPR_TRY {
+        check_expr(names, nodes, lists, errors, scopes, node_b(nodes, expr));
+    }
+}
+
+/// The arm's body statement is the arm's result: an expression statement
+/// whose expression is a bare reference to a linear binding moves it out
+/// of the arm into the match result, so it is consumed here rather than
+/// flagged by the arm-scope check.
+fn consume_arm_result(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, scopes: &mut Vec<Scope>, arm: i64) {
+    let body = node_b(nodes, arm);
+    if node_tag(nodes, body) != NODE_STMT || node_a(nodes, body) != STMT_EXPR {
+        return;
+    }
+    consume_expr_result(nodes, lists, scopes, node_b(nodes, body));
+}
+
+/// Walks an arm-result expression, moving any linear path references it
+/// produces.  Call arguments were already consumed when the body was
+/// checked, and nested match arms consumed their own results, so those
+/// are left alone.
+fn consume_expr_result(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, scopes: &mut Vec<Scope>, expr: i64) {
+    if node_tag(nodes, expr) != NODE_EXPR {
+        return;
+    }
+    let kind = node_a(nodes, expr);
+    if kind == EXPR_PATH {
+        let segs = node_b(nodes, expr);
+        if list_len(lists, segs) == 1 {
+            let name = list_get(lists, segs, 0);
+            if let Some(binding) = lookup_mut(scopes, name)
+                && binding.1 && !binding.3 {
+                    binding.3 = true;
+                }
+        }
+        return;
+    }
+    if kind == EXPR_UNARY {
+        consume_expr_result(nodes, lists, scopes, node_c(nodes, expr));
+        return;
+    }
+    if kind == EXPR_BINARY {
+        consume_expr_result(nodes, lists, scopes, node_c(nodes, expr));
+        consume_expr_result(nodes, lists, scopes, node_d(nodes, expr));
+        return;
+    }
+    if kind == EXPR_STRUCT_LIT {
+        let values = node_d(nodes, expr);
+        let count = list_len(lists, values);
+        let mut idx = 0i64;
+        while idx < count {
+            consume_expr_result(nodes, lists, scopes, list_get(lists, values, idx));
+            idx += 1;
+        }
+        return;
+    }
+    if kind == EXPR_ARRAY {
+        let elems = node_b(nodes, expr);
+        let count = list_len(lists, elems);
+        let mut idx = 0i64;
+        while idx < count {
+            consume_expr_result(nodes, lists, scopes, list_get(lists, elems, idx));
+            idx += 1;
+        }
+        return;
+    }
+    if kind == EXPR_TRY {
+        consume_expr_result(nodes, lists, scopes, node_b(nodes, expr));
+    }
+}
+
+/// Merges every arm's state for one parent binding.  A continuing arm
+/// that leaves the value unmoved while another arm moved it makes the
+/// post-match state ambiguous (an error); a diverging arm must have
+/// consumed the value before its path ends, or the value leaks.  The
+/// post-match state is `moved` only when every continuing arm moved it.
+fn merge_arm_binding(
+    names: &[String],
+    errors: &mut Vec<Diag>,
+    scopes: &mut [Scope],
+    s_idx: usize,
+    entry: &(i64, Binding),
+    branches: &[(Vec<Scope>, i64)],
+) {
+    let name = entry.0;
+    let binding = &entry.1;
+    if !binding.1 {
+        return;
+    }
+    let mut some_moved = false;
+    let mut all_moved = true;
+    let mut saw_continuing = false;
+    let mut leaked = false;
+    let mut b_idx = 0usize;
+    while b_idx < branches.len() {
+        match branches.get(b_idx) {
+            Some(pair) => {
+                let (state, diverges) = pair;
+                let moved = binding_moved(state, s_idx, name);
+                if *diverges == 1 {
+                    if !moved {
+                        leaked = true;
+                    }
+                } else {
+                    saw_continuing = true;
+                    if moved {
+                        some_moved = true;
+                    } else {
+                        all_moved = false;
+                    }
+                }
+            }
+            None => break,
+        }
+        b_idx += 1;
+    }
+    if leaked || (saw_continuing && some_moved && !all_moved) {
+        push_error(
+            errors,
+            &format!("linear value '{}' is not consumed on every path", name_text(names, name)),
+            binding.5,
+            binding.6,
+            binding.7,
+        );
+    }
+    if saw_continuing {
+        let merged_moved = all_moved;
+        if let Some(scope) = scopes.get_mut(s_idx) {
+            let mut f_idx = scope.len();
+            while f_idx > 0 {
+                f_idx -= 1;
+                match scope.get_mut(f_idx) {
+                    Some(entry_mut) => {
+                        if entry_mut.0 == name {
+                            entry_mut.1.3 = merged_moved;
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+}
+
+/// Merges every arm's state: a linear binding consumed in some arms but
+/// not all is an error, and a diverging arm that leaks one is an error.
+fn merge_arms(
+    names: &[String],
+    errors: &mut Vec<Diag>,
+    scopes: &mut [Scope],
+    parent: &[Scope],
+    branches: &[(Vec<Scope>, i64)],
+) {
+    let mut s_idx = 0usize;
+    while s_idx < parent.len() {
+        let scope = match parent.get(s_idx) {
+            Some(scope) => scope,
+            None => break,
+        };
+        let mut e_idx = 0usize;
+        while e_idx < scope.len() {
+            match scope.get(e_idx) {
+                Some(entry) => merge_arm_binding(names, errors, scopes, s_idx, entry, branches),
+                None => break,
+            }
+            e_idx += 1;
+        }
+        s_idx += 1;
+    }
+}
+
+fn check_path(names: &mut [String], nodes: &mut [i64], lists: &mut [Vec<i64>], errors: &mut Vec<Diag>, scopes: &mut [Scope], expr: i64) {
+    let sym = expr_sym_of(nodes, expr);
+    if sym != NONE {
+        return;
+    }
+    // A local chain: the first segment names a binding.  Reading it by
+    // value is fine unless it is a moved linear value.
+    let segs = node_b(nodes, expr);
+    let first = list_get(lists, segs, 0);
+    if let Some(binding) = lookup(scopes, first)
+        && binding.1 && binding.3 {
+            push_error(
+                errors,
+                &format!("use of moved value '{}'", name_text(names, first)),
+                node_file(nodes, expr),
+                node_start(nodes, expr),
+                node_end(nodes, expr),
+            );
+        }
+}
+
+fn fn_node_of_sym(nodes: &[i64], sym: i64) -> i64 {
+    let decl = node_c(nodes, sym);
+    if node_tag(nodes, decl) == NODE_FN {
+        decl
+    } else {
+        node_d(nodes, decl)
+    }
+}
+
+/// Checks a call's arguments against the callee's declared parameter
+/// kinds: a by-value linear parameter consumes its argument, a `&T` or
+/// `&mut T` parameter borrows it.  The instance row the typechecker
+/// attached already carries the callee's fn node; the fallback only
+/// unwraps the symbol-to-item indirection the typechecker uses for
+/// imported declarations.
+fn check_call(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, scopes: &mut Vec<Scope>, expr: i64) {
+    let inst = expr_sym_of(nodes, expr);
+    let arg_exprs = node_d(nodes, expr);
+    let acount = list_len(lists, arg_exprs);
+    let mut param_kinds: Vec<i64> = Vec::new();
+    if inst != NONE {
+        let fn_slot = inst_fn_of(nodes, inst);
+        let fn_node = if node_tag(nodes, fn_slot) == NODE_FN {
+            fn_slot
+        } else {
+            fn_node_of_sym(nodes, fn_slot)
+        };
+        param_kinds = declared_param_kinds(nodes, lists, fn_node);
+    }
+    let mut idx = 0i64;
+    while idx < acount {
+        let arg = list_get(lists, arg_exprs, idx);
+        let kind = match param_kinds.get(idx as usize) {
+            Some(kind) => *kind,
+            None => TYD_UNKNOWN,
+        };
+        if kind == TYD_REF || kind == TYD_REF_MUT {
+            check_borrow_arg(names, nodes, lists, errors, scopes, arg, kind);
+        } else {
+            check_consume_arg(names, nodes, lists, errors, scopes, arg);
+        }
+        idx += 1;
+    }
+}
+
+/// The parameter kinds of a fn node, in order (`TYD_REF`, `TYD_REF_MUT`,
+/// or the dereferenced-by-value kind).
+fn declared_param_kinds(nodes: &[i64], lists: &[Vec<i64>], fn_node: i64) -> Vec<i64> {
+    let params = node_c(nodes, fn_node);
+    let count = list_len(lists, params);
+    let mut kinds: Vec<i64> = Vec::new();
+    let mut idx = 0i64;
+    while idx < count {
+        let param = list_get(lists, params, idx);
+        let key = ty_key_of(nodes, node_b(nodes, param));
+        let kind = key_kind(nodes, key);
+        if kind == TYD_REF || kind == TYD_REF_MUT {
+            kinds.push(kind);
+        } else {
+            kinds.push(key);
+        }
+        idx += 1;
+    }
+    kinds
+}
+
+fn check_borrow_arg(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, scopes: &mut Vec<Scope>, arg: i64, kind: i64) {
+    // The borrow is usually an explicit `&x`; a path argument passes an
+    // existing reference through.
+    if node_tag(nodes, arg) == NODE_EXPR && node_a(nodes, arg) == EXPR_UNARY {
+        let inner = node_c(nodes, arg);
+        if node_tag(nodes, inner) == NODE_EXPR && node_a(nodes, inner) == EXPR_PATH {
+            let segs = node_b(nodes, inner);
+            let name = list_get(lists, segs, 0);
+            verify_borrow(names, nodes, errors, scopes, name, kind, inner);
+            return;
+        }
+    }
+    check_expr(names, nodes, lists, errors, scopes, arg);
+}
+
+fn verify_borrow(names: &mut [String], nodes: &mut [i64], errors: &mut Vec<Diag>, scopes: &mut [Scope], name: i64, kind: i64, at: i64) {
+    if let Some(binding) = lookup(scopes, name) {
+        if binding.1 && binding.3 {
+            push_error(
+                errors,
+                &format!("cannot borrow moved value '{}'", name_text(names, name)),
+                node_file(nodes, at),
+                node_start(nodes, at),
+                node_end(nodes, at),
+            );
+            return;
+        }
+        // Exclusivity: a mutable borrow cannot overlap a live borrow.
+        let holds = &binding.4;
+        if kind == BORROW_MUT && !holds.is_empty() {
+            push_error(
+                errors,
+                &format!("cannot mutably borrow '{}': it is already borrowed", name_text(names, name)),
+                node_file(nodes, at),
+                node_start(nodes, at),
+                node_end(nodes, at),
             );
         }
     }
+    // The owner's borrowed-from set is the value's own holds; the borrow
+    // of `name` is a use of `name`'s value, recorded against the owners
+    // of the value `name` borrows.  For a direct borrow of `name` the
+    // borrow is recorded on the bindings that own the value.
+    record_borrow(names, errors, scopes, name, kind);
+}
 
-    fn lookup_binding(&self, name: &str) -> Option<&BindingInfo> {
-        let mut idx = self.scopes.len();
-        while idx > 0 {
-            idx -= 1;
-            if let Some(info) = self.scopes[idx].get(name) {
-                return Some(info);
+fn record_borrow(names: &mut [String], errors: &mut Vec<Diag>, scopes: &mut [Scope], owner: i64, kind: i64) {
+    if let Some(binding) = lookup_mut(scopes, owner) {
+        if binding.1 && binding.3 {
+            push_error(
+                errors,
+                &format!("cannot borrow moved value '{}'", name_text(names, owner)),
+                -1,
+                -1,
+                -1,
+            );
+            return;
+        }
+        let holds = &mut binding.4;
+        holds.push((owner, kind));
+    }
+}
+
+/// A by-value argument: a linear value is consumed here (moved).
+fn check_consume_arg(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, scopes: &mut Vec<Scope>, arg: i64) {
+    if node_tag(nodes, arg) == NODE_EXPR && node_a(nodes, arg) == EXPR_PATH {
+        let segs = node_b(nodes, arg);
+        if list_len(lists, segs) == 1 {
+            let name = list_get(lists, segs, 0);
+            if let Some(binding) = lookup_mut(scopes, name) {
+                if binding.1 {
+                    if binding.3 {
+                        push_error(
+                            errors,
+                            &format!("use of moved value '{}'", name_text(names, name)),
+                            node_file(nodes, arg),
+                            node_start(nodes, arg),
+                            node_end(nodes, arg),
+                        );
+                    } else {
+                        binding.3 = true;
+                    }
+                }
+                return;
             }
         }
-        None
     }
+    check_expr(names, nodes, lists, errors, scopes, arg);
+}
 
-    fn lookup_binding_mut(&mut self, name: &str) -> Option<&mut BindingInfo> {
-        let mut idx = self.scopes.len();
-        while idx > 0 {
-            idx -= 1;
-            if self.scopes[idx].contains_key(name) {
-                return self.scopes[idx].get_mut(name);
+/// Binds the names a pattern introduces (for match arm scopes).
+fn check_pattern(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, scopes: &mut Vec<Scope>, pat: i64) {
+    if node_tag(nodes, pat) != NODE_PAT {
+        return;
+    }
+    let kind = node_a(nodes, pat);
+    if kind == PAT_BIND {
+        let name = node_b(nodes, pat);
+        let key = pat_ty_of(nodes, pat);
+        let linear = key_is_linear(nodes, names, key);
+        bind(scopes, name, key, linear, false, (node_file(nodes, pat), node_start(nodes, pat), node_end(nodes, pat)));
+        return;
+    }
+    if kind == PAT_VARIANT {
+        let payload = node_c(nodes, pat);
+        let count = list_len(lists, payload);
+        let mut idx = 0i64;
+        while idx < count {
+            check_pattern(names, nodes, lists, scopes, list_get(lists, payload, idx));
+            idx += 1;
+        }
+        return;
+    }
+    if kind == PAT_ARRAY {
+        let elems = node_b(nodes, pat);
+        let count = list_len(lists, elems);
+        let mut idx = 0i64;
+        while idx < count {
+            check_pattern(names, nodes, lists, scopes, list_get(lists, elems, idx));
+            idx += 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs the full pipeline on the reference spec and prints every
+    /// borrow error with its source span.  Temporary diagnostic.
+    #[test]
+    fn spec_borrow_diagnostics() {
+        let mut names: Vec<String> = Vec::new();
+        let mut nodes: Vec<i64> = Vec::new();
+        let mut lists: Vec<Vec<i64>> = Vec::new();
+        let mut errors: Vec<Diag> = Vec::new();
+        let (loaded, files) =
+            crate::module_loader::load(&mut names, &mut nodes, &mut lists, &mut errors, "tests/fixtures/spec.cnb");
+        let (root, ext_mods) = match loaded {
+            Some(program) => program,
+            None => {
+                let mut idx = 0usize;
+                while idx < errors.len() {
+                    match errors.get(idx) {
+                        Some(diag) => println!("LOADERR: {} @ {} {} {}", diag.0, diag.1, diag.2, diag.3),
+                        None => break,
+                    }
+                    idx += 1;
+                }
+                return;
             }
+        };
+        crate::resolver::resolve(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods);
+        let (ok, impls_list) = crate::typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods);
+        crate::borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods);
+        let mut detail: Vec<String> = Vec::new();
+        let mut idx = 0usize;
+        while idx < errors.len() {
+            match errors.get(idx) {
+                Some(diag) => {
+                    let path = match files.get(diag.1 as usize) {
+                        Some(pair) => pair.0.clone(),
+                        None => "?".to_string(),
+                    };
+                    detail.push(format!("{} @ {} {} {}", diag.0, path, diag.2, diag.3));
+                }
+                None => break,
+            }
+            idx += 1;
         }
-        None
-    }
-
-    fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
-    }
-
-    fn pop_scope(&mut self) {
-        if self.scopes.len() > 1 {
-            self.scopes.pop();
-        }
+        assert!(errors.is_empty() && ok, "typecheck={} impls={} errors:\n{}", ok, impls_list, detail.join("\n"));
     }
 }

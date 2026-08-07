@@ -1,1362 +1,1361 @@
-use crate::ast::BinOp;
-use crate::ast::EnumVariant;
-use crate::ast::Expr;
-use crate::ast::GenericParam;
-use crate::ast::Item;
-use crate::ast::ItemKind;
-use crate::ast::Lit;
-use crate::ast::Param;
-use crate::ast::Pattern;
-use crate::ast::Spanned;
-use crate::ast::Stmt;
-use crate::ast::StructField;
-use crate::ast::Type;
-use crate::ast::TypeKind;
-use crate::ast::UnOp;
-use crate::lexer::Span;
-use crate::lexer::Token;
-use crate::lexer::TokenKind;
-use std::fmt;
+//! Cinnabar parser.
+//!
+//! Recursive descent over the token arena.  Every construct has its own
+//! small function; all parsing writes into the node arena and the list
+//! arena.  Statement boundaries are newline tokens.  `parse` returns
+//! false when the program is not well formed; every failure is reported
+//! in `errors`.
 
-#[derive(Debug, Clone)]
-pub struct ParseError {
-    pub message: String,
-    pub span: Span,
+use crate::ast::*;
+
+/// Parses items from the token arena into `root` (a list of item ids).
+/// `token_start` is the node id where this file's tokens begin; the
+/// tokens of each loaded file are appended to the same arena.
+/// Returns false when the program is not well formed.
+pub fn parse(
+    names: &mut [String],
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    errors: &mut Vec<Diag>,
+    root: i64,
+    token_start: i64,
+) -> bool {
+    let mut pos = token_start;
+    skip_nl(nodes, &mut pos);
+    while !at_eof(nodes, pos) {
+        let before = pos;
+        match parse_item(&mut pos, names, nodes, lists, errors) {
+            Some(item) => {
+                list_push(lists, root, item);
+            }
+            None => {
+                recover_line(nodes, &mut pos);
+            }
+        }
+        skip_nl(nodes, &mut pos);
+        if pos <= before {
+            pos += 1;
+        }
+    }
+    errors.is_empty()
 }
 
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Parse Error at line {}, col {}: {}",
-            self.span.line, self.span.col, self.message
-        )
+// ---------------------------------------------------------------------------
+// Token cursor.
+// ---------------------------------------------------------------------------
+
+fn at_eof(nodes: &[i64], pos: i64) -> bool {
+    node_a(nodes, pos) == TOK_EOF
+}
+
+fn is_name(nodes: &[i64], names: &[String], pos: i64, text: &str) -> bool {
+    tok_is_name(nodes, names, pos, text)
+}
+
+fn is_sym(nodes: &[i64], names: &[String], pos: i64, text: &str) -> bool {
+    tok_is_sym(nodes, names, pos, text)
+}
+
+/// True when the token at `pos` is a word (any identifier or keyword).
+fn is_word(nodes: &[i64], pos: i64) -> bool {
+    node_tag(nodes, pos) == NODE_TOKEN && node_a(nodes, pos) == TOK_IDENT
+}fn skip_nl(nodes: &[i64], pos: &mut i64) {
+    while node_a(nodes, *pos) == TOK_NL {
+        *pos += 1;
     }
 }
 
-enum DeclKind {
-    Unknown,
-    Struct,
-    Enum,
+/// True when the token at `pos` carries the interned text `text`, whether
+/// it lexed as an identifier or a symbol.  Keywords, punctuation, and
+/// operators all live in the same name arena; `accept`/`expect` match
+/// either kind.
+fn tok_text_is(nodes: &[i64], names: &[String], pos: i64, text: &str) -> bool {
+    node_tag(nodes, pos) == NODE_TOKEN
+        && name_is(names, node_b(nodes, pos), text)
 }
 
-pub struct Parser<'a> {
-    tokens: &'a [Token],
-    cursor: usize,
-}
-
-impl<'a> Parser<'a> {
-    pub fn new(tokens: &'a [Token]) -> Self {
-        Self { tokens, cursor: 0 }
-    }
-
-    pub fn parse_program(&mut self) -> Result<Vec<Spanned<Item>>, ParseError> {
-        let mut items = Vec::new();
-        while !self.is_at_end() && self.peek_kind() != Some(&TokenKind::Eof) {
-            let doc_comment = self.collect_doc_comments();
-            if self.is_at_end() || self.peek_kind() == Some(&TokenKind::Eof) {
-                break;
-            }
-            let start_span = self.current_span();
-            let item_node = self.parse_item(doc_comment)?;
-            let end_span = self.previous_span();
-            let full_span = Span::new(start_span.start, end_span.end, start_span.line, start_span.col);
-            items.push(Spanned::new(item_node, full_span));
-        }
-        Ok(items)
-    }
-
-    fn collect_doc_comments(&mut self) -> Option<String> {
-        let mut docs = Vec::new();
-        while let Some(TokenKind::DocComment(text)) = self.peek_kind() {
-            docs.push(text.clone());
-            self.advance();
-        }
-        if docs.is_empty() {
-            None
-        } else {
-            Some(docs.join("\n"))
-        }
-    }
-
-    fn peek_can_start_type(&self) -> bool {
-        matches!(
-            self.peek_kind(),
-            Some(TokenKind::PascalIdent(_)) | Some(TokenKind::Ampersand) | Some(TokenKind::LBracket)
-        )
-    }
-
-    fn parse_item(&mut self, doc: Option<String>) -> Result<Item, ParseError> {
-        let start_span = self.current_span();
-
-        let is_pub = if self.match_kind(&TokenKind::Pub) {
-            self.advance();
-            true
-        } else {
-            false
-        };
-
-        let is_native = if self.match_kind(&TokenKind::Native) {
-            self.advance();
-            true
-        } else {
-            false
-        };
-
-        let kind = match self.peek_kind() {
-            Some(TokenKind::Const) => {
-                if is_native {
-                    return Err(ParseError {
-                        message: "The 'native' modifier cannot be used on 'const' declarations".to_string(),
-                        span: start_span,
-                    });
-                }
-                self.parse_const(is_pub)?
-            }
-            Some(TokenKind::Type) => self.parse_type_decl(is_pub, is_native)?,
-            Some(TokenKind::Mod) => {
-                if is_native {
-                    return Err(ParseError {
-                        message: "The 'native' modifier cannot be used on 'mod' declarations".to_string(),
-                        span: start_span,
-                    });
-                }
-                self.parse_module(is_pub)?
-            }
-            Some(TokenKind::Use) => {
-                if is_native {
-                    return Err(ParseError {
-                        message: "The 'native' modifier cannot be used on 'use' imports".to_string(),
-                        span: start_span,
-                    });
-                }
-                self.parse_use(is_pub)?
-            }
-            Some(TokenKind::Fun) | Some(TokenKind::Impure) => self.parse_function(is_pub, is_native)?,
-            Some(TokenKind::Trait) => {
-                if is_native {
-                    return Err(ParseError {
-                        message: "The 'native' modifier cannot be used on 'trait' declarations".to_string(),
-                        span: start_span,
-                    });
-                }
-                self.parse_trait(is_pub)?
-            }
-            Some(TokenKind::Impl) => {
-                if is_native {
-                    return Err(ParseError {
-                        message: "The 'native' modifier cannot be used on 'impl' blocks".to_string(),
-                        span: start_span,
-                    });
-                }
-                self.parse_impl(is_pub)?
-            }
-            Some(unexpected_token) => return Err(ParseError {
-                message: format!("Expected item declaration, found {:?}", unexpected_token),
-                span: start_span,
-            }),
-            None => return Err(ParseError {
-                message: "Unexpected end of input while parsing item".to_string(),
-                span: start_span,
-            }),
-        };
-
-        Ok(Item { doc, kind })
-    }
-
-    fn parse_const(&mut self, is_pub: bool) -> Result<ItemKind, ParseError> {
-        self.expect(&TokenKind::Const)?;
-        let name = self.expect_screaming_ident()?;
-        self.expect(&TokenKind::Colon)?;
-        let ty = self.parse_spanned_type()?;
-        self.expect(&TokenKind::Eq)?;
-        let init = self.parse_spanned_expr()?;
-        Ok(ItemKind::Const { is_pub, name, ty, init })
-    }
-
-    fn parse_type_decl(&mut self, is_pub: bool, is_native: bool) -> Result<ItemKind, ParseError> {
-        self.expect(&TokenKind::Type)?;
-        let name = self.expect_pascal_ident()?;
-
-        let generics = if self.match_kind(&TokenKind::LParen) {
-            self.advance();
-            let mut args = Vec::new();
-            while !self.match_kind(&TokenKind::RParen) && !self.is_at_end() {
-                args.push(GenericParam {
-                    name: self.expect_pascal_ident()?,
-                    bounds: Vec::new(),
-                });
-                if self.match_kind(&TokenKind::Comma) {
-                    self.advance();
-                } else {
-                    break;
-                }
-            }
-            self.expect(&TokenKind::RParen)?;
-            args
-        } else {
-            Vec::new()
-        };
-
-        if is_native {
-            return Ok(ItemKind::TypeDecl {
-                is_pub,
-                name,
-                generics,
-                kind: TypeKind::Native,
-            });
-        }
-
-        if self.match_kind(&TokenKind::End) {
-            self.advance();
-            return Ok(ItemKind::TypeDecl {
-                is_pub,
-                name,
-                generics,
-                kind: TypeKind::Unit,
-            });
-        }
-
-        let mut fields = Vec::new();
-        let mut variants = Vec::new();
-        let mut decl_kind = DeclKind::Unknown;
-
-        while !self.match_kind(&TokenKind::End) && !self.is_at_end() {
-            self.collect_doc_comments();
-            if self.match_kind(&TokenKind::End) || self.is_at_end() {
-                break;
-            }
-
-            let start_item_span = self.current_span();
-            let field_or_variant_pub = if self.match_kind(&TokenKind::Pub) {
-                self.advance();
-                true
-            } else {
-                false
-            };
-
-            if let Ok(field_name) = self.expect_snake_ident() {
-                match decl_kind {
-                    DeclKind::Enum => {
-                        return Err(ParseError {
-                            message: "Cannot mix enum variants and struct fields in type declaration".to_string(),
-                            span: start_item_span,
-                        });
-                    }
-                    DeclKind::Unknown => decl_kind = DeclKind::Struct,
-                    DeclKind::Struct => {}
-                }
-
-                self.expect(&TokenKind::Colon)?;
-                let field_ty = self.parse_spanned_type()?;
-                fields.push(StructField {
-                    is_pub: field_or_variant_pub,
-                    name: field_name,
-                    ty: field_ty,
-                });
-            } else if let Ok(variant_name) = self.expect_pascal_ident() {
-                match decl_kind {
-                    DeclKind::Struct => {
-                        return Err(ParseError {
-                            message: "Cannot mix struct fields and enum variants in type declaration".to_string(),
-                            span: start_item_span,
-                        });
-                    }
-                    DeclKind::Unknown => decl_kind = DeclKind::Enum,
-                    DeclKind::Enum => {}
-                }
-
-                let mut tuple_types = Vec::new();
-                if self.match_kind(&TokenKind::LParen) {
-                    self.advance();
-                    while !self.match_kind(&TokenKind::RParen) && !self.is_at_end() {
-                        tuple_types.push(self.parse_spanned_type()?);
-                        if self.match_kind(&TokenKind::Comma) {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-                    self.expect(&TokenKind::RParen)?;
-                }
-                variants.push(EnumVariant {
-                    is_pub: field_or_variant_pub,
-                    name: variant_name,
-                    types: tuple_types,
-                });
-            } else {
-                return Err(ParseError {
-                    message: "Expected struct field or enum variant in type definition".to_string(),
-                    span: self.current_span(),
-                });
-            }
-        }
-
-        self.expect(&TokenKind::End)?;
-
-        let kind = match decl_kind {
-            DeclKind::Struct => TypeKind::Struct(fields),
-            DeclKind::Enum => TypeKind::Enum(variants),
-            DeclKind::Unknown => TypeKind::Unit,
-        };
-
-        Ok(ItemKind::TypeDecl {
-            is_pub,
-            name,
-            generics,
-            kind,
-        })
-    }
-
-    fn parse_trait(&mut self, is_pub: bool) -> Result<ItemKind, ParseError> {
-        self.expect(&TokenKind::Trait)?;
-        let name = self.expect_pascal_ident()?;
-        let mut methods = Vec::new();
-
-        while !self.match_kind(&TokenKind::End) && !self.is_at_end() {
-            let doc_comment = self.collect_doc_comments();
-            if self.match_kind(&TokenKind::End) || self.is_at_end() {
-                break;
-            }
-
-            let start_span = self.current_span();
-            let method_pub = if self.match_kind(&TokenKind::Pub) {
-                self.advance();
-                true
-            } else {
-                false
-            };
-
-            self.expect(&TokenKind::Fun)?;
-            let method_name = self.expect_snake_ident()?;
-
-            self.expect(&TokenKind::LParen)?;
-            let params = self.parse_params()?;
-            self.expect(&TokenKind::RParen)?;
-
-            let is_impure = if self.match_kind(&TokenKind::Impure) {
-                self.advance();
-                true
-            } else {
-                false
-            };
-
-            let return_ty = if self.peek_can_start_type() {
-                Some(self.parse_spanned_type()?)
-            } else {
-                None
-            };
-
-            let end_span = self.previous_span();
-            let method_span = Span::new(start_span.start, end_span.end, start_span.line, start_span.col);
-
-            let method_item = Item {
-                doc: doc_comment,
-                kind: ItemKind::Function {
-                    is_pub: method_pub,
-                    is_native: false,
-                    is_impure,
-                    name: method_name,
-                    generics: Vec::new(),
-                    params,
-                    return_ty,
-                    body: None,
-                },
-            };
-            methods.push(Spanned::new(method_item, method_span));
-        }
-        self.expect(&TokenKind::End)?;
-
-        Ok(ItemKind::Trait { is_pub, name, methods })
-    }
-
-    fn parse_impl(&mut self, is_pub: bool) -> Result<ItemKind, ParseError> {
-        self.expect(&TokenKind::Impl)?;
-        let trait_name = self.expect_pascal_ident()?;
-        self.expect(&TokenKind::For)?;
-        let target_type = self.parse_spanned_type()?;
-        let mut methods = Vec::new();
-
-        while !self.match_kind(&TokenKind::End) && !self.is_at_end() {
-            let doc_comment = self.collect_doc_comments();
-            if self.match_kind(&TokenKind::End) || self.is_at_end() {
-                break;
-            }
-
-            let start_span = self.current_span();
-            let method_pub = if self.match_kind(&TokenKind::Pub) {
-                self.advance();
-                true
-            } else {
-                false
-            };
-
-            let method_kind = self.parse_function(method_pub, false)?;
-            let end_span = self.previous_span();
-            let method_span = Span::new(start_span.start, end_span.end, start_span.line, start_span.col);
-
-            methods.push(Spanned::new(Item { doc: doc_comment, kind: method_kind }, method_span));
-        }
-        self.expect(&TokenKind::End)?;
-
-        Ok(ItemKind::Impl {
-            is_pub,
-            trait_name,
-            target_type,
-            methods,
-        })
-    }
-
-    fn parse_module(&mut self, is_pub: bool) -> Result<ItemKind, ParseError> {
-        self.expect(&TokenKind::Mod)?;
-        let name = self.expect_pascal_ident()?;
-
-        let mut items = Vec::new();
-        while !self.match_kind(&TokenKind::End) && !self.is_at_end() {
-            let doc_comment = self.collect_doc_comments();
-            if self.match_kind(&TokenKind::End) || self.is_at_end() {
-                break;
-            }
-            let start_span = self.current_span();
-            let item_node = self.parse_item(doc_comment)?;
-            let end_span = self.previous_span();
-            let full_span = Span::new(start_span.start, end_span.end, start_span.line, start_span.col);
-            items.push(Spanned::new(item_node, full_span));
-        }
-        self.expect(&TokenKind::End)?;
-
-        Ok(ItemKind::Module { is_pub, name, items })
-    }
-
-    fn parse_use(&mut self, is_pub: bool) -> Result<ItemKind, ParseError> {
-        self.expect(&TokenKind::Use)?;
-        let mut path = Vec::new();
-        path.push(self.expect_pascal_ident()?);
-
-        while self.match_kind(&TokenKind::Dot) {
-            self.advance();
-            if let Ok(pascal_name) = self.expect_pascal_ident() {
-                path.push(pascal_name);
-            } else {
-                path.push(self.expect_snake_ident()?);
-            }
-        }
-
-        let alias = if self.match_kind(&TokenKind::As) {
-            self.advance();
-            Some(self.expect_snake_ident()?)
-        } else {
-            None
-        };
-
-        Ok(ItemKind::Use { is_pub, path, alias })
-    }
-
-    fn parse_function(&mut self, is_pub: bool, is_native: bool) -> Result<ItemKind, ParseError> {
-        self.expect(&TokenKind::Fun)?;
-        let name = self.expect_snake_ident()?;
-
-        let generics = if self.match_kind(&TokenKind::Lt) {
-            self.advance();
-            let mut args = Vec::new();
-            while !self.match_kind(&TokenKind::Gt) && !self.is_at_end() {
-                let gen_name = self.expect_pascal_ident()?;
-                let mut bounds = Vec::new();
-                if self.match_kind(&TokenKind::Colon) {
-                    self.advance();
-                    bounds.push(self.expect_pascal_ident()?);
-                }
-                args.push(GenericParam { name: gen_name, bounds });
-                if self.match_kind(&TokenKind::Comma) {
-                    self.advance();
-                } else {
-                    break;
-                }
-            }
-            self.expect(&TokenKind::Gt)?;
-            args
-        } else {
-            Vec::new()
-        };
-
-        self.expect(&TokenKind::LParen)?;
-        let params = self.parse_params()?;
-        self.expect(&TokenKind::RParen)?;
-
-        let is_impure = if self.match_kind(&TokenKind::Impure) {
-            self.advance();
-            true
-        } else {
-            false
-        };
-
-        let return_ty = if self.peek_can_start_type() {
-            Some(self.parse_spanned_type()?)
-        } else {
-            None
-        };
-
-        let body = if is_native {
-            None
-        } else {
-            let mut stmts = Vec::new();
-            while !self.match_kind(&TokenKind::End) && !self.is_at_end() {
-                self.collect_doc_comments();
-                if self.match_kind(&TokenKind::End) || self.is_at_end() {
-                    break;
-                }
-                stmts.push(self.parse_spanned_stmt()?);
-            }
-            self.expect(&TokenKind::End)?;
-            Some(stmts)
-        };
-
-        Ok(ItemKind::Function {
-            is_pub,
-            is_native,
-            is_impure,
-            name,
-            generics,
-            params,
-            return_ty,
-            body,
-        })
-    }
-
-    fn parse_params(&mut self) -> Result<Vec<Param>, ParseError> {
-        let mut params = Vec::new();
-        while !self.match_kind(&TokenKind::RParen) && !self.is_at_end() {
-            let name = self.expect_snake_ident()?;
-            self.expect(&TokenKind::Colon)?;
-            let ty = self.parse_spanned_type()?;
-            params.push(Param { name, ty });
-
-            if self.match_kind(&TokenKind::Comma) {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-        Ok(params)
-    }
-
-    fn parse_spanned_type(&mut self) -> Result<Spanned<Type>, ParseError> {
-        let start_span = self.current_span();
-        let type_node = self.parse_type()?;
-        let end_span = self.previous_span();
-        let full_span = Span::new(start_span.start, end_span.end, start_span.line, start_span.col);
-        Ok(Spanned::new(type_node, full_span))
-    }
-
-    fn parse_type(&mut self) -> Result<Type, ParseError> {
-        if self.match_kind(&TokenKind::Ampersand) {
-            self.advance();
-            if self.match_kind(&TokenKind::Mut) {
-                self.advance();
-                let inner_type = self.parse_spanned_type()?;
-                return Ok(Type::RefMut(Box::new(inner_type)));
-            } else if self.match_kind(&TokenKind::LBracket) {
-                self.advance();
-                let inner_type = self.parse_spanned_type()?;
-                self.expect(&TokenKind::RBracket)?;
-                let end_span = self.previous_span();
-                let inner_span = inner_type.span;
-                let slice_span = Span::new(inner_span.start, end_span.end, inner_span.line, inner_span.col);
-                let slice_type = Spanned::new(Type::Slice(Box::new(inner_type)), slice_span);
-                return Ok(Type::Ref(Box::new(slice_type)));
-            } else {
-                let inner_type = self.parse_spanned_type()?;
-                return Ok(Type::Ref(Box::new(inner_type)));
-            }
-        }
-
-        if self.match_kind(&TokenKind::LBracket) {
-            self.advance();
-            let element_type = self.parse_spanned_type()?;
-            if self.match_kind(&TokenKind::Semicolon) {
-                self.advance();
-                let size_val = match self.peek_kind() {
-                    Some(TokenKind::IntLit(size)) => {
-                        let sz = *size as usize;
-                        self.advance();
-                        sz
-                    }
-                    unexpected_kind => return Err(ParseError {
-                        message: format!("Expected array size integer, found {:?}", unexpected_kind),
-                        span: self.current_span(),
-                    }),
-                };
-                self.expect(&TokenKind::RBracket)?;
-                return Ok(Type::Array(Box::new(element_type), size_val));
-            } else {
-                self.expect(&TokenKind::RBracket)?;
-                return Ok(Type::Slice(Box::new(element_type)));
-            }
-        }
-
-        let mut path = Vec::new();
-        path.push(self.expect_pascal_ident()?);
-
-        while self.match_kind(&TokenKind::Dot) {
-            self.advance();
-            path.push(self.expect_pascal_ident()?);
-        }
-
-        let is_generic = self.match_kind(&TokenKind::LParen);
-        let type_args = if is_generic {
-            self.advance();
-            let mut args = Vec::new();
-            while !self.match_kind(&TokenKind::RParen) && !self.is_at_end() {
-                args.push(self.parse_spanned_type()?);
-                if self.match_kind(&TokenKind::Comma) {
-                    self.advance();
-                } else {
-                    break;
-                }
-            }
-            self.expect(&TokenKind::RParen)?;
-            Some(args)
-        } else {
-            None
-        };
-
-        if let Some(args) = type_args {
-            if path.len() == 1 {
-                Ok(Type::Generic(path[0].clone(), args))
-            } else {
-                Ok(Type::GenericPath(path, args))
-            }
-        } else {
-            if path.len() == 1 {
-                Ok(Type::Named(path[0].clone()))
-            } else {
-                Ok(Type::Path(path))
-            }
-        }
-    }
-
-    fn parse_spanned_stmt(&mut self) -> Result<Spanned<Stmt>, ParseError> {
-        let start_span = self.current_span();
-        let stmt_node = self.parse_stmt()?;
-        let end_span = self.previous_span();
-        let full_span = Span::new(start_span.start, end_span.end, start_span.line, start_span.col);
-        Ok(Spanned::new(stmt_node, full_span))
-    }
-
-    fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
-        let start_span = self.current_span();
-
-        if self.match_kind(&TokenKind::Pub) {
-            self.advance();
-            if self.match_kind(&TokenKind::Val) || self.match_kind(&TokenKind::Var) {
-                return Err(ParseError {
-                    message: "pub cannot appear on local val/var".to_string(),
-                    span: start_span,
-                });
-            } else {
-                return Err(ParseError {
-                    message: "Unexpected 'pub' modifier inside local scope".to_string(),
-                    span: start_span,
-                });
-            }
-        }
-        if self.match_kind(&TokenKind::Val) {
-            self.advance();
-            let name = self.expect_snake_ident()?;
-            let ty = if self.match_kind(&TokenKind::Colon) {
-                self.advance();
-                Some(self.parse_spanned_type()?)
-            } else {
-                None
-            };
-            self.expect(&TokenKind::Eq)?;
-            let init = self.parse_spanned_expr()?;
-            Ok(Stmt::Val { name, ty, init })
-        } else if self.match_kind(&TokenKind::Var) {
-            self.advance();
-            let name = self.expect_snake_ident()?;
-            let ty = if self.match_kind(&TokenKind::Colon) {
-                self.advance();
-                Some(self.parse_spanned_type()?)
-            } else {
-                None
-            };
-            self.expect(&TokenKind::Eq)?;
-            let init = self.parse_spanned_expr()?;
-            Ok(Stmt::Var { name, ty, init })
-        } else if self.match_kind(&TokenKind::While) {
-            self.advance();
-            let cond = self.parse_spanned_expr()?;
-            let mut body = Vec::new();
-            while !self.match_kind(&TokenKind::End) && !self.is_at_end() {
-                self.collect_doc_comments();
-                if self.match_kind(&TokenKind::End) || self.is_at_end() {
-                    break;
-                }
-                body.push(self.parse_spanned_stmt()?);
-            }
-            self.expect(&TokenKind::End)?;
-            Ok(Stmt::While { cond, body })
-        } else if let Some(TokenKind::SnakeIdent(name)) = self.peek_kind() {
-            let var_name = name.clone();
-            if self.peek_next_kind() == Some(&TokenKind::Eq) {
-                self.advance();
-                self.advance();
-                let expr = self.parse_spanned_expr()?;
-                Ok(Stmt::Assign { name: var_name, expr })
-            } else {
-                let expr = self.parse_spanned_expr()?;
-                Ok(Stmt::Expr(expr))
-            }
-        } else if !self.is_at_end() {
-            let expr = self.parse_spanned_expr()?;
-            Ok(Stmt::Expr(expr))
-        } else {
-            Err(ParseError {
-                message: "Unexpected EOF while parsing statement".to_string(),
-                span: self.current_span(),
-            })
-        }
-    }
-
-    fn parse_spanned_expr(&mut self) -> Result<Spanned<Expr>, ParseError> {
-        let start_span = self.current_span();
-        let expr_node = self.parse_expr()?;
-        let end_span = self.previous_span();
-        let full_span = Span::new(start_span.start, end_span.end, start_span.line, start_span.col);
-        Ok(Spanned::new(expr_node, full_span))
-    }
-
-    fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        if self.match_kind(&TokenKind::Return) {
-            self.advance();
-            let return_val = if !self.match_kind(&TokenKind::End)
-                && !self.match_kind(&TokenKind::Else)
-                && !self.is_at_end()
-            {
-                Some(Box::new(self.parse_spanned_expr()?))
-            } else {
-                None
-            };
-            return Ok(Expr::Return(return_val));
-        }
-
-        if self.match_kind(&TokenKind::Break) {
-            self.advance();
-            return Ok(Expr::Break);
-        }
-
-        if self.match_kind(&TokenKind::Continue) {
-            self.advance();
-            return Ok(Expr::Continue);
-        }
-
-        if self.match_kind(&TokenKind::If) {
-            self.advance();
-            let cond = self.parse_spanned_expr()?;
-            let mut then_body = Vec::new();
-            let mut else_body = None;
-
-            while !self.match_kind(&TokenKind::Else) && !self.match_kind(&TokenKind::End) && !self.is_at_end() {
-                self.collect_doc_comments();
-                if self.match_kind(&TokenKind::Else) || self.match_kind(&TokenKind::End) || self.is_at_end() {
-                    break;
-                }
-                then_body.push(self.parse_spanned_stmt()?);
-            }
-
-            if self.match_kind(&TokenKind::Else) {
-                self.advance();
-                let mut else_stmts = Vec::new();
-                while !self.match_kind(&TokenKind::End) && !self.is_at_end() {
-                    self.collect_doc_comments();
-                    if self.match_kind(&TokenKind::End) || self.is_at_end() {
-                        break;
-                    }
-                    else_stmts.push(self.parse_spanned_stmt()?);
-                }
-                else_body = Some(else_stmts);
-            }
-            self.expect(&TokenKind::End)?;
-
-            return Ok(Expr::If(Box::new(cond), then_body, else_body));
-        }
-
-        if self.match_kind(&TokenKind::Match) {
-            self.advance();
-            let target_expr = self.parse_spanned_expr()?;
-            let mut arms = Vec::new();
-
-            while !self.match_kind(&TokenKind::End) && !self.is_at_end() {
-                self.collect_doc_comments();
-                if self.match_kind(&TokenKind::End) || self.is_at_end() {
-                    break;
-                }
-                let pattern = self.parse_spanned_pattern()?;
-                self.expect(&TokenKind::FatArrow)?;
-                let body_expr = self.parse_spanned_expr()?;
-                arms.push((pattern, body_expr));
-            }
-            self.expect(&TokenKind::End)?;
-
-            return Ok(Expr::Match(Box::new(target_expr), arms));
-        }
-
-        self.parse_binary_expr(0)
-    }
-
-    fn parse_spanned_pattern(&mut self) -> Result<Spanned<Pattern>, ParseError> {
-        let start_span = self.current_span();
-        let pattern_node = self.parse_pattern()?;
-        let end_span = self.previous_span();
-        let full_span = Span::new(start_span.start, end_span.end, start_span.line, start_span.col);
-        Ok(Spanned::new(pattern_node, full_span))
-    }
-
-    fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
-        if self.match_kind(&TokenKind::LBracket) {
-            self.advance();
-            let mut patterns = Vec::new();
-            while !self.match_kind(&TokenKind::RBracket) && !self.is_at_end() {
-                if let Ok(name) = self.expect_snake_ident() {
-                    let name_span = self.previous_span();
-                    if self.match_kind(&TokenKind::At) {
-                        self.advance();
-                        self.expect(&TokenKind::DotDot)?;
-                        patterns.push(Spanned::new(Pattern::Rest(name), name_span));
-                    } else {
-                        patterns.push(Spanned::new(Pattern::Var(name), name_span));
-                    }
-                } else {
-                    patterns.push(self.parse_spanned_pattern()?);
-                }
-
-                if self.match_kind(&TokenKind::Comma) {
-                    self.advance();
-                } else {
-                    break;
-                }
-            }
-            self.expect(&TokenKind::RBracket)?;
-            return Ok(Pattern::Array(patterns));
-        }
-
-        if let Ok(pascal_name) = self.expect_pascal_ident() {
-            if self.match_kind(&TokenKind::Dot) {
-                self.advance();
-                let variant_name = self.expect_pascal_ident()?;
-                let mut sub_patterns = Vec::new();
-                if self.match_kind(&TokenKind::LParen) {
-                    self.advance();
-                    while !self.match_kind(&TokenKind::RParen) && !self.is_at_end() {
-                        sub_patterns.push(self.parse_spanned_pattern()?);
-                        if self.match_kind(&TokenKind::Comma) {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-                    self.expect(&TokenKind::RParen)?;
-                }
-                return Ok(Pattern::PathVariant(vec![pascal_name, variant_name], sub_patterns));
-            } else if self.match_kind(&TokenKind::LParen) {
-                self.advance();
-                let mut sub_patterns = Vec::new();
-                while !self.match_kind(&TokenKind::RParen) && !self.is_at_end() {
-                    sub_patterns.push(self.parse_spanned_pattern()?);
-                    if self.match_kind(&TokenKind::Comma) {
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
-                self.expect(&TokenKind::RParen)?;
-                return Ok(Pattern::Variant(pascal_name, sub_patterns));
-            } else {
-                return Ok(Pattern::Variant(pascal_name, Vec::new()));
-            }
-        }
-
-        if let Ok(snake_name) = self.expect_snake_ident() {
-            return Ok(Pattern::Var(snake_name));
-        }
-
-        match self.peek_kind() {
-            Some(TokenKind::IntLit(val)) => {
-                let num = *val;
-                self.advance();
-                Ok(Pattern::Lit(Lit::Int(num)))
-            }
-            Some(TokenKind::HexLit(val)) => {
-                let num = *val;
-                self.advance();
-                Ok(Pattern::Lit(Lit::Hex(num)))
-            }
-            Some(TokenKind::BoolLit(val)) => {
-                let b = *val;
-                self.advance();
-                Ok(Pattern::Lit(Lit::Bool(b)))
-            }
-            Some(unexpected_kind) => Err(ParseError {
-                message: format!("Expected pattern, found {:?}", unexpected_kind),
-                span: self.current_span(),
-            }),
-            None => Err(ParseError {
-                message: "Unexpected EOF while parsing pattern".to_string(),
-                span: self.current_span(),
-            }),
-        }
-    }
-
-    fn parse_binary_expr(&mut self, min_precedence: u8) -> Result<Expr, ParseError> {
-        let mut left = self.parse_spanned_unary_expr()?;
-
-        while let Some(op) = self.peek_binary_op() {
-            let precedence = self.op_precedence(&op);
-            if precedence < min_precedence {
-                break;
-            }
-            self.advance();
-            let right = self.parse_spanned_binary_expr(precedence + 1)?;
-            let full_span = Span::new(left.span.start, right.span.end, left.span.line, left.span.col);
-            left = Spanned::new(Expr::Binary(Box::new(left), op, Box::new(right)), full_span);
-        }
-
-        Ok(left.node)
-    }
-
-    fn parse_spanned_binary_expr(&mut self, min_precedence: u8) -> Result<Spanned<Expr>, ParseError> {
-        let start_span = self.current_span();
-        let expr_node = self.parse_binary_expr(min_precedence)?;
-        let end_span = self.previous_span();
-        let full_span = Span::new(start_span.start, end_span.end, start_span.line, start_span.col);
-        Ok(Spanned::new(expr_node, full_span))
-    }
-
-    fn parse_spanned_unary_expr(&mut self) -> Result<Spanned<Expr>, ParseError> {
-        let start_span = self.current_span();
-        let expr_node = self.parse_unary_expr()?;
-        let end_span = self.previous_span();
-        let full_span = Span::new(start_span.start, end_span.end, start_span.line, start_span.col);
-        Ok(Spanned::new(expr_node, full_span))
-    }
-
-    fn parse_unary_expr(&mut self) -> Result<Expr, ParseError> {
-        if self.match_kind(&TokenKind::Not) {
-            self.advance();
-            let inner_expr = self.parse_spanned_unary_expr()?;
-            return Ok(Expr::Unary(UnOp::Not, Box::new(inner_expr)));
-        } else if self.match_kind(&TokenKind::Minus) {
-            self.advance();
-            let inner_expr = self.parse_spanned_unary_expr()?;
-            return Ok(Expr::Unary(UnOp::Neg, Box::new(inner_expr)));
-        } else if self.match_kind(&TokenKind::Ampersand) {
-            self.advance();
-            if self.match_kind(&TokenKind::Mut) {
-                self.advance();
-                let inner_expr = self.parse_spanned_unary_expr()?;
-                return Ok(Expr::Unary(UnOp::RefMut, Box::new(inner_expr)));
-            } else {
-                let inner_expr = self.parse_spanned_unary_expr()?;
-                return Ok(Expr::Unary(UnOp::Ref, Box::new(inner_expr)));
-            }
-        }
-
-        self.parse_primary_expr()
-    }
-
-    fn parse_primary_expr(&mut self) -> Result<Expr, ParseError> {
-        if self.match_kind(&TokenKind::Try) {
-            self.advance();
-            let inner_expr = self.parse_spanned_primary_expr()?;
-            return Ok(Expr::Try(Box::new(inner_expr)));
-        }
-
-        let token = match self.peek_token() {
-            Some(token_val) => token_val.clone(),
-            None => return Err(ParseError {
-                message: "Unexpected EOF while parsing expression".to_string(),
-                span: self.current_span(),
-            }),
-        };
-
-        let start_span = token.span;
-
-        let mut primary_expr = match &token.kind {
-            TokenKind::IntLit(val) => {
-                self.advance();
-                Spanned::new(Expr::Lit(Lit::Int(*val)), token.span)
-            }
-            TokenKind::HexLit(val) => {
-                self.advance();
-                Spanned::new(Expr::Lit(Lit::Hex(*val)), token.span)
-            }
-            TokenKind::BoolLit(val) => {
-                self.advance();
-                Spanned::new(Expr::Lit(Lit::Bool(*val)), token.span)
-            }
-            TokenKind::SnakeIdent(name) => {
-                let name_str = name.clone();
-                self.advance();
-                Spanned::new(Expr::Var(name_str), token.span)
-            }
-            TokenKind::ScreamingIdent(name) => {
-                let name_str = name.clone();
-                self.advance();
-                Spanned::new(Expr::Const(name_str), token.span)
-            }
-            TokenKind::PascalIdent(name) => {
-                let mut path = vec![name.clone()];
-                self.advance();
-
-                while self.match_kind(&TokenKind::Dot) {
-                    self.advance();
-                    let segment = match self.expect_pascal_ident() {
-                        Ok(pascal_seg) => pascal_seg,
-                        Err(pascal_err) => {
-                            match self.expect_snake_ident() {
-                                Ok(snake_seg) => snake_seg,
-                                Err(snake_err) => {
-                                    return Err(ParseError {
-                                        message: format!("Expected path segment, got {}", snake_err.message),
-                                        span: pascal_err.span,
-                                    });
-                                }
-                            }
-                        }
-                    };
-                    path.push(segment);
-                }
-
-                let end_span = self.previous_span();
-                let full_span = Span::new(token.span.start, end_span.end, token.span.line, token.span.col);
-
-                Spanned::new(Expr::Path(path), full_span)
-            }
-            TokenKind::LBracket => {
-                self.advance();
-                let mut elements = Vec::new();
-                while !self.match_kind(&TokenKind::RBracket) && !self.is_at_end() {
-                    elements.push(self.parse_spanned_expr()?);
-                    if self.match_kind(&TokenKind::Comma) {
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
-                self.expect(&TokenKind::RBracket)?;
-                let end_span = self.previous_span();
-                let full_span = Span::new(token.span.start, end_span.end, token.span.line, token.span.col);
-                Spanned::new(Expr::ArrayLit(elements), full_span)
-            }
-            TokenKind::LParen => {
-                self.advance();
-                let inner = self.parse_expr()?;
-                self.expect(&TokenKind::RParen)?;
-                let end_span = self.previous_span();
-                let full_span = Span::new(token.span.start, end_span.end, token.span.line, token.span.col);
-                Spanned::new(inner, full_span)
-            }
-            unexpected_kind => return Err(ParseError {
-                message: format!("Unexpected expression token {:?}", unexpected_kind),
-                span: token.span,
-            }),
-        };
-
-        // Postfix Expression Loop: Field Access, Calls, Generic Instantiation, Struct Init
-        loop {
-            if self.match_kind(&TokenKind::Dot) {
-                self.advance();
-                let field_name = self.expect_snake_ident()?;
-                let end_span = self.previous_span();
-                let full_span = Span::new(start_span.start, end_span.end, start_span.line, start_span.col);
-                primary_expr = Spanned::new(Expr::FieldAccess(Box::new(primary_expr), field_name), full_span);
-            } else if self.match_kind(&TokenKind::LBracket) {
-                if self.is_generic_call_ahead() {
-                    self.advance();
-                    let mut type_args = Vec::new();
-                    while !self.match_kind(&TokenKind::RBracket) && !self.is_at_end() {
-                        type_args.push(self.parse_spanned_type()?);
-                        if self.match_kind(&TokenKind::Comma) {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-                    self.expect(&TokenKind::RBracket)?;
-
-                    self.expect(&TokenKind::LParen)?;
-                    let mut args = Vec::new();
-                    while !self.match_kind(&TokenKind::RParen) && !self.is_at_end() {
-                        args.push(self.parse_spanned_expr()?);
-                        if self.match_kind(&TokenKind::Comma) {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-                    self.expect(&TokenKind::RParen)?;
-                    let end_span = self.previous_span();
-                    let full_span = Span::new(start_span.start, end_span.end, start_span.line, start_span.col);
-
-                    primary_expr = Spanned::new(Expr::Call(Box::new(primary_expr), Some(type_args), args), full_span);
-                } else {
-                    break;
-                }
-            } else if self.match_kind(&TokenKind::LParen) {
-                self.advance();
-
-                if self.peek_next_kind() == Some(&TokenKind::Colon) {
-                    let mut fields = Vec::new();
-
-                    while !self.match_kind(&TokenKind::RParen) && !self.is_at_end() {
-                        let field_name = self.expect_snake_ident()?;
-                        self.expect(&TokenKind::Colon)?;
-                        let field_val = self.parse_spanned_expr()?;
-                        fields.push((field_name, field_val));
-
-                        if self.match_kind(&TokenKind::Comma) {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-
-                    self.expect(&TokenKind::RParen)?;
-
-                    let end_span = self.previous_span();
-                    let full_span = Span::new(start_span.start, end_span.end, start_span.line, start_span.col);
-
-                    if let Expr::Path(path) = primary_expr.node {
-                        if path.len() != 1 {
-                            return Err(ParseError {
-                                message: "Struct initialization requires an unqualified type name".to_string(),
-                                span: full_span,
-                            });
-                        }
-
-                        let struct_name = match path.into_iter().next() {
-                            Some(name_val) => name_val,
-                            None => return Err(ParseError {
-                                message: "Path expected to contain at least one segment".to_string(),
-                                span: full_span,
-                            }),
-                        };
-                        primary_expr = Spanned::new(Expr::StructInit(struct_name, fields), full_span);
-                    } else {
-                        return Err(ParseError {
-                            message: "Struct initialization requires a type name".to_string(),
-                            span: full_span,
-                        });
-                    }
-                } else {
-                    let mut args = Vec::new();
-
-                    while !self.match_kind(&TokenKind::RParen) && !self.is_at_end() {
-                        args.push(self.parse_spanned_expr()?);
-
-                        if self.match_kind(&TokenKind::Comma) {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-
-                    self.expect(&TokenKind::RParen)?;
-
-                    let end_span = self.previous_span();
-                    let full_span = Span::new(start_span.start, end_span.end, start_span.line, start_span.col);
-
-                    primary_expr = Spanned::new(Expr::Call(Box::new(primary_expr), None, args), full_span);
-                }
-            } else {
-                break;
-            }
-        }
-
-        Ok(primary_expr.node)
-    }
-
-    fn parse_spanned_primary_expr(&mut self) -> Result<Spanned<Expr>, ParseError> {
-        let start_span = self.current_span();
-        let expr_node = self.parse_primary_expr()?;
-        let end_span = self.previous_span();
-        let full_span = Span::new(start_span.start, end_span.end, start_span.line, start_span.col);
-        Ok(Spanned::new(expr_node, full_span))
-    }
-
-    fn is_generic_call_ahead(&self) -> bool {
-        let mut idx = self.cursor + 1;
-        let mut bracket_depth = 1;
-
-        while idx < self.tokens.len() {
-            let token_kind = &self.tokens[idx].kind;
-            if *token_kind == TokenKind::LBracket {
-                bracket_depth += 1;
-            } else if *token_kind == TokenKind::RBracket {
-                bracket_depth -= 1;
-                if bracket_depth == 0 {
-                    if idx + 1 < self.tokens.len() {
-                        return self.tokens[idx + 1].kind == TokenKind::LParen;
-                    } else {
-                        return false;
-                    }
-                }
-            }
-            idx += 1;
-        }
+fn accept(nodes: &[i64], names: &[String], pos: &mut i64, text: &str) -> bool {
+    if tok_text_is(nodes, names, *pos, text) {
+        *pos += 1;
+        true
+    } else {
         false
     }
+}
 
-    fn peek_binary_op(&self) -> Option<BinOp> {
-        let kind = self.peek_kind()?;
-        if *kind == TokenKind::Plus { Some(BinOp::Add) }
-        else if *kind == TokenKind::Minus { Some(BinOp::Sub) }
-        else if *kind == TokenKind::Star { Some(BinOp::Mul) }
-        else if *kind == TokenKind::Slash { Some(BinOp::Div) }
-        else if *kind == TokenKind::EqEq { Some(BinOp::Eq) }
-        else if *kind == TokenKind::NotEq { Some(BinOp::NotEq) }
-        else if *kind == TokenKind::Lt { Some(BinOp::Lt) }
-        else if *kind == TokenKind::Gt { Some(BinOp::Gt) }
-        else if *kind == TokenKind::LtEq { Some(BinOp::LtEq) }
-        else if *kind == TokenKind::GtEq { Some(BinOp::GtEq) }
-        else if *kind == TokenKind::Ampersand { Some(BinOp::BitAnd) }
-        else if *kind == TokenKind::Pipe { Some(BinOp::BitOr) }
-        else if *kind == TokenKind::Caret { Some(BinOp::BitXor) }
-        else if *kind == TokenKind::Shl { Some(BinOp::Shl) }
-        else if *kind == TokenKind::Shr { Some(BinOp::Shr) }
-        else if *kind == TokenKind::AmpAmp { Some(BinOp::And) }
-        else if *kind == TokenKind::PipePipe { Some(BinOp::Or) }
-        else { None }
+fn expect(nodes: &[i64], names: &[String], pos: &mut i64, text: &str, errors: &mut Vec<Diag>) -> bool {
+    if accept(nodes, names, pos, text) {
+        true
+    } else {
+        let file = node_file(nodes, *pos);
+        let start = node_start(nodes, *pos);
+        let end = node_end(nodes, *pos);
+        push_error(errors, &format!("expected '{}'", text), file, start, end);
+        false
     }
+}
 
-    fn op_precedence(&self, op: &BinOp) -> u8 {
-        match op {
-            BinOp::Mul | BinOp::Div | BinOp::Shl | BinOp::Shr => 5,
-            BinOp::Add | BinOp::Sub | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => 4,
-            BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => 3,
-            BinOp::And => 2,
-            BinOp::Or => 1,
-        }
+fn recover_line(nodes: &[i64], pos: &mut i64) {
+    while !at_eof(nodes, *pos) && node_a(nodes, *pos) != TOK_NL {
+        *pos += 1;
     }
-
-    fn expect(&mut self, expected_kind: &TokenKind) -> Result<(), ParseError> {
-        if self.match_kind(expected_kind) {
-            self.advance();
-            Ok(())
-        } else {
-            Err(ParseError {
-                message: format!("Expected token {:?}, found {:?}", expected_kind, self.peek_kind()),
-                span: self.current_span(),
-            })
-        }
+    if !at_eof(nodes, *pos) {
+        *pos += 1;
     }
+}
 
-    fn expect_snake_ident(&mut self) -> Result<String, ParseError> {
-        match self.peek_kind() {
-            Some(TokenKind::SnakeIdent(name)) => {
-                let name_clone = name.clone();
-                self.advance();
-                Ok(name_clone)
+// ---------------------------------------------------------------------------
+// Node allocators.  The operands slice fills the kind-specific slots; a
+// missing operand is NONE.
+// ---------------------------------------------------------------------------
+
+fn slot(operands: &[i64], idx: usize) -> i64 {
+    match operands.get(idx) {
+        Some(value) => *value,
+        None => NONE,
+    }
+}
+
+fn alloc_item(nodes: &mut Vec<i64>, kind: i64, file: i64, start: i64, end: i64, is_pub: i64, operands: &[i64]) -> i64 {
+    alloc_node(
+        nodes,
+        &[
+            NODE_ITEM, file, start, end, kind, is_pub, NONE,
+            slot(operands, 0),
+            slot(operands, 1),
+            slot(operands, 2),
+        ],
+    )
+}
+
+fn alloc_param(nodes: &mut Vec<i64>, name: i64, file: i64, start: i64, end: i64, ty: i64) -> i64 {
+    alloc_node(nodes, &[NODE_PARAM, file, start, end, name, ty, NONE, NONE, NONE, NONE])
+}
+
+fn alloc_field(nodes: &mut Vec<i64>, name: i64, file: i64, start: i64, end: i64, ty: i64, is_pub: i64) -> i64 {
+    alloc_node(nodes, &[NODE_FIELD, file, start, end, name, ty, is_pub, NONE, NONE, NONE])
+}
+
+fn alloc_variant(nodes: &mut Vec<i64>, name: i64, file: i64, start: i64, end: i64, payload: i64, is_pub: i64) -> i64 {
+    alloc_node(nodes, &[NODE_VARIANT, file, start, end, name, payload, is_pub, NONE, NONE, NONE])
+}
+
+fn alloc_arm(nodes: &mut Vec<i64>, file: i64, start: i64, end: i64, pattern: i64, body: i64) -> i64 {
+    alloc_node(nodes, &[NODE_ARM, file, start, end, pattern, body, NONE, NONE, NONE, NONE])
+}
+
+fn alloc_ty(nodes: &mut Vec<i64>, kind: i64, file: i64, start: i64, end: i64, operands: &[i64]) -> i64 {
+    alloc_node(
+        nodes,
+        &[
+            NODE_TY, file, start, end, kind,
+            slot(operands, 0),
+            slot(operands, 1),
+            NONE, NONE, NONE,
+        ],
+    )
+}
+
+fn alloc_expr(nodes: &mut Vec<i64>, kind: i64, file: i64, start: i64, end: i64, operands: &[i64]) -> i64 {
+    alloc_node(
+        nodes,
+        &[
+            NODE_EXPR, file, start, end, kind,
+            slot(operands, 0),
+            slot(operands, 1),
+            slot(operands, 2),
+            NONE, NONE,
+        ],
+    )
+}
+
+fn alloc_stmt(nodes: &mut Vec<i64>, kind: i64, file: i64, start: i64, end: i64, operands: &[i64]) -> i64 {
+    alloc_node(
+        nodes,
+        &[
+            NODE_STMT, file, start, end, kind,
+            slot(operands, 0),
+            slot(operands, 1),
+            slot(operands, 2),
+            slot(operands, 3),
+            NONE,
+        ],
+    )
+}
+
+fn alloc_pat(nodes: &mut Vec<i64>, kind: i64, file: i64, start: i64, end: i64, operands: &[i64]) -> i64 {
+    alloc_node(
+        nodes,
+        &[
+            NODE_PAT, file, start, end, kind,
+            slot(operands, 0),
+            slot(operands, 1),
+            NONE, NONE, NONE,
+        ],
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Items.
+// ---------------------------------------------------------------------------
+
+fn parse_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    if is_name(nodes, names, *pos, "pub") {
+        parse_pub_item(pos, names, nodes, lists, errors)
+    } else if is_name(nodes, names, *pos, "native") {
+        *pos += 1;
+        parse_native_item(pos, names, nodes, lists, errors, 0)
+    } else {
+        parse_item_body(pos, names, nodes, lists, errors, 0)
+    }
+}
+
+fn parse_pub_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    *pos += 1;
+    if is_name(nodes, names, *pos, "native") {
+        *pos += 1;
+        parse_native_item(pos, names, nodes, lists, errors, 1)
+    } else {
+        parse_item_body(pos, names, nodes, lists, errors, 1)
+    }
+}
+
+fn parse_native_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, is_pub: i64) -> Option<i64> {
+    if is_name(nodes, names, *pos, "fun") {
+        parse_fun_item(pos, names, nodes, lists, errors, is_pub, 1)
+    } else if is_name(nodes, names, *pos, "type") {
+        parse_native_type(pos, names, nodes, lists, errors, is_pub)
+    } else {
+        let file = node_file(nodes, *pos);
+        let start = node_start(nodes, *pos);
+        let end = node_end(nodes, *pos);
+        push_error(errors, "native modifier is only allowed on fun and type", file, start, end);
+        None
+    }
+}
+
+fn parse_item_body(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, is_pub: i64) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    if is_name(nodes, names, *pos, "mod") {
+        parse_module(pos, names, nodes, lists, errors, is_pub)
+    } else if is_name(nodes, names, *pos, "use") {
+        parse_use(pos, names, nodes, lists, errors, is_pub)
+    } else if is_name(nodes, names, *pos, "type") {
+        parse_type_decl(pos, names, nodes, lists, errors, is_pub)
+    } else if is_name(nodes, names, *pos, "trait") {
+        parse_trait(pos, names, nodes, lists, errors, is_pub)
+    } else if is_name(nodes, names, *pos, "impl") {
+        parse_impl(pos, names, nodes, lists, errors, is_pub)
+    } else if is_name(nodes, names, *pos, "fun") {
+        parse_fun_item(pos, names, nodes, lists, errors, is_pub, 0)
+    } else if is_name(nodes, names, *pos, "const") {
+        parse_const(pos, names, nodes, lists, errors, is_pub)
+    } else {
+        let end = node_end(nodes, *pos);
+        push_error(errors, "expected an item declaration", file, start, end);
+        None
+    }
+}
+
+fn parse_module(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, is_pub: i64) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    *pos += 1;
+    let name = expect_word(pos, nodes, errors)?;
+    let children = alloc_list(lists);
+    skip_nl(nodes, pos);
+    while !is_name(nodes, names, *pos, "end") && !at_eof(nodes, *pos) {
+        match parse_item(pos, names, nodes, lists, errors) {
+            Some(item) => {
+                list_push(lists, children, item);
             }
-            Some(unexpected_kind) => Err(ParseError {
-                message: format!("Expected snake_case identifier, found {:?}", unexpected_kind),
-                span: self.current_span(),
-            }),
-            None => Err(ParseError {
-                message: "Unexpected EOF while reading snake_case identifier".to_string(),
-                span: self.current_span(),
-            }),
-        }
-    }
-
-    fn expect_pascal_ident(&mut self) -> Result<String, ParseError> {
-        match self.peek_kind() {
-            Some(TokenKind::PascalIdent(name)) => {
-                let name_clone = name.clone();
-                self.advance();
-                Ok(name_clone)
+            None => {
+                recover_line(nodes, pos);
             }
-            Some(unexpected_kind) => Err(ParseError {
-                message: format!("Expected PascalCase identifier, found {:?}", unexpected_kind),
-                span: self.current_span(),
-            }),
-            None => Err(ParseError {
-                message: "Unexpected EOF while reading PascalCase identifier".to_string(),
-                span: self.current_span(),
-            }),
         }
+        skip_nl(nodes, pos);
     }
+    let end = expect_end(pos, names, nodes, errors)?;
+    Some(alloc_item(nodes, ITEM_MODULE, file, start, end, is_pub, &[name, children, NONE]))
+}
 
-    fn expect_screaming_ident(&mut self) -> Result<String, ParseError> {
-        match self.peek_kind() {
-            Some(TokenKind::ScreamingIdent(name)) => {
-                let name_clone = name.clone();
-                self.advance();
-                Ok(name_clone)
+fn parse_use(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, is_pub: i64) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    *pos += 1;
+    let segs = parse_path(pos, names, nodes, lists, errors)?;
+    let mut alias = NONE;
+    if accept(nodes, names, pos, "as") {
+        alias = expect_word(pos, nodes, errors)?;
+    }
+    let end = node_end(nodes, *pos - 1);
+    Some(alloc_item(nodes, ITEM_USE, file, start, end, is_pub, &[segs, alias, NONE]))
+}
+
+fn parse_type_decl(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, is_pub: i64) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    *pos += 1;
+    let name = expect_word(pos, nodes, errors)?;
+    let type_params = parse_type_params(pos, names, nodes, lists, errors)?;
+    let fields = alloc_list(lists);
+    let variants = alloc_list(lists);
+    skip_nl(nodes, pos);
+    while !is_name(nodes, names, *pos, "end") && !at_eof(nodes, *pos) {
+        let member_pub = if accept(nodes, names, pos, "pub") { 1 } else { 0 };
+        let member_name = expect_word(pos, nodes, errors)?;
+        let member_start = node_start(nodes, *pos - 1);
+        let member_file = file;
+        if accept(nodes, names, pos, ":") {
+            let ty = parse_type(pos, names, nodes, lists, errors)?;
+            let field = alloc_field(nodes, member_name, member_file, member_start, node_end(nodes, ty), ty, member_pub);
+            list_push(lists, fields, field);
+        } else if is_sym(nodes, names, *pos, "(") {
+            let payload = parse_payload_types(pos, names, nodes, lists, errors)?;
+            let variant = alloc_variant(nodes, member_name, member_file, member_start, node_end(nodes, *pos - 1), payload, member_pub);
+            list_push(lists, variants, variant);
+        } else {
+            let payload = alloc_list(lists);
+            let variant = alloc_variant(nodes, member_name, member_file, member_start, node_end(nodes, *pos - 1), payload, member_pub);
+            list_push(lists, variants, variant);
+        }
+        skip_nl(nodes, pos);
+    }
+    let end = expect_end(pos, names, nodes, errors)?;
+    if list_len(lists, fields) > 0 && list_len(lists, variants) > 0 {
+        push_error(errors, "type cannot mix struct fields and enum variants", file, start, end);
+        return None;
+    }
+    if list_len(lists, variants) > 0 {
+        Some(alloc_item(nodes, ITEM_ENUM, file, start, end, is_pub, &[name, variants, type_params]))
+    } else {
+        Some(alloc_item(nodes, ITEM_STRUCT, file, start, end, is_pub, &[name, fields, type_params]))
+    }
+}
+
+fn parse_payload_types(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let payload = alloc_list(lists);
+    *pos += 1;
+    skip_nl(nodes, pos);
+    while !is_sym(nodes, names, *pos, ")") && !at_eof(nodes, *pos) {
+        let ty = parse_type(pos, names, nodes, lists, errors)?;
+        list_push(lists, payload, ty);
+        if !accept(nodes, names, pos, ",") {
+            break;
+        }
+        skip_nl(nodes, pos);
+    }
+    skip_nl(nodes, pos);
+    if !expect(nodes, names, pos, ")", errors) {
+        return None;
+    }
+    Some(payload)
+}
+
+fn parse_trait(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, is_pub: i64) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    *pos += 1;
+    let name = expect_word(pos, nodes, errors)?;
+    let methods = alloc_list(lists);
+    skip_nl(nodes, pos);
+    while !is_name(nodes, names, *pos, "end") && !at_eof(nodes, *pos) {
+        accept(nodes, names, pos, "pub");
+        if !expect(nodes, names, pos, "fun", errors) {
+            recover_line(nodes, pos);
+            continue;
+        }
+        match parse_fun_body_or_sig(pos, names, nodes, lists, errors, 0) {
+            Some(fn_id) => {
+                list_push(lists, methods, fn_id);
             }
-            Some(unexpected_kind) => Err(ParseError {
-                message: format!("Expected SCREAMING_SNAKE_CASE identifier, found {:?}", unexpected_kind),
-                span: self.current_span(),
-            }),
-            None => Err(ParseError {
-                message: "Unexpected EOF while reading SCREAMING_SNAKE_CASE identifier".to_string(),
-                span: self.current_span(),
-            }),
+            None => {
+                recover_line(nodes, pos);
+            }
+        }
+        skip_nl(nodes, pos);
+    }
+    let end = expect_end(pos, names, nodes, errors)?;
+    Some(alloc_item(nodes, ITEM_TRAIT, file, start, end, is_pub, &[name, methods, NONE]))
+}
+
+fn parse_impl(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, is_pub: i64) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    *pos += 1;
+    let trait_segs = parse_path(pos, names, nodes, lists, errors)?;
+    if !expect(nodes, names, pos, "for", errors) {
+        return None;
+    }
+    let for_ty = parse_type(pos, names, nodes, lists, errors)?;
+    let methods = alloc_list(lists);
+    skip_nl(nodes, pos);
+    while !is_name(nodes, names, *pos, "end") && !at_eof(nodes, *pos) {
+        accept(nodes, names, pos, "pub");
+        if !expect(nodes, names, pos, "fun", errors) {
+            recover_line(nodes, pos);
+            continue;
+        }
+        match parse_fun_body_or_sig(pos, names, nodes, lists, errors, 1) {
+            Some(fn_id) => {
+                list_push(lists, methods, fn_id);
+            }
+            None => {
+                recover_line(nodes, pos);
+            }
+        }
+        skip_nl(nodes, pos);
+    }
+    let end = expect_end(pos, names, nodes, errors)?;
+    Some(alloc_item(nodes, ITEM_IMPL, file, start, end, is_pub, &[trait_segs, for_ty, methods]))
+}
+
+fn parse_fun_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, is_pub: i64, is_native: i64) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    *pos += 1;
+    // Native functions are opaque signatures: they declare the name and
+    // type, never a body, so they parse like trait methods.
+    let body_required = 1 - is_native;
+    let fn_id = parse_fun_body_or_sig(pos, names, nodes, lists, errors, body_required)?;
+    let end = node_end(nodes, fn_id);
+    let kind = if is_native == 1 { ITEM_NATIVE_FUN } else { ITEM_FUN };
+    Some(alloc_item(nodes, kind, file, start, end, is_pub, &[fn_id, NONE, NONE]))
+}
+
+fn parse_const(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, is_pub: i64) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    *pos += 1;
+    let name = expect_word(pos, nodes, errors)?;
+    if !expect(nodes, names, pos, ":", errors) {
+        return None;
+    }
+    let ty = parse_type(pos, names, nodes, lists, errors)?;
+    if !expect(nodes, names, pos, "=", errors) {
+        return None;
+    }
+    skip_nl(nodes, pos);
+    let value = parse_expr(pos, names, nodes, lists, errors)?;
+    let end = node_end(nodes, value);
+    Some(alloc_item(nodes, ITEM_CONST, file, start, end, is_pub, &[name, ty, value]))
+}
+
+fn parse_native_type(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, is_pub: i64) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    *pos += 1;
+    let name = expect_word(pos, nodes, errors)?;
+    let type_params = parse_type_params(pos, names, nodes, lists, errors)?;
+    let end = node_end(nodes, *pos - 1);
+    Some(alloc_item(nodes, ITEM_NATIVE_TYPE, file, start, end, is_pub, &[name, type_params, NONE]))
+}
+
+fn parse_fun_body_or_sig(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, body_required: i64) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    let name = expect_word(pos, nodes, errors)?;
+    let type_params = parse_angle_params(pos, names, nodes, lists, errors)?;
+    let params = alloc_list(lists);
+    if !expect(nodes, names, pos, "(", errors) {
+        return None;
+    }
+    skip_nl(nodes, pos);
+    while !is_sym(nodes, names, *pos, ")") && !at_eof(nodes, *pos) {
+        let param = parse_param(pos, names, nodes, lists, errors)?;
+        list_push(lists, params, param);
+        if !accept(nodes, names, pos, ",") {
+            break;
+        }
+        skip_nl(nodes, pos);
+    }
+    skip_nl(nodes, pos);
+    if !expect(nodes, names, pos, ")", errors) {
+        return None;
+    }
+    let mut is_impure = 0;
+    if accept(nodes, names, pos, "impure") {
+        is_impure = 1;
+    }
+    let ret_ty = parse_type(pos, names, nodes, lists, errors)?;
+    let mut body = NONE;
+    let mut end = node_end(nodes, ret_ty);
+    if body_required == 1 {
+        skip_nl(nodes, pos);
+        let block = parse_block(pos, names, nodes, lists, errors, &["end"])?;
+        body = block;
+        end = expect_end(pos, names, nodes, errors)?;
+    }
+    Some(alloc_node(nodes, &[NODE_FN, file, start, end, name, type_params, params, ret_ty, is_impure, body]))
+}
+
+fn parse_param(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    let name = expect_word(pos, nodes, errors)?;
+    if !expect(nodes, names, pos, ":", errors) {
+        return None;
+    }
+    let ty = parse_type(pos, names, nodes, lists, errors)?;
+    let end = node_end(nodes, ty);
+    Some(alloc_param(nodes, name, file, start, end, ty))
+}
+
+/// Parses `(T, U)` type parameters after a type or native-type name.
+fn parse_type_params(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let params = alloc_list(lists);
+    if !is_sym(nodes, names, *pos, "(") {
+        return Some(params);
+    }
+    *pos += 1;
+    skip_nl(nodes, pos);
+    while !is_sym(nodes, names, *pos, ")") && !at_eof(nodes, *pos) {
+        let name = expect_word(pos, nodes, errors)?;
+        let param = alloc_ty(nodes, TY_PARAM, node_file(nodes, *pos - 1), node_start(nodes, *pos - 1), node_end(nodes, *pos - 1), &[name, NONE]);
+        list_push(lists, params, param);
+        if !accept(nodes, names, pos, ",") {
+            break;
+        }
+        skip_nl(nodes, pos);
+    }
+    skip_nl(nodes, pos);
+    if !expect(nodes, names, pos, ")", errors) {
+        return None;
+    }
+    Some(params)
+}
+
+/// Parses `<T: Bound, U>` type parameters after a function name.
+fn parse_angle_params(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let params = alloc_list(lists);
+    if !is_sym(nodes, names, *pos, "<") {
+        return Some(params);
+    }
+    *pos += 1;
+    while !is_sym(nodes, names, *pos, ">") && !at_eof(nodes, *pos) {
+        let name = expect_word(pos, nodes, errors)?;
+        let mut bound = NONE;
+        if accept(nodes, names, pos, ":") {
+            bound = parse_path(pos, names, nodes, lists, errors)?;
+        }
+        let param = alloc_ty(nodes, TY_PARAM, node_file(nodes, *pos - 1), node_start(nodes, *pos - 1), node_end(nodes, *pos - 1), &[name, bound]);
+        list_push(lists, params, param);
+        if !accept(nodes, names, pos, ",") {
+            break;
         }
     }
-
-    fn match_kind(&self, kind: &TokenKind) -> bool {
-        self.peek_kind() == Some(kind)
+    skip_nl(nodes, pos);
+    if !expect(nodes, names, pos, ">", errors) {
+        return None;
     }
+    Some(params)
+}
 
-    fn peek_token(&self) -> Option<&Token> {
-        if self.cursor < self.tokens.len() {
-            Some(&self.tokens[self.cursor])
+/// Parses `word(.word)*` and returns the segments list.
+fn parse_path(pos: &mut i64, names: &[String], nodes: &mut [i64], lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let segs = alloc_list(lists);
+    let mut seg = expect_word(pos, nodes, errors)?;
+    list_push(lists, segs, seg);
+    while accept(nodes, names, pos, ".") {
+        seg = expect_word(pos, nodes, errors)?;
+        list_push(lists, segs, seg);
+    }
+    Some(segs)
+}
+
+/// Consumes a word token and returns its interned name id.
+fn expect_word(pos: &mut i64, nodes: &mut [i64], errors: &mut Vec<Diag>) -> Option<i64> {
+    if node_tag(nodes, *pos) == NODE_TOKEN && node_a(nodes, *pos) == TOK_IDENT {
+        let name = node_b(nodes, *pos);
+        *pos += 1;
+        Some(name)
+    } else {
+        let file = node_file(nodes, *pos);
+        let start = node_start(nodes, *pos);
+        let end = node_end(nodes, *pos);
+        push_error(errors, "expected a name", file, start, end);
+        None
+    }
+}
+
+fn expect_end(pos: &mut i64, names: &[String], nodes: &mut [i64], errors: &mut Vec<Diag>) -> Option<i64> {
+    let end = node_end(nodes, *pos);
+    if expect(nodes, names, pos, "end", errors) {
+        Some(end)
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Types.
+// ---------------------------------------------------------------------------
+
+fn parse_type(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    if is_sym(nodes, names, *pos, "&") {
+        *pos += 1;
+        if accept(nodes, names, pos, "mut") {
+            parse_ref_tail(pos, names, nodes, lists, errors, (file, start), TY_REF_MUT)
         } else {
-            None
+            parse_ref_tail(pos, names, nodes, lists, errors, (file, start), TY_REF)
+        }
+    } else if is_sym(nodes, names, *pos, "[") {
+        parse_array_tail(pos, names, nodes, lists, errors, file, start)
+    } else if is_name(nodes, names, *pos, "Self") {
+        *pos += 1;
+        let end = node_end(nodes, *pos - 1);
+        Some(alloc_ty(nodes, TY_SELF, file, start, end, &[NONE, NONE]))
+    } else if is_word(nodes, *pos) {
+        parse_named_type(pos, names, nodes, lists, errors)
+    } else {
+        let end = node_end(nodes, *pos);
+        push_error(errors, "expected a type", file, start, end);
+        None
+    }
+}
+
+fn parse_ref_tail(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, span: (i64, i64), kind: i64) -> Option<i64> {
+    let (file, start) = span;
+    let inner = parse_type(pos, names, nodes, lists, errors)?;
+    let end = node_end(nodes, inner);
+    Some(alloc_ty(nodes, kind, file, start, end, &[inner, NONE]))
+}
+
+fn parse_array_tail(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, file: i64, start: i64) -> Option<i64> {
+    *pos += 1;
+    let elem = parse_type(pos, names, nodes, lists, errors)?;
+    if accept(nodes, names, pos, ";") {
+        let len = parse_array_len(pos, nodes, errors)?;
+        if !expect(nodes, names, pos, "]", errors) {
+            return None;
+        }
+        let end = node_end(nodes, *pos - 1);
+        Some(alloc_ty(nodes, TY_ARRAY, file, start, end, &[elem, len]))
+    } else {
+        if !expect(nodes, names, pos, "]", errors) {
+            return None;
+        }
+        let end = node_end(nodes, *pos - 1);
+        Some(alloc_ty(nodes, TY_SLICE, file, start, end, &[elem, NONE]))
+    }
+}
+
+fn parse_array_len(pos: &mut i64, nodes: &mut [i64], errors: &mut Vec<Diag>) -> Option<i64> {
+    if node_a(nodes, *pos) == TOK_INT {
+        let len = node_c(nodes, *pos);
+        *pos += 1;
+        Some(len)
+    } else {
+        let file = node_file(nodes, *pos);
+        let start = node_start(nodes, *pos);
+        let end = node_end(nodes, *pos);
+        push_error(errors, "expected an array length", file, start, end);
+        None
+    }
+}
+
+fn parse_named_type(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    let segs = parse_path(pos, names, nodes, lists, errors)?;
+    let end = node_end(nodes, *pos - 1);
+    if is_sym(nodes, names, *pos, "(") {
+        let args = parse_payload_types(pos, names, nodes, lists, errors)?;
+        let end = node_end(nodes, *pos - 1);
+        Some(alloc_ty(nodes, TY_GENERIC, file, start, end, &[segs, args]))
+    } else if list_len(lists, segs) == 1 {
+        let name = list_first(lists, segs);
+        Some(alloc_ty(nodes, TY_NAMED, file, start, end, &[name, NONE]))
+    } else {
+        Some(alloc_ty(nodes, TY_PATH, file, start, end, &[segs, NONE]))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Statements.
+// ---------------------------------------------------------------------------
+
+fn parse_block(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, terminators: &[&str]) -> Option<i64> {
+    let list = alloc_list(lists);
+    skip_nl(nodes, pos);
+    while !at_terminator(nodes, names, *pos, terminators) && !at_eof(nodes, *pos) {
+        let before = *pos;
+        match parse_stmt(pos, names, nodes, lists, errors) {
+            Some(stmt) => {
+                list_push(lists, list, stmt);
+            }
+            None => {
+                recover_line(nodes, pos);
+            }
+        }
+        skip_nl(nodes, pos);
+        if *pos <= before {
+            *pos += 1;
         }
     }
+    Some(list)
+}
 
-    fn peek_kind(&self) -> Option<&TokenKind> {
-        self.peek_token().map(|token_ref| &token_ref.kind)
+fn at_terminator(nodes: &[i64], names: &[String], pos: i64, terminators: &[&str]) -> bool {
+    let mut idx = 0usize;
+    while idx < terminators.len() {
+        let term = match terminators.get(idx) {
+            Some(term) => term,
+            None => break,
+        };
+        if is_name(nodes, names, pos, term) {
+            return true;
+        }
+        idx += 1;
     }
+    false
+}
 
-    fn peek_next_kind(&self) -> Option<&TokenKind> {
-        if self.cursor + 1 < self.tokens.len() {
-            Some(&self.tokens[self.cursor + 1].kind)
+fn parse_stmt(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    if is_name(nodes, names, *pos, "val") {
+        parse_let(pos, names, nodes, lists, errors, 0)
+    } else if is_name(nodes, names, *pos, "var") {
+        parse_let(pos, names, nodes, lists, errors, 1)
+    } else if is_name(nodes, names, *pos, "while") {
+        parse_while(pos, names, nodes, lists, errors)
+    } else if is_name(nodes, names, *pos, "if") {
+        parse_if(pos, names, nodes, lists, errors)
+    } else if is_name(nodes, names, *pos, "return") {
+        parse_return(pos, names, nodes, lists, errors)
+    } else if is_name(nodes, names, *pos, "break") {
+        parse_break(nodes, pos)
+    } else if is_name(nodes, names, *pos, "continue") {
+        parse_continue(nodes, pos)
+    } else if is_assign(nodes, names, *pos) {
+        parse_assign(pos, names, nodes, lists, errors)
+    } else {
+        parse_expr_stmt(pos, names, nodes, lists, errors)
+    }
+}
+
+fn is_assign(nodes: &[i64], names: &[String], pos: i64) -> bool {
+    node_tag(nodes, pos) == NODE_TOKEN
+        && node_a(nodes, pos) == TOK_IDENT
+        && is_sym(nodes, names, pos + 1, "=")
+}
+
+fn parse_let(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, is_mut: i64) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    *pos += 1;
+    let name = expect_word(pos, nodes, errors)?;
+    let mut ty = NONE;
+    if accept(nodes, names, pos, ":") {
+        ty = parse_type(pos, names, nodes, lists, errors)?;
+    }
+    if !expect(nodes, names, pos, "=", errors) {
+        return None;
+    }
+    skip_nl(nodes, pos);
+    let init = parse_expr(pos, names, nodes, lists, errors)?;
+    let end = node_end(nodes, init);
+    Some(alloc_stmt(nodes, STMT_LET, file, start, end, &[is_mut, name, ty, init]))
+}
+
+fn parse_while(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    *pos += 1;
+    let cond = parse_expr(pos, names, nodes, lists, errors)?;
+    let body = parse_block(pos, names, nodes, lists, errors, &["end"])?;
+    let end = expect_end(pos, names, nodes, errors)?;
+    Some(alloc_stmt(nodes, STMT_WHILE, file, start, end, &[cond, body, NONE, NONE]))
+}
+
+fn parse_if(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    *pos += 1;
+    let cond = parse_expr(pos, names, nodes, lists, errors)?;
+    let then_body = parse_block(pos, names, nodes, lists, errors, &["end", "else"])?;
+    let mut else_body = NONE;
+    if accept(nodes, names, pos, "else") {
+        else_body = parse_block(pos, names, nodes, lists, errors, &["end"])?;
+    }
+    let end = expect_end(pos, names, nodes, errors)?;
+    Some(alloc_stmt(nodes, STMT_IF, file, start, end, &[cond, then_body, else_body, NONE]))
+}
+
+fn parse_return(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    *pos += 1;
+    let mut value = NONE;
+    let mut end = node_end(nodes, *pos - 1);
+    if !at_eof(nodes, *pos) && node_a(nodes, *pos) != TOK_NL {
+        let expr = parse_expr(pos, names, nodes, lists, errors)?;
+        value = expr;
+        end = node_end(nodes, expr);
+    }
+    Some(alloc_stmt(nodes, STMT_RETURN, file, start, end, &[value, NONE, NONE, NONE]))
+}
+
+fn parse_break(nodes: &mut Vec<i64>, pos: &mut i64) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    let end = node_end(nodes, *pos);
+    *pos += 1;
+    Some(alloc_stmt(nodes, STMT_BREAK, file, start, end, &[NONE, NONE, NONE, NONE]))
+}
+
+fn parse_continue(nodes: &mut Vec<i64>, pos: &mut i64) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    let end = node_end(nodes, *pos);
+    *pos += 1;
+    Some(alloc_stmt(nodes, STMT_CONTINUE, file, start, end, &[NONE, NONE, NONE, NONE]))
+}
+
+fn parse_assign(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    let target = node_b(nodes, *pos);
+    *pos += 2;
+    skip_nl(nodes, pos);
+    let value = parse_expr(pos, names, nodes, lists, errors)?;
+    let end = node_end(nodes, value);
+    Some(alloc_stmt(nodes, STMT_ASSIGN, file, start, end, &[target, value, NONE, NONE]))
+}
+
+fn parse_expr_stmt(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    let expr = parse_expr(pos, names, nodes, lists, errors)?;
+    let end = node_end(nodes, expr);
+    Some(alloc_stmt(nodes, STMT_EXPR, file, start, end, &[expr, NONE, NONE, NONE]))
+}
+
+// ---------------------------------------------------------------------------
+// Expressions.
+// ---------------------------------------------------------------------------
+
+fn parse_expr(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    parse_binary(pos, names, nodes, lists, errors, 0)
+}
+
+fn parse_binary(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, min_prec: i64) -> Option<i64> {
+    let mut lhs = parse_unary(pos, names, nodes, lists, errors)?;
+    while let Some((op, prec)) = bin_op_at(nodes, names, *pos) {
+        if prec < min_prec {
+            break;
+        }
+        *pos += 1;
+        let rhs = parse_binary(pos, names, nodes, lists, errors, prec + 1)?;
+        let file = node_file(nodes, lhs);
+        let start = node_start(nodes, lhs);
+        let end = node_end(nodes, rhs);
+        lhs = alloc_expr(nodes, EXPR_BINARY, file, start, end, &[op, lhs, rhs]);
+    }
+    Some(lhs)
+}
+
+fn parse_unary(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    if is_sym(nodes, names, *pos, "-") {
+        *pos += 1;
+        let operand = parse_unary(pos, names, nodes, lists, errors)?;
+        let end = node_end(nodes, operand);
+        Some(alloc_expr(nodes, EXPR_UNARY, file, start, end, &[UN_NEG, operand, NONE]))
+    } else if is_sym(nodes, names, *pos, "!") {
+        *pos += 1;
+        let operand = parse_unary(pos, names, nodes, lists, errors)?;
+        let end = node_end(nodes, operand);
+        Some(alloc_expr(nodes, EXPR_UNARY, file, start, end, &[UN_NOT, operand, NONE]))
+    } else if is_sym(nodes, names, *pos, "&") {
+        *pos += 1;
+        let op = if accept(nodes, names, pos, "mut") { UN_REF_MUT } else { UN_REF };
+        let operand = parse_unary(pos, names, nodes, lists, errors)?;
+        let end = node_end(nodes, operand);
+        Some(alloc_expr(nodes, EXPR_UNARY, file, start, end, &[op, operand, NONE]))
+    } else {
+        parse_postfix(pos, names, nodes, lists, errors)
+    }
+}
+
+fn parse_postfix(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let mut expr = parse_primary(pos, names, nodes, lists, errors)?;
+    loop {
+        if is_sym(nodes, names, *pos, "(") {
+            expr = parse_call_tail(pos, names, nodes, lists, errors, expr, NONE)?;
+        } else if is_sym(nodes, names, *pos, "[") {
+            let targs = parse_type_args_tail(pos, names, nodes, lists, errors)?;
+            // parse_call_tail consumes the `(` itself, exactly as the
+            // plain-call branch above; never consume it here as well.
+            expr = parse_call_tail(pos, names, nodes, lists, errors, expr, targs)?;
         } else {
-            None
+            break;
         }
     }
+    Some(expr)
+}
 
-    fn advance(&mut self) {
-        if self.cursor < self.tokens.len() {
-            self.cursor += 1;
+fn parse_primary(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    let kind = node_a(nodes, *pos);
+    if kind == TOK_INT || kind == TOK_HEX {
+        let lit = if kind == TOK_INT { LIT_INT } else { LIT_HEX };
+        let value = node_c(nodes, *pos);
+        let end = node_end(nodes, *pos);
+        *pos += 1;
+        Some(alloc_expr(nodes, EXPR_LIT, file, start, end, &[lit, value, NONE]))
+    } else if is_name(nodes, names, *pos, "true") {
+        let end = node_end(nodes, *pos);
+        *pos += 1;
+        Some(alloc_expr(nodes, EXPR_LIT, file, start, end, &[LIT_TRUE, 1, NONE]))
+    } else if is_name(nodes, names, *pos, "false") {
+        let end = node_end(nodes, *pos);
+        *pos += 1;
+        Some(alloc_expr(nodes, EXPR_LIT, file, start, end, &[LIT_FALSE, 0, NONE]))
+    } else if is_sym(nodes, names, *pos, "(") {
+        *pos += 1;
+        let inner = parse_expr(pos, names, nodes, lists, errors)?;
+        if !expect(nodes, names, pos, ")", errors) {
+            return None;
         }
+        Some(inner)
+    } else if is_sym(nodes, names, *pos, "[") {
+        parse_array_lit(pos, names, nodes, lists, errors)
+    } else if is_name(nodes, names, *pos, "match") {
+        parse_match_expr(pos, names, nodes, lists, errors)
+    } else if is_name(nodes, names, *pos, "try") {
+        *pos += 1;
+        let inner = parse_unary(pos, names, nodes, lists, errors)?;
+        let end = node_end(nodes, inner);
+        Some(alloc_expr(nodes, EXPR_TRY, file, start, end, &[inner, NONE, NONE]))
+    } else if is_word(nodes, *pos) {
+        parse_name_chain(pos, names, nodes, lists, errors)
+    } else {
+        let end = node_end(nodes, *pos);
+        push_error(errors, "expected an expression", file, start, end);
+        None
     }
+}
 
-    fn is_at_end(&self) -> bool {
-        self.cursor >= self.tokens.len()
+fn parse_array_lit(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    *pos += 1;
+    let elements = alloc_list(lists);
+    skip_nl(nodes, pos);
+    while !is_sym(nodes, names, *pos, "]") && !at_eof(nodes, *pos) {
+        let element = parse_expr(pos, names, nodes, lists, errors)?;
+        list_push(lists, elements, element);
+        if !accept(nodes, names, pos, ",") {
+            break;
+        }
+        skip_nl(nodes, pos);
     }
+    skip_nl(nodes, pos);
+    if !expect(nodes, names, pos, "]", errors) {
+        return None;
+    }
+    let end = node_end(nodes, *pos - 1);
+    Some(alloc_expr(nodes, EXPR_ARRAY, file, start, end, &[elements, NONE, NONE]))
+}
 
-    fn previous_span(&self) -> Span {
-        if self.cursor > 0 && self.cursor - 1 < self.tokens.len() {
-            self.tokens[self.cursor - 1].span
-        } else if let Some(last_token) = self.tokens.last() {
-            last_token.span
+fn parse_name_chain(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    let segs = parse_path(pos, names, nodes, lists, errors)?;
+    let end = node_end(nodes, *pos - 1);
+    Some(alloc_expr(nodes, EXPR_PATH, file, start, end, &[segs, NONE, NONE]))
+}
+
+fn parse_call_tail(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, callee: i64, targs: i64) -> Option<i64> {
+    *pos += 1;
+    skip_nl(nodes, pos);
+    if is_word(nodes, *pos) && is_sym(nodes, names, *pos + 1, ":") {
+        parse_struct_lit_fields(pos, names, nodes, lists, errors, callee)
+    } else {
+        parse_call_args(pos, names, nodes, lists, errors, callee, targs)
+    }
+}
+
+fn parse_call_args(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, callee: i64, targs: i64) -> Option<i64> {
+    let file = node_file(nodes, callee);
+    let start = node_start(nodes, callee);
+    let args = alloc_list(lists);
+    while !is_sym(nodes, names, *pos, ")") && !at_eof(nodes, *pos) {
+        let arg = parse_expr(pos, names, nodes, lists, errors)?;
+        list_push(lists, args, arg);
+        if !accept(nodes, names, pos, ",") {
+            break;
+        }
+        skip_nl(nodes, pos);
+    }
+    skip_nl(nodes, pos);
+    if !expect(nodes, names, pos, ")", errors) {
+        return None;
+    }
+    let end = node_end(nodes, *pos - 1);
+    Some(alloc_expr(nodes, EXPR_CALL, file, start, end, &[callee, targs, args]))
+}
+
+fn parse_struct_lit_fields(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, path_expr: i64) -> Option<i64> {
+    let file = node_file(nodes, path_expr);
+    let start = node_start(nodes, path_expr);
+    let segs = node_b(nodes, path_expr);
+    let field_names = alloc_list(lists);
+    let field_vals = alloc_list(lists);
+    while !is_sym(nodes, names, *pos, ")") && !at_eof(nodes, *pos) {
+        let field_name = expect_word(pos, nodes, errors)?;
+        if !expect(nodes, names, pos, ":", errors) {
+            return None;
+        }
+        skip_nl(nodes, pos);
+        let value = parse_expr(pos, names, nodes, lists, errors)?;
+        list_push(lists, field_names, field_name);
+        list_push(lists, field_vals, value);
+        if !accept(nodes, names, pos, ",") {
+            break;
+        }
+        skip_nl(nodes, pos);
+    }
+    skip_nl(nodes, pos);
+    if !expect(nodes, names, pos, ")", errors) {
+        return None;
+    }
+    let end = node_end(nodes, *pos - 1);
+    Some(alloc_expr(nodes, EXPR_STRUCT_LIT, file, start, end, &[segs, field_names, field_vals]))
+}
+
+fn parse_type_args_tail(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let targs = alloc_list(lists);
+    *pos += 1;
+    skip_nl(nodes, pos);
+    while !is_sym(nodes, names, *pos, "]") && !at_eof(nodes, *pos) {
+        let ty = parse_type(pos, names, nodes, lists, errors)?;
+        list_push(lists, targs, ty);
+        if !accept(nodes, names, pos, ",") {
+            break;
+        }
+        skip_nl(nodes, pos);
+    }
+    skip_nl(nodes, pos);
+    if !expect(nodes, names, pos, "]", errors) {
+        return None;
+    }
+    Some(targs)
+}
+
+fn parse_match_expr(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    *pos += 1;
+    let scrutinee = parse_expr(pos, names, nodes, lists, errors)?;
+    let arms = parse_match_arms(pos, names, nodes, lists, errors)?;
+    let end = expect_end(pos, names, nodes, errors)?;
+    Some(alloc_expr(nodes, EXPR_MATCH, file, start, end, &[scrutinee, arms, NONE]))
+}
+
+fn parse_match_arms(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let arms = alloc_list(lists);
+    skip_nl(nodes, pos);
+    while !is_name(nodes, names, *pos, "end") && !at_eof(nodes, *pos) {
+        let file = node_file(nodes, *pos);
+        let pattern = parse_pattern(pos, names, nodes, lists, errors)?;
+        if !expect(nodes, names, pos, "=>", errors) {
+            recover_line(nodes, pos);
+            continue;
+        }
+        skip_nl(nodes, pos);
+        match parse_stmt(pos, names, nodes, lists, errors) {
+            Some(body) => {
+                let start = node_start(nodes, pattern);
+                let end = node_end(nodes, body);
+                let arm = alloc_arm(nodes, file, start, end, pattern, body);
+                list_push(lists, arms, arm);
+            }
+            None => {
+                recover_line(nodes, pos);
+            }
+        }
+        skip_nl(nodes, pos);
+    }
+    Some(arms)
+}
+
+// ---------------------------------------------------------------------------
+// Patterns.
+// ---------------------------------------------------------------------------
+
+fn parse_pattern(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    if is_sym(nodes, names, *pos, "[") {
+        parse_array_pattern(pos, names, nodes, lists, errors)
+    } else if node_a(nodes, *pos) == TOK_INT || node_a(nodes, *pos) == TOK_HEX {
+        let file = node_file(nodes, *pos);
+        let start = node_start(nodes, *pos);
+        let end = node_end(nodes, *pos);
+        let kind = if node_a(nodes, *pos) == TOK_INT { LIT_INT } else { LIT_HEX };
+        let value = node_c(nodes, *pos);
+        *pos += 1;
+        Some(alloc_pat(nodes, PAT_LIT, file, start, end, &[kind, value]))
+    } else if is_word(nodes, *pos) {
+        parse_name_pattern(pos, names, nodes, lists, errors)
+    } else {
+        let file = node_file(nodes, *pos);
+        let start = node_start(nodes, *pos);
+        let end = node_end(nodes, *pos);
+        push_error(errors, "expected a pattern", file, start, end);
+        None
+    }
+}
+
+fn parse_name_pattern(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    let segs = parse_path(pos, names, nodes, lists, errors)?;
+    let end = node_end(nodes, *pos - 1);
+    if is_sym(nodes, names, *pos, "(") {
+        let payload = parse_payload_patterns(pos, names, nodes, lists, errors)?;
+        let end = node_end(nodes, *pos - 1);
+        Some(alloc_pat(nodes, PAT_VARIANT, file, start, end, &[segs, payload]))
+    } else if list_len(lists, segs) == 1 {
+        let name = list_first(lists, segs);
+        Some(alloc_pat(nodes, PAT_BIND, file, start, end, &[name, NONE]))
+    } else {
+        Some(alloc_pat(nodes, PAT_PATH, file, start, end, &[segs, NONE]))
+    }
+}
+
+fn parse_payload_patterns(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let payload = alloc_list(lists);
+    *pos += 1;
+    skip_nl(nodes, pos);
+    while !is_sym(nodes, names, *pos, ")") && !at_eof(nodes, *pos) {
+        let pattern = parse_pattern(pos, names, nodes, lists, errors)?;
+        list_push(lists, payload, pattern);
+        if !accept(nodes, names, pos, ",") {
+            break;
+        }
+        skip_nl(nodes, pos);
+    }
+    skip_nl(nodes, pos);
+    if !expect(nodes, names, pos, ")", errors) {
+        return None;
+    }
+    Some(payload)
+}
+
+fn parse_array_pattern(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    *pos += 1;
+    let elements = alloc_list(lists);
+    let mut rest = NONE;
+    skip_nl(nodes, pos);
+    while !is_sym(nodes, names, *pos, "]") && !at_eof(nodes, *pos) {
+        let element = parse_pattern(pos, names, nodes, lists, errors)?;
+        if is_sym(nodes, names, *pos, "@") {
+            if node_a(nodes, element) != PAT_BIND {
+                let file = node_file(nodes, *pos);
+                let start = node_start(nodes, *pos);
+                let end = node_end(nodes, *pos);
+                push_error(errors, "rest pattern must bind a name", file, start, end);
+                return None;
+            }
+            *pos += 1;
+            if !expect(nodes, names, pos, "..", errors) {
+                return None;
+            }
+            rest = node_b(nodes, element);
         } else {
-            Span::new(0, 0, 1, 1)
+            list_push(lists, elements, element);
         }
+        if !accept(nodes, names, pos, ",") {
+            break;
+        }
+        skip_nl(nodes, pos);
+    }
+    skip_nl(nodes, pos);
+    if !expect(nodes, names, pos, "]", errors) {
+        return None;
+    }
+    let end = node_end(nodes, *pos - 1);
+    Some(alloc_pat(nodes, PAT_ARRAY, file, start, end, &[elements, rest]))
+}
+
+// ---------------------------------------------------------------------------
+// Binary operators.
+// ---------------------------------------------------------------------------
+
+fn bin_op_at(nodes: &[i64], names: &[String], pos: i64) -> Option<(i64, i64)> {
+    logical_op_at(nodes, names, pos)
+        .or(comparison_op_at(nodes, names, pos))
+        .or(bitwise_op_at(nodes, names, pos))
+        .or(shift_op_at(nodes, names, pos))
+        .or(arith_op_at(nodes, names, pos))
+}
+
+fn logical_op_at(nodes: &[i64], names: &[String], pos: i64) -> Option<(i64, i64)> {
+    if is_sym(nodes, names, pos, "||") {
+        Some((BIN_OR, 1))
+    } else if is_sym(nodes, names, pos, "&&") {
+        Some((BIN_AND, 2))
+    } else {
+        None
+    }
+}
+
+fn comparison_op_at(nodes: &[i64], names: &[String], pos: i64) -> Option<(i64, i64)> {
+    if is_sym(nodes, names, pos, "==") {
+        Some((BIN_EQ, 3))
+    } else if is_sym(nodes, names, pos, "!=") {
+        Some((BIN_NE, 3))
+    } else if is_sym(nodes, names, pos, "<") {
+        Some((BIN_LT, 3))
+    } else if is_sym(nodes, names, pos, ">") {
+        Some((BIN_GT, 3))
+    } else if is_sym(nodes, names, pos, "<=") {
+        Some((BIN_LE, 3))
+    } else if is_sym(nodes, names, pos, ">=") {
+        Some((BIN_GE, 3))
+    } else {
+        None
+    }
+}
+
+fn bitwise_op_at(nodes: &[i64], names: &[String], pos: i64) -> Option<(i64, i64)> {
+    if is_sym(nodes, names, pos, "|") {
+        Some((BIN_BOR, 4))
+    } else if is_sym(nodes, names, pos, "^") {
+        Some((BIN_BXOR, 5))
+    } else if is_sym(nodes, names, pos, "&") {
+        Some((BIN_BAND, 6))
+    } else {
+        None
+    }
+}
+
+fn shift_op_at(nodes: &[i64], names: &[String], pos: i64) -> Option<(i64, i64)> {
+    if is_sym(nodes, names, pos, "<<") {
+        Some((BIN_SHL, 7))
+    } else if is_sym(nodes, names, pos, ">>") {
+        Some((BIN_SHR, 7))
+    } else {
+        None
+    }
+}
+
+fn arith_op_at(nodes: &[i64], names: &[String], pos: i64) -> Option<(i64, i64)> {
+    if is_sym(nodes, names, pos, "+") {
+        Some((BIN_ADD, 8))
+    } else if is_sym(nodes, names, pos, "-") {
+        Some((BIN_SUB, 8))
+    } else if is_sym(nodes, names, pos, "*") {
+        Some((BIN_MUL, 9))
+    } else if is_sym(nodes, names, pos, "/") {
+        Some((BIN_DIV, 9))
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// List helpers.
+// ---------------------------------------------------------------------------
+
+fn list_first(lists: &[Vec<i64>], id: i64) -> i64 {
+    match lists.get(id as usize) {
+        Some(items) => match items.first() {
+            Some(value) => *value,
+            None => NONE,
+        },
+        None => NONE,
+    }
+}
+
+fn list_len(lists: &[Vec<i64>], id: i64) -> i64 {
+    match lists.get(id as usize) {
+        Some(items) => items.len() as i64,
+        None => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_all(source: &str) -> Vec<Diag> {
+        let mut names: Vec<String> = Vec::new();
+        let mut nodes: Vec<i64> = Vec::new();
+        let mut lists: Vec<Vec<i64>> = Vec::new();
+        let mut errors: Vec<Diag> = Vec::new();
+        let ok = crate::lexer::lex(&mut names, &mut nodes, source, 0, &mut errors);
+        let root = alloc_list(&mut lists);
+        let parsed = parse(&mut names, &mut nodes, &mut lists, &mut errors, root, 0);
+        assert!(ok || errors.len() > 0);
+        assert!(parsed || errors.len() > 0);
+        errors
     }
 
-    fn current_span(&self) -> Span {
-        if let Some(token_ref) = self.peek_token() {
-            token_ref.span
-        } else if let Some(last_token) = self.tokens.last() {
-            last_token.span
-        } else {
-            Span::new(0, 0, 1, 1)
-        }
+    #[test]
+    fn parses_simple_fun() {
+        let errors = parse_all("pub fun add(a: Int, b: Int) Int\n  return a + b\nend\n");
+        assert_eq!(errors.len(), 0);
+    }
+
+    #[test]
+    fn parses_match_and_rest() {
+        let errors = parse_all(
+            "pub fun split_first(view: &[U8]) Option(SplitFirst)\n  match view\n    [] => return None\n    [first, rest @ ..] => return Some(SplitFirst(first: first, rest_len: 3))\n  end\nend\n",
+        );
+        assert_eq!(errors.len(), 0);
+    }
+
+    #[test]
+    fn parses_generic_native() {
+        let errors = parse_all(
+            "pub mod Collections\n  pub native type Vec(T)\n  pub native fun vec_new<T>() impure Result(Vec(T), Error)\nend\n",
+        );
+        assert_eq!(errors.len(), 0);
+    }
+
+    #[test]
+    fn parses_trait_bound() {
+        let errors = parse_all("pub trait Checksum\n  pub fun checksum(value: &Self) U32\nend\n\nfun checksum_value<T: Checksum>(value: &T) U32\n  return Checksum.checksum(value)\nend\n");
+        assert_eq!(errors.len(), 0);
+    }
+
+    #[test]
+    fn parses_multiline_lists() {
+        // Multi-line parameters, payload types, struct-literal fields, and
+        // call arguments each end with a newline before the close delimiter.
+        let errors = parse_all(
+            "pub native fun write_u8(\n  block: &Block,\n  offset: Usize,\n  value: U8\n) impure Result(Unit, Error)\n\nfun make() MagicHeader\n  return MagicHeader(\n    bytes: [MAGIC_BYTE_0, MAGIC_BYTE_1],\n    expected: MAGIC_U32\n  )\nend\n",
+        );
+        assert_eq!(errors.len(), 0);
+    }
+
+    #[test]
+    fn parses_try_typed_call_then_ref_mut_call() {
+        // `try vec_new[U8]()` on its own line, then a `val` whose init
+        // passes `&mut vec` to a call: both forms must parse cleanly.
+        let errors = parse_all(
+            "fun vec_demo() impure Result(Unit, Error)\n  val vec = try vec_new[U8]()\n  val push_result = push_all_magic(&mut vec)\n  return Ok(Unit)\nend\n",
+        );
+        assert_eq!(errors.len(), 0);
+    }
+
+    #[test]
+    fn rejects_mixed_type() {
+        let errors = parse_all("pub type BadMixedType\n  pub x: Int\n  pub BadVariant(U32)\nend\n");
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn rejects_native_on_const() {
+        let errors = parse_all("native const BAD: Int = 1\n");
+        assert_eq!(errors.len(), 1);
     }
 }

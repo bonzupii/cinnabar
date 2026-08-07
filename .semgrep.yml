@@ -1,0 +1,284 @@
+# Cinnabar correctness policy for Rust implementation code.
+#
+# Cargo.toml owns routine rustc/Clippy lint enforcement: unwrap/expect,
+# panic/todo/unimplemented/unreachable, indexing, naming, ordinary unused
+# variables/imports, wildcard enum matches, and redundant struct-rest patterns.
+# These rules enforce the additional invariants that keep an AI implementation
+# from compiling guessed semantics or hiding discarded values.
+#
+# Every finding is an error. Existing findings are refactoring work. There are
+# no exceptions for `_`, `_prefix`, `_ =>`, `..`, or `rest @ ..` in Rust.
+# `rest @ ..` is Cinnabar source syntax only; it is not a Rust implementation
+# escape hatch.
+
+rules:
+  - id: cinnabar-no-underscore-prefixed-binding
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      Do not hide a value from Rust's unused-variable lint with `_` or an
+      `_prefix` binding. Bind every produced value with a real name and use it,
+      or reshape the producer so the value is not produced. This rule matches
+      actual binding positions, not ordinary identifiers in comments or code.
+    pattern-regex: >-
+      (?m)^[ \t]*(?:let[ \t]+(?:mut[ \t]+)?_[A-Za-z0-9_]*[ \t]*(?::[^=\n]+)?=|fn[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*\([^\n]*\b_[A-Za-z0-9_]*[ \t]*:)
+
+  - id: cinnabar-no-explicit-discard-binding
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This binding discards a value. Name the value and use it in program
+      behavior, or restructure the producer so it is not created.
+    pattern-regex: >-
+      (?m)^[ \t]*let[ \t]+(?:mut[ \t]+)?(?:_|\([^\n]*(?:^|[, (])_[, )][^\n]*\))[ \t]*(?::[^=\n]+)?=
+
+  - id: cinnabar-no-wildcard-match-arm
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This Rust match arm discards unmatched variants or values. Name every
+      variant explicitly and handle its value.
+    pattern-regex: >-
+      (?m)^[ \t]*_[ \t]*=>
+
+  - id: cinnabar-no-struct-rest-pattern
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This Rust pattern discards fields with `..`. Bind every field by name
+      and use each value, or split the match into explicit arms.
+    pattern-regex: >-
+      (?m)^[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*::)*[A-Za-z_][A-Za-z0-9_]*[ \t]*\{[^{}\n]*\.\.[^{}\n]*\}[ \t]*(?:=>|=|if|\)|;|$)
+
+  - id: cinnabar-no-slice-rest-pattern
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This Rust slice pattern discards elements with `..`. Bind the remaining
+      elements explicitly and use them.
+    pattern-regex: >-
+      (?m)^[ \t]*(?:\[[^\]\n]*\.\.[^\]\n]*\][ \t]*=>|(?:let|if[ \t]+let|while[ \t]+let)[ \t]+(?:mut[ \t]+)?\[[^\]\n]*\.\.[^\]\n]*\][ \t]*=)
+
+  - id: cinnabar-no-allow-attribute
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      Remove this #[allow] attribute and fix the diagnostic it suppresses.
+      Lint suppression cannot replace a correct implementation.
+    pattern-regex: >-
+      (?m)^[ \t]*#!?[ \t]*\[[ \t]*allow[ \t]*\(
+
+  - id: cinnabar-no-fabricated-span
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This creates a fabricated source location. Thread the real Cinnabar
+      span through the operation instead of assigning line 1, column 1.
+    pattern-regex: >-
+      (?m)(?:crate::lexer::)?Span::new\([ \t]*0[ \t]*,[ \t]*0[ \t]*,[ \t]*1[ \t]*,[ \t]*1[ \t]*\)
+
+  - id: cinnabar-no-fake-consumption-pointer-probe
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This consumes a value only by probing its address. Use the value in real
+      control flow or output, or remove it from the producer.
+    pattern-either:
+      - pattern: |
+          let $PTR = $VALUE as *const $TYPE;
+          let $ADDR = $PTR as usize;
+          if $ADDR == 0 { ... }
+      - pattern: |
+          let $PTR = $VALUE as *mut $TYPE;
+          let $ADDR = $PTR as usize;
+          if $ADDR == 0 { ... }
+      - pattern: |
+          let $ADDR = ($VALUE as *const $TYPE) as usize;
+          if $ADDR == 0 { ... }
+      - pattern: |
+          let $ADDR = ($VALUE as *mut $TYPE) as usize;
+          if $ADDR == 0 { ... }
+      - pattern: |
+          let $PTR = $VALUE as *const $TYPE;
+          if $PTR.is_null() { ... }
+      - pattern: |
+          let $PTR = $VALUE as *mut $TYPE;
+          if $PTR.is_null() { ... }
+
+  - id: cinnabar-no-fake-consumption-noop-helper
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This helper only makes an otherwise-unused value appear used. Make the
+      value affect real control flow or output, or remove the producer.
+    pattern-regex: >-
+      (?ms)^[ \t]*(?:pub[ \t]+)?fn[ \t]+(?:touch|use_ref|use_value|consume_ref|consume_value)[ \t]*\([^)]*\)[^{]*\{[^{}]*(?:as[ \t]*\*[ \t]*(?:const|mut)|is_null\(\)|as[ \t]+usize)[^{}]*\}
+
+  - id: cinnabar-no-hand-maintained-variant-tags
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This table is a second source of enum tags. Derive tags from each enum's
+      declared variant order and reuse that result for construction and match.
+    pattern-regex: >-
+      (?m)^[ \t]*self\.[A-Za-z_][A-Za-z0-9_]*tags?\.insert\([ \t]*[^\n]*\.to_string\(\)[ \t]*,
+
+  - id: cinnabar-no-codegen-reinference
+    languages: [rust]
+    severity: ERROR
+    paths:
+      exclude: ["/src/resolver.rs", "/src/typecheck.rs"]
+    message: >-
+      Codegen is recomputing a semantic fact. Consume the resolver or
+      typechecker result attached to the source node instead.
+    pattern-regex: >-
+      (?m)^[ \t]*(?:fn[ \t]+(?:resolve|qualify|infer)[A-Za-z_0-9]*[ \t]*\(|self\.(?:resolve|qualify|infer)[A-Za-z_0-9]*[ \t]*\()
+
+  - id: cinnabar-no-codegen-variant-tag-registration
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      Codegen is rebuilding enum tags in a second registry. Derive each tag
+      from its enum declaration and carry that result into lowering.
+    pattern-regex: >-
+      (?m)^[ \t]*(?:fn[ \t]+[A-Za-z_][A-Za-z0-9_]*(?:register|assign)[A-Za-z0-9_]*(?:variant|tag)[A-Za-z0-9_]*[ \t]*\(|(?:self\.)?[A-Za-z_][A-Za-z0-9_]*(?:variant|tag)[A-Za-z0-9_]*[ \t]*=[^=])
+
+  - id: cinnabar-no-hardcoded-codegen-layout
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This code hardcodes a representation size or slot count. Derive the
+      layout from the declared type and target layout.
+    pattern-either:
+      - pattern: $TYPE.array_type(64)
+      - pattern: $TYPE.const_int(128, ...)
+      - pattern: $TYPE.const_int(64, ...)
+      - pattern: $TYPE.const_int(24, ...)
+      - pattern: $TYPE.const_int(16, ...)
+
+  - id: cinnabar-no-invented-fallback-type
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This expression receives an invented fallback type. Use the declared or
+      inferred type, or return a typed error when no type can be established.
+    pattern-either:
+      - pattern-regex: >-
+          (?m)^[ \t]*(?:Type::Named\("RangeError"\.to_string\(\)|Type::Generic\("Option"\.to_string\(\),[^\n]*dummy_span|Type::Generic\("Result"\.to_string\(\),[^\n]*dummy_span)
+
+  - id: cinnabar-no-codegen-match-sequential-arms
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      Match lowering emits arms sequentially and overwrites one result. Test
+      the scrutinee, branch to one matching arm, and join the arm results.
+    pattern-regex: >-
+      (?m)^[ \t]*res_val[ \t]*=[ \t]*self\.emit_expr\(body_expr\)\?;
+
+  - id: cinnabar-no-codegen-zero-pattern-bindings
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This pattern binding is initialized with zero instead of the matched
+      payload. Extract and store the value selected by the pattern.
+    pattern-regex: >-
+      (?ms)fn[ \t]+bind_pattern_vars[^{]*\{.*?build_store\(alloca,[ \t]*i64_ty\.const_zero\(\)\)
+
+  - id: cinnabar-no-codegen-ignored-field-access
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This field access ignores the requested field. Select the named field
+      using its declared type and return that field's value.
+    pattern-regex: >-
+      (?m)^[ \t]*Expr::FieldAccess\(target,[ \t]*_\)[ \t]*=>
+
+  - id: cinnabar-no-empty-type-argument-walk
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This loop walks generic arguments without using them. Resolve and carry
+      every argument into the call, or remove the loop.
+    pattern-regex: >-
+      (?ms)if[ \t]+let[ \t]+Some\(t_args\)[ \t]*=[ \t]*type_args[ \t]*\{[^{}]*while[ \t]+t_idx[ \t]*<[ \t]*t_args\.len\(\)[ \t]*\{[ \t\n]*t_idx[ \t]*\+=[ \t]*1;[ \t\n]*\}[^{}]*\}
+
+  - id: cinnabar-no-root-only-path-resolution
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This resolver validates only the first path segment. Resolve every
+      module, type, and member segment with its scope and visibility.
+    pattern-regex: >-
+      (?ms)fn[ \t]+resolve_path[^{]*\{[^{}]*root_name[ \t]*=[ \t]*&path\[0\][^{}]*symbol_exists\(root_name\)[^{}]*\}
+
+  - id: cinnabar-no-hardcoded-generic-parameter-names
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      Generic inference is restricted to hardcoded parameter names. Use the
+      function's declared generic-parameter list instead.
+    pattern-regex: >-
+      (?m)^[ \t]*if[ \t]+name[ \t]*==[ \t]*"T"[ \t]*\|\|[ \t]*name[ \t]*==[ \t]*"K"[ \t]*\|\|[ \t]*name[ \t]*==[ \t]*"V"[ \t]*\|\|[ \t]*name[ \t]*==[ \t]*"E"[ \t]*\|\|[ \t]*name[ \t]*==[ \t]*"U"
+
+  - id: cinnabar-no-unknown-call-type-fallback
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      An unresolved call is being assigned a fallback return type. Report the
+      unknown callee at its source span instead.
+    pattern-regex: >-
+      (?ms)if[ \t]+let[ \t]+Some\(exp_ty\)[ \t]*=[ \t]*expected_type[ \t]*\{.*?Ok\(exp_ty\.clone\(\)\).*?else[ \t]*\{.*?Ok\([^\n]*Unit[^\n]*\)
+
+  - id: cinnabar-no-unknown-field-type-fallback
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      An unknown field is being assigned Int as a fallback type. Report the
+      missing field at the field-access span instead.
+    pattern-regex: >-
+      (?ms)Expr::FieldAccess\(target,[ \t]*field_name\)[^\n]*=>.*?Ok\(Type::Named\("Int"\.to_string\(\)\)\)
+
+  - id: cinnabar-no-codegen-type-reinference-helper
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      Codegen defines a second type-resolution path. Consume the type attached
+      by the typechecker instead.
+    pattern-regex: >-
+      (?m)^[ \t]*fn[ \t]+(?:infer_expr_type|resolve_type)[ \t]*\(
+
+  - id: cinnabar-no-codegen-fixed-struct-layout
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This LLVM layout is handwritten as a fixed field list. Derive fields and
+      element types from the declared Cinnabar type.
+    pattern-regex: >-
+      (?m)^[ \t]*let[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*self\.context\.struct_type\(&\[[^\n]*\][^\n]*\)
+
+  - id: cinnabar-no-codegen-fixed-element-gep
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This GEP uses a fixed i64 element type. Use the declared element type
+      so every generic collection has the correct stride.
+    pattern-regex: >-
+      (?m)^[ \t]*let[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*=[^\n]*build_gep\(i64_ty,
+
+  - id: cinnabar-no-fixed-enum-representation
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This uses one fixed representation for every enum. Derive the tag and
+      payload layout from the specific enum declaration.
+    pattern-regex: >-
+      (?m)^[ \t]*fn[ \t]+lower_enum_type[ \t]*\(
+
+  - id: cinnabar-no-opaque-native-runtime-substitute
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This generated runtime body substitutes a fixed implementation for a
+      declared native surface. Lower the declared signature and types directly.
+    pattern: |
+      fn emit_native_runtime_bodies(...) { ... }

@@ -26,3 +26,8 @@ pub fun option_demo() Option(Int)
   val none_value = None
   return none_value
 end
+pub fun main() Unit
+  val p = port_demo()
+  val o = option_demo()
+  return Unit
+end

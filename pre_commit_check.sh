@@ -77,6 +77,7 @@ echo ""
 # 1. Code Quality & Lint Gates
 run_check "Cargo check" cargo check --quiet
 run_check "Cargo clippy (zero warnings policy)" cargo clippy --quiet -- -D warnings
+run_check "Semgrep (AGENTS.md policy: discard patterns, dummy spans, hardcoded registries)" semgrep --config .semgrep.yml --error --quiet src/
 run_check "Cargo unit test suite" cargo test --quiet
 
 # 2. CLI Invocation Checks

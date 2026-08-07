@@ -1,257 +1,275 @@
-use crate::ast::Item;
-use crate::ast::ItemKind;
-use crate::ast::Spanned;
-use crate::lexer::Lexer;
-use crate::lexer::Span;
-use crate::parser::Parser;
-use std::collections::HashSet;
-use std::fs;
-use std::path::{Path, PathBuf};
+//! Cinnabar module loader.
+//!
+//! Loads the entry file and every external module referenced by `use`
+//! statements whose first segment is not a declared module: a `use
+//! Math.add` with no in-file `mod Math` loads `Math.cnb` from the
+//! importing file's directory and exposes its items under the module name
+//! `Math`.  Loading is recursive and each file is recorded with its real
+//! path and source text so diagnostics render at the true origin.  Every
+//! file's tokens are lexed into the shared arenas and parsed from its own
+//! `token_start`; a file's tokens end with their own `TOK_EOF`, so parsing
+//! one file never runs into the next file's tokens.
 
-#[derive(Debug, Clone)]
-pub struct ModuleLoaderError {
-    pub message: String,
-    pub span: Span,
+use crate::ast::*;
+use std::path::Path;
+
+/// The loaded program: the entry item-list id and the external modules
+/// `(name, root list)`.  The files table travels separately so failures
+/// during loading still render diagnostics at their real origin.
+type Loaded = (i64, Vec<(String, i64)>);
+
+/// The loader's own tables: loaded `(path, source)` files, external
+/// modules `(name, root list)`, and the work queue `(path, root list)`.
+type Loader = (Vec<(String, String)>, Vec<(String, i64)>, Vec<(String, i64)>);
+
+pub fn load(
+    names: &mut Vec<String>,
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    errors: &mut Vec<Diag>,
+    entry_path: &str,
+) -> (Option<Loaded>, Vec<(String, String)>) {
+    let root = alloc_list(lists);
+    let source = match read_source(entry_path, errors) {
+        Some(text) => text,
+        None => return (None, Vec::new()),
+    };
+    let mut loader: Loader = (Vec::new(), Vec::new(), Vec::new());
+    loader.0.push((entry_path.to_string(), source.clone()));
+    if !parse_file(names, nodes, lists, errors, &source, 0, root) {
+        return (None, loader.0);
+    }
+    loader.2.push((entry_path.to_string(), root));
+    while let Some((path, list)) = loader.2.pop() {
+        process_imports(names, nodes, lists, errors, &path, list, &mut loader);
+    }
+    let files = loader.0;
+    let ext_mods = loader.1;
+    (Some((root, ext_mods)), files)
 }
 
-pub struct ModuleLoader {
-    base_dir: PathBuf,
-    loaded_paths: HashSet<PathBuf>,
+/// Lexes and parses one file's tokens (starting after every previously
+/// loaded file's tokens) into `root`.
+fn parse_file(
+    names: &mut Vec<String>,
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    errors: &mut Vec<Diag>,
+    source: &str,
+    file_id: i64,
+    root: i64,
+) -> bool {
+    let token_start = nodes.len() as i64 / NODE_STRIDE;
+    if !crate::lexer::lex(names, nodes, source, file_id, errors) {
+        return false;
+    }
+    crate::parser::parse(names, nodes, lists, errors, root, token_start)
 }
 
-impl ModuleLoader {
-    pub fn new(root_file_path: &Path) -> Self {
-        let base_dir = match root_file_path.parent() {
-            Some(parent_dir) => parent_dir.to_path_buf(),
-            None => PathBuf::from("."),
-        };
+/// Loads the sibling modules the file at `path` imports.  Files whose
+/// first segment is a declared module or an already-loaded module are
+/// skipped; a missing sibling file is left for the resolver to report as
+/// an unknown module.
+fn process_imports(
+    names: &mut Vec<String>,
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    errors: &mut Vec<Diag>,
+    path: &str,
+    list: i64,
+    loader: &mut Loader,
+) {
+    let declared = declared_module_names(nodes, lists, list);
+    let uses = use_targets(nodes, lists, list);
+    let dir = parent_dir(path);
+    let mut idx = 0usize;
+    while let Some(pair) = uses.get(idx) {
+        if !name_in(&declared, pair.0)
+            && !loaded_name(&loader.1, names, pair.0)
+            && let Some(module) = sibling_module(&dir, names, pair.0)
+        {
+            load_sibling(names, nodes, lists, errors, module, pair.1, loader);
+        }
+        idx += 1;
+    }
+}
 
-        let mut loaded_paths = HashSet::new();
-        let canonical_root = match root_file_path.canonicalize() {
-            Ok(path) => path,
-            Err(_) => root_file_path.to_path_buf(),
-        };
-        loaded_paths.insert(canonical_root);
+/// Resolves one external module to `(path, module name)`, or None when
+/// no sibling file exists.
+fn sibling_module(dir: &str, names: &[String], seg: i64) -> Option<(String, String)> {
+    let mod_path = sibling_path(dir, names, seg)?;
+    let mod_name = name_text(names, seg);
+    Some((mod_path, mod_name))
+}
 
-        Self {
-            base_dir,
-            loaded_paths,
+/// Loads one external module file: reads it, parses it into its own item
+/// list, and queues it for its own imports to be processed.
+fn load_sibling(
+    names: &mut Vec<String>,
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    errors: &mut Vec<Diag>,
+    module: (String, String),
+    use_item: i64,
+    loader: &mut Loader,
+) {
+    let (mod_path, mod_name) = module;
+    let source = read_source_at(&mod_path, errors, node_file(nodes, use_item), node_start(nodes, use_item), node_end(nodes, use_item));
+    let mod_source = match source {
+        Some(text) => text,
+        None => return,
+    };
+    let child_list = alloc_list(lists);
+    let child_id = loader.0.len() as i64;
+    loader.0.push((mod_path.clone(), mod_source.clone()));
+    if !parse_file(names, nodes, lists, errors, &mod_source, child_id, child_list) {
+        return;
+    }
+    loader.1.push((mod_name.clone(), child_list));
+    loader.2.push((mod_path, child_list));
+}
+
+// ---------------------------------------------------------------------------
+// File helpers.
+// ---------------------------------------------------------------------------
+
+/// Reads `path`, binding the I/O failure into the diagnostic.  A missing
+/// input file has no Cinnabar source origin, so that diagnostic is
+/// source-less.
+fn read_source(path: &str, errors: &mut Vec<Diag>) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(cause) => {
+            errors.push((format!("cannot read input file '{}': {}", path, cause), NO_FILE, 0, 0));
+            None
         }
     }
+}
 
-    pub fn load_external_modules(&mut self, items: &mut Vec<Spanned<Item>>) -> Result<(), ModuleLoaderError> {
-        let mut required_modules = Vec::new();
-        self.collect_required_modules(items, &mut required_modules);
-
-        let mut req_idx = 0;
-        while req_idx < required_modules.len() {
-            let mod_name = &required_modules[req_idx];
-            if let Some(loaded_module_item) = self.try_load_module_file(mod_name)? {
-                items.push(loaded_module_item);
-            }
-            req_idx += 1;
+/// Reads a module file, reporting any failure at the `use` statement that
+/// referenced it.
+fn read_source_at(path: &str, errors: &mut Vec<Diag>, file: i64, start: i64, end: i64) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(cause) => {
+            push_error(errors, &format!("cannot read module file '{}': {}", path, cause), file, start, end);
+            None
         }
-
-        Ok(())
     }
+}
 
-    fn collect_required_modules(&self, items: &[Spanned<Item>], required_modules: &mut Vec<String>) {
-        let mut idx = 0;
-        while idx < items.len() {
-            let item = &items[idx];
-            match &item.node.kind {
-                ItemKind::Use { path, .. } => {
-                    if !path.is_empty() {
-                        let root_mod = &path[0];
-                        if !self.has_module_declaration(items, root_mod) && !required_modules.contains(root_mod) {
-                            required_modules.push(root_mod.clone());
-                        }
-                    }
-                }
-                ItemKind::Module { items: child_items, .. } => {
-                    self.collect_required_modules(child_items, required_modules);
-                }
-                ItemKind::Const { ty, .. } => {
-                    self.inspect_type(ty, items, required_modules);
-                }
-                ItemKind::TypeDecl { kind, .. } => {
-                    match kind {
-                        crate::ast::TypeKind::Struct(fields) => {
-                            let mut f_idx = 0;
-                            while f_idx < fields.len() {
-                                self.inspect_type(&fields[f_idx].ty, items, required_modules);
-                                f_idx += 1;
-                            }
-                        }
-                        crate::ast::TypeKind::Enum(variants) => {
-                            let mut v_idx = 0;
-                            while v_idx < variants.len() {
-                                let variant = &variants[v_idx];
-                                let mut t_idx = 0;
-                                while t_idx < variant.types.len() {
-                                    self.inspect_type(&variant.types[t_idx], items, required_modules);
-                                    t_idx += 1;
-                                }
-                                v_idx += 1;
-                            }
-                        }
-                        crate::ast::TypeKind::Native | crate::ast::TypeKind::Unit => {}
-                    }
-                }
-                ItemKind::Function { params, return_ty, .. } => {
-                    let mut p_idx = 0;
-                    while p_idx < params.len() {
-                        self.inspect_type(&params[p_idx].ty, items, required_modules);
-                        p_idx += 1;
-                    }
-                    if let Some(ret_type) = return_ty {
-                        self.inspect_type(ret_type, items, required_modules);
-                    }
-                }
-                ItemKind::Trait { methods, .. } => {
-                    self.collect_required_modules(methods, required_modules);
-                }
-                ItemKind::Impl { target_type, methods, .. } => {
-                    self.inspect_type(target_type, items, required_modules);
-                    self.collect_required_modules(methods, required_modules);
+/// The directory containing `path`, or "." when there is none.
+fn parent_dir(path: &str) -> String {
+    match Path::new(path).parent() {
+        Some(dir) => dir.to_string_lossy().to_string(),
+        None => ".".to_string(),
+    }
+}
+
+/// `<dir>/<name>.cnb` when that file exists.
+fn sibling_path(dir: &str, names: &[String], seg: i64) -> Option<String> {
+    let name = name_text(names, seg);
+    let candidate = Path::new(dir).join(format!("{}.cnb", name));
+    let path = candidate.to_string_lossy().to_string();
+    if Path::new(&path).exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// True when `seg` names a module that is already loaded (or queued).
+fn loaded_name(ext_mods: &[(String, i64)], names: &[String], seg: i64) -> bool {
+    let text = name_text(names, seg);
+    let mut idx = 0usize;
+    loop {
+        match ext_mods.get(idx) {
+            Some(pair) => {
+                if pair.0 == text {
+                    return true;
                 }
             }
+            None => return false,
+        }
+        idx += 1;
+    }
+}
+
+/// True when `name` appears in `list`.
+fn name_in(list: &[i64], name: i64) -> bool {
+    let mut idx = 0usize;
+    loop {
+        match list.get(idx) {
+            Some(candidate) => {
+                if *candidate == name {
+                    return true;
+                }
+            }
+            None => return false,
+        }
+        idx += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Item scanning.
+// ---------------------------------------------------------------------------
+
+/// The declared module name ids in `list` (recursively, since a `use`
+/// inside a module resolves against modules declared anywhere in the file).
+fn declared_module_names(nodes: &[i64], lists: &[Vec<i64>], list: i64) -> Vec<i64> {
+    let mut found: Vec<i64> = Vec::new();
+    let count = list_len(lists, list);
+    let mut idx = 0i64;
+    while idx < count {
+        collect_module_names(nodes, lists, list_get(lists, list, idx), &mut found);
+        idx += 1;
+    }
+    found
+}
+
+fn collect_module_names(nodes: &[i64], lists: &[Vec<i64>], item: i64, found: &mut Vec<i64>) {
+    if node_tag(nodes, item) != NODE_ITEM || node_a(nodes, item) != ITEM_MODULE {
+        return;
+    }
+    found.push(node_d(nodes, item));
+    let children = node_e(nodes, item);
+    let count = list_len(lists, children);
+    let mut idx = 0i64;
+    while idx < count {
+        collect_module_names(nodes, lists, list_get(lists, children, idx), found);
+        idx += 1;
+    }
+}
+
+/// The `(first_segment_name, use_item)` pairs for every `use` in `list`.
+fn use_targets(nodes: &[i64], lists: &[Vec<i64>], list: i64) -> Vec<(i64, i64)> {
+    let mut found: Vec<(i64, i64)> = Vec::new();
+    let count = list_len(lists, list);
+    let mut idx = 0i64;
+    while idx < count {
+        collect_use_targets(nodes, lists, list_get(lists, list, idx), &mut found);
+        idx += 1;
+    }
+    found
+}
+
+fn collect_use_targets(nodes: &[i64], lists: &[Vec<i64>], item: i64, found: &mut Vec<(i64, i64)>) {
+    if node_tag(nodes, item) != NODE_ITEM {
+        return;
+    }
+    if node_a(nodes, item) == ITEM_USE {
+        let first = list_first(lists, node_d(nodes, item));
+        if first != NONE {
+            found.push((first, item));
+        }
+    } else if node_a(nodes, item) == ITEM_MODULE {
+        let children = node_e(nodes, item);
+        let count = list_len(lists, children);
+        let mut idx = 0i64;
+        while idx < count {
+            collect_use_targets(nodes, lists, list_get(lists, children, idx), found);
             idx += 1;
         }
-    }
-
-    fn inspect_type(&self, ty: &Spanned<crate::ast::Type>, items: &[Spanned<Item>], required_modules: &mut Vec<String>) {
-        match &ty.node {
-            crate::ast::Type::Path(path) | crate::ast::Type::GenericPath(path, _) => {
-                if !path.is_empty() {
-                    let root_mod = &path[0];
-                    if !self.has_module_declaration(items, root_mod) && !required_modules.contains(root_mod) {
-                        required_modules.push(root_mod.clone());
-                    }
-                }
-            }
-            crate::ast::Type::Generic(_, args) => {
-                let mut a_idx = 0;
-                while a_idx < args.len() {
-                    self.inspect_type(&args[a_idx], items, required_modules);
-                    a_idx += 1;
-                }
-            }
-            crate::ast::Type::Array(inner, _) | crate::ast::Type::Slice(inner) | crate::ast::Type::Ref(inner) | crate::ast::Type::RefMut(inner) => {
-                self.inspect_type(inner, items, required_modules);
-            }
-            crate::ast::Type::Named(_) => {}
-        }
-    }
-
-    fn has_module_declaration(&self, items: &[Spanned<Item>], mod_name: &str) -> bool {
-        let mut idx = 0;
-        while idx < items.len() {
-            if let ItemKind::Module { name, .. } = &items[idx].node.kind
-                && name == mod_name
-            {
-                return true;
-            }
-            idx += 1;
-        }
-        false
-    }
-
-    fn try_load_module_file(&mut self, mod_name: &str) -> Result<Option<Spanned<Item>>, ModuleLoaderError> {
-        let pascal_filename = format!("{}.cnb", mod_name);
-        let snake_filename = format!("{}.cnb", self.to_snake_case(mod_name));
-
-        let candidate_paths = [
-            self.base_dir.join(&pascal_filename),
-            self.base_dir.join(&snake_filename),
-            self.base_dir.join(mod_name).join("mod.cnb"),
-        ];
-
-        let mut found_path: Option<PathBuf> = None;
-        let mut path_idx = 0;
-        while path_idx < candidate_paths.len() {
-            let path_candidate = &candidate_paths[path_idx];
-            if path_candidate.exists() && path_candidate.is_file() {
-                found_path = Some(path_candidate.clone());
-                break;
-            }
-            path_idx += 1;
-        }
-
-        let file_path = match found_path {
-            Some(path_val) => path_val,
-            None => return Ok(None),
-        };
-
-        let canonical_path = match file_path.canonicalize() {
-            Ok(path) => path,
-            Err(_) => file_path.clone(),
-        };
-
-        if self.loaded_paths.contains(&canonical_path) {
-            return Ok(None);
-        }
-        self.loaded_paths.insert(canonical_path);
-
-        let source = match fs::read_to_string(&file_path) {
-            Ok(content) => content,
-            Err(io_err) => return Err(ModuleLoaderError {
-                message: format!("Failed to read module file '{}': {}", file_path.display(), io_err),
-                span: Span::new(0, 0, 1, 1),
-            }),
-        };
-
-        let mut lexer = Lexer::new(&source);
-        let tokens = match lexer.tokenize() {
-            Ok(toks) => toks,
-            Err(lex_err) => return Err(ModuleLoaderError {
-                message: format!("Lexical error in external module file '{}': {}", file_path.display(), lex_err.message),
-                span: lex_err.span,
-            }),
-        };
-
-        let mut parser = Parser::new(&tokens);
-        let mut child_items = match parser.parse_program() {
-            Ok(parsed_ast) => parsed_ast,
-            Err(parse_err) => return Err(ModuleLoaderError {
-                message: format!("Syntax error in external module file '{}': {}", file_path.display(), parse_err.message),
-                span: parse_err.span,
-            }),
-        };
-
-        self.load_external_modules(&mut child_items)?;
-
-        let dummy_span = Span::new(0, 0, 1, 1);
-        let module_item = Item {
-            doc: None,
-            kind: ItemKind::Module {
-                is_pub: true,
-                name: mod_name.to_string(),
-                items: child_items,
-            },
-        };
-
-        Ok(Some(Spanned::new(module_item, dummy_span)))
-    }
-
-    fn to_snake_case(&self, pascal_str: &str) -> String {
-        let mut snake = String::new();
-        let mut idx = 0;
-        let chars: Vec<char> = pascal_str.chars().collect();
-        while idx < chars.len() {
-            let ch = chars[idx];
-            if ch.is_uppercase() {
-                if idx > 0 {
-                    snake.push('_');
-                }
-                for lower_ch in ch.to_lowercase() {
-                    snake.push(lower_ch);
-                }
-            } else {
-                snake.push(ch);
-            }
-            idx += 1;
-        }
-        snake
     }
 }

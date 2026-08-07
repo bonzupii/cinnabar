@@ -15,16 +15,22 @@
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             llvm
+            clang
+            libffi
+            libxml2
             cargo
             rustc
             rustfmt
             clippy
             pkg-config
+            semgrep
           ];
 
           shellHook = ''
             echo "LLVM $(llvm-config --version)"
             echo "Rust $(rustc --version)"
+            export NIX_CFLAGS_COMPILE=""
+            export NIX_HARDENING_ENABLE=""
           '';
         };
       }

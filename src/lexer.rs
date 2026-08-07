@@ -1,574 +1,624 @@
-use std::fmt;
+//! Cinnabar lexer.
+//!
+//! Small functions that turn source text into tokens in the node arena.
+//! Comments: `#` and `#!` run to end of line; `#| ... |#` and
+//! `#!| ... |#` are block comments, and block comments may not nest.
+//! Literals are decimal integers and `0x` hexadecimals.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Span {
-    pub start: usize,
-    pub end: usize,
-    pub line: usize,
-    pub col: usize,
+use crate::ast::*;
+
+/// Scans `source` into the token arena.  Returns false when the source is
+/// not lexically well formed; every failure is reported in `errors`.
+pub fn lex(
+    names: &mut Vec<String>,
+    nodes: &mut Vec<i64>,
+    source: &str,
+    file: i64,
+    errors: &mut Vec<Diag>,
+) -> bool {
+    let bytes = source.as_bytes();
+    let len = bytes.len();
+    let mut pos = 0usize;
+    while pos < len {
+        pos = lex_byte(names, nodes, bytes, pos, source, file, errors);
+    }
+    push_token(nodes, TOK_EOF, NONE, NONE, len as i64, len as i64, file);
+    errors.is_empty()
 }
 
-impl Span {
-    pub fn new(start: usize, end: usize, line: usize, col: usize) -> Self {
-        Self { start, end, line, col }
+/// Scans one byte at `pos`, dispatching to the scanner for its class.
+fn lex_byte(
+    names: &mut Vec<String>,
+    nodes: &mut Vec<i64>,
+    bytes: &[u8],
+    pos: usize,
+    source: &str,
+    file: i64,
+    errors: &mut Vec<Diag>,
+) -> usize {
+    let byte = byte_at(bytes, pos);
+    if is_space(byte) {
+        pos + 1
+    } else if byte == b'\n' {
+        push_newline(nodes, pos, file);
+        pos + 1
+    } else if byte == b'#' {
+        lex_comment(bytes, pos, file, errors)
+    } else if is_ident_start(byte) {
+        lex_ident(names, nodes, bytes, pos, file, source, errors)
+    } else if is_digit(byte) {
+        lex_number(nodes, bytes, pos, file, errors)
+    } else {
+        lex_symbol(names, nodes, bytes, pos, file, errors)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TokenKind {
-    // Keywords
-    Pub,
-    Const,
-    Val,
-    Var,
-    Type,
-    End,
-    Mod,
-    Native,
-    Fun,
-    Impure,
-    Try,
-    Return,
-    Match,
-    If,
-    Else,
-    While,
-    Break,
-    Continue,
-    Use,
-    As,
-    Trait,
-    Impl,
-    For,
-    Mut,
-
-    // Identifiers
-    SnakeIdent(String),
-    PascalIdent(String),
-    ScreamingIdent(String),
-
-    // Literals
-    IntLit(i64),
-    HexLit(u64),
-    BoolLit(bool),
-
-    // Symbols & Operators
-    Colon,
-    Semicolon,
-    Comma,
-    Dot,
-    DotDot,
-    At,
-    FatArrow,
-    Ampersand,
-    Pipe,
-    Caret,
-    Shl,
-    Shr,
-    Eq,
-    EqEq,
-    Not,
-    NotEq,
-    Lt,
-    Gt,
-    LtEq,
-    GtEq,
-    Plus,
-    Minus,
-    Star,
-    Slash,
-    AmpAmp,
-    PipePipe,
-
-    // Delimiters
-    LParen,
-    RParen,
-    LBracket,
-    RBracket,
-
-    // Comments
-    DocComment(String),
-
-    Eof,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Token {
-    pub kind: TokenKind,
-    pub span: Span,
-}
-
-#[derive(Debug, Clone)]
-pub struct LexerError {
-    pub message: String,
-    pub span: Span,
-}
-
-impl fmt::Display for LexerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Lexical Error at line {}, col {}: {}",
-            self.span.line, self.span.col, self.message
-        )
+/// Reads a byte at `pos`, or 0 past the end of the slice.  There is no
+/// indexing anywhere in this module.
+fn byte_at(bytes: &[u8], pos: usize) -> u8 {
+    match bytes.get(pos) {
+        Some(byte) => *byte,
+        None => 0,
     }
 }
 
-pub struct Lexer<'a> {
-    source: &'a str,
-    chars: Vec<(usize, char)>,
-    cursor: usize,
-    line: usize,
-    col: usize,
+fn is_space(byte: u8) -> bool {
+    byte == b' ' || byte == b'\t' || byte == b'\r'
 }
 
-impl<'a> Lexer<'a> {
-    pub fn new(source: &'a str) -> Self {
-        let chars: Vec<(usize, char)> = source.char_indices().collect();
-        Self {
-            source,
-            chars,
-            cursor: 0,
-            line: 1,
-            col: 1,
+fn is_letter(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_uppercase()
+}
+
+fn is_digit(byte: u8) -> bool {
+    byte.is_ascii_digit()
+}
+
+fn is_ident_start(byte: u8) -> bool {
+    is_letter(byte) || byte == b'_'
+}
+
+fn is_ident_char(byte: u8) -> bool {
+    is_letter(byte) || is_digit(byte) || byte == b'_'
+}
+
+fn is_hex_digit(byte: u8) -> bool {
+    is_digit(byte) || (b'a'..=b'f').contains(&byte) || (b'A'..=b'F').contains(&byte)
+}
+
+fn hex_digit(byte: u8) -> Option<u64> {
+    if byte.is_ascii_digit() {
+        Some((byte - b'0') as u64)
+    } else if (b'a'..=b'f').contains(&byte) {
+        Some((byte - b'a' + 10) as u64)
+    } else if (b'A'..=b'F').contains(&byte) {
+        Some((byte - b'A' + 10) as u64)
+    } else {
+        None
+    }
+}
+
+fn push_token(
+    nodes: &mut Vec<i64>,
+    kind: i64,
+    name: i64,
+    value: i64,
+    start: i64,
+    end: i64,
+    file: i64,
+) {
+    alloc_node(nodes, &[NODE_TOKEN, file, start, end, kind, name, value, NONE, NONE, NONE]);
+}
+
+fn push_newline(nodes: &mut Vec<i64>, pos: usize, file: i64) {
+    push_token(nodes, TOK_NL, NONE, NONE, pos as i64, pos as i64 + 1, file);
+}
+
+/// Interning an operator symbol and emitting its token; returns the end
+/// position for the caller.
+fn push_symbol(names: &mut Vec<String>, nodes: &mut Vec<i64>, text: &str, start: usize, end: usize, file: i64) -> usize {
+    let name = intern(names, text);
+    push_token(nodes, TOK_SYM, name, NONE, start as i64, end as i64, file);
+    end
+}
+
+// ---------------------------------------------------------------------------
+// Comments.
+// ---------------------------------------------------------------------------
+
+fn is_doc_comment(bytes: &[u8], pos: usize) -> bool {
+    byte_at(bytes, pos + 1) == b'!'
+}
+
+/// True when the bytes at `pos` start a block comment: `#|` or `#!|`.
+/// The `#` must be at `pos` itself, so scanning inside a comment never
+/// mistakes the byte before a `|#` close (or any other `|`) for an
+/// opener.
+fn is_block_opener(bytes: &[u8], pos: usize) -> bool {
+    if byte_at(bytes, pos) != b'#' {
+        return false;
+    }
+    if byte_at(bytes, pos + 1) == b'|' {
+        return true;
+    }
+    byte_at(bytes, pos + 1) == b'!' && byte_at(bytes, pos + 2) == b'|'
+}
+
+fn comment_body_start(bytes: &[u8], pos: usize) -> usize {
+    if byte_at(bytes, pos + 1) == b'!' {
+        pos + 3
+    } else {
+        pos + 2
+    }
+}
+
+/// Scans a comment starting at `pos` (which points at `#`).
+fn lex_comment(bytes: &[u8], pos: usize, file: i64, errors: &mut Vec<Diag>) -> usize {
+    if is_block_opener(bytes, pos) {
+        let body = comment_body_start(bytes, pos);
+        lex_block_comment(bytes, body, pos, file, errors)
+    } else if is_doc_comment(bytes, pos) {
+        lex_line_comment(bytes, pos + 2)
+    } else {
+        lex_line_comment(bytes, pos + 1)
+    }
+}
+
+fn lex_line_comment(bytes: &[u8], mut pos: usize) -> usize {
+    while byte_at(bytes, pos) != b'\n' && byte_at(bytes, pos) != 0 {
+        pos += 1;
+    }
+    pos
+}
+
+fn lex_block_comment(bytes: &[u8], mut pos: usize, start: usize, file: i64, errors: &mut Vec<Diag>) -> usize {
+    while byte_at(bytes, pos) != 0 {
+        if is_block_opener(bytes, pos) {
+            report_nested_comment(file, pos, errors);
+            pos += 1;
+            continue;
+        }
+        if is_block_close(bytes, pos) {
+            return pos + 2;
+        }
+        pos += 1;
+    }
+    report_unterminated_comment(file, start, errors);
+    pos
+}
+
+fn is_block_close(bytes: &[u8], pos: usize) -> bool {
+    byte_at(bytes, pos) == b'|' && byte_at(bytes, pos + 1) == b'#'
+}
+
+fn report_nested_comment(file: i64, pos: usize, errors: &mut Vec<Diag>) {
+    push_error(errors, "nested block comment is not allowed", file, pos as i64, pos as i64 + 2);
+}
+
+fn report_unterminated_comment(file: i64, start: usize, errors: &mut Vec<Diag>) {
+    push_error(errors, "unterminated block comment", file, start as i64, start as i64 + 2);
+}
+
+// ---------------------------------------------------------------------------
+// Identifiers.
+// ---------------------------------------------------------------------------
+
+fn lex_ident(
+    names: &mut Vec<String>,
+    nodes: &mut Vec<i64>,
+    bytes: &[u8],
+    pos: usize,
+    file: i64,
+    source: &str,
+    errors: &mut Vec<Diag>,
+) -> usize {
+    let end = scan_ident_end(bytes, pos);
+    match slice_text(source, pos, end, errors) {
+        Some(text) => {
+            let name = intern(names, text);
+            push_token(nodes, TOK_IDENT, name, NONE, pos as i64, end as i64, file);
+            end
+        }
+        None => end,
+    }
+}
+
+fn scan_ident_end(bytes: &[u8], mut end: usize) -> usize {
+    while is_ident_char(byte_at(bytes, end)) {
+        end += 1;
+    }
+    end
+}
+
+fn slice_text<'a>(source: &'a str, start: usize, end: usize, errors: &mut Vec<Diag>) -> Option<&'a str> {
+    match source.get(start..end) {
+        Some(text) => Some(text),
+        None => {
+            push_internal(errors, "slice out of range");
+            None
         }
     }
+}
 
-    pub fn tokenize(&mut self) -> Result<Vec<Token>, LexerError> {
-        let mut tokens = Vec::new();
+// ---------------------------------------------------------------------------
+// Numbers.
+// ---------------------------------------------------------------------------
 
-        loop {
-            self.skip_whitespace();
-            if self.is_at_end() {
-                tokens.push(Token {
-                    kind: TokenKind::Eof,
-                    span: Span::new(self.source.len(), self.source.len(), self.line, self.col),
-                });
-                break;
-            }
-
-            if let Some(doc) = self.try_lex_comment()? {
-                if let Some(doc_token) = doc {
-                    tokens.push(doc_token);
-                }
-                continue;
-            }
-
-            let start_pos = self.current_pos();
-            let start_line = self.line;
-            let start_col = self.col;
-
-            let ch = match self.peek() {
-                Some(character) => character,
-                None => break,
-            };
-
-            let kind = match ch {
-                '(' => { self.advance(); TokenKind::LParen }
-                ')' => { self.advance(); TokenKind::RParen }
-                '[' => { self.advance(); TokenKind::LBracket }
-                ']' => { self.advance(); TokenKind::RBracket }
-                ':' => { self.advance(); TokenKind::Colon }
-                ';' => { self.advance(); TokenKind::Semicolon }
-                ',' => { self.advance(); TokenKind::Comma }
-                '@' => { self.advance(); TokenKind::At }
-                '+' => { self.advance(); TokenKind::Plus }
-                '-' => { self.advance(); TokenKind::Minus }
-                '*' => { self.advance(); TokenKind::Star }
-                '/' => { self.advance(); TokenKind::Slash }
-                '^' => { self.advance(); TokenKind::Caret }
-
-                '.' => {
-                    self.advance();
-                    if self.match_char('.') {
-                        TokenKind::DotDot
-                    } else {
-                        TokenKind::Dot
-                    }
-                }
-
-                '=' => {
-                    self.advance();
-                    if self.match_char('>') {
-                        TokenKind::FatArrow
-                    } else if self.match_char('=') {
-                        TokenKind::EqEq
-                    } else {
-                        TokenKind::Eq
-                    }
-                }
-
-                '!' => {
-                    self.advance();
-                    if self.match_char('=') {
-                        TokenKind::NotEq
-                    } else {
-                        TokenKind::Not
-                    }
-                }
-
-                '<' => {
-                    self.advance();
-                    if self.match_char('<') {
-                        TokenKind::Shl
-                    } else if self.match_char('=') {
-                        TokenKind::LtEq
-                    } else {
-                        TokenKind::Lt
-                    }
-                }
-
-                '>' => {
-                    self.advance();
-                    if self.match_char('>') {
-                        TokenKind::Shr
-                    } else if self.match_char('=') {
-                        TokenKind::GtEq
-                    } else {
-                        TokenKind::Gt
-                    }
-                }
-
-                '&' => {
-                    self.advance();
-                    if self.match_char('&') {
-                        TokenKind::AmpAmp
-                    } else {
-                        TokenKind::Ampersand
-                    }
-                }
-
-                '|' => {
-                    self.advance();
-                    if self.match_char('|') {
-                        TokenKind::PipePipe
-                    } else {
-                        TokenKind::Pipe
-                    }
-                }
-
-                '0'..='9' => self.lex_number(start_line, start_col)?,
-                'a'..='z' | 'A'..='Z' => self.lex_identifier_or_keyword(start_line, start_col)?,
-
-                unhandled_char => return Err(self.error(&format!("Unexpected character '{}'", unhandled_char))),
-            };
-
-            let end_pos = self.current_pos();
-            tokens.push(Token {
-                kind,
-                span: Span::new(start_pos, end_pos, start_line, start_col),
-            });
-        }
-
-        Ok(tokens)
+fn lex_number(nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, file: i64, errors: &mut Vec<Diag>) -> usize {
+    if byte_at(bytes, pos) == b'0' && byte_at(bytes, pos + 1) == b'x' {
+        lex_hex(nodes, bytes, pos, file, errors)
+    } else {
+        lex_decimal(nodes, bytes, pos, file, errors)
     }
+}
 
-    fn lex_identifier_or_keyword(&mut self, start_line: usize, start_col: usize) -> Result<TokenKind, LexerError> {
-        let start_pos = self.current_pos();
-        while let Some(character) = self.peek() {
-            if character.is_ascii_alphanumeric() || character == '_' {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-        let end_pos = self.current_pos();
-        let ident_str = &self.source[start_pos..end_pos];
-
-        if let Some(keyword_kind) = self.lookup_keyword(ident_str) {
-            return Ok(keyword_kind);
-        }
-
-        let first = match ident_str.chars().next() {
-            Some(character) => character,
-            None => return Err(LexerError {
-                message: "Empty identifier string encountered".to_string(),
-                span: Span::new(start_pos, end_pos, start_line, start_col),
-            }),
-        };
-
-        if first.is_ascii_lowercase() {
-            for character in ident_str.chars() {
-                if !character.is_ascii_lowercase() && !character.is_ascii_digit() && character != '_' {
-                    return Err(LexerError {
-                        message: format!("Identifier '{}' violates snake_case rule", ident_str),
-                        span: Span::new(start_pos, end_pos, start_line, start_col),
-                    });
-                }
-            }
-            Ok(TokenKind::SnakeIdent(ident_str.to_string()))
-        } else if first.is_ascii_uppercase() {
-            if ident_str.contains('_') {
-                for character in ident_str.chars() {
-                    if !character.is_ascii_uppercase() && !character.is_ascii_digit() && character != '_' {
-                        return Err(LexerError {
-                            message: format!("Constant '{}' violates SCREAMING_SNAKE_CASE rule", ident_str),
-                            span: Span::new(start_pos, end_pos, start_line, start_col),
-                        });
-                    }
-                }
-                Ok(TokenKind::ScreamingIdent(ident_str.to_string()))
-            } else {
-                for character in ident_str.chars() {
-                    if !character.is_ascii_alphanumeric() {
-                        return Err(LexerError {
-                            message: format!("Type/Module '{}' violates PascalCase rule", ident_str),
-                            span: Span::new(start_pos, end_pos, start_line, start_col),
-                        });
-                    }
-                }
-                Ok(TokenKind::PascalIdent(ident_str.to_string()))
-            }
+fn lex_decimal(nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, file: i64, errors: &mut Vec<Diag>) -> usize {
+    let start = pos;
+    let end = scan_digits(bytes, pos);
+    if let Some(value) = decimal_value(bytes, start, end, file, errors) {
+        if is_ident_char(byte_at(bytes, end)) {
+            push_error(errors, "invalid character in integer literal", file, start as i64, end as i64);
         } else {
-            Err(LexerError {
-                message: format!("Invalid identifier start character '{}'", first),
-                span: Span::new(start_pos, end_pos, start_line, start_col),
-            })
+            push_token(nodes, TOK_INT, NONE, value, start as i64, end as i64, file);
         }
     }
+    end
+}
 
-    fn lookup_keyword(&self, ident_str: &str) -> Option<TokenKind> {
-        if ident_str == "pub" { Some(TokenKind::Pub) }
-        else if ident_str == "const" { Some(TokenKind::Const) }
-        else if ident_str == "val" { Some(TokenKind::Val) }
-        else if ident_str == "var" { Some(TokenKind::Var) }
-        else if ident_str == "type" { Some(TokenKind::Type) }
-        else if ident_str == "end" { Some(TokenKind::End) }
-        else if ident_str == "mod" { Some(TokenKind::Mod) }
-        else if ident_str == "native" { Some(TokenKind::Native) }
-        else if ident_str == "fun" { Some(TokenKind::Fun) }
-        else if ident_str == "impure" { Some(TokenKind::Impure) }
-        else if ident_str == "try" { Some(TokenKind::Try) }
-        else if ident_str == "return" { Some(TokenKind::Return) }
-        else if ident_str == "match" { Some(TokenKind::Match) }
-        else if ident_str == "if" { Some(TokenKind::If) }
-        else if ident_str == "else" { Some(TokenKind::Else) }
-        else if ident_str == "while" { Some(TokenKind::While) }
-        else if ident_str == "break" { Some(TokenKind::Break) }
-        else if ident_str == "continue" { Some(TokenKind::Continue) }
-        else if ident_str == "use" { Some(TokenKind::Use) }
-        else if ident_str == "as" { Some(TokenKind::As) }
-        else if ident_str == "trait" { Some(TokenKind::Trait) }
-        else if ident_str == "impl" { Some(TokenKind::Impl) }
-        else if ident_str == "for" { Some(TokenKind::For) }
-        else if ident_str == "mut" { Some(TokenKind::Mut) }
-        else if ident_str == "true" { Some(TokenKind::BoolLit(true)) }
-        else if ident_str == "false" { Some(TokenKind::BoolLit(false)) }
-        else { None }
+fn scan_digits(bytes: &[u8], mut end: usize) -> usize {
+    while is_digit(byte_at(bytes, end)) {
+        end += 1;
     }
+    end
+}
 
-    fn lex_number(&mut self, start_line: usize, start_col: usize) -> Result<TokenKind, LexerError> {
-        let start_pos = self.current_pos();
-
-        if self.peek() == Some('0') {
-            self.advance();
-            if self.peek() == Some('x') || self.peek() == Some('X') {
-                self.advance();
-                let hex_start = self.current_pos();
-                while let Some(character) = self.peek() {
-                    if character.is_ascii_hexdigit() {
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
-                let hex_str = &self.source[hex_start..self.current_pos()];
-                let val = u64::from_str_radix(hex_str, 16).map_err(|parse_err| LexerError {
-                    message: format!("Invalid hex literal '0x{}': {}", hex_str, parse_err),
-                    span: Span::new(start_pos, self.current_pos(), start_line, start_col),
-                })?;
-                return Ok(TokenKind::HexLit(val));
-            }
+fn decimal_value(bytes: &[u8], start: usize, end: usize, file: i64, errors: &mut Vec<Diag>) -> Option<i64> {
+    let mut value: u64 = 0;
+    let mut pos = start;
+    while pos < end {
+        let digit = (byte_at(bytes, pos) - b'0') as u64;
+        {
+            let next = accumulate_digit(value, digit, 10, "integer literal is too large", (file, start as i64, pos as i64), errors)?;
+            value = next
         }
-
-        while let Some(character) = self.peek() {
-            if character.is_ascii_digit() {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-
-        let num_str = &self.source[start_pos..self.current_pos()];
-        let val = num_str.parse::<i64>().map_err(|parse_err| LexerError {
-            message: format!("Invalid integer literal '{}': {}", num_str, parse_err),
-            span: Span::new(start_pos, self.current_pos(), start_line, start_col),
-        })?;
-
-        Ok(TokenKind::IntLit(val))
+        pos += 1;
     }
+    if value > i64::MAX as u64 {
+        push_error(errors, "integer literal is too large", file, start as i64, end as i64);
+        return None;
+    }
+    Some(value as i64)
+}
 
-    fn try_lex_comment(&mut self) -> Result<Option<Option<Token>>, LexerError> {
-        if self.peek() != Some('#') {
-            return Ok(None);
-        }
+fn lex_hex(nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, file: i64, errors: &mut Vec<Diag>) -> usize {
+    let start = pos;
+    let end = scan_hex_digits(bytes, pos + 2);
+    if end == start + 2 {
+        push_error(errors, "expected hexadecimal digits after 0x", file, start as i64, end as i64);
+        return end;
+    }
+    if is_ident_char(byte_at(bytes, end)) {
+        push_error(errors, "invalid digit in hexadecimal literal", file, start as i64, end as i64);
+        return end;
+    }
+    if let Some(value) = hex_value(bytes, start + 2, end, file, errors) { push_token(nodes, TOK_HEX, NONE, value, start as i64, end as i64, file) }
+    end
+}
 
-        let start_pos = self.current_pos();
-        let start_line = self.line;
-        let start_col = self.col;
-        self.advance();
+fn scan_hex_digits(bytes: &[u8], mut end: usize) -> usize {
+    while is_hex_digit(byte_at(bytes, end)) {
+        end += 1;
+    }
+    end
+}
 
-        if self.peek() == Some('!') {
-            self.advance();
-
-            if self.peek() == Some('|') {
-                self.advance();
-                let content_start = self.current_pos();
-
-                while !self.is_at_end() {
-                    if self.peek() == Some('|') && self.peek_next() == Some('#') {
-                        let content = self.source[content_start..self.current_pos()].trim().to_string();
-                        self.advance();
-                        self.advance();
-                        return Ok(Some(Some(Token {
-                            kind: TokenKind::DocComment(content),
-                            span: Span::new(start_pos, self.current_pos(), start_line, start_col),
-                        })));
-                    }
-
-                    if self.peek() == Some('#') && self.peek_next() == Some('|') {
-                        return Err(self.error("Nested block comments are not allowed"));
-                    }
-
-                    if self.peek() == Some('#')
-                        && self.peek_next() == Some('!')
-                        && self.peek_next_next() == Some('|')
-                    {
-                        return Err(self.error("Nested doc block comments are not allowed"));
-                    }
-
-                    self.advance();
-                }
-
-                return Err(self.error("Unterminated block doc comment"));
-            }
-
-            let content_start = self.current_pos();
-            while let Some(character) = self.peek() {
-                if character == '\n' {
-                    break;
-                }
-                self.advance();
-            }
-
-            let content = self.source[content_start..self.current_pos()].trim().to_string();
-            return Ok(Some(Some(Token {
-                kind: TokenKind::DocComment(content),
-                span: Span::new(start_pos, self.current_pos(), start_line, start_col),
-            })));
-        }
-
-        if self.peek() == Some('|') {
-            self.advance();
-
-            while !self.is_at_end() {
-                if self.peek() == Some('|') && self.peek_next() == Some('#') {
-                    self.advance();
-                    self.advance();
-                    return Ok(Some(None));
-                }
-
-                if self.peek() == Some('#') && self.peek_next() == Some('|') {
-                    return Err(self.error("Nested block comments are not allowed"));
-                }
-
-                if self.peek() == Some('#')
-                    && self.peek_next() == Some('!')
-                    && self.peek_next_next() == Some('|')
+fn hex_value(bytes: &[u8], start: usize, end: usize, file: i64, errors: &mut Vec<Diag>) -> Option<i64> {
+    let mut value: u64 = 0;
+    let mut pos = start;
+    while pos < end {
+        match hex_digit(byte_at(bytes, pos)) {
+            Some(digit) => {
                 {
-                    return Err(self.error("Nested doc block comments are not allowed"));
+                    let next = accumulate_digit(value, digit, 16, "hexadecimal literal is too large", (file, start as i64, pos as i64), errors)?;
+                    value = next
                 }
-
-                self.advance();
             }
-
-            return Err(self.error("Unterminated block comment"));
-        }
-
-        while let Some(character) = self.peek() {
-            if character == '\n' {
-                break;
-            }
-            self.advance();
-        }
-
-        Ok(Some(None))
-    }
-
-    fn skip_whitespace(&mut self) {
-        while let Some(character) = self.peek() {
-            if character == ' ' || character == '\t' || character == '\r' || character == '\n' {
-                self.advance();
-            } else {
-                break;
+            None => {
+                push_internal(errors, "hex digit invariant broken");
+                return None;
             }
         }
+        pos += 1;
     }
+    Some(value as i64)
+}
 
-    fn advance(&mut self) -> Option<char> {
-        if self.cursor >= self.chars.len() {
-            return None;
-        }
-        let character = self.chars[self.cursor].1;
-        self.cursor += 1;
-        if character == '\n' {
-            self.line += 1;
-            self.col = 1;
-        } else {
-            self.col += 1;
-        }
-        Some(character)
-    }
-
-    fn match_char(&mut self, expected: char) -> bool {
-        if self.peek() == Some(expected) {
-            self.advance();
-            true
-        } else {
-            false
-        }
-    }
-
-    fn peek(&self) -> Option<char> {
-        if self.cursor < self.chars.len() {
-            Some(self.chars[self.cursor].1)
-        } else {
+/// Multiplies `value` by `radix` and adds `digit`, reporting an overflow
+/// as a diagnostic.
+fn accumulate_digit(
+    value: u64,
+    digit: u64,
+    radix: u64,
+    message: &str,
+    span: (i64, i64, i64),
+    errors: &mut Vec<Diag>,
+) -> Option<u64> {
+    let (file, start, end) = span;
+    match value.checked_mul(radix).and_then(|v| v.checked_add(digit)) {
+        Some(next) => Some(next),
+        None => {
+            push_error(errors, message, file, start, end);
             None
         }
     }
+}
 
-    fn peek_next(&self) -> Option<char> {
-        if self.cursor + 1 < self.chars.len() {
-            Some(self.chars[self.cursor + 1].1)
-        } else {
-            None
+// ---------------------------------------------------------------------------
+// Symbols.
+// ---------------------------------------------------------------------------
+
+fn lex_symbol(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, file: i64, errors: &mut Vec<Diag>) -> usize {
+    let byte = byte_at(bytes, pos);
+    let next = byte_at(bytes, pos + 1);
+    match two_char_symbol(byte, next) {
+        Some(text) => push_symbol(names, nodes, text, pos, pos + 2, file),
+        None => lex_one_char_symbol(names, nodes, bytes, pos, file, errors),
+    }
+}
+
+fn lex_one_char_symbol(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, file: i64, errors: &mut Vec<Diag>) -> usize {
+    match one_char_symbol(byte_at(bytes, pos)) {
+        Some(text) => push_symbol(names, nodes, text, pos, pos + 1, file),
+        None => report_unexpected(file, pos, errors),
+    }
+}
+
+fn report_unexpected(file: i64, pos: usize, errors: &mut Vec<Diag>) -> usize {
+    push_error(errors, "unexpected character", file, pos as i64, pos as i64 + 1);
+    pos + 1
+}
+
+fn two_char_symbol(byte: u8, next: u8) -> Option<&'static str> {
+    if byte == b'<' {
+        less_symbol(next)
+    } else if byte == b'>' {
+        greater_symbol(next)
+    } else if byte == b'=' {
+        equal_symbol(next)
+    } else if byte == b'!' {
+        not_symbol(next)
+    } else if byte == b'&' {
+        and_symbol(next)
+    } else if byte == b'|' {
+        or_symbol(next)
+    } else if byte == b'.' {
+        dot_symbol(next)
+    } else {
+        None
+    }
+}
+
+fn less_symbol(next: u8) -> Option<&'static str> {
+    if next == b'<' {
+        Some("<<")
+    } else if next == b'=' {
+        Some("<=")
+    } else {
+        None
+    }
+}
+
+fn greater_symbol(next: u8) -> Option<&'static str> {
+    if next == b'>' {
+        Some(">>")
+    } else if next == b'=' {
+        Some(">=")
+    } else {
+        None
+    }
+}
+
+fn equal_symbol(next: u8) -> Option<&'static str> {
+    if next == b'=' {
+        Some("==")
+    } else if next == b'>' {
+        Some("=>")
+    } else {
+        None
+    }
+}
+
+fn not_symbol(next: u8) -> Option<&'static str> {
+    if next == b'=' {
+        Some("!=")
+    } else {
+        None
+    }
+}
+
+fn and_symbol(next: u8) -> Option<&'static str> {
+    if next == b'&' {
+        Some("&&")
+    } else {
+        None
+    }
+}
+
+fn or_symbol(next: u8) -> Option<&'static str> {
+    if next == b'|' {
+        Some("||")
+    } else {
+        None
+    }
+}
+
+fn dot_symbol(next: u8) -> Option<&'static str> {
+    if next == b'.' {
+        Some("..")
+    } else {
+        None
+    }
+}
+
+fn one_char_symbol(byte: u8) -> Option<&'static str> {
+    math_symbol(byte)
+        .or(bit_symbol(byte))
+        .or(group_symbol(byte))
+        .or(punct_symbol(byte))
+        .or(relational_symbol(byte))
+}
+
+fn math_symbol(byte: u8) -> Option<&'static str> {
+    if byte == b'+' {
+        Some("+")
+    } else if byte == b'-' {
+        Some("-")
+    } else if byte == b'*' {
+        Some("*")
+    } else if byte == b'/' {
+        Some("/")
+    } else {
+        None
+    }
+}
+
+fn bit_symbol(byte: u8) -> Option<&'static str> {
+    if byte == b'^' {
+        Some("^")
+    } else if byte == b'|' {
+        Some("|")
+    } else if byte == b'&' {
+        Some("&")
+    } else {
+        None
+    }
+}
+
+fn group_symbol(byte: u8) -> Option<&'static str> {
+    if byte == b'(' {
+        Some("(")
+    } else if byte == b')' {
+        Some(")")
+    } else if byte == b'[' {
+        Some("[")
+    } else if byte == b']' {
+        Some("]")
+    } else {
+        None
+    }
+}
+
+fn punct_symbol(byte: u8) -> Option<&'static str> {
+    if byte == b',' {
+        Some(",")
+    } else if byte == b':' {
+        Some(":")
+    } else if byte == b'.' {
+        Some(".")
+    } else if byte == b'@' {
+        Some("@")
+    } else if byte == b';' {
+        Some(";")
+    } else {
+        None
+    }
+}
+
+fn relational_symbol(byte: u8) -> Option<&'static str> {
+    if byte == b'<' {
+        Some("<")
+    } else if byte == b'>' {
+        Some(">")
+    } else if byte == b'=' {
+        Some("=")
+    } else if byte == b'!' {
+        Some("!")
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lex_all(source: &str) -> (Vec<i64>, Vec<Diag>) {
+        let mut names: Vec<String> = Vec::new();
+        let mut nodes: Vec<i64> = Vec::new();
+        let mut errors: Vec<Diag> = Vec::new();
+        let ok = lex(&mut names, &mut nodes, source, 0, &mut errors);
+        let mut kinds: Vec<i64> = Vec::new();
+        let mut idx = 0i64;
+        while idx < nodes.len() as i64 / NODE_STRIDE {
+            if node_tag(&nodes, idx) == NODE_TOKEN {
+                kinds.push(node_a(&nodes, idx));
+            }
+            idx += 1;
+        }
+        assert!(ok || errors.len() > 0);
+        (kinds, errors)
+    }
+
+    /// Lexes `source` and returns only its diagnostics, for tests that
+    /// assert rejection behavior and never need the token stream.
+    fn lex_errors(source: &str) -> Vec<Diag> {
+        let mut names: Vec<String> = Vec::new();
+        let mut nodes: Vec<i64> = Vec::new();
+        let mut errors: Vec<Diag> = Vec::new();
+        let ok = lex(&mut names, &mut nodes, source, 0, &mut errors);
+        assert!(ok || errors.len() > 0);
+        errors
+    }
+
+    #[test]
+    fn lexes_comments_and_literals() {
+        // `=` is a symbol token, not an identifier; the block comment
+        // produces no tokens at all.
+        let (kinds, errors) = lex_all("#| block |#\nval x = 0x1F\n");
+        assert_eq!(errors.len(), 0);
+        assert_eq!(
+            kinds,
+            vec![TOK_NL, TOK_IDENT, TOK_IDENT, TOK_SYM, TOK_HEX, TOK_NL, TOK_EOF]
+        );
+    }
+
+    #[test]
+    fn rejects_nested_block_comment() {
+        let errors = lex_errors("#| outer #| inner |# |#\n");
+        assert_eq!(errors.len(), 1);
+        match errors.get(0) {
+            Some(diag) => assert!(diag.0.contains("nested")),
+            None => assert!(false),
         }
     }
 
-    fn peek_next_next(&self) -> Option<char> {
-        if self.cursor + 2 < self.chars.len() {
-            Some(self.chars[self.cursor + 2].1)
-        } else {
-            None
+    #[test]
+    fn rejects_bad_hex() {
+        let errors = lex_errors("0xG123\n");
+        assert_eq!(errors.len(), 1);
+        match errors.get(0) {
+            Some(diag) => assert!(diag.0.contains("hex")),
+            None => assert!(false),
         }
     }
 
-    fn current_pos(&self) -> usize {
-        if self.cursor < self.chars.len() {
-            self.chars[self.cursor].0
-        } else {
-            self.source.len()
+    #[test]
+    fn rejects_unexpected_char() {
+        let errors = lex_errors("$100\n");
+        assert_eq!(errors.len(), 1);
+        match errors.get(0) {
+            Some(diag) => assert!(diag.0.contains("unexpected")),
+            None => assert!(false),
         }
     }
 
-    fn is_at_end(&self) -> bool {
-        self.cursor >= self.chars.len()
-    }
-
-    fn error(&self, message: &str) -> LexerError {
-        LexerError {
-            message: message.to_string(),
-            span: Span::new(self.current_pos(), self.current_pos(), self.line, self.col),
+    #[test]
+    fn rejects_unterminated_block_comment() {
+        let errors = lex_errors("#| never closed\n");
+        assert_eq!(errors.len(), 1);
+        match errors.get(0) {
+            Some(diag) => assert!(diag.0.contains("unterminated")),
+            None => assert!(false),
         }
     }
 }
