@@ -434,3 +434,92 @@ fn app_workflow_wraps_errors_through_range_to_app() {
         "app_workflow(101) = AppRange(TooLarge(101))"
     );
 }
+
+// ---------------------------------------------------------------------------
+// End-to-end fixture gate: compile and run the Euclidean-division fixture
+// (`tests/fixtures/verify_math/euclid_div.cnb`) and compare its actual
+// stdout against the oracle above, line by line.  This is the check the
+// fixture's header promises: the compiled program's real runtime output,
+// not a re-statement of the oracle.  Every other fixture in the corpus is
+// gated by the repro harness or the pre-commit script; this is the sole
+// fixture under tests/fixtures/verify_math/.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn euclid_div_fixture_output_matches_oracle() {
+    let cinnabar = env!("CARGO_BIN_EXE_cinnabar");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root
+        .join("tests")
+        .join("fixtures")
+        .join("verify_math")
+        .join("euclid_div.cnb");
+    let dir = std::env::temp_dir().join(format!("cinnabar_verify_math_{}", std::process::id()));
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => {}
+        Err(err) => {
+            eprintln!("cannot create temp dir: {}", err);
+            return;
+        }
+    }
+    let bin = dir.join("euclid_div_bin");
+
+    let compile = std::process::Command::new(cinnabar)
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&bin)
+        .output();
+    match compile {
+        Ok(out) => {
+            assert!(
+                out.status.success(),
+                "euclid_div.cnb failed to compile (exit {:?}):\n{}\n{}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Err(err) => {
+            eprintln!("spawn cinnabar failed: {}", err);
+            return;
+        }
+    }
+
+    let run = std::process::Command::new(&bin).output();
+    match run {
+        Ok(out) => {
+            assert!(
+                out.status.success(),
+                "euclid_div binary failed (exit {:?})",
+                out.status.code()
+            );
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            let pairs = [(10i64, 3i64), (21, 3), (21, 5), (-10, 3), (10, -3), (-10, -3)];
+            let mut expected = String::new();
+            let mut idx = 0usize;
+            while idx < pairs.len() {
+                match pairs.get(idx) {
+                    Some((a, b)) => {
+                        let q = euclid_div(*a, *b);
+                        let r = euclid_rem(*a, *b);
+                        expected.push_str(&format!("{}/{}={} {}\n", a, b, q, r));
+                    }
+                    None => break,
+                }
+                idx += 1;
+            }
+            assert_eq!(
+                stdout, expected,
+                "euclid_div.cnb runtime output must match the oracle line by line"
+            );
+        }
+        Err(err) => {
+            eprintln!("spawn euclid_div binary failed: {}", err);
+        }
+    }
+
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => {}
+        Err(err) => eprintln!("temp cleanup failed: {}", err),
+    }
+}

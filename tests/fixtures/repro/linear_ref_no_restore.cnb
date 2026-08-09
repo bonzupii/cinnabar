@@ -1,0 +1,37 @@
+#! A callee must not consume a caller's linear handle through a `&mut`
+#! parameter and return without restoring it: the caller's bookkeeping
+#! would still believe the handle is live, so the caller's later use of it
+#! would be a use-after-free (or double free).
+
+pub mod Memory
+  pub nat type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+  end
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+end
+
+use Memory.allocate
+use Memory.deallocate
+
+pub type Holder
+  pub block: Memory.Block
+  pub tag: Int
+end
+
+fun steal_block(r: &mut Holder) Int
+  deallocate(r.block)
+  return 0
+end
+
+pub fun main() Int
+  val block = match allocate(1)
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  val holder = Holder(block: block, tag: 7)
+  val code = steal_block(&mut holder)
+  deallocate(holder.block)
+  return code
+end

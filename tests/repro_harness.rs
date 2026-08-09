@@ -57,15 +57,35 @@ const EXPECT_OK: &[(&str, i32)] = &[
     ("div_runtime", 7), // runtime zero divisor -> Err(DivByZero), no trap
     ("multiline_const", 30), // const initializer spanning lines in parens
     ("fib", 155), // while loops without a user-declared Unit (builtin Unit)
+    ("linear_field_reinit", 0), // linear field sub-node cycle on a local: consume -> reinit -> consume -> exit
+    ("linear_ref_swap", 0), // design-doc cycle through &mut: deallocate(ref.block) then ref.block = replacement
+    ("linear_field_consume", 0), // bug-report 2a fixed shape: linear-in-struct is consumable end-to-end
+    ("linear_ref_nonlinear_read", 14), // non-linear field reads through &mut are plain reads (no false positive)
+    ("ret_borrow_shared_twice", 0), // bug-report d5 control: two shared borrows of one input coexist; free after the last use
+    ("ret_borrow_single_origin", 0), // bug-report d7d: callee-origin summary — view_of_a's returned borrow traces to its first input only, so freeing the never-borrowed second input while the view is live compiles
 ];
 
 /// Programs the compiler must reject.
 const EXPECT_REJECTED: &[&str] = &[
-    "index_oob_const", // constant index out of bounds (5 >= 3): compile-time error
-    "rt2",            // linear value not consumed (correct rejection)
-    "slice_test",     // U8 + Usize arithmetic (strict same-type rule)
-    "div_zero_const", // division by constant zero is a compile-time error
-    "mod_zero_const", // modulo by constant zero is a compile-time error
+    "index_oob_const",     // constant index out of bounds (5 >= 3): compile-time error
+    "rt2",                 // linear value not consumed (correct rejection)
+    "slice_test",          // U8 + Usize arithmetic (strict same-type rule)
+    "div_zero_const",      // division by constant zero is a compile-time error
+    "mod_zero_const",      // modulo by constant zero is a compile-time error
+    "assign_shared_ref",   // field write through a shared &T reference: assignment requires &mut
+    "linear_field_reassign", // reassigning a Live linear field without consuming it is a compile error
+    "linear_field_dup",    // copying a linear field out of a shared &T reference duplicates the handle
+    "linear_struct_dead_end", // bug-report 2a dead end: a moved-out linear handle left unconsumed is rejected
+    "linear_field_dup_extract", // bug-report 2b: extracting the same linear field twice is a use of moved value
+    "linear_ref_no_restore", // UAF shape: consuming through a &mut param without restoring is rejected
+    "linear_ref_no_restore_falloff", // same, on the reachable fall-off-end exit (no return statement)
+    "linear_ref_untracked", // consuming through a &mut to an untracked temporary is rejected
+    "ret_borrow_ambiguous", // bug-report d6: returned borrow derives from two different input params on different paths -> ambiguity error
+    "ret_borrow_sole_input", // bug-report d4 control: freeing the sole input while its returned borrow is live is rejected
+    "ret_borrow_uaf", // bug-report d7b: ambiguous ref-returning callee (and freeing a possibly-aliased input) is rejected
+    "duplicate_builtin_unit", // bug-report d3: declaring Unit is a builtin redeclaration, not a bare duplicate symbol
+    "duplicate_builtin_int", // declaring Int must not silently replace the builtin scalar
+    "duplicate_user_symbol", // control: user-user duplicates still report duplicate symbol
 ];
 
 /// Known-broken programs; observed status printed only.  Each entry names

@@ -1,0 +1,33 @@
+#! Reading a NON-linear field through a `&mut` reference is a plain read,
+#! not a move: it must be repeatable without tripping the linear rules,
+#! even when the referent struct contains a linear field elsewhere.
+
+pub mod Memory
+  pub nat type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+  end
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+end
+
+use Memory.allocate
+use Memory.deallocate
+
+pub type Holder
+  pub block: Memory.Block
+  pub tag: Int
+end
+
+pub fun main() Int
+  val block = match allocate(1)
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  val holder = Holder(block: block, tag: 7)
+  val r = &mut holder
+  val a = r.tag
+  val b = r.tag
+  deallocate(r.block)
+  return a + b
+end

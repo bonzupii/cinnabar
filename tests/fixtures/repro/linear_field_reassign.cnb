@@ -1,0 +1,19 @@
+pub mod Memory
+  pub nat type Block
+  pub nat fun make() impure Memory.Block
+end
+
+use Memory.make
+
+pub type Holder
+  pub block: Memory.Block
+  pub tag: Int
+end
+
+pub fun main() Int
+  val first = make()
+  var holder = Holder(block: first, tag: 7)
+  val second = make()
+  holder.block = second
+  return 0
+end

@@ -1,0 +1,15 @@
+# duplicate_user_symbol (control): two user declarations of the same name
+# must still be rejected as a duplicate symbol — the builtin-redeclaration
+# diagnostic is reserved for collisions with the language's own builtins.
+
+pub type Foo
+  pub x: Int
+end
+
+pub type Foo
+  pub y: Int
+end
+
+pub fun main() Int
+  return 0
+end

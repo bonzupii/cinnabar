@@ -1,0 +1,14 @@
+pub type Pair
+  pub x: Int
+  pub y: Int
+end
+
+fun tamper(value: &Pair) Int
+  value.x = 99
+  return value.x
+end
+
+pub fun main() Int
+  val p = Pair(x: 1, y: 2)
+  return tamper(&p)
+end

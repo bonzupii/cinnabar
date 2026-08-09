@@ -111,6 +111,7 @@ pub const STRING_BYTE_14: U8 = 0x21 # UTF-8 '!'
 pub const MEMORY_BYTE: U8 = 0xA5
 pub const MEMORY_SIZE: Usize = 1
 pub const ZERO_USIZE: Usize = 0
+pub const ONE_USIZE: Usize = 1
 pub const SENTINEL_USIZE: Usize = 999999
 
 pub const EXPECTED_REST_LEN: Usize = 3
@@ -526,6 +527,51 @@ end
 
 fun move_point(point: Point, dx: Int, dy: Int) Point
   return Point(x: point.x + dx, y: point.y + dy)
+end
+
+#! Mutates a Point's fields in place through a &mut reference.
+fun mutate_point(point: &mut Point, dx: Int, dy: Int) Unit
+  point.x = point.x + dx
+  point.y = point.y + dy
+  return Unit
+end
+
+#! Writes one field of a dynamically-indexed element of a fixed-size
+#! array through a &mut borrow, unwrapped with try in the assignment
+#! target.  Dynamic array indexing is runtime-checked, so the try can
+#! propagate IndexError; the returned Bool reports whether the write
+#! actually landed on the element.
+fun mutate_point_array(index: Usize, value: Int) Result(Bool, IndexError)
+  var points = [Point(x: 1, y: 2), Point(x: 3, y: 4)]
+
+  (try &mut points[index]).x = value
+
+  val changed = points[0].x == 1 && points[1].x == value
+  return Ok(changed)
+end
+
+#! Exercises field assignment through mutable references: a &mut local
+#! binding, a &mut parameter, and a &mut-borrowed array element reached
+#! through dynamic indexing.
+fun check_mut_ref() Bool
+  var pt = Point(x: 1, y: 2)
+  val ref_pt = &mut pt
+  ref_pt.x = 10
+  ref_pt.y = 20
+
+  val array_ok = match mutate_point_array(ONE_USIZE, 100)
+    Ok(changed) => changed
+    Err(IndexOutOfBounds(index, length)) =>
+      index == SENTINEL_USIZE && length == SENTINEL_USIZE
+  end
+
+  mutate_point(&mut pt, 1, 2)
+
+  if pt.x == 11 && pt.y == 22 && array_ok
+    return true
+  end
+
+  return false
 end
 
 #! Reads a Point through a shared borrow; consumes `&arr[i]`.
@@ -947,6 +993,7 @@ fun reference_checks() impure ExitCode
   val loop_ok = check_loop()
   val break_continue_ok = check_break_continue()
   val struct_ok = check_struct()
+  val mut_ref_ok = check_mut_ref()
   val flags_ok = check_flags()
   val modulo_ok = check_modulo()
   val div_ok = check_div()
@@ -956,7 +1003,7 @@ fun reference_checks() impure ExitCode
   val index_ok = check_index()
   val collections_ok = check_collections()
 
-  val all_ok = range_ok && app_ok && port_ok && option_ok && option_try_ok && loop_ok && break_continue_ok && struct_ok && flags_ok && modulo_ok && div_ok && memory_ok && binary_ok && trait_ok && index_ok && collections_ok
+  val all_ok = range_ok && app_ok && port_ok && option_ok && option_try_ok && loop_ok && break_continue_ok && struct_ok && mut_ref_ok && flags_ok && modulo_ok && div_ok && memory_ok && binary_ok && trait_ok && index_ok && collections_ok
 
   if all_ok
     return ExitSuccess

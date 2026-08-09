@@ -137,6 +137,7 @@ pub const EXPR_ARRAY: i64 = 6; // b: element expr-id list
 pub const EXPR_MATCH: i64 = 7; // b: scrutinee expr id, c: arm ids list
 pub const EXPR_TRY: i64 = 8; // b: inner expr id
 pub const EXPR_INDEX: i64 = 9; // b: base expr id, c: index expr id
+pub const EXPR_FIELD_ACCESS: i64 = 10; // b: base expr id, c: field name id; `expr.field` on a non-path base
 
 // Literal kinds.
 pub const LIT_INT: i64 = 0;
@@ -175,7 +176,7 @@ pub const BIN_MOD: i64 = 17;
 // ---------------------------------------------------------------------------
 
 pub const STMT_LET: i64 = 0; // b: is_mut, c: name id, d: type id (NONE), e: init expr id
-pub const STMT_ASSIGN: i64 = 1; // b: target name id, c: value expr id
+pub const STMT_ASSIGN: i64 = 1; // b: target expr id (a place: name, field chain, or field through a &mut reference), c: value expr id
 pub const STMT_WHILE: i64 = 2; // b: cond expr id, c: body stmt-id list
 pub const STMT_IF: i64 = 3; // b: cond expr id, c: then stmt-id list, d: else stmt-id list (NONE)
 pub const STMT_RETURN: i64 = 4; // b: value expr id (NONE)

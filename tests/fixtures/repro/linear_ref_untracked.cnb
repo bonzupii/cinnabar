@@ -1,0 +1,34 @@
+#! Consuming a linear field through a `&mut` to an untracked temporary
+#! (`&mut make_holder()`) would silently duplicate the handle: the
+#! referent must be a tracked local.
+
+pub mod Memory
+  pub nat type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+  end
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+end
+
+use Memory.allocate
+use Memory.deallocate
+
+pub type Holder
+  pub block: Memory.Block
+  pub tag: Int
+end
+
+fun make_holder(block: Memory.Block) Holder
+  return Holder(block: block, tag: 7)
+end
+
+pub fun main() Int
+  val block = match allocate(1)
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  val r = &mut make_holder(block)
+  deallocate(r.block)
+  return 0
+end

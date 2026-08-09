@@ -1,0 +1,31 @@
+#! Copying a linear field by value out of a shared `&T` reference would
+#! duplicate the handle.  The only sanctioned consumption of a linear
+#! field goes through `&mut`; this must be rejected.
+
+pub mod Memory
+  pub nat type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+  end
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+end
+
+use Memory.allocate
+use Memory.deallocate
+
+pub type Holder
+  pub block: Memory.Block
+  pub tag: Int
+end
+
+pub fun main() Int
+  val block = match allocate(1)
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  val holder = Holder(block: block, tag: 7)
+  val shared = &holder
+  deallocate(shared.block)
+  return 0
+end

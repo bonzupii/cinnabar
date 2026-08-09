@@ -1,0 +1,41 @@
+# ret_borrow_sole_input (bug-report d4 control): a callee returns a view of
+# its sole input; freeing that input while the returned borrow is live must
+# be rejected.  This locks the sound single-input case that the multi-input
+# fixes must not regress.
+
+pub mod Collections
+  pub nat type Vec(T)
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+  end
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_view<T>(vec: &Vec(T)) &[T]
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
+end
+
+use Collections.vec_new
+use Collections.vec_view
+use Collections.vec_free
+
+fun view_of(v: &Collections.Vec(Int)) &[Int]
+  return vec_view(v)
+end
+
+pub fun main() Int
+  val x = match vec_new[Int]()
+    Ok(v) => v
+    Err(error) => return 1
+  end
+
+  val r = view_of(&x)
+
+  vec_free(x)
+
+  val used = match r
+    [] => 0
+    [first, rest @ ..] => first
+  end
+
+  return used
+end

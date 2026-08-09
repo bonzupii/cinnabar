@@ -1,0 +1,15 @@
+# ret_borrow_ambiguous (bug-report d6): a function whose returned borrow
+# derives from different input reference parameters on different paths is
+# ambiguous and must be rejected by the ambiguity rule — the compiler must
+# never guess which parameter the returned reference came from.
+
+fun choose_ref(a: &Int, b: &Int) &Int
+  if a < b
+    return a
+  end
+  return b
+end
+
+pub fun main() Int
+  return 0
+end

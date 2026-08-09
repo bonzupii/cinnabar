@@ -953,10 +953,66 @@ fn emit_assign<'ctx, 'a>(
     let target = node_b(sess.5, stmt);
     let value = node_c(sess.5, stmt);
     let key = sub_key(sess, ctx.3, ctx.4, stmt_ty_of(sess.5, stmt));
-    let tptr = get_local(&ctx.1, target)?;
+    let tptr = emit_place(sess, ctx, target)?;
     let vptr = emit_expr(sess, ctx, value)?;
     copy_value(sess, key, tptr, vptr)?;
     Ok((tptr, false))
+}
+
+/// Emits the storage address an assignment target writes to: a local's
+/// slot for a plain name, the field GEP of a path chain (through a `&mut`
+/// reference when the base is one), or the field GEP of a `EXPR_FIELD_ACCESS`
+/// place (whose base may itself be a borrowed index).
+fn emit_place<'ctx, 'a>(
+    sess: &mut Session<'ctx, '_, '_>,
+    ctx: &mut FnCtx<'ctx, 'a>,
+    expr: i64,
+) -> Result<PointerValue<'ctx>, CodegenError> {
+    if node_a(sess.5, expr) == EXPR_PATH {
+        // A path is already a place: its value lives at the local slot
+        // (one segment) or the field GEP of the chain.
+        return emit_path(sess, ctx, expr);
+    }
+    if node_a(sess.5, expr) == EXPR_FIELD_ACCESS {
+        return emit_field_access(sess, ctx, expr);
+    }
+    Err(builder_error(
+        node_file(sess.5, expr),
+        node_start(sess.5, expr),
+        node_end(sess.5, expr),
+        "internal: invalid assignment target",
+    ))
+}
+
+/// Emits a field access on a non-path base (`(expr).field`): the base is
+/// evaluated, dereferenced when its type is a reference, and the field
+/// GEP is returned as the place.
+fn emit_field_access<'ctx, 'a>(
+    sess: &mut Session<'ctx, '_, '_>,
+    ctx: &mut FnCtx<'ctx, 'a>,
+    expr: i64,
+) -> Result<PointerValue<'ctx>, CodegenError> {
+    let base = node_b(sess.5, expr);
+    let field = node_c(sess.5, expr);
+    let mut ptr = emit_expr(sess, ctx, base)?;
+    let mut cur_key = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, base));
+    let ckind = em_key_kind(sess, cur_key);
+    if ckind == TYD_REF || ckind == TYD_REF_MUT {
+        ptr = load_ptr(sess, ptr)?;
+        cur_key = em_key_elem(sess, cur_key);
+    }
+    let sym2 = em_key_sym(sess, cur_key);
+    if sym2 == NONE {
+        return Err(builder_error(
+            node_file(sess.5, expr),
+            node_start(sess.5, expr),
+            node_end(sess.5, expr),
+            "internal: field access on a non-struct",
+        ));
+    }
+    let item = em_sym_decl(sess, sym2);
+    let fld_idx = struct_field_index(sess, item, field)?;
+    struct_gep(sess, cur_key, ptr, fld_idx as u32, "")
 }
 
 fn emit_while<'ctx, 'a>(
@@ -1087,6 +1143,8 @@ fn emit_expr<'ctx, 'a>(
         emit_try(sess, ctx, expr)
     } else if kind == EXPR_INDEX {
         emit_index(sess, ctx, expr)
+    } else if kind == EXPR_FIELD_ACCESS {
+        emit_field_access(sess, ctx, expr)
     } else {
         Err(builder_error(
             node_file(sess.5, expr),

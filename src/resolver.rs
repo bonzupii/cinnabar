@@ -448,9 +448,12 @@ fn report_casing(names: &[String], name: i64, casing: i64, errors: &mut Vec<Diag
 // ---------------------------------------------------------------------------
 
 /// Inserts a declaration into `scope`, reporting duplicate symbols.  A
-/// declaration with the same name as a builtin replaces the builtin;
-/// declarations never shadow other declarations.  Casing violations are
-/// reported but the name is still declared so references do not cascade.
+/// name that collides with a builtin (a seeded scalar with no declaration
+/// row, a synthesized primitive enum, or a user declaration that a
+/// synthesized seed later collides with) is a builtin redeclaration; any
+/// other collision is a duplicate symbol.  Declarations never shadow
+/// other declarations.  Casing violations are reported but the name is
+/// still declared so references do not cascade.
 fn insert_decl(state: &mut State, scope: i64, name: i64, sym: i64, ns: i64, casing: i64, span: (i64, i64, i64)) {
     report_casing(state.0, name, casing, state.3, span.0, span.1, span.2);
     let existing = scope_lookup(state.4, scope, name, ns);
@@ -458,29 +461,40 @@ fn insert_decl(state: &mut State, scope: i64, name: i64, sym: i64, ns: i64, casi
         push_entry(state.4, scope, name, sym, ns, NONE);
         return;
     }
-    let existing_src = existing.1;
     let existing_decl = sym_decl_of(state.1, existing.0);
-    if existing_src != NONE || existing_decl != NONE {
-        let message = if existing_decl != NONE && node_file(state.1, existing_decl) == NO_FILE {
-            format!("cannot redeclare builtin '{}'", name_text(state.0, name))
-        } else {
-            format!("duplicate symbol '{}'", name_text(state.0, name))
-        };
-        push_error(state.3, &message, span.0, span.1, span.2);
-        return;
-    }
-    let entries = match state.4.get_mut(scope as usize) {
-        Some(entries) => entries,
-        None => return,
+    let incoming_decl = sym_decl_of(state.1, sym);
+    // A name colliding with a builtin: the existing entry is a seeded
+    // scalar (no declaration row) or a synthesized primitive item (a
+    // NO_FILE span), or the incoming symbol is itself a synthesized seed
+    // colliding with a user declaration (the seeded items are collected
+    // after the user's, so the user's declaration is what the seed finds
+    // in the scope).  Either way the program redeclared a builtin the
+    // language reserves, and that is what the diagnostic must name.
+    let builtin_collision = existing_decl == NONE
+        || (existing_decl != NONE && node_file(state.1, existing_decl) == NO_FILE)
+        || (incoming_decl != NONE && node_file(state.1, incoming_decl) == NO_FILE);
+    let message = if builtin_collision {
+        format!("cannot redeclare builtin '{}'", name_text(state.0, name))
+    } else {
+        format!("duplicate symbol '{}'", name_text(state.0, name))
     };
-    let mut idx = 0i64;
-    while idx < entries.len() as i64 / 4 {
-        if entry_get(entries, idx, 0) == name && entry_get(entries, idx, 2) == ns && entry_get(entries, idx, 3) == NONE {
-            entry_set(entries, idx, 1, sym);
-            return;
-        }
-        idx += 1;
-    }
+    // When the collision is reported for a synthesized seed, which has
+    // no Cinnabar source origin, point at the user's declaration that
+    // collides with it instead of fabricating a location.
+    let report_span = if incoming_decl != NONE
+        && node_file(state.1, incoming_decl) == NO_FILE
+        && existing_decl != NONE
+        && node_file(state.1, existing_decl) != NO_FILE
+    {
+        (
+            node_file(state.1, existing_decl),
+            node_start(state.1, existing_decl),
+            node_end(state.1, existing_decl),
+        )
+    } else {
+        span
+    };
+    push_error(state.3, &message, report_span.0, report_span.1, report_span.2);
 }
 
 fn collect_list(state: &mut State, scope: i64, list: i64) {
@@ -1260,6 +1274,9 @@ fn walk_stmt(state: &mut State, scope: i64, stmt: i64) {
         }
         walk_expr(state, scope, node_e(state.1, stmt));
     } else if kind == STMT_ASSIGN {
+        // The target is an expression (a place), not a bare name: its
+        // paths resolve like any other expression's.
+        walk_expr(state, scope, node_b(state.1, stmt));
         walk_expr(state, scope, node_c(state.1, stmt));
     } else if kind == STMT_WHILE {
         walk_expr(state, scope, node_b(state.1, stmt));
@@ -1305,6 +1322,8 @@ fn walk_expr(state: &mut State, scope: i64, expr: i64) {
     } else if kind == EXPR_INDEX {
         walk_expr(state, scope, node_b(state.1, expr));
         walk_expr(state, scope, node_c(state.1, expr));
+    } else if kind == EXPR_FIELD_ACCESS {
+        walk_expr(state, scope, node_b(state.1, expr));
     }
 }
 

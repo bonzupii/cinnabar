@@ -1,0 +1,38 @@
+#! Bug-report 2b lock: extracting the same linear field twice must be a
+#! compile error -- the second extraction is a use of the moved handle.
+
+pub mod Collections
+  pub nat type Vec(T)
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+  end
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
+end
+
+pub type Holder
+  pub vec: Collections.Vec(Int)
+end
+
+use Collections.vec_new
+use Collections.vec_free
+
+fun make_holder() Result(Holder, Collections.Error)
+  val v = match vec_new[Int]()
+    Ok(value) => value
+    Err(error) => return Err(error)
+  end
+  return Ok(Holder(vec: v))
+end
+
+pub fun main() Int
+  val h = match make_holder()
+    Ok(value) => value
+    Err(error) => return 1
+  end
+
+  val v1 = h.vec
+  val v2 = h.vec
+  return 0
+end

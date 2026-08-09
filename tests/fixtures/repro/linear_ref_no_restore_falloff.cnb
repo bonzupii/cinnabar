@@ -1,0 +1,37 @@
+#! Same rule as linear_ref_no_restore, exercised on the REACHABLE
+#! fall-off-end exit (this callee has no return statement): a callee that
+#! consumes a caller's linear handle through a `&mut` parameter must
+#! restore it before control leaves, or the caller's later use of the
+#! handle would be a use-after-free.
+
+pub mod Memory
+  pub nat type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+  end
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+end
+
+use Memory.allocate
+use Memory.deallocate
+
+pub type Holder
+  pub block: Memory.Block
+  pub tag: Int
+end
+
+fun steal_block_falloff(r: &mut Holder) Unit
+  deallocate(r.block)
+end
+
+pub fun main() Int
+  val block = match allocate(1)
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  val holder = Holder(block: block, tag: 7)
+  steal_block_falloff(&mut holder)
+  deallocate(holder.block)
+  return 0
+end

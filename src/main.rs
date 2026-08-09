@@ -508,7 +508,9 @@ fn dump_stmt(names: &[String], nodes: &[i64], lists: &[Vec<i64>], id: i64, depth
         dump_expr(names, nodes, lists, node_e(nodes, id), depth + 1);
         println!("{})", pad);
     } else if kind == STMT_ASSIGN {
-        println!("{}Assign(target: {}, value: ", pad, name_text(names, node_b(nodes, id)));
+        println!("{}Assign(target: ", pad);
+        dump_expr(names, nodes, lists, node_b(nodes, id), depth + 1);
+        println!("{}value: ", pad);
         dump_expr(names, nodes, lists, node_c(nodes, id), depth + 1);
         println!("{})", pad);
     } else if kind == STMT_WHILE {
@@ -604,13 +606,16 @@ fn dump_expr(names: &[String], nodes: &[i64], lists: &[Vec<i64>], id: i64, depth
     } else if kind == EXPR_TRY {
         println!("{}Try(", pad);
         dump_expr(names, nodes, lists, node_b(nodes, id), depth + 1);
-        println!("{})", pad);
-    } else if kind == EXPR_INDEX {
+        println!("{})", pad);    } else if kind == EXPR_INDEX {
         println!("{}Index(base:", pad);
         dump_expr(names, nodes, lists, node_b(nodes, id), depth + 1);
-        println!("{}index:", pad);
+        println!("{}index: ", pad);
         dump_expr(names, nodes, lists, node_c(nodes, id), depth + 1);
         println!("{})", pad);
+    } else if kind == EXPR_FIELD_ACCESS {
+        println!("{}FieldAccess(base: ", pad);
+        dump_expr(names, nodes, lists, node_b(nodes, id), depth + 1);
+        println!("{}.{})", pad, name_text(names, node_c(nodes, id)));
     }
 }
 

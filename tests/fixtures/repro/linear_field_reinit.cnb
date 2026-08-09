@@ -1,0 +1,51 @@
+#! Positive lock for the linear-field sub-node machinery: a struct with a
+#! linear field can have that field consumed, re-initialized, and consumed
+#! again on a plain local.  Each `deallocate(holder.block)` moves the
+#! field's sub-node (marking the parent partially moved); the reassignment
+#! after a consume is legal and resets the field to Live; the exit is legal
+#! because every linear sub-node was consumed.
+
+pub mod Memory
+  pub nat type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+  end
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+end
+
+use Memory.allocate
+use Memory.deallocate
+
+pub type Holder
+  pub block: Memory.Block
+  pub tag: Int
+end
+
+fun fail_alloc() Int
+  return 1
+end
+
+pub fun main() Int
+  val first = match allocate(1)
+    Ok(value) => value
+    Err(error) => return fail_alloc()
+  end
+  var holder = Holder(block: first, tag: 7)
+
+  # Consume the old handle: the block sub-node moves, the parent becomes
+  # partially moved.
+  deallocate(holder.block)
+
+  # Re-initialize: legal because the previous handle was consumed.
+  val second = match allocate(1)
+    Ok(value) => value
+    Err(error) => return fail_alloc()
+  end
+  holder.block = second
+
+  # Consume the new handle, then exit with the shell (all linear
+  # sub-nodes consumed).
+  deallocate(holder.block)
+  return 0
+end

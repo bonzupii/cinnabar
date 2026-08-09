@@ -119,16 +119,15 @@ fun append_int_digits(vec: &mut Collections.Vec(U8), value: Int) Result(Unit, Co
   return Ok(Unit)
 end
 
-#! Prints `value` as a decimal string; `newline` selects print_line vs print.
-fun print_int(value: Int, newline: Bool) Result(Unit, Collections.Error)
-  val vec = try vec_new[U8]()
-
+#! Appends the decimal representation of `value` (with a leading '-') to a
+#! BORROWED vec, most significant digit first.  All branching happens here
+#! on the borrowed handle, exactly like `append_int_digits`; the owning
+#! print functions below stay straight-line (the `print_byte_string`
+#! shape), so the borrowed handle is never carried across a branch merge
+#! in a function that owns it.
+fun append_int(vec: &mut Collections.Vec(U8), value: Int) Result(Unit, Collections.Error)
   if value < 0
-    val minus_result = vec_push(&mut vec, MINUS)
-    match minus_result
-      Ok(Unit) => Unit
-      Err(error) => return fail_free_vec(vec, error)
-    end
+    try vec_push(vec, MINUS)
   end
 
   var magnitude: Int = value
@@ -137,17 +136,22 @@ fun print_int(value: Int, newline: Bool) Result(Unit, Collections.Error)
   end
 
   if magnitude == 0
-    val zero_result = vec_push(&mut vec, ZERO_DIGIT)
-    match zero_result
-      Ok(Unit) => Unit
-      Err(error) => return fail_free_vec(vec, error)
-    end
+    try vec_push(vec, ZERO_DIGIT)
   else
-    val digits_result = append_int_digits(&mut vec, magnitude)
-    match digits_result
-      Ok(Unit) => Unit
-      Err(error) => return fail_free_vec(vec, error)
-    end
+    try append_int_digits(vec, magnitude)
+  end
+
+  return Ok(Unit)
+end
+
+#! Owns the vec in straight-line code only: build, view, string, print.
+fun print_int_inline(value: Int) Result(Unit, Collections.Error)
+  val vec = try vec_new[U8]()
+
+  val build_result = append_int(&mut vec, value)
+  match build_result
+    Ok(Unit) => Unit
+    Err(error) => return fail_free_vec(vec, error)
   end
 
   val view = vec_view(&vec)
@@ -156,46 +160,21 @@ fun print_int(value: Int, newline: Bool) Result(Unit, Collections.Error)
     Err(error) => return fail_free_vec(vec, error)
   end
 
-  if newline
-    print_line(&string)
-  else
-    print(&string)
-  end
+  print(&string)
 
   string_free(string)
   vec_free(vec)
   return Ok(Unit)
 end
 
-#! Variant of print_int without the conditional print, for bisection.
-fun print_int_plain(value: Int) Result(Unit, Collections.Error)
+#! Like `print_int_inline`, but ends with a newline.
+fun print_int_newline(value: Int) Result(Unit, Collections.Error)
   val vec = try vec_new[U8]()
 
-  if value < 0
-    val minus_result = vec_push(&mut vec, MINUS)
-    match minus_result
-      Ok(Unit) => Unit
-      Err(error) => return fail_free_vec(vec, error)
-    end
-  end
-
-  var magnitude: Int = value
-  if magnitude < 0
-    magnitude = -magnitude
-  end
-
-  if magnitude == 0
-    val zero_result = vec_push(&mut vec, ZERO_DIGIT)
-    match zero_result
-      Ok(Unit) => Unit
-      Err(error) => return fail_free_vec(vec, error)
-    end
-  else
-    val digits_result = append_int_digits(&mut vec, magnitude)
-    match digits_result
-      Ok(Unit) => Unit
-      Err(error) => return fail_free_vec(vec, error)
-    end
+  val build_result = append_int(&mut vec, value)
+  match build_result
+    Ok(Unit) => Unit
+    Err(error) => return fail_free_vec(vec, error)
   end
 
   val view = vec_view(&vec)
@@ -235,16 +214,16 @@ end
 
 #! Prints one line "a/b=q r" for the Euclidean quotient and remainder.
 fun print_div_rem(a: Int, b: Int) Result(Unit, Collections.Error)
-  try print_int(a, false)
+  try print_int_inline(a)
   try print_byte_string(SLASH)
-  try print_int(b, false)
+  try print_int_inline(b)
   try print_byte_string(EQUALS)
 
   val quotient = match a / b
     Ok(qv) => qv
     Err(DivByZero) => 0
   end
-  try print_int(quotient, false)
+  try print_int_inline(quotient)
 
   try print_byte_string(SPACE)
 
@@ -252,7 +231,7 @@ fun print_div_rem(a: Int, b: Int) Result(Unit, Collections.Error)
     Ok(rv) => rv
     Err(DivByZero) => 0
   end
-  try print_int(remainder, true)
+  try print_int_newline(remainder)
   return Ok(Unit)
 end
 

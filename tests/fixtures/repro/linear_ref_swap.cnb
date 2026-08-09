@@ -1,0 +1,57 @@
+#! Positive lock for the design doc's linear-field cycle through a `&mut`
+#! reference: `deallocate(ref.block)` consumes the referent's handle and
+#! `ref.block = replacement` re-initializes it, which is legal only because
+#! the old handle was consumed.  The callee must leave the borrowed
+#! referent exactly as it found it (every linear field restored to Live).
+
+pub mod Memory
+  pub nat type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+  end
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+end
+
+use Memory.allocate
+use Memory.deallocate
+
+pub type Holder
+  pub block: Memory.Block
+  pub tag: Int
+end
+
+fun fail_alloc() Int
+  return 1
+end
+
+#! Error path: consume the whole holder so the early return is legal.
+fun fail_consume(holder: Holder) Int
+  deallocate(holder.block)
+  return 1
+end
+
+#! Consumes the old handle through the &mut parameter, then re-initializes
+#! the field with the replacement handle.
+fun replace_block(holder: &mut Holder, replacement: Memory.Block) Unit
+  deallocate(holder.block)
+  holder.block = replacement
+  return Unit
+end
+
+pub fun main() Int
+  val original = match allocate(1)
+    Ok(value) => value
+    Err(error) => return fail_alloc()
+  end
+  var holder = Holder(block: original, tag: 7)
+
+  val fresh = match allocate(1)
+    Ok(value) => value
+    Err(error) => return fail_consume(holder)
+  end
+
+  replace_block(&mut holder, fresh)
+  deallocate(holder.block)
+  return 0
+end

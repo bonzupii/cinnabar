@@ -737,17 +737,31 @@ fn parse_stmt(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut
         parse_break(nodes, pos)
     } else if is_name(nodes, names, *pos, "continue") {
         parse_continue(nodes, pos)
-    } else if is_assign(nodes, names, *pos) {
-        parse_assign(pos, names, nodes, lists, errors)
     } else {
-        parse_expr_stmt(pos, names, nodes, lists, errors)
+        parse_expr_or_assign(pos, names, nodes, lists, errors)
     }
 }
 
-fn is_assign(nodes: &[i64], names: &[String], pos: i64) -> bool {
-    node_tag(nodes, pos) == NODE_TOKEN
-        && node_a(nodes, pos) == TOK_IDENT
-        && is_sym(nodes, names, pos + 1, "=")
+/// Parses a statement that begins with an expression.  When the
+/// expression is followed by `=` the statement is an assignment whose
+/// target is kept as the expression (a place: a plain name, a field
+/// chain like `pt.x`, or a field through a reference like
+/// `(try &mut arr[i]).x`); otherwise it is a bare expression statement.
+/// `=` is not a binary operator, so the expression parser always stops
+/// before it.
+fn parse_expr_or_assign(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    let target = parse_expr(pos, names, nodes, lists, errors, 0)?;
+    if accept(nodes, names, pos, "=") {
+        skip_nl(nodes, pos);
+        let value = parse_expr(pos, names, nodes, lists, errors, 0)?;
+        let end = node_end(nodes, value);
+        Some(alloc_stmt(nodes, STMT_ASSIGN, file, start, end, &[target, value, NONE, NONE]))
+    } else {
+        let end = node_end(nodes, target);
+        Some(alloc_stmt(nodes, STMT_EXPR, file, start, end, &[target, NONE, NONE, NONE]))
+    }
 }
 
 fn parse_let(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, is_mut: i64) -> Option<i64> {
@@ -858,25 +872,6 @@ fn parse_continue(nodes: &mut Vec<i64>, pos: &mut i64) -> Option<i64> {
     Some(alloc_stmt(nodes, STMT_CONTINUE, file, start, end, &[NONE, NONE, NONE, NONE]))
 }
 
-fn parse_assign(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
-    let file = node_file(nodes, *pos);
-    let start = node_start(nodes, *pos);
-    let target = node_b(nodes, *pos);
-    *pos += 2;
-    skip_nl(nodes, pos);
-    let value = parse_expr(pos, names, nodes, lists, errors, 0)?;
-    let end = node_end(nodes, value);
-    Some(alloc_stmt(nodes, STMT_ASSIGN, file, start, end, &[target, value, NONE, NONE]))
-}
-
-fn parse_expr_stmt(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
-    let file = node_file(nodes, *pos);
-    let start = node_start(nodes, *pos);
-    let expr = parse_expr(pos, names, nodes, lists, errors, 0)?;
-    let end = node_end(nodes, expr);
-    Some(alloc_stmt(nodes, STMT_EXPR, file, start, end, &[expr, NONE, NONE, NONE]))
-}
-
 // ---------------------------------------------------------------------------
 // Expressions.
 // ---------------------------------------------------------------------------
@@ -967,6 +962,17 @@ fn parse_postfix(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &
             } else {
                 expr = parse_index_tail(pos, names, nodes, lists, errors, expr)?;
             }
+        } else if is_sym(nodes, names, *pos, ".") {
+            // Field access on a non-path base (`(expr).field`, `arr[i].field`,
+            // `(try &mut x).field`): a bare name chain already carries its
+            // fields as path segments, so a postfix dot here means the base
+            // is a parenthesized expression, an index, or a call result.
+            let file = node_file(nodes, expr);
+            let start = node_start(nodes, expr);
+            *pos += 1;
+            let field = expect_word(pos, nodes, errors)?;
+            let end = node_end(nodes, *pos - 1);
+            expr = alloc_expr(nodes, EXPR_FIELD_ACCESS, file, start, end, &[expr, field, NONE]);
         } else {
             break;
         }

@@ -1,0 +1,11 @@
+# duplicate_builtin_unit (bug-report d3): declaring a name the language
+# reserves for a builtin primitive must be rejected with a diagnostic that
+# names the builtin, never a bare 'duplicate symbol'.
+
+pub type Unit
+  pub x: Int
+end
+
+pub fun main() Int
+  return 0
+end

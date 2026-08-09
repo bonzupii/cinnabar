@@ -96,6 +96,13 @@ This section is normative. If a fixture, harness, or existing program contradict
 - Any runtime-computed index, and every index into a slice (whose length is dynamic), evaluates to `Result(T, IndexError)` — or `Result(&T, IndexError)` / `Result(&mut T, IndexError)` when borrowed — carrying `IndexOutOfBounds(index, length)` on failure, handled with `try` or `match` like every other fallible operation.
 - Indexing a linear-element array or slice by value is a compile error ("cannot move linear element out of array by index: borrow with & or &mut instead"): an indexed element is never moved out of its container, only read or borrowed.
 
+**Assignment**
+
+- `x = value` assigns a mutable local (`var`); assigning to a `val` or a const is a compile error.
+- Field assignment `target.field = value` (and deeper chains `a.b.c = value`) is valid whenever `target` is a mutable local `var` or has type `&mut T`. The target expression is a place, not a value: `pt.x = 5`, `ref.x = 5` for a `&mut Point`, and `(try &mut arr[i]).x = 42` all write in place, through the borrow. There is no dereference operator; the compiler manages the indirection internally.
+- Writing through a shared `&T` reference is a hard compile error ("cannot assign to field 'x' through shared reference: assignment requires &mut"): mutation requires an exclusive borrow.
+- Reassigning an effectively-Live linear field without consuming the previous handle is a hard compile error ("linear value 'a.b' is reassigned without being consumed"). Consuming the field first (a move into a call) transitions it to Moved, after which assignment re-initializes it and restores its moved-out ancestors.
+
 **Types**
 
 - Compiler builtins: `Unit`, `Result(T, E)`, `Option(T)`, `IndexError`, `Bool`, `Int`, `U8`, `U32`, `Usize`. They are always available; no program may declare them.

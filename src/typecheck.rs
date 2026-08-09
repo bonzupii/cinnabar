@@ -1365,20 +1365,18 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
     if kind == STMT_ASSIGN {
         let target = node_b(state.1, stmt);
         let value = node_c(state.1, stmt);
-        let vkey = check_expr(state, value, NONE, ret, impure, self_key);
-        let found = lookup(state.4, target);
-        if found.0 == NONE {
-            push_error(state.3, &format!("unknown symbol '{}'", name_text(state.0, target)), file, start, end);
-        } else if found.1 == 0 {
-            push_error(state.3, &format!("cannot assign to '{}': assignment requires var", name_text(state.0, target)), file, start, end);
-        } else {
-            let ok = unify_key(state.1, state.2, state.6, vkey, found.0);
-            if !ok {
-                push_error(state.3, &format!("cannot assign '{}' to '{}'", render_key(state.0, state.1, state.2, vkey), render_key(state.0, state.1, state.2, found.0)), file, start, end);
-            }
+        // The target is a place expression; its type is the type the
+        // value must have.  `check_assign_target` types it and enforces
+        // the assignment rules (mutable local or `&mut` base; a shared
+        // `&T` base is a hard error).
+        let tkey = check_assign_target(state, target, ret, impure, self_key);
+        let vkey = check_expr(state, value, tkey, ret, impure, self_key);
+        let ok = unify_key(state.1, state.2, state.6, vkey, tkey);
+        if !ok {
+            push_error(state.3, &format!("cannot assign '{}' to '{}'", render_key(state.0, state.1, state.2, vkey), render_key(state.0, state.1, state.2, tkey)), file, start, end);
         }
-        stmt_set_ty(state.1, stmt, vkey);
-        return vkey;
+        stmt_set_ty(state.1, stmt, tkey);
+        return tkey;
     }
     if kind == STMT_WHILE {
         let cond = check_expr(state, node_b(state.1, stmt), NONE, ret, impure, self_key);
@@ -1705,6 +1703,9 @@ fn check_expr(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64
     }
     if kind == EXPR_INDEX {
         return check_index(state, expr, 0, ret, impure, self_key);
+    }
+    if kind == EXPR_FIELD_ACCESS {
+        return check_field_access(state, expr, ret, impure, self_key);
     }
     push_error(state.3, "malformed expression", node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
     let key = unknown_key(state.1, state.2);
@@ -2033,6 +2034,104 @@ fn check_index(state: &mut State, expr: i64, borrow: i64, ret: i64, impure: i64,
     let key = index_result_key(state, payload);
     expr_set_ty(state.1, expr, key);
     key
+}
+
+/// Checks a field access on a non-path base (`(expr).field`): the base
+/// is typed (references dereferenced) and the substituted field key is
+/// returned.
+fn check_field_access(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
+    let base = node_b(state.1, expr);
+    let field = node_c(state.1, expr);
+    let base_key = check_expr(state, base, NONE, ret, impure, self_key);
+    let key = field_access_key(state.0, state.1, state.2, state.3, expr, base_key, field);
+    expr_set_ty(state.1, expr, key);
+    key
+}
+
+/// Checks an assignment target expression (a place) and returns the key
+/// of the value it accepts.  The rules: a plain name target must be a
+/// mutable local (`var`); a field chain may be rooted at a mutable local
+/// or at a `&mut T` reference (writing through it); writing through a
+/// shared `&T` reference is a hard error, as is any target that is not a
+/// place.
+fn check_assign_target(state: &mut State, target: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
+    if node_tag(state.1, target) != NODE_EXPR {
+        return unknown_key(state.1, state.2);
+    }
+    let file = node_file(state.1, target);
+    let start = node_start(state.1, target);
+    let end = node_end(state.1, target);
+    let kind = node_a(state.1, target);
+    if kind == EXPR_PATH {
+        let segs = node_b(state.1, target);
+        let count = list_len(state.2, segs);
+        let first = list_get(state.2, segs, 0);
+        let found = lookup(state.4, first);
+        if found.0 == NONE {
+            push_error(state.3, &format!("unknown symbol '{}'", name_text(state.0, first)), file, start, end);
+            let key = unknown_key(state.1, state.2);
+            expr_set_ty(state.1, target, key);
+            return key;
+        }
+        if count == 1 {
+            if found.1 == 0 {
+                push_error(state.3, &format!("cannot assign to '{}': assignment requires var", name_text(state.0, first)), file, start, end);
+            }
+            expr_set_ty(state.1, target, found.0);
+            return found.0;
+        }
+        check_field_target_base(state, found, first, file, start, end);
+        let mut current = found.0;
+        let mut idx = 1i64;
+        while idx < count {
+            current = field_access_key(state.0, state.1, state.2, state.3, target, current, list_get(state.2, segs, idx));
+            idx += 1;
+        }
+        expr_set_ty(state.1, target, current);
+        return current;
+    }
+    if kind == EXPR_FIELD_ACCESS {
+        let base = node_b(state.1, target);
+        let field = node_c(state.1, target);
+        let base_key = check_expr(state, base, NONE, ret, impure, self_key);
+        let bkind = key_kind(state.1, base_key);
+        if bkind == TYD_REF {
+            push_error(state.3, &format!("cannot assign to field '{}' through shared reference '{}': assignment requires &mut", name_text(state.0, field), render_key(state.0, state.1, state.2, base_key)), file, start, end);
+        } else if bkind == TYD_REF_MUT {
+            // Writable through the exclusive reference.
+        } else if node_tag(state.1, base) == NODE_EXPR && node_a(state.1, base) == EXPR_PATH {
+            let segs = node_b(state.1, base);
+            let first = list_get(state.2, segs, 0);
+            let found = lookup(state.4, first);
+            if found.0 == NONE {
+                push_error(state.3, &format!("unknown symbol '{}'", name_text(state.0, first)), file, start, end);
+            } else if found.1 == 0 {
+                push_error(state.3, &format!("cannot assign to field '{}' of '{}': assignment requires var", name_text(state.0, field), name_text(state.0, first)), file, start, end);
+            }
+        } else {
+            push_error(state.3, &format!("cannot assign to field '{}': the target is not a mutable place", name_text(state.0, field)), file, start, end);
+        }
+        let key = field_access_key(state.0, state.1, state.2, state.3, target, base_key, field);
+        expr_set_ty(state.1, target, key);
+        return key;
+    }
+    push_error(state.3, "invalid assignment target", file, start, end);
+    let key = unknown_key(state.1, state.2);
+    expr_set_ty(state.1, target, key);
+    key
+}
+
+/// The assignability of a field-chain target rooted at the local binding
+/// `found` (`(key, is_mut)` with name `name`): a mutable local is
+/// writable, a `&mut T` reference is writable through, and a `&T` shared
+/// reference is the hard error.
+fn check_field_target_base(state: &mut State, found: (i64, i64), name: i64, file: i64, start: i64, end: i64) {
+    let bkind = key_kind(state.1, found.0);
+    if bkind == TYD_REF {
+        push_error(state.3, &format!("cannot assign to a field through shared reference '{}': assignment requires &mut", render_key(state.0, state.1, state.2, found.0)), file, start, end);
+    } else if bkind != TYD_REF_MUT && found.1 == 0 {
+        push_error(state.3, &format!("cannot assign to field of '{}': assignment requires var", name_text(state.0, name)), file, start, end);
+    }
 }
 
 fn check_try(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
