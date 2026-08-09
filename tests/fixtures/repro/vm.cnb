@@ -32,7 +32,7 @@ const LOOP_START: Int = 2
 const HALT_POS: Int = 6
 
 #! prog: LOAD 1; MOVC 5; JZC 6; ACCM; DECC; JMP 2; HALT
-pub const PROG: Int = (0x01) | (0x15 << 8) | (0x26 << 16) | (0x30 << 24) | (0x40 << 32) | (0x52 << 40) | (0x70 << 48)
+pub const PROG: Int = (0x01) | (0x15 << 8) | (0x66 << 16) | (0x40 << 24) | (0x20 << 32) | (0x52 << 40) | (0x70 << 48)
 
 fun fetch(prog: Int, pc: Int) Int
   return (prog >> (pc * 8)) & 0xFF

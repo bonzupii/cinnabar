@@ -1,5 +1,5 @@
 pub mod Slice
-  pub native fun len<T>(view: &[T]) Usize
+  pub nat fun len<T>(view: &[T]) Usize
 end
 
 use Slice.len as slice_len

@@ -56,7 +56,7 @@ Block comments may not nest (nesting is a lexical error). Trailing comments may 
 The compiler operates on a flat node arena with fixed-width records rather than a heap of boxed/reference-counted tree nodes. Trees are integer ids. Each stage is a pure function (or set of functions) that reads the arena and writes attachments — no stage retains internal mutable state past its own return. This is exactly the data structure a Cinnabar program would use to represent itself. When the language is self-hosted, the compiler's architecture does not change — only the host language does.
 
 **11. The Crucible Rule**
-If a program compiles, it runs without crashing or panicking. Every runtime failure mode that can be moved to compile time must be: bounds are `Result` errors on the native surface, never traps; division/modulo by a compile-time-provable zero is a compile-time error; recursion must not be able to exhaust the stack. The compiler is judged by the binaries it produces — disassembled, executed, and checked for memory safety — not by whether the frontend accepts a program.
+If a program compiles, it runs without crashing or panicking. Every runtime failure mode that can be moved to compile time must be: bounds are `Result` errors on the native surface and on array/slice indexing, never traps; division/modulo by a compile-time-provable zero is a compile-time error; recursion must not be able to exhaust the stack. The compiler is judged by the binaries it produces — disassembled, executed, and checked for memory safety — not by whether the frontend accepts a program.
 
 **12. Self-Hosting Discipline**
 Once Cinnabar compiles itself, the compiler is a Cinnabar-emitted binary and is bound by every principle above, including the Crucible Rule — it is not exempt as tooling. Where a compiler feature is temporarily unrepresentable in Cinnabar itself, the boundary is marked explicitly with a native declaration and the temporary status is visible, not hidden; the feature is rewritten in Cinnabar once the language can express it.
@@ -89,10 +89,17 @@ This section is normative. If a fixture, harness, or existing program contradict
 - Division `/` and modulo `%` return `Result(T, DivError)`: any **compile-time-provable-zero** divisor — a literal, a folded const reference, or any arithmetic combination of them (`N / 0`, `5 / 0`, `x / (3 - 3)`) — is a compile-time error, whatever the numerator. A runtime zero produces `Err(DivByZero)`, handled with `try` or `match` like every other fallible operation. Division never traps and is never undefined behavior.
 - `/` and `%` use Euclidean division: the remainder is always non-negative (`0 <= r < abs(divisor)`), regardless of operand signs. This is deliberate — it is the only common convention where the remainder's sign never depends on either operand's sign.
 
+**Indexing**
+
+- `arr[i]`, `&arr[i]`, and `&mut arr[i]` index fixed-size arrays `[T; N]` and slices `&[T]`. The index must be `Usize`.
+- A compile-time-constant index against a fixed-size array is checked at compile time: an out-of-range constant (`i < 0` or `i >= N`) is a hard compile error; an in-range constant evaluates directly to the element type `T` (or `&T` / `&mut T` when borrowed) with no `Result` wrapper and no runtime bounds check, because safety is proven statically.
+- Any runtime-computed index, and every index into a slice (whose length is dynamic), evaluates to `Result(T, IndexError)` — or `Result(&T, IndexError)` / `Result(&mut T, IndexError)` when borrowed — carrying `IndexOutOfBounds(index, length)` on failure, handled with `try` or `match` like every other fallible operation.
+- Indexing a linear-element array or slice by value is a compile error ("cannot move linear element out of array by index: borrow with & or &mut instead"): an indexed element is never moved out of its container, only read or borrowed.
+
 **Types**
 
-- Compiler builtins: `Unit`, `Result(T, E)`, `Option(T)`, `Bool`, `Int`, `U8`, `U32`, `Usize`. They are always available; no program may declare them.
-- Fixed-size arrays `[T; N]`: no indexing syntax. Access via destructuring (`match arr [a, b, c] => ...`). Array length is always statically known, so the compiler can require full destructuring rather than a runtime-checked index operation.
+- Compiler builtins: `Unit`, `Result(T, E)`, `Option(T)`, `IndexError`, `Bool`, `Int`, `U8`, `U32`, `Usize`. They are always available; no program may declare them.
+- Fixed-size arrays `[T; N]`: indexed with `arr[i]`, `&arr[i]`, and `&mut arr[i]` (see Indexing), and destructured with `match arr [a, b, c] => ...` and rest patterns. Array length is always statically known, so a constant index is proven at compile time.
 - Slices `&[T]`: produced by `vec_view` or by the sanctioned coercion `&[T; N]` → `&[T]`.
 - References: `&T` (shared), `&mut T` (exclusive mutable).
 
@@ -117,11 +124,30 @@ This section is normative. If a fixture, harness, or existing program contradict
 - Trait bounds: `fun f<T: Checksum>(...)`.
 - Return-type-only type parameters are inferred from call-site context.
 
+**Runtime Guarantees**
+
+- **Recursion cannot exhaust the stack.** Every compiled function checks, at
+  entry, how much process stack it has consumed against the process's own
+  `RLIMIT_STACK` soft limit, measured once in the real `main` wrapper's entry
+  and reduced by a guard margin. Past the limit, the binary writes
+  `Cinnabar: stack overflow` to stderr and exits with status 70
+  (`EX_SOFTWARE`) — a defined, observable failure — instead of dying with the
+  OS's SIGSEGV on the guard page. An unlimited soft limit (`ulimit -s
+  unlimited`, `RLIM_INFINITY`) is clamped to the POSIX default main-thread
+  limit (8 MiB) so the guard is never silently disabled; a failed `getrlimit`
+  uses the same default.
+- **Self-tail-recursion runs in O(1) stack.** A call that is the direct value
+  of a `return` statement is a tail call: codegen marks it `tail` and LLVM's
+  tail-call elimination turns self-tail-recursive calls into jumps at `-O2`,
+  so a self-recursive function's depth does not consume stack. Marking is
+  precise — argument subexpressions are never marked, so `return x + f(y)`
+  does not treat `f` as a tail call. Non-tail recursion is bounded by the
+  recursion guard above.
+
 **What Is NOT Cinnabar**
 
 - Semicolons as statement separators
-- User-declared `Unit`, `Result`, or `Option` (they are builtins)
-- Array indexing (`arr[i]`)
+- User-declared `Unit`, `Result`, `Option`, or `IndexError` (they are builtins)
 - Panic-based error handling, exceptions, null, undefined behavior as a language feature
 - Everything listed under Anti-Principles below
 

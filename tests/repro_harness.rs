@@ -13,6 +13,10 @@
 //! pipeline including llc/clang is exercised.  Binaries are written to a
 //! unique temp directory; the repo is never littered.
 //!
+//! Every compiled repro is killed after `RUN_TIMEOUT_SECS` if it has not
+//! exited, so a legitimately non-terminating program (an infinite VM
+//! loop) costs the suite one bounded wait instead of hanging it.
+//!
 //! As phases land, entries move from `RECORD_ONLY` into `EXPECT_OK` (or,
 //! for error-quality work, `EXPECT_REJECTED` gains message assertions).
 
@@ -23,7 +27,11 @@ use std::process::Command;
 const EXPECT_OK: &[(&str, i32)] = &[
     ("hello", 0),
     ("mini", 0),
+    ("array_test", 0), // const in-range index arr[0]: proven at compile time, no Result wrapper
+    ("borrow_index", 0), // &arr[i] and &mut arr[i] borrow elements; dynamic &rest[i] returns Result(&Pair, IndexError) with the borrowed element in the Ok payload
     ("rec_test", 120),
+    ("tail_rec", 64), // 1M self-tail-recursive iterations: LLVM tail-call elimination keeps it O(1)-stack
+    ("mem_probe", 70), // non-tail recursion depth 500000 (opaque heap read per level keeps the frames real) trips the stack guard, which exits 70 instead of SIGSEGV
     ("hanoi", 255),
     ("head", 10),
     ("enum_test", 0),
@@ -36,6 +44,7 @@ const EXPECT_OK: &[(&str, i32)] = &[
     ("vm8", 1),
     ("vm9", 5),
     ("vm11", 4),
+    ("vm", 120), // factorial VM with backward jumps; PROG bytes reconciled to the documented 5! program
     ("continue_test", 9),
     ("jump_test", 3),
     ("jump2", 3),
@@ -52,7 +61,7 @@ const EXPECT_OK: &[(&str, i32)] = &[
 
 /// Programs the compiler must reject.
 const EXPECT_REJECTED: &[&str] = &[
-    "array_test",     // no array indexing (deliberate omission)
+    "index_oob_const", // constant index out of bounds (5 >= 3): compile-time error
     "rt2",            // linear value not consumed (correct rejection)
     "slice_test",     // U8 + Usize arithmetic (strict same-type rule)
     "div_zero_const", // division by constant zero is a compile-time error
@@ -63,13 +72,11 @@ const EXPECT_REJECTED: &[&str] = &[
 /// its fix target.
 const RECORD_ONLY: &[&str] = &[
     "full_rt",   // Vec native by-value handle double-deref
-    "mem_probe", // unbounded recursion (TCO / guard)
     "mem_test",  // write_u8 Err + deallocate UB
     "rt1",       // vec_free NULL-deref
     "vec_test",  // Vec native
-    "vm",        // backward-jump loop crash
-    "vm5",       // backward-jump loop crash
-    "vm10",      // backward-jump loop crash
+    "vm5",       // infinite interpreter loop (backward jumps); runs forever without crashing, killed by the 10s harness timeout
+    "vm10",      // infinite interpreter loop (backward jumps); runs forever without crashing, killed by the 10s harness timeout
 ];
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -100,12 +107,81 @@ fn compile(cinnabar: &str, fixture: &Path, bin: &Path) -> i32 {
     exit_code(Command::new(cinnabar).arg(fixture).arg("-o").arg(bin))
 }
 
-/// Runs a compiled binary with stdio nulled; returns its exit code.
+/// Seconds a compiled repro may run before the harness kills it.  A
+/// correct program may legitimately loop forever (the VM interpreters
+/// in RECORD_ONLY), so every execution is bounded: an infinite loop
+/// must cost the harness its timeout, never hang the test suite.
+const RUN_TIMEOUT_SECS: u64 = 10;
+
+/// Code reported when a repro is killed for exceeding the time limit;
+/// mirrors GNU coreutils `timeout` (124), so a hang reads distinctly
+/// from a real exit code or a signal crash.
+const TIMEOUT_CODE: i32 = 124;
+
+/// Runs a compiled binary with stdio nulled, killing it after
+/// `RUN_TIMEOUT_SECS` if it has not exited; returns its exit code, or
+/// `TIMEOUT_CODE` when the time limit was hit.
 fn run_binary(bin: &Path) -> i32 {
-    let mut cmd = Command::new(bin);
-    cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
-    exit_code(&mut cmd)
+    let mut child = match Command::new(bin)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            eprintln!("spawn failed: {}", err);
+            return 139;
+        }
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(RUN_TIMEOUT_SECS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return match status.code() {
+                    Some(code) => code,
+                    None => 139,
+                };
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    // Deadline hit: terminate the repro and reap it.  A
+                    // signal death (the kill landed) reports the
+                    // timeout; a child that raced past the deadline and
+                    // exited on its own just before the kill reports its
+                    // real code.
+                    match child.kill() {
+                        Ok(()) => {}
+                        Err(err) => {
+                            // InvalidInput means the child had already
+                            // exited on its own just as the deadline
+                            // hit — the expected race, not a failure;
+                            // the real code is reported below.
+                            if err.kind() != std::io::ErrorKind::InvalidInput {
+                                eprintln!("kill after deadline failed: {}", err);
+                            }
+                        }
+                    }
+                    match child.wait() {
+                        Ok(status) => {
+                            return match status.code() {
+                                Some(code) => code,
+                                None => TIMEOUT_CODE,
+                            };
+                        }
+                        Err(err) => {
+                            eprintln!("reap failed: {}", err);
+                            return TIMEOUT_CODE;
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(err) => {
+                eprintln!("wait failed: {}", err);
+                return 139;
+            }
+        }
+    }
 }
 
 fn temp_dir() -> PathBuf {

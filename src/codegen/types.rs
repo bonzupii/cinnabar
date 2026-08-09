@@ -89,8 +89,7 @@ fn build_type<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64) -> Result<BasicType
     let elem = node_e(env.3, row);
     let len = node_f(env.3, row);
     if kind == TYD_BUILTIN {
-        let name = name_text(env.2, sym_name(env.3, sym));
-        return builtin_llvm(env.0, &name);
+        return builtin_llvm(env.0, node_f(env.3, row));
     }
     if kind == TYD_STRUCT {
         let item = node_c(env.3, sym);
@@ -136,26 +135,22 @@ fn key_kind_of(nodes: &[i64], key: i64) -> i64 {
     }
 }
 
-/// The scalar representation of a builtin type, keyed by its name.
-fn builtin_llvm<'ctx>(context: &'ctx Context, name: &str) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
-    if name == "U8" {
+/// The scalar representation of a builtin type, keyed by its sub-kind
+/// (stored in the descriptor at seed time).
+fn builtin_llvm<'ctx>(context: &'ctx Context, sub: i64) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+    if sub == BUILTIN_U8 {
         return Ok(context.i8_type().into());
     }
-    if name == "U32" {
+    if sub == BUILTIN_U32 {
         return Ok(context.i32_type().into());
     }
-    if name == "Bool" {
+    if sub == BUILTIN_BOOL {
         return Ok(context.bool_type().into());
     }
-    if name == "Int" || name == "Usize" {
+    if sub == BUILTIN_INT || sub == BUILTIN_USIZE {
         return Ok(context.i64_type().into());
     }
-    Err(builder_error(
-        -1,
-        0,
-        0,
-        &format!("unsupported builtin type '{}'", name),
-    ))
+    Err(builder_error(-1, 0, 0, "unsupported builtin type"))
 }
 
 /// The slice view type `{data, len}` shared by `[T]` and `&[T]`.

@@ -17,7 +17,7 @@ pub mod emitter;
 pub mod error;
 pub mod types;
 
-use crate::codegen::emitter::{emit_program, InstFns, Session};
+use crate::codegen::emitter::{emit_program, protocol_of, InstFns, Session};
 use crate::codegen::error::*;
 use crate::codegen::types::{EnumInfos, KeyTypes, PayloadStructs};
 use inkwell::context::Context;
@@ -102,6 +102,9 @@ fn run_emitter<'ctx, 'm, 'a>(
 ) -> Result<(), CodegenError> {
     let (context, module, builder, target_data) = llvm;
     let (key_types, enum_infos, payload_structs, inst_fns) = caches;
+    // The protocol ids are interned once from the program's own names
+    // table; every variant-tag lookup reads them from the session.
+    let protocol = protocol_of(names);
     let mut sess: Session<'ctx, 'm, 'a> = (
         context,
         module,
@@ -115,6 +118,7 @@ fn run_emitter<'ctx, 'm, 'a>(
         payload_structs,
         inst_fns,
         impls_list,
+        protocol,
     );
     emit_program(&mut sess)
 }
@@ -169,8 +173,27 @@ fn write_text(path: &Path, text: &str) -> Result<(), CodegenError> {
     fs::write(path, text).map_err(|err| io_error(&format!("cannot write '{}': {}", path.display(), err)))
 }
 
-/// Runs `llc -O2 -filetype=obj` to assemble the IR.
+/// Optimizes the IR with `opt -passes=default<O2>` and assembles it with
+/// `llc -O2 -filetype=obj`.
+///
+/// llc's `-O2` drives the *backend's* codegen optimizations but does not
+/// run LLVM's module-level IR optimization pipeline, so the emitter's
+/// `tail` markers never reach `tailcallelim` and `mem2reg` never
+/// promotes its entry-block allocas under llc alone.  The explicit `opt`
+/// step runs the full default pipeline — the one the emitter is written
+/// against ("mem2reg at -O2 promotes the scalar cases") and the one
+/// that turns self-tail-recursion into O(1)-stack loops.
 fn assemble(ir_path: &Path, obj_path: &Path) -> Result<(), CodegenError> {
+    let opt_path = ir_path.with_extension("opt.ll");
+    run_tool(
+        "opt",
+        &[
+            "-passes=default<O2>",
+            "-o",
+            &opt_path.to_string_lossy(),
+            &ir_path.to_string_lossy(),
+        ],
+    )?;
     run_tool(
         "llc",
         &[
@@ -178,18 +201,27 @@ fn assemble(ir_path: &Path, obj_path: &Path) -> Result<(), CodegenError> {
             "-filetype=obj",
             "-o",
             &obj_path.to_string_lossy(),
-            &ir_path.to_string_lossy(),
+            &opt_path.to_string_lossy(),
         ],
     )
 }
 
 /// Links the object with clang into the final binary.
+///
+/// `-no-pie`: the emitted module carries defined globals for the
+/// recursion guard, and the IR is non-PIC, so a PIE link would reject
+/// the absolute `.data` relocations (`R_X86_64_32 against .data can not
+/// be used when making a PIE object`).  A fixed load base is the
+/// deliberate, systems-language-consistent choice here — it matches the
+/// manifesto's static-only posture and changes nothing about the
+/// program's behavior.
 fn link(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
     run_tool(
         "clang",
         &[
             "-nostdinc",
             "-nostdinc++",
+            "-no-pie",
             "-o",
             &out.to_string_lossy(),
             &obj_path.to_string_lossy(),

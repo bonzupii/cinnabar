@@ -80,35 +80,28 @@ fn main() -> ExitCode {
     let (loaded, files) = module_loader::load(&mut names, &mut nodes, &mut lists, &mut errors, &entry);
     let (root, ext_mods) = match loaded {
         Some(program) => program,
-        None => {
-            render_diagnostics(&errors, &files);
-            return ExitCode::FAILURE;
-        }
+        None => return finish_with_diagnostics(&errors, &files),
     };
     if dump_ast {
         dump_program(&names, &nodes, &lists, root);
         return ExitCode::SUCCESS;
     }
     if !resolver::resolve(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods) {
-        render_diagnostics(&errors, &files);
-        return ExitCode::FAILURE;
+        return finish_with_diagnostics(&errors, &files);
     }
     let (ok, impls_list) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods);
     if !ok {
-        render_diagnostics(&errors, &files);
-        return ExitCode::FAILURE;
+        return finish_with_diagnostics(&errors, &files);
     }
     if !borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods) {
-        render_diagnostics(&errors, &files);
-        return ExitCode::FAILURE;
+        return finish_with_diagnostics(&errors, &files);
     }
     let out = match &output {
         Some(path) => path.clone(),
-        None => input.with_extension(""),
+        None => default_out_path(&input),
     };
     if let Err(codegen_err) = compile_and_link(&names, &mut nodes, &mut lists, impls_list, &out) {
-        render_codegen_error(&codegen_err, &files);
-        return ExitCode::FAILURE;
+        return finish_with_codegen_error(&codegen_err, &files);
     }
     if run {
         return run_binary(&out);
@@ -150,17 +143,19 @@ fn file_path_of(files: &[(String, String)], file_id: i64) -> Option<String> {
 }
 
 /// Renders every diagnostic, each at its own source origin.  Internal
-/// diagnostics (no source) are printed plainly.
-fn render_diagnostics(errors: &[Diag], files: &[(String, String)]) {
+/// diagnostics (no source) are printed plainly.  A rendering failure is
+/// returned to the driver instead of being swallowed.
+fn render_diagnostics(errors: &[Diag], files: &[(String, String)]) -> Result<(), String> {
     let mut cache = make_cache(files);
     let mut idx = 0usize;
     while idx < errors.len() {
         match errors.get(idx) {
-            Some(diag) => render_diag(&mut cache, files, diag),
+            Some(diag) => render_diag(&mut cache, files, diag)?,
             None => break,
         }
         idx += 1;
     }
+    Ok(())
 }
 
 /// Renders one diagnostic.  A `NO_FILE` span means the failure has no
@@ -169,16 +164,16 @@ fn render_diag(
     cache: &mut FnCache<String, impl FnMut(&String) -> Result<String, String>, String>,
     files: &[(String, String)],
     diag: &Diag,
-) {
+) -> Result<(), String> {
     if diag.1 == NO_FILE {
         eprintln!("error: {}", diag.0);
-        return;
+        return Ok(());
     }
     let path = match file_path_of(files, diag.1) {
         Some(path) => path,
         None => {
             eprintln!("error: {} (unknown file {})", diag.0, diag.1);
-            return;
+            return Ok(());
         }
     };
     let span = diag.2 as usize..diag.3 as usize;
@@ -186,18 +181,18 @@ fn render_diag(
         .with_message(&diag.0)
         .with_label(Label::new((path, span)).with_message("here").with_color(Color::Red))
         .finish();
-    if let Err(render_err) = report.print(&mut *cache) {
-        eprintln!("failed to render diagnostic: {}", render_err);
-    }
+    report
+        .print(&mut *cache)
+        .map_err(|render_err| format!("cannot render '{}': {}", diag.0, render_err))
 }
 
 /// Renders a codegen failure.  The span carries the failing construct's
 /// origin, or `(-1, 0, 0)` for toolchain failures with no source.
-fn render_codegen_error(codegen_err: &codegen::error::CodegenError, files: &[(String, String)]) {
+fn render_codegen_error(codegen_err: &codegen::error::CodegenError, files: &[(String, String)]) -> Result<(), String> {
     let mut cache = make_cache(files);
     if codegen_err.span.0 == NO_FILE {
         eprintln!("error: {}", codegen_error_message(codegen_err));
-        return;
+        return Ok(());
     }
     let path = match file_path_of(files, codegen_err.span.0) {
         Some(path) => path,
@@ -207,7 +202,7 @@ fn render_codegen_error(codegen_err: &codegen::error::CodegenError, files: &[(St
                 codegen_error_message(codegen_err),
                 codegen_err.span.0
             );
-            return;
+            return Ok(());
         }
     };
     let span = codegen_err.span.1 as usize..codegen_err.span.2 as usize;
@@ -219,9 +214,39 @@ fn render_codegen_error(codegen_err: &codegen::error::CodegenError, files: &[(St
                 .with_color(Color::Red),
         )
         .finish();
-    if let Err(render_err) = report.print(&mut cache) {
-        eprintln!("failed to render codegen error diagnostic: {}", render_err);
+    report
+        .print(&mut cache)
+        .map_err(|render_err| format!("cannot render codegen error: {}", render_err))
+}
+
+/// The default output path: the input path with a trailing `.cnb`
+/// stripped.  Only the exact `.cnb` suffix is removed, so a source file
+/// with any other extension keeps its name as the output.
+fn default_out_path(input: &Path) -> PathBuf {
+    let text = input.to_string_lossy();
+    match text.strip_suffix(".cnb") {
+        Some(stripped) => PathBuf::from(stripped),
+        None => input.to_path_buf(),
     }
+}
+
+/// Renders the accumulated diagnostics and exits with failure.  A
+/// rendering failure is printed, but compilation already failed, so the
+/// driver still exits with failure.
+fn finish_with_diagnostics(errors: &[Diag], files: &[(String, String)]) -> ExitCode {
+    if let Err(message) = render_diagnostics(errors, files) {
+        eprintln!("failed to render diagnostic: {}", message);
+    }
+    ExitCode::FAILURE
+}
+
+/// Renders a codegen failure and exits with failure, propagating a
+/// rendering failure the same way `finish_with_diagnostics` does.
+fn finish_with_codegen_error(codegen_err: &codegen::error::CodegenError, files: &[(String, String)]) -> ExitCode {
+    if let Err(message) = render_codegen_error(codegen_err, files) {
+        eprintln!("failed to render diagnostic: {}", message);
+    }
+    ExitCode::FAILURE
 }
 
 // ---------------------------------------------------------------------------
@@ -579,6 +604,12 @@ fn dump_expr(names: &[String], nodes: &[i64], lists: &[Vec<i64>], id: i64, depth
     } else if kind == EXPR_TRY {
         println!("{}Try(", pad);
         dump_expr(names, nodes, lists, node_b(nodes, id), depth + 1);
+        println!("{})", pad);
+    } else if kind == EXPR_INDEX {
+        println!("{}Index(base:", pad);
+        dump_expr(names, nodes, lists, node_b(nodes, id), depth + 1);
+        println!("{}index:", pad);
+        dump_expr(names, nodes, lists, node_c(nodes, id), depth + 1);
         println!("{})", pad);
     }
 }

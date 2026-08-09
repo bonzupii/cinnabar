@@ -1,0 +1,56 @@
+pub const OOB_INDEX: Usize = 9
+pub const ONE_USIZE: Usize = 1
+
+pub type Pair
+  pub x: Int
+  pub y: Int
+end
+
+fun pair_sum(value: &Pair) Int
+  return value.x + value.y
+end
+
+fun read_mut(value: &mut Pair) Int
+  return value.x + value.y
+end
+
+fun oob_score(index: Usize, length: Usize) Int
+  if index == OOB_INDEX && length == ONE_USIZE
+    return 0
+  end
+
+  return 1
+end
+
+fun check_borrowed(p0: Pair, rest: &[Pair], shared_sum: Int, mut_sum: Int) Int
+  # Dynamic index into a slice: Result(&Pair, IndexError), with the
+  # borrowed element carried in the Ok payload.  rest is arr[1..], so
+  # rest[0] is Pair(3, 4) and the index 9 is out of bounds.
+  val dynamic_ok = match &rest[0]
+    Ok(value) => pair_sum(value)
+    Err(IndexOutOfBounds(index, length)) => pair_sum(&p0)
+  end
+
+  val dynamic_err = match &rest[9]
+    Ok(value) => pair_sum(value)
+    Err(IndexOutOfBounds(index, length)) => oob_score(index, length)
+  end
+
+  if shared_sum == 3 && mut_sum == 7 && dynamic_ok == 7 && dynamic_err == 0 && p0.x == 1
+    return 0
+  end
+
+  return 1
+end
+
+pub fun main() Int
+  val arr = [Pair(x: 1, y: 2), Pair(x: 3, y: 4)]
+
+  # Constant in-range indices: &arr[i] and &mut arr[i] borrow the element.
+  val shared_sum = pair_sum(&arr[0])
+  val mut_sum = read_mut(&mut arr[1])
+
+  match arr
+    [p0, rest @ ..] => return check_borrowed(p0, rest, shared_sum, mut_sum)
+  end
+end

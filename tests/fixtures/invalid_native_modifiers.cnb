@@ -1,19 +1,19 @@
 # 1. Native on const
-native const BAD_NATIVE_CONST: Int = 1
+nat const BAD_NATIVE_CONST: Int = 1
 
 # 2. Native on mod
-native mod BadNativeMod
+nat mod BadNativeMod
 end
 
 # 3. Native on use
-native use Path.To.Item
+nat use Path.To.Item
 
 # 4. Native on trait
-native trait BadNativeTrait
+nat trait BadNativeTrait
 end
 
 # 5. Native on impl
-native impl BadNativeTrait for Int
+nat impl BadNativeTrait for Int
 end
 
 pub fun main() Int

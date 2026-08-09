@@ -44,7 +44,7 @@ pub fn resolve(
     lists: &mut Vec<Vec<i64>>,
     errors: &mut Vec<Diag>,
     root: i64,
-    ext_mods: &[(String, i64)],
+    ext_mods: &[(i64, i64)],
 ) -> bool {
     let mut scopes: Vec<Vec<i64>> = Vec::new();
     let mut parents: Vec<i64> = Vec::new();
@@ -70,12 +70,12 @@ pub fn resolve(
 
     collect_list(&mut state, root_scope, root);
 
-    let mut ext_scopes: Vec<(String, i64)> = Vec::new();
+    let mut ext_scopes: Vec<(i64, i64)> = Vec::new();
     let mut idx = 0usize;
     while idx < ext_mods.len() {
         match ext_mods.get(idx) {
             Some(pair) => {
-                let mod_name = intern(state.0, &pair.0);
+                let mod_name = pair.0;
                 let prefix = alloc_list(state.2);
                 list_push(state.2, prefix, mod_name);
                 let ext_scope = alloc_scope(state.4, state.5, state.6, state.7, root_scope, prefix, 1);
@@ -84,7 +84,7 @@ pub fn resolve(
                 // `Math` segment to the module's scope.
                 let ext_sym = alloc_sym(state.1, SYM_MODULE, mod_name, NONE, root_scope, ext_scope);
                 push_entry(state.4, root_scope, mod_name, ext_sym, NS_TYPE, NONE);
-                ext_scopes.push((pair.0.clone(), ext_scope));
+                ext_scopes.push((pair.0, ext_scope));
                 collect_list(&mut state, ext_scope, pair.1);
             }
             None => break,
@@ -97,7 +97,7 @@ pub fn resolve(
     while idx < ext_mods.len() {
         match ext_mods.get(idx) {
             Some(pair) => {
-                let ext_scope = ext_scope_of(&ext_scopes, &pair.0);
+                let ext_scope = ext_scope_of(&ext_scopes, pair.0);
                 resolve_imports(&mut state, ext_scope, pair.1);
             }
             None => break,
@@ -110,7 +110,7 @@ pub fn resolve(
     while idx < ext_mods.len() {
         match ext_mods.get(idx) {
             Some(pair) => {
-                let ext_scope = ext_scope_of(&ext_scopes, &pair.0);
+                let ext_scope = ext_scope_of(&ext_scopes, pair.0);
                 walk_item_list(&mut state, ext_scope, pair.1);
             }
             None => break,
@@ -284,17 +284,25 @@ fn sym_is_pub(nodes: &[i64], sym: i64) -> i64 {
 }
 
 /// The fully qualified dotted name of an item declared as `name` inside
-/// the scope with prefix `prefix`.
+/// the scope with prefix `prefix`.  The dotted text is assembled in a
+/// single reusable buffer and interned once; no intermediate string
+/// list is allocated.
 fn qualified_name(names: &mut Vec<String>, lists: &[Vec<i64>], prefix: i64, name: i64) -> i64 {
-    let mut parts: Vec<String> = Vec::new();
+    let mut text = String::new();
     let count = list_len(lists, prefix);
     let mut idx = 0i64;
     while idx < count {
-        parts.push(name_text(names, list_get(lists, prefix, idx)));
+        if !text.is_empty() {
+            text.push('.');
+        }
+        text.push_str(&name_text(names, list_get(lists, prefix, idx)));
         idx += 1;
     }
-    parts.push(name_text(names, name));
-    intern(names, &parts.join("."))
+    if !text.is_empty() {
+        text.push('.');
+    }
+    text.push_str(&name_text(names, name));
+    intern(names, &text)
 }
 
 /// True when `sym` is visible from `scope`: either it lives in the scope's
@@ -522,6 +530,11 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
         let name = node_d(state.1, item);
         let full = qualified_name(state.0, state.2, prefix, name);
         let sym = alloc_sym(state.1, SYM_ENUM, full, item, scope, NONE);
+        // The primitive-enum sub-kind is a fact about the symbol, assigned
+        // once at declaration: the seeded Unit/Result/Option/DivError
+        // enums carry PRIM_* here, so the typechecker and codegen identify
+        // them by the stored integer, never by name.
+        sym_set_prim_kind(state.1, sym, prim_kind_of(state.0, full));
         insert_decl(state, scope, name, sym, NS_TYPE, 2, (file, start, end));
         item_set_sym(state.1, item, sym);
         let sub = alloc_scope(state.4, state.5, state.6, state.7, scope, prefix, 1);
@@ -549,6 +562,11 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
         let sym = alloc_sym(state.1, sym_kind, full, item, scope, NONE);
         insert_decl(state, scope, name, sym, NS_VALUE, 1, (file, start, end));
         item_set_sym(state.1, item, sym);
+        if kind == ITEM_NATIVE_FUN {
+            // The runtime ABI opcode is a fact about the symbol, assigned
+            // once at declaration; codegen dispatches on the integer.
+            sym_set_native_op(state.1, sym, native_opcode_of(state.0, full));
+        }
     } else if kind == ITEM_CONST {
         let name = node_d(state.1, item);
         let full = qualified_name(state.0, state.2, prefix, name);
@@ -613,6 +631,9 @@ fn collect_variants(state: &mut State, hoist_scope: i64, sub: i64, enum_full: i6
         let single = single_name_list(state.2, enum_full);
         let full = qualified_name(state.0, state.2, single, var_name);
         let sym = alloc_sym(state.1, SYM_VARIANT, full, variant, sub, NONE);
+        // Attach the symbol to its variant declaration so the typechecker
+        // can record the (enum key, variant) facts codegen reads.
+        variant_set_sym(state.1, variant, sym);
         push_entry(state.4, sub, var_name, sym, NS_VALUE, NONE);
         insert_hoisted(state, hoist_scope, var_name, sym, variant);
         idx += 1;
@@ -693,6 +714,7 @@ fn seed_builtins(state: &mut State, root_scope: i64, root: i64) {
     seed_primitive(state, root, "Result", &["T", "E"], &[("Ok", &["T"]), ("Err", &["E"])]);
     seed_primitive(state, root, "Option", &["T"], &[("Some", &["T"]), ("None", &[])]);
     seed_primitive(state, root, "DivError", &[], &[("DivByZero", &[])]);
+    seed_primitive(state, root, "IndexError", &[], &[("IndexOutOfBounds", &["Usize", "Usize"])]);
 }
 
 /// Synthesizes one primitive enum declaration and pushes it into the root
@@ -755,7 +777,107 @@ fn seed_from_u8(state: &mut State, sub: i64, name: i64) {
     let from_u8_name = intern(state.0, "from_u8");
     let method = qualified_name(state.0, state.2, prefix, from_u8_name);
     let from_u8 = alloc_sym(state.1, SYM_NATIVE_FUN, method, NONE, sub, NONE);
+    sym_set_native_op(state.1, from_u8, native_opcode_of(state.0, method));
     push_entry(state.4, sub, from_u8_name, from_u8, NS_VALUE, NONE);
+}
+
+/// The native-surface opcode of a native function symbol's fully
+/// qualified name.  This is the single definition of the runtime ABI
+/// surface set: it runs once per native symbol, at declaration or
+/// seeding, and codegen dispatches on the stored integer opcode, never
+/// re-matching names.  An unrecognized native (a surface the runtime
+/// does not implement) gets NAT_NONE and is rejected by codegen.
+fn native_opcode_of(names: &[String], full: i64) -> i64 {
+    if name_is(names, full, "U8.from_u8")
+        || name_is(names, full, "U32.from_u8")
+        || name_is(names, full, "Int.from_u8")
+        || name_is(names, full, "Usize.from_u8")
+    {
+        return NAT_FROM_U8;
+    }
+    if name_is(names, full, "Slice.len") {
+        return NAT_SLICE_LEN;
+    }
+    if name_is(names, full, "Memory.allocate") {
+        return NAT_MEM_ALLOCATE;
+    }
+    if name_is(names, full, "Memory.deallocate") {
+        return NAT_MEM_DEALLOCATE;
+    }
+    if name_is(names, full, "Memory.write_u8") {
+        return NAT_MEM_WRITE_U8;
+    }
+    if name_is(names, full, "Memory.read_u8") {
+        return NAT_MEM_READ_U8;
+    }
+    if name_is(names, full, "Collections.vec_new") {
+        return NAT_VEC_NEW;
+    }
+    if name_is(names, full, "Collections.vec_push") {
+        return NAT_VEC_PUSH;
+    }
+    if name_is(names, full, "Collections.vec_view") {
+        return NAT_VEC_VIEW;
+    }
+    if name_is(names, full, "Collections.vec_free") {
+        return NAT_VEC_FREE;
+    }
+    if name_is(names, full, "Collections.string_from_slice") {
+        return NAT_STRING_FROM_SLICE;
+    }
+    if name_is(names, full, "Collections.string_len") {
+        return NAT_STRING_LEN;
+    }
+    if name_is(names, full, "Collections.string_free") {
+        return NAT_STRING_FREE;
+    }
+    if name_is(names, full, "Collections.hash_map_new") {
+        return NAT_HASH_MAP_NEW;
+    }
+    if name_is(names, full, "Collections.hash_map_insert") {
+        return NAT_HASH_MAP_INSERT;
+    }
+    if name_is(names, full, "Collections.hash_map_get") {
+        return NAT_HASH_MAP_GET;
+    }
+    if name_is(names, full, "Collections.hash_map_free") {
+        return NAT_HASH_MAP_FREE;
+    }
+    if name_is(names, full, "Runtime.self_check") {
+        return NAT_SELF_CHECK;
+    }
+    if name_is(names, full, "Terminal.print") {
+        return NAT_TERM_PRINT;
+    }
+    if name_is(names, full, "Terminal.print_line") {
+        return NAT_TERM_PRINT_LINE;
+    }
+    if name_is(names, full, "Terminal.eprint") {
+        return NAT_TERM_EPRINT;
+    }
+    NAT_NONE
+}
+
+/// The primitive-enum sub-kind of a seeded enum's fully qualified name.
+/// The four primitives (Unit, Result, Option, DivError) are interned once
+/// at seeding; every other enum gets PRIM_NONE.  This is the single place
+/// the prim names are known — the same single-definition pattern as
+/// `native_opcode_of` — and the result is stored on the symbol at
+/// declaration time, so later stages read the integer, never the name.
+fn prim_kind_of(names: &mut Vec<String>, full: i64) -> i64 {
+    if full == intern(names, "Unit") {
+        PRIM_UNIT
+    } else if full == intern(names, "Result") {
+        PRIM_RESULT
+    } else if full == intern(names, "Option") {
+        PRIM_OPTION
+    } else if full == intern(names, "DivError") {
+        PRIM_DIV_ERROR
+    } else if full == intern(names, "IndexError") {
+        PRIM_INDEX_ERROR
+    } else {
+        PRIM_NONE
+    }
 }
 
 fn builtin_int_names(names: &mut Vec<String>) -> Vec<i64> {
@@ -945,7 +1067,7 @@ fn copy_list(lists: &mut [Vec<i64>], from: i64, to: i64) {
 // Reference walking (phase C).
 // ---------------------------------------------------------------------------
 
-fn ext_scope_of(ext_scopes: &[(String, i64)], name: &str) -> i64 {
+fn ext_scope_of(ext_scopes: &[(i64, i64)], name: i64) -> i64 {
     let mut idx = 0usize;
     loop {
         match ext_scopes.get(idx) {
@@ -1180,6 +1302,9 @@ fn walk_expr(state: &mut State, scope: i64, expr: i64) {
         walk_arms(state, scope, node_c(state.1, expr));
     } else if kind == EXPR_TRY {
         walk_expr(state, scope, node_b(state.1, expr));
+    } else if kind == EXPR_INDEX {
+        walk_expr(state, scope, node_b(state.1, expr));
+        walk_expr(state, scope, node_c(state.1, expr));
     }
 }
 

@@ -34,10 +34,11 @@
       - try operator for Result and Option
       - arithmetic (+, -, *, /, %), bitwise (&, |, ^, <<, >>), logical (&&, ||, !)
       - / and % return Result(T, DivError); a statically-known-zero divisor is a compile error
+      - array/slice indexing (arr[i], &arr[i], &mut arr[i]): constant indices proven at compile time; dynamic and slice indices return Result(T, IndexError)
   - Native Surfaces:
       - Runtime, Memory, Binary, Slice, Collections, Terminal
   - Built-in Primitives:
-      - Unit, Result(T, E), Option(T) are built-in language primitives
+      - Unit, Result(T, E), Option(T), IndexError are built-in language primitives
       - Int, U8, U32, Usize, Bool are built-in scalar types
 |#
 
@@ -114,6 +115,8 @@ pub const SENTINEL_USIZE: Usize = 999999
 
 pub const EXPECTED_REST_LEN: Usize = 3
 pub const EXPECTED_STRING_LEN: Usize = 15
+
+pub const OOB_INDEX: Usize = 99
 
 pub const HEADER_KIND: U32 = 7
 pub const HEADER_FLAGS: U32 = 3
@@ -525,6 +528,11 @@ fun move_point(point: Point, dx: Int, dy: Int) Point
   return Point(x: point.x + dx, y: point.y + dy)
 end
 
+#! Reads a Point through a shared borrow; consumes `&arr[i]`.
+fun point_sum(value: &Point) Int
+  return value.x + value.y
+end
+
 fun use_memory_block(block: Memory.Block, plan: &MemoryPlan) impure Result(U8, Memory.Error)
   val write_result = write_u8(&block, ZERO_USIZE, plan.byte)
 
@@ -820,6 +828,53 @@ fun check_binary() Bool
   end
 end
 
+#! Runtime-checked slice indexing: `view[index]` returns Result(U8,
+#! IndexError), landing in Ok for in-bounds reads and in
+#! Err(IndexOutOfBounds(index, length)) out of bounds.
+fun get_checked(view: &[U8], index: Usize) Result(U8, IndexError)
+  return view[index]
+end
+
+#! Asserts the in-bounds and out-of-bounds outcomes of dynamic slice
+#! indexing are distinct, and that the out-of-bounds error carries the
+#! attempted index and the slice's real length.
+fun check_indexed(rest: &[U8], b0: U8, first: U8, last: U8) Bool
+  val in_ok = match get_checked(rest, 1)
+    Ok(value) => value == MAGIC_BYTE_2
+    Err(IndexOutOfBounds(index, length)) =>
+      index == SENTINEL_USIZE && length == SENTINEL_USIZE
+  end
+
+  val out_ok = match get_checked(rest, OOB_INDEX)
+    Ok(value) => false
+    Err(IndexOutOfBounds(index, length)) =>
+      index == OOB_INDEX && length == EXPECTED_REST_LEN
+  end
+
+  return (b0 == first) && (last == MAGIC_BYTE_3) && in_ok && out_ok
+end
+
+#! Demonstrates array/slice indexing.  Constant indices against the
+#! fixed-size array are proven in range at compile time and evaluate
+#! directly to the element type with no Result wrapper; dynamic indexing
+#! over a slice (from the rest pattern) is runtime-checked.
+fun check_index() Bool
+  val arr = [MAGIC_BYTE_0, MAGIC_BYTE_1, MAGIC_BYTE_2, MAGIC_BYTE_3]
+
+  val first = arr[0]
+  val last = arr[3]
+
+  # `&arr[i]` with a constant, in-range index borrows the element: the
+  # result is `&Point`, consumed here through a `&Point` parameter.
+  val points = [Point(x: POINT_DX, y: POINT_DY), Point(x: ZERO_INT, y: ZERO_INT)]
+  val borrowed_ok = point_sum(&points[0]) == POINT_DX + POINT_DY
+
+  match arr
+    [b0, rest @ ..] =>
+      return check_indexed(rest, b0, first, last) && borrowed_ok
+  end
+end
+
 fun check_trait() Bool
   val header = Header(kind: HEADER_KIND, flags: HEADER_FLAGS)
   val tag = Tag(value: TAG_VALUE)
@@ -898,9 +953,10 @@ fun reference_checks() impure ExitCode
   val memory_ok = check_memory()
   val binary_ok = check_binary()
   val trait_ok = check_trait()
+  val index_ok = check_index()
   val collections_ok = check_collections()
 
-  val all_ok = range_ok && app_ok && port_ok && option_ok && option_try_ok && loop_ok && break_continue_ok && struct_ok && flags_ok && modulo_ok && div_ok && memory_ok && binary_ok && trait_ok && collections_ok
+  val all_ok = range_ok && app_ok && port_ok && option_ok && option_try_ok && loop_ok && break_continue_ok && struct_ok && flags_ok && modulo_ok && div_ok && memory_ok && binary_ok && trait_ok && index_ok && collections_ok
 
   if all_ok
     return ExitSuccess

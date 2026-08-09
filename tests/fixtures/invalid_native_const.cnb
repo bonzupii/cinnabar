@@ -1,4 +1,4 @@
-native const INVALID_NATIVE: Int = 42
+nat const INVALID_NATIVE: Int = 42
 
 pub fun main() Int
   return 0

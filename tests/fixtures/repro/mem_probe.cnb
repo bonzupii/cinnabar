@@ -1,25 +1,25 @@
 pub mod Memory
-  pub native type Block
+  pub nat type Block
   pub type Error
     pub AllocationFailed(Usize)
     pub AccessOutOfBounds(Usize, Usize)
   end
-  pub native fun allocate(size: Usize) impure Result(Block, Error)
-  pub native fun deallocate(block: Block) impure Unit
-  pub native fun write_u8(block: &Block, offset: Usize, value: U8) impure Result(Unit, Error)
-  pub native fun read_u8(block: &Block, offset: Usize) impure Result(U8, Error)
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+  pub nat fun write_u8(block: &Block, offset: Usize, value: U8) impure Result(Unit, Error)
+  pub nat fun read_u8(block: &Block, offset: Usize) impure Result(U8, Error)
 end
 
 pub mod Collections
-  pub native type Vec(T)
+  pub nat type Vec(T)
   pub type Error
     pub AllocationFailed(Usize)
     pub IndexOutOfBounds(Usize)
   end
-  pub native fun vec_new<T>() impure Result(Vec(T), Error)
-  pub native fun vec_push<T>(vec: &mut Vec(T), value: T) impure Result(Unit, Error)
-  pub native fun vec_view<T>(vec: &Vec(T)) &[T]
-  pub native fun vec_free<T>(vec: Vec(T)) impure Unit
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_push<T>(vec: &mut Vec(T), value: T) impure Result(Unit, Error)
+  pub nat fun vec_view<T>(vec: &Vec(T)) &[T]
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
 end
 
 use Memory.allocate
@@ -32,21 +32,48 @@ use Collections.vec_view
 use Collections.vec_free
 
 pub mod Slice
-  pub native fun len<T>(view: &[T]) Usize
+  pub nat fun len<T>(view: &[T]) Usize
 end
 
 use Slice.len as slice_len
 
-const PROBE_RECURSE_DEPTH: Int = 100000
+# Depth far past the guard's limit even after -O2 shrinks each frame
+# to a few dozen bytes: the guard trips around 7 MiB of consumed stack,
+# and 500000 frames of any plausible size exceed that.
+#
+# The harness asserts this program exits 70 (the guard fired).  That
+# assertion assumes the process runs under a finite stack soft limit
+# (the default 8 MiB): the guard measures `RLIMIT_STACK` at startup and
+# an unlimited limit (ulimit -s unlimited) cannot trip it — the
+# recursion would instead run to completion and exit 0.  Run the harness
+# under the default limit.
+const PROBE_RECURSE_DEPTH: Int = 500000
 
 pub const PROBE_BYTE: U8 = 0x42
 pub const PROBE_FAIL_BYTE: U8 = 0xFF
 
-fun recurse(n: Int) Int
+const ZERO_USIZE: Usize = 0
+
+# Non-tail recursion with an opaque heap read in the continuation.  The
+# per-level addend (1 or 2) is chosen by a byte read from the block, so
+# the optimizer cannot summarize the recursion — a `recurse(n - 1) + 1`
+# shape is simplified to `n`, leaving no frames to guard, and factorial
+# shapes are turned into loops.  Every level keeps a real frame; the
+# stack guard must fire cleanly (exit 70) instead of the OS SIGSEGV.
+# The accumulated value is never asserted; the exit code 70 is.
+fun recurse(n: Int, block: &Memory.Block) Int
   if n <= 0
     return 0
   end
-  return recurse(n - 1) + 1
+  val byte = match read_u8(block, ZERO_USIZE)
+    Ok(value) => value
+    Err(error) => PROBE_FAIL_BYTE
+  end
+  val inner = recurse(n - 1, block)
+  if byte == PROBE_BYTE
+    return inner + 1
+  end
+  return inner + 2
 end
 
 fun fail_write(block: Memory.Block, error: Memory.Error) Result(U8, Memory.Error)
@@ -82,7 +109,12 @@ fun memory_roundtrip() Result(U8, Memory.Error)
 end
 
 pub fun main() Int
-  val depth = recurse(PROBE_RECURSE_DEPTH)
+  val block = match allocate(1)
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  val depth = recurse(PROBE_RECURSE_DEPTH, &block)
+  deallocate(block)
 
   val mem = match memory_roundtrip()
     Ok(v) => v

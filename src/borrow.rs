@@ -35,11 +35,11 @@
 //! binary (shared or exclusive); no fractional accounting is modelled.
 //!
 //! The checker consumes the typechecker's attached facts (expression
-//! types, statement binding types, pattern types, instance rows) and the
-//! resolver's resolved symbols.  It never re-derives a fact an earlier
-//! stage established; the only facts it computes are the ones this stage
-//! owns: linearity of a type (from the canonical type descriptors) and the
-//! two dataflow analyses above.
+//! types, statement binding types, pattern types, instance rows, and the
+//! per-key linearity flag) and the resolver's resolved symbols.  It never
+//! re-derives a fact an earlier stage established; the only facts it
+//! computes are the two dataflow analyses above.  Linearity is read from
+//! the flag the typechecker stored on every canonical descriptor row.
 
 use crate::ast::*;
 
@@ -281,8 +281,8 @@ fn state_set(state: &mut [i64], path: i64, value: i64) {
 
 // ---------------------------------------------------------------------------
 // Type facts.  The typechecker canonicalized every type into descriptor
-// rows; these reads consume that table.  Linearity is this stage's own
-// derived fact, computed once here from the descriptors.
+// rows and stored a per-key linearity flag; these reads consume that
+// table.  Nothing here re-derives a fact an earlier stage established.
 // ---------------------------------------------------------------------------
 
 fn ty_kind_of(nodes: &[i64], key: i64) -> i64 {
@@ -322,100 +322,15 @@ fn is_ref_key(nodes: &[i64], key: i64) -> bool {
     kind == TYD_REF || kind == TYD_REF_MUT || kind == TYD_SLICE
 }
 
-/// True when `key` is (or transitively contains) a linear handle.  Native
-/// handles are linear by their qualified name; structs, enums, and arrays
-/// are linear when any field, payload, or element is.  `seen` guards the
-/// recursion against cyclic type graphs.
-fn key_is_linear(ctx: &mut Ctx, key: i64, seen: &mut Vec<i64>) -> bool {
-    if key < 0 {
-        return false;
-    }
-    if list_has(seen, key) {
-        return false;
-    }
-    seen.push(key);
-    let kind = ty_kind_of(ctx.1, key);
-    if kind == TYD_NATIVE {
-        let sym = ty_sym_of(ctx.1, key);
-        if sym == NONE {
-            return false;
-        }
-        let name = node_b(ctx.1, sym);
-        return name_is(ctx.0, name, "Memory.Block")
-            || name_is(ctx.0, name, "Collections.Vec")
-            || name_is(ctx.0, name, "Collections.String")
-            || name_is(ctx.0, name, "Collections.HashMap");
-    }
-    if kind == TYD_ARRAY {
-        let elem = ty_elem_of(ctx.1, key);
-        return elem != NONE && key_is_linear(ctx, elem, seen);
-    }
-    if kind == TYD_STRUCT || kind == TYD_ENUM {
-        let sym = ty_sym_of(ctx.1, key);
-        if sym == NONE {
-            return false;
-        }
-        let decl = node_c(ctx.1, sym);
-        if decl == NONE || node_tag(ctx.1, decl) != NODE_ITEM {
-            return false;
-        }
-        if key_is_linear_members(ctx, decl, key, seen) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Whether a struct or enum declaration transitively contains a linear
-/// member.  The declared member types were canonicalized by the
-/// typechecker against the declaration's own type parameters; each
-/// declared member is substituted against the concrete instantiation
-/// (`key`) before the recursion, so a `T`-typed member counts as linear
-/// exactly when its instantiated type is linear.
-fn key_is_linear_members(ctx: &mut Ctx, decl: i64, key: i64, seen: &mut Vec<i64>) -> bool {
-    let kind = node_a(ctx.1, decl);
-    if kind == ITEM_STRUCT {
-        let fields = node_e(ctx.1, decl);
-        let count = list_len(ctx.2, fields);
-        let mut idx = 0i64;
-        while idx < count {
-            let fty_node = node_b(ctx.1, list_get(ctx.2, fields, idx));
-            let declared = ty_key_of(ctx.1, fty_node);
-            let fty = subst_declared(ctx, decl, key, declared);
-            if key_is_linear(ctx, fty, seen) {
-                return true;
-            }
-            idx += 1;
-        }
-    } else if kind == ITEM_ENUM {
-        let variants = node_e(ctx.1, decl);
-        let count = list_len(ctx.2, variants);
-        let mut idx = 0i64;
-        while idx < count {
-            let payload = node_b(ctx.1, list_get(ctx.2, variants, idx));
-            let pcount = list_len(ctx.2, payload);
-            let mut pidx = 0i64;
-            while pidx < pcount {
-                let pty_node = list_get(ctx.2, payload, pidx);
-                let declared = ty_key_of(ctx.1, pty_node);
-                let pty = subst_declared(ctx, decl, key, declared);
-                if key_is_linear(ctx, pty, seen) {
-                    return true;
-                }
-                pidx += 1;
-            }
-            idx += 1;
-        }
-    }
-    false
-}
-
+/// Whether `key` is (or transitively contains) a linear handle.  The
+/// typechecker computed the flag once over every canonical descriptor
+/// row at the end of checking; this is a plain read of that stored fact,
+/// never a re-derivation from names or declarations.
 fn is_linear_key(ctx: &mut Ctx, key: i64) -> i64 {
     if key == NONE {
         return 0;
     }
-    let mut seen: Vec<i64> = Vec::new();
-    if key_is_linear(ctx, key, &mut seen) {
+    if tyinfo_is_linear(ctx.1, key) == 1 {
         1
     } else {
         0
@@ -922,6 +837,20 @@ fn expr_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, mode: i64, ret: 
     if kind == EXPR_TRY {
         return try_effects(f, b, ctx, expr, ret, prod);
     }
+    if kind == EXPR_INDEX {
+        // An index reads its base in the enclosing mode (a value read, a
+        // shared borrow, or an exclusive borrow of the element) and its
+        // index in a value position.  The index never moves the base: a
+        // value-position index of a linear-element array or slice is
+        // rejected by the typechecker, so only reads and borrows reach
+        // this arm.  A borrowed element issues its loan on the root
+        // binding through the base's borrow effect.
+        let base = node_b(ctx.1, expr);
+        let index = node_c(ctx.1, expr);
+        let cont = expr_effects(f, b, ctx, base, mode, ret, prod);
+        expr_effects(f, b, ctx, index, MODE_VALUE, ret, &mut Vec::new());
+        return cont;
+    }
     cur(b)
 }
 
@@ -1110,7 +1039,7 @@ fn field_key_of(ctx: &mut Ctx, key: i64, field: i64) -> i64 {
 
 /// Substitutes a declared member type against the concrete type arguments
 /// of `key` (the struct or enum instantiation), matching the declaration's
-/// type parameters by name.
+/// type parameters by key.
 fn subst_declared(ctx: &mut Ctx, decl: i64, key: i64, declared: i64) -> i64 {
     if declared == NONE {
         return declared;
@@ -1468,7 +1397,7 @@ pub fn borrow_check(
     lists: &mut Vec<Vec<i64>>,
     errors: &mut Vec<Diag>,
     root: i64,
-    ext_mods: &[(String, i64)],
+    ext_mods: &[(i64, i64)],
 ) -> bool {
     let before = errors.len();
     check_item_list(names, nodes, lists, errors, root);
@@ -1566,7 +1495,7 @@ fn check_fn(
 fn analyze_fn(f: &mut F, ctx: &mut Ctx, entry: i64) {
     let live_after = compute_liveness(f);
     let (entry_state, inconsistencies) = linear_fixpoint(f, ctx, entry);
-    let entry_origins = origin_fixpoint(f, entry);
+    let entry_origins = origin_fixpoint(f, ctx, entry);
     report(f, ctx, &live_after, &entry_state, &inconsistencies, &entry_origins);
 }
 
@@ -1982,10 +1911,16 @@ fn linear_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> (Vec<Vec<i64>>, Vec<(i64
         blk += 1;
     }
     let mut inconsistencies: Vec<(i64, i64)> = Vec::new();
+    // Four lattice states per path, so each (block, path) entry and exit
+    // can change at most three times; the cap is derived from the data.
+    // Hitting it with changes still pending is a non-convergence compile
+    // error, never silent acceptance of un-converged facts.
+    let cap = nblocks * npaths * 8 + 1;
     let mut guard = 0usize;
     loop {
         guard += 1;
-        if guard > 64 {
+        if guard > cap as usize {
+            push_internal(ctx.3, "internal: linear-consumption analysis did not converge");
             break;
         }
         let mut changed = false;
@@ -2070,9 +2005,10 @@ fn apply_block_origins(f: &F, block: i64, origins: &mut [Vec<i64>]) {
 /// The origin fixpoint.  A reference binding's origin is set exactly once
 /// (at its bind or re-assign), so the union join converges quickly; the
 /// result is the per-block entry origin set for every binding.
-fn origin_fixpoint(f: &F, entry: i64) -> Vec<Vec<Vec<i64>>> {
+fn origin_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> Vec<Vec<Vec<i64>>> {
     let nblocks = f.6.len() as i64;
     let nbind = f.0.len() as i64;
+    let nloans = f.3.len() as i64;
     let mut entry_origins: Vec<Vec<Vec<i64>>> = Vec::new();
     let mut exit_origins: Vec<Vec<Vec<i64>>> = Vec::new();
     let mut blk = 0i64;
@@ -2081,10 +2017,18 @@ fn origin_fixpoint(f: &F, entry: i64) -> Vec<Vec<Vec<i64>>> {
         exit_origins.push(empty_origins(nbind));
         blk += 1;
     }
+    // Each binding's origin set can gain at most `nloans` elements, and
+    // a block's exit origin is either its entry (bindings it never
+    // re-points) or a fixed constant (re-pointed bindings), so only the
+    // entry unions grow; the cap is derived from the data.  Hitting it
+    // with changes still pending is a non-convergence compile error,
+    // never silent acceptance of un-converged facts.
+    let cap = nblocks * nbind * (nloans + 1) + 1;
     let mut guard = 0usize;
     loop {
         guard += 1;
-        if guard > 64 {
+        if guard > cap as usize {
+            push_internal(ctx.3, "internal: borrow-origin analysis did not converge");
             break;
         }
         let mut changed = false;

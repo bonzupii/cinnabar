@@ -16,7 +16,7 @@ use crate::codegen::error::*;
 use crate::codegen::types::*;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
-use inkwell::module::Module;
+use inkwell::module::{Linkage, Module};
 use inkwell::targets::TargetData;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType};
 use inkwell::values::{
@@ -27,10 +27,12 @@ use inkwell::IntPredicate;
 
 /// `(context, module, builder, target data, names, nodes, lists, type
 /// cache, enum info cache, payload struct cache, emitted functions,
-/// impls list id)`.  The four caches are owned: the emitter consumes
-/// them during emission and nothing uses them afterward.  The impls
-/// list is the typechecker's fact table of `(trait sym, for key,
-/// methods list)` triples, read only for deferred trait dispatch.
+/// impls list id, protocol ids)`.  The four caches are owned: the
+/// emitter consumes them during emission and nothing uses them
+/// afterward.  The impls list is the typechecker's fact table of
+/// `(trait sym, for key, methods list)` triples, read only for deferred
+/// trait dispatch; the protocol ids are the interned names of the
+/// primitive-enum variants the emitter's synthesized surfaces reference.
 ///
 /// `'ctx` names the context, which outlives the whole codegen phase;
 /// the LLVM types and values the emitter creates carry it.  The module,
@@ -50,7 +52,51 @@ pub type Session<'ctx, 'm, 'a> = (
     PayloadStructs<'ctx>,
     InstFns<'ctx>,
     i64,
+    Protocol,
 );
+
+/// The interned name ids of the protocol variant names the emitter's
+/// synthesized surfaces reference: Result's Ok/Err, Option's Some/None,
+/// DivError's DivByZero, the native error enums' AllocationFailed /
+/// AccessOutOfBounds / KeyNotFound / InvalidUtf8, and ExitCode's
+/// ExitDiagnostic.  Built once when the session is created from the
+/// program's own names table; variant-tag lookups take these ids
+/// instead of re-scanning the names table at every call site.
+#[derive(Clone, Copy)]
+pub struct Protocol {
+    pub ok: i64,
+    pub err: i64,
+    pub some: i64,
+    pub none: i64,
+    pub div_by_zero: i64,
+    pub alloc_failed: i64,
+    pub oob: i64,
+    pub index_oob: i64,
+    pub key_not_found: i64,
+    pub invalid_utf8: i64,
+    pub exit_diag: i64,
+}
+
+/// Interns the protocol variant names from the program's own names
+/// table.  Every one of them was interned by the resolver when it
+/// synthesized the Unit/Result/Option/DivError primitive enums, so a
+/// NONE entry means the seeding did not run — an internal error that
+/// the tag lookup reports only when the corresponding surface is used.
+pub fn protocol_of(names: &[String]) -> Protocol {
+    Protocol {
+        ok: find_name(names, "Ok"),
+        err: find_name(names, "Err"),
+        some: find_name(names, "Some"),
+        none: find_name(names, "None"),
+        div_by_zero: find_name(names, "DivByZero"),
+        alloc_failed: find_name(names, "AllocationFailed"),
+        oob: find_name(names, "AccessOutOfBounds"),
+        index_oob: find_name(names, "IndexOutOfBounds"),
+        key_not_found: find_name(names, "KeyNotFound"),
+        invalid_utf8: find_name(names, "InvalidUtf8"),
+        exit_diag: find_name(names, "ExitDiagnostic"),
+    }
+}
 
 /// `(mono key, function value)` for every emitted function.
 pub type InstFns<'ctx> = Vec<(i64, FunctionValue<'ctx>)>;
@@ -69,9 +115,18 @@ pub type BasicBlockId<'ctx> = inkwell::basic_block::BasicBlock<'ctx>;
 
 /// The per-function compilation context threaded through every statement
 /// and expression emitter: the function being built, its local bindings,
-/// its loop stack, its type-argument substitution (`from` → `to`), and
-/// its return key.  Exactly as `Session` threads the phase state, this
-/// threads the function state.
+/// its loop stack, its type-argument substitution (`from` → `to`), its
+/// return key, and the tail-position flag.  Exactly as `Session` threads
+/// the phase state, this threads the function state.
+///
+/// The tail-position flag is set only while emitting the expression that
+/// is the direct value of a `return` statement.  A call emitted with the
+/// flag set is marked `tail`, which lets LLVM's tail-call elimination
+/// convert self-tail-recursion into O(1)-stack jumps (`musttail` is not
+/// usable: the caller's frame holds allocas, and its stricter guarantees
+/// are not what the language needs).  Every descent into a subexpression
+/// that is not itself the return value clears the flag, so `return x +
+/// f(y)` never marks `f`'s call.
 pub type FnCtx<'ctx, 'a> = (
     FunctionValue<'ctx>,
     Locals<'ctx>,
@@ -79,6 +134,7 @@ pub type FnCtx<'ctx, 'a> = (
     &'a [i64],
     &'a [i64],
     i64,
+    bool,
 );
 
 /// A match continuation: the result slot's key, its alloca, and the merge
@@ -134,10 +190,6 @@ fn utf8_byte_value<'ctx>(sess: &mut Session<'ctx, '_, '_>, b: IntValue<'ctx>) ->
 // Small arena reads.
 // ---------------------------------------------------------------------------
 
-fn sym_name(nodes: &[i64], sym: i64) -> i64 {
-    node_b(nodes, sym)
-}
-
 fn list_len(lists: &[Vec<i64>], id: i64) -> i64 {
     match lists.get(id as usize) {
         Some(items) => items.len() as i64,
@@ -190,9 +242,44 @@ fn fn_declared_param_keys(sess: &mut Session, fn_node: i64) -> Vec<i64> {
 // Values: alloca, load, store, copy, constants.
 // ---------------------------------------------------------------------------
 
+/// Emits a stack allocation of `ty` into the entry block of the function
+/// currently being built, regardless of which block the builder is
+/// pointing at.
+///
+/// An `alloca` slot lives until its function returns, and an `alloca`
+/// executed inside a loop body allocates fresh stack space on every
+/// iteration (freed only at function exit).  Emitting loop-body locals
+/// and temporaries at the active insertion point would therefore grow
+/// the frame by one slot per iteration, so a long-running `while`
+/// exhausts the stack and dies with SIGSEGV.  Hoisting every slot into
+/// the entry block — the canonical LLVM convention, and what `mem2reg`
+/// requires in order to promote them — keeps the frame at a constant
+/// size no matter how the CFG iterates.
+fn alloca_raw<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    ty: BasicTypeEnum<'ctx>,
+    name: &str,
+) -> Result<PointerValue<'ctx>, CodegenError> {
+    let entry = match sess
+        .2
+        .get_insert_block()
+        .and_then(|block| block.get_parent())
+        .and_then(|fun| fun.get_first_basic_block())
+    {
+        Some(block) => block,
+        None => return Err(builder_error(-1, 0, 0, "internal: alloca outside a function body")),
+    };
+    let alloca_builder = sess.0.create_builder();
+    match entry.get_first_instruction() {
+        Some(first) => alloca_builder.position_before(&first),
+        None => alloca_builder.position_at_end(entry),
+    }
+    alloca_builder.build_alloca(ty, name).map_err(builder_fail)
+}
+
 fn alloca_typed<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, name: &str) -> Result<PointerValue<'ctx>, CodegenError> {
     let ty = llvm_type(&mut ty_env(sess), key)?;
-    sess.2.build_alloca(ty, name).map_err(builder_fail)
+    alloca_raw(sess, ty, name)
 }
 
 /// The generic address space, used for every pointer the compiler
@@ -303,21 +390,21 @@ fn const_int_of<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, value: i64) ->
     if kind != TYD_BUILTIN {
         return Err(builder_error(-1, 0, 0, "constant of a non-scalar type"));
     }
-    let name = name_text(sess.4, sym_name(sess.5, key_sym_of(sess.5, key)));
+    let sub = key_builtin_of(sess, key);
     let i8 = sess.0.i8_type();
     let i32 = sess.0.i32_type();
     let i64 = sess.0.i64_type();
     let b = sess.0.bool_type();
-    if name == "U8" {
+    if sub == BUILTIN_U8 {
         return Ok(i8.const_int((value & 0xFF) as u64, false).into());
     }
-    if name == "U32" {
+    if sub == BUILTIN_U32 {
         return Ok(i32.const_int((value & 0xFFFF_FFFF) as u64, false).into());
     }
-    if name == "Bool" {
+    if sub == BUILTIN_BOOL {
         return Ok(b.const_int(value as u64, false).into());
     }
-    if name == "Int" || name == "Usize" {
+    if sub == BUILTIN_INT || sub == BUILTIN_USIZE {
         return Ok(i64.const_int(value as u64, false).into());
     }
     Err(builder_error(-1, 0, 0, "unsupported scalar type"))
@@ -496,6 +583,17 @@ fn key_len_of(sess: &Session, key: i64) -> i64 {
     }
 }
 
+/// The builtin sub-kind of a builtin key (slot f of its descriptor),
+/// stored at seed time by the typechecker.
+fn key_builtin_of(sess: &Session, key: i64) -> i64 {
+    let row = find_tyinfo(sess.5, key);
+    if row == NONE {
+        NONE
+    } else {
+        node_f(sess.5, row)
+    }
+}
+
 /// The dereferenced key of a reference key, unchanged otherwise.
 fn deref_key_of(sess: &Session, key: i64) -> i64 {
     let kind = em_key_kind(sess, key);
@@ -562,11 +660,12 @@ fn struct_field_index(sess: &Session, item: i64, name: i64) -> Result<i64, Codeg
 }
 
 /// The declared-variant index of `variant_sym` inside its enum, derived
-/// from the enum's declared variant order.
-fn variant_index_of(sess: &Session, enum_key: i64, variant_sym: i64) -> Result<i64, CodegenError> {
+/// from the enum's declared variant order, or NONE when the symbol does
+/// not belong to the enum.
+fn variant_index_of_raw(sess: &Session, enum_key: i64, variant_sym: i64) -> i64 {
     let enum_sym = em_key_sym(sess, enum_key);
     if enum_sym == NONE {
-        return Err(builder_error(-1, 0, 0, "internal: enum key without a symbol"));
+        return NONE;
     }
     let item = em_sym_decl(sess, enum_sym);
     let variants = node_e(sess.5, item);
@@ -575,47 +674,6 @@ fn variant_index_of(sess: &Session, enum_key: i64, variant_sym: i64) -> Result<i
     let mut idx = 0i64;
     while idx < count {
         if list_get(sess.6, variants, idx) == vdecl {
-            return Ok(idx);
-        }
-        idx += 1;
-    }
-    Err(builder_error(-1, 0, 0, "internal: variant not found in its enum"))
-}
-
-/// The declared-variant index of the variant named `text`.
-fn variant_index_by_name(sess: &Session, enum_key: i64, text: &str) -> Result<i64, CodegenError> {
-    let enum_sym = em_key_sym(sess, enum_key);
-    if enum_sym == NONE {
-        return Err(builder_error(-1, 0, 0, "internal: enum key without a symbol"));
-    }
-    let item = em_sym_decl(sess, enum_sym);
-    let variants = node_e(sess.5, item);
-    let count = list_len(sess.6, variants);
-    let mut idx = 0i64;
-    while idx < count {
-        let variant = list_get(sess.6, variants, idx);
-        if name_is(sess.4, node_a(sess.5, variant), text) {
-            return Ok(idx);
-        }
-        idx += 1;
-    }
-    Err(builder_error(-1, 0, 0, &format!("internal: variant '{}' not found", text)))
-}
-
-/// The declared-variant index of the variant named `text` in the enum at
-/// `enum_key`, or NONE when the enum declares no such variant.
-fn variant_index_by_name_opt(sess: &Session, enum_key: i64, text: &str) -> i64 {
-    let enum_sym = em_key_sym(sess, enum_key);
-    if enum_sym == NONE {
-        return NONE;
-    }
-    let item = em_sym_decl(sess, enum_sym);
-    let variants = node_e(sess.5, item);
-    let count = list_len(sess.6, variants);
-    let mut idx = 0i64;
-    while idx < count {
-        let variant = list_get(sess.6, variants, idx);
-        if name_is(sess.4, node_a(sess.5, variant), text) {
             return idx;
         }
         idx += 1;
@@ -623,13 +681,43 @@ fn variant_index_by_name_opt(sess: &Session, enum_key: i64, text: &str) -> i64 {
     NONE
 }
 
-/// True when the enum key's type is named `text`.
-fn enum_name_is(sess: &Session, key: i64, text: &str) -> bool {
-    let sym = em_key_sym(sess, key);
-    if sym == NONE {
-        return false;
+/// The declared-variant index of `variant_sym` inside its enum, derived
+/// from the enum's declared variant order.
+fn variant_index_of(sess: &Session, enum_key: i64, variant_sym: i64) -> Result<i64, CodegenError> {
+    let idx = variant_index_of_raw(sess, enum_key, variant_sym);
+    if idx == NONE {
+        return Err(builder_error(-1, 0, 0, "internal: variant not found in its enum"));
     }
-    name_is(sess.4, node_b(sess.5, sym), text)
+    Ok(idx)
+}
+
+/// The declared-order tag of the variant whose interned name id is
+/// `name_id` in the enum at `key`.  The variant's symbol is read from
+/// the variant-fact table the typechecker filled (keyed by the interned
+/// name id); only the declared order is scanned, never the name.
+fn variant_tag_of(sess: &Session, key: i64, name_id: i64) -> Result<i64, CodegenError> {
+    if name_id == NONE {
+        return Err(builder_error(-1, 0, 0, "internal: protocol variant name not interned"));
+    }
+    let vsym = find_varfact(sess.5, key, name_id);
+    if vsym == NONE {
+        return Err(builder_error(-1, 0, 0, &format!("internal: variant '{}' not found in its enum", em_name(sess, name_id))));
+    }
+    variant_index_of(sess, key, vsym)
+}
+
+/// The declared-order tag of the variant whose interned name id is
+/// `name_id` in the enum at `key`, or NONE when the enum declares no
+/// such variant.
+fn variant_tag_of_opt(sess: &Session, key: i64, name_id: i64) -> i64 {
+    if name_id == NONE {
+        return NONE;
+    }
+    let vsym = find_varfact(sess.5, key, name_id);
+    if vsym == NONE {
+        return NONE;
+    }
+    variant_index_of_raw(sess, key, vsym)
 }
 
 /// The declared payload-field count of `(enum_key, variant_idx)`, read
@@ -947,7 +1035,15 @@ fn emit_return<'ctx, 'a>(
         build_unit_value_into(sess, ret_key, slot)?;
         slot
     } else {
-        emit_expr(sess, ctx, value)?
+        // The returned expression is in tail position: a call there is
+        // marked `tail` so LLVM can turn self-tail-recursion into a
+        // jump.  Restored even on error so a failed emit never leaves a
+        // stale flag behind.
+        let saved_tail = ctx.6;
+        ctx.6 = true;
+        let expr_ptr = emit_expr(sess, ctx, value);
+        ctx.6 = saved_tail;
+        expr_ptr?
     };
     let loaded = load_key(sess, ret_key, ptr)?;
     sess.2.build_return(Some(&loaded)).map_err(builder_fail)?;
@@ -964,39 +1060,43 @@ fn emit_expr<'ctx, 'a>(
     expr: i64,
 ) -> Result<PointerValue<'ctx>, CodegenError> {
     let kind = node_a(sess.5, expr);
-    if kind == EXPR_LIT {
-        return emit_lit(sess, ctx, expr);
-    }
-    if kind == EXPR_PATH {
-        return emit_path(sess, ctx, expr);
-    }
-    if kind == EXPR_UNARY {
-        return emit_unary(sess, ctx, expr);
-    }
-    if kind == EXPR_BINARY {
-        return emit_binary(sess, ctx, expr);
-    }
     if kind == EXPR_CALL {
+        // A call in tail position keeps the flag: emit_call marks it.
         return emit_call(sess, ctx, expr);
     }
-    if kind == EXPR_STRUCT_LIT {
-        return emit_struct_lit(sess, ctx, expr);
-    }
-    if kind == EXPR_ARRAY {
-        return emit_array(sess, ctx, expr);
-    }
-    if kind == EXPR_MATCH {
-        return emit_match(sess, ctx, expr);
-    }
-    if kind == EXPR_TRY {
-        return emit_try(sess, ctx, expr);
-    }
-    Err(builder_error(
-        node_file(sess.5, expr),
-        node_start(sess.5, expr),
-        node_end(sess.5, expr),
-        "internal: unknown expression kind",
-    ))
+    // Any other expression node: its subexpressions are not in tail
+    // position (`return x + f(y)` must not mark `f`'s call), so the
+    // flag is cleared for the whole subtree and restored after.
+    let saved_tail = ctx.6;
+    ctx.6 = false;
+    let result = if kind == EXPR_LIT {
+        emit_lit(sess, ctx, expr)
+    } else if kind == EXPR_PATH {
+        emit_path(sess, ctx, expr)
+    } else if kind == EXPR_UNARY {
+        emit_unary(sess, ctx, expr)
+    } else if kind == EXPR_BINARY {
+        emit_binary(sess, ctx, expr)
+    } else if kind == EXPR_STRUCT_LIT {
+        emit_struct_lit(sess, ctx, expr)
+    } else if kind == EXPR_ARRAY {
+        emit_array(sess, ctx, expr)
+    } else if kind == EXPR_MATCH {
+        emit_match(sess, ctx, expr)
+    } else if kind == EXPR_TRY {
+        emit_try(sess, ctx, expr)
+    } else if kind == EXPR_INDEX {
+        emit_index(sess, ctx, expr)
+    } else {
+        Err(builder_error(
+            node_file(sess.5, expr),
+            node_start(sess.5, expr),
+            node_end(sess.5, expr),
+            "internal: unknown expression kind",
+        ))
+    };
+    ctx.6 = saved_tail;
+    result
 }
 
 fn emit_lit<'ctx, 'a>(
@@ -1078,6 +1178,15 @@ fn emit_unary<'ctx, 'a>(
     let inner = node_c(sess.5, expr);
     let key = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, expr));
     if op == UN_REF || op == UN_REF_MUT {
+        let inner_ptr = emit_expr(sess, ctx, inner)?;
+        // A borrow of an indexed element whose access is dynamically
+        // checked is itself a `Result` — the borrow applies to the
+        // element inside the bounds check, so the operand already is the
+        // full value (`Result(&T, IndexError)`), and the `&` materializes
+        // nothing.  This is the only way a borrow's own type is an enum.
+        if em_key_kind(sess, key) == TYD_ENUM {
+            return Ok(inner_ptr);
+        }
         // The value of `&x` is a pointer, materialized in a slot of the
         // reference type (which lowers to a pointer).  Every consumer
         // (call arguments, let/assign copies, returns) loads through
@@ -1085,7 +1194,6 @@ fn emit_unary<'ctx, 'a>(
         // slot, not returned raw: returning the referent's storage
         // address directly would make the load read the referent's own
         // first bytes as if they were the pointer.
-        let inner_ptr = emit_expr(sess, ctx, inner)?;
         let out = declare_local(sess, key, "ref")?;
         store_key(sess, out, inner_ptr.into())?;
         return Ok(out);
@@ -1105,14 +1213,9 @@ fn emit_unary<'ctx, 'a>(
 }
 
 /// True when a key is the signed Int builtin (division and comparison
-/// signedness follow the declared type).
+/// signedness follow the declared type), read from the stored sub-kind.
 fn key_is_signed(sess: &Session, key: i64) -> bool {
-    let row = find_tyinfo(sess.5, key);
-    if row == NONE {
-        return false;
-    }
-    let sym = node_c(sess.5, row);
-    name_is(sess.4, node_b(sess.5, sym), "Int")
+    em_key_kind(sess, key) == TYD_BUILTIN && key_builtin_of(sess, key) == BUILTIN_INT
 }
 
 fn bin_lt_pred(sess: &Session, key: i64) -> IntPredicate {
@@ -1221,6 +1324,22 @@ fn emit_binary<'ctx, 'a>(
 /// (arg 0 of the result key); the error tag comes from the declared
 /// DivError variants, and both tags from each enum's declared variant
 /// order.
+///
+/// Int division and modulo use Euclidean semantics: the remainder is
+/// always in `[0, |divisor|)` regardless of operand signs.  Truncated
+/// division produces a remainder with the dividend's sign; when it is
+/// negative the correction adds `|divisor|` and steps the quotient one
+/// unit in the divisor's direction (`q -= sign(divisor)`).  Unsigned
+/// types need no correction, and the correction arithmetic wraps (so
+/// even an `INT_MIN` divisor, whose magnitude is 2^63, comes out
+/// right).
+///
+/// The typechecker's constant fold implements the same Euclidean rule
+/// for statically-known operands (`euclid_div_i64`/`euclid_rem_i64`);
+/// the two must never diverge, including on the one signed overflow
+/// (`INT_MIN / -1`): the fold yields INT_MIN via wrapping, and the
+/// guarded runtime path below yields the same value with no divide
+/// instruction at all.
 fn emit_div_rem_result<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     ctx: &mut FnCtx<'ctx, '_>,
@@ -1238,28 +1357,79 @@ fn emit_div_rem_result<'ctx>(
     let merge_block = new_block(sess, ctx.0, "div_merge");
     sess.2.build_conditional_branch(is_zero, err_block, ok_block).map_err(builder_fail)?;
     sess.2.position_at_end(err_block);
+    let proto = sess.12;
     let err_key = result_arg_key(sess, result_key, 1);
-    let err_tag = variant_index_by_name(sess, err_key, "DivByZero")?;
+    let err_tag = variant_tag_of(sess, err_key, proto.div_by_zero)?;
     let div_error = declare_local(sess, err_key, "div_err_val")?;
     build_enum_value_into(sess, err_key, err_tag, &[], div_error)?;
-    let err_variant = variant_index_by_name(sess, result_key, "Err")?;
+    let err_variant = variant_tag_of(sess, result_key, proto.err)?;
     build_enum_value_into(sess, result_key, err_variant, &[(err_key, div_error)], out)?;
     sess.2.build_unconditional_branch(merge_block).map_err(builder_fail)?;
     sess.2.position_at_end(ok_block);
-    let q = if op == BIN_DIV {
-        if key_is_signed(sess, lkey) {
+    let signed = key_is_signed(sess, lkey);
+    let quotient = declare_local(sess, lkey, "quo")?;
+    if signed {
+        // Signed division guards its one overflow: `sdiv`/`srem` with a
+        // dividend of INT_MIN and a divisor of -1 is LLVM poison and an
+        // x86-64 hardware divide trap (`#DE` → SIGFPE) in the compiled
+        // binary, so a divisor of exactly -1 takes a dedicated path with
+        // no divide instruction at all.  The quotient is the wrapping
+        // negation and the remainder is 0, which is also exactly what
+        // the Euclidean rule demands.
+        let neg_one = sess.0.i64_type().const_int(u64::MAX, false);
+        let is_neg1 = sess.2.build_int_compare(IntPredicate::EQ, rv, neg_one, "").map_err(builder_fail)?;
+        let neg1_block = new_block(sess, ctx.0, "div_neg1");
+        let gen_block = new_block(sess, ctx.0, "div_gen");
+        let after_block = new_block(sess, ctx.0, "div_after");
+        sess.2.build_conditional_branch(is_neg1, neg1_block, gen_block).map_err(builder_fail)?;
+        sess.2.position_at_end(neg1_block);
+        let q_neg1 = sess.2.build_int_neg(lv, "").map_err(builder_fail)?;
+        let neg1_val = if op == BIN_DIV { q_neg1 } else { zero };
+        store_key(sess, quotient, neg1_val.into())?;
+        sess.2.build_unconditional_branch(after_block).map_err(builder_fail)?;
+        sess.2.position_at_end(gen_block);
+        // Truncated quotient and remainder.  Here the divisor is neither
+        // zero (branched above) nor -1 (branched here), so both
+        // instructions are defined for every operand.
+        let q = if op == BIN_DIV {
             sess.2.build_int_signed_div(lv, rv, "").map_err(builder_fail)?
         } else {
-            sess.2.build_int_unsigned_div(lv, rv, "").map_err(builder_fail)?
-        }
-    } else if key_is_signed(sess, lkey) {
-        sess.2.build_int_signed_rem(lv, rv, "").map_err(builder_fail)?
+            sess.2.build_int_signed_rem(lv, rv, "").map_err(builder_fail)?
+        };
+        let rem = if op == BIN_DIV {
+            sess.2.build_int_signed_rem(lv, rv, "").map_err(builder_fail)?
+        } else {
+            q
+        };
+        // Euclidean correction: the truncated remainder carries the
+        // dividend's sign; when it is negative, add |divisor| and step
+        // the quotient in the divisor's direction.
+        let neg = sess.2.build_int_compare(IntPredicate::SLT, rem, zero, "").map_err(builder_fail)?;
+        let b_neg = sess.2.build_int_compare(IntPredicate::SLT, rv, zero, "").map_err(builder_fail)?;
+        let neg_rv = sess.2.build_int_neg(rv, "").map_err(builder_fail)?;
+        let abs_b = sess.2.build_select(b_neg, neg_rv, rv, "").map_err(builder_fail)?.into_int_value();
+        let rem_adj = sess.2.build_int_add(rem, abs_b, "").map_err(builder_fail)?;
+        let one = sess.0.i64_type().const_int(1, false);
+        let q_plus = sess.2.build_int_add(q, one, "").map_err(builder_fail)?;
+        let q_minus = sess.2.build_int_sub(q, one, "").map_err(builder_fail)?;
+        let q_step = sess.2.build_select(b_neg, q_plus, q_minus, "").map_err(builder_fail)?.into_int_value();
+        let q_adj = sess.2.build_select(neg, q_step, q, "").map_err(builder_fail)?.into_int_value();
+        let rem_final = sess.2.build_select(neg, rem_adj, rem, "").map_err(builder_fail)?.into_int_value();
+        let gen_val = if op == BIN_DIV { q_adj } else { rem_final };
+        store_key(sess, quotient, gen_val.into())?;
+        sess.2.build_unconditional_branch(after_block).map_err(builder_fail)?;
+        sess.2.position_at_end(after_block);
     } else {
-        sess.2.build_int_unsigned_rem(lv, rv, "").map_err(builder_fail)?
-    };
-    let quotient = declare_local(sess, lkey, "quo")?;
-    store_key(sess, quotient, q.into())?;
-    let ok_tag = variant_index_by_name(sess, result_key, "Ok")?;
+        // Unsigned division can never overflow, so the truncated result
+        // is already the Euclidean result.
+        let q = if op == BIN_DIV {
+            sess.2.build_int_unsigned_div(lv, rv, "").map_err(builder_fail)?
+        } else {
+            sess.2.build_int_unsigned_rem(lv, rv, "").map_err(builder_fail)?
+        };
+        store_key(sess, quotient, q.into())?;
+    }
+    let ok_tag = variant_tag_of(sess, result_key, proto.ok)?;
     build_enum_value_into(sess, result_key, ok_tag, &[(lkey, quotient)], out)?;
     sess.2.build_unconditional_branch(merge_block).map_err(builder_fail)?;
     sess.2.position_at_end(merge_block);
@@ -1543,18 +1713,18 @@ fn emit_try<'ctx, 'a>(
     let result_key = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, expr));
     let ret_key = sub_key(sess, ctx.3, ctx.4, ctx.5);
     let inner_ptr = emit_expr(sess, ctx, inner)?;
-    let ok_name;
-    let err_name;
-    if enum_name_is(sess, inner_key, "Result") {
-        ok_name = "Ok";
-        err_name = "Err";
-    } else {
-        ok_name = "Some";
-        err_name = "None";
-    }
-    let ok_tag = variant_index_by_name(sess, inner_key, ok_name)?;
-    let err_tag = variant_index_by_name(sess, inner_key, err_name)?;
-    let ret_err_tag = variant_index_by_name(sess, ret_key, err_name)?;
+    // A Result carries Ok/Err, an Option Some/None; which of the two the
+    // value uses is read from the PRIM_* classification the typechecker
+    // stored on the enum's symbol — the same stored fact it used to type
+    // the expression — never by re-probing or re-searching names.
+    let proto = sess.12;
+    let inner_sym = em_key_sym(sess, inner_key);
+    let is_result = sym_prim_kind(sess.5, inner_sym) == PRIM_RESULT;
+    let ok_name = if is_result { proto.ok } else { proto.some };
+    let err_name = if is_result { proto.err } else { proto.none };
+    let ok_tag = variant_tag_of(sess, inner_key, ok_name)?;
+    let err_tag = variant_tag_of(sess, inner_key, err_name)?;
+    let ret_err_tag = variant_tag_of(sess, ret_key, err_name)?;
     let err_block = new_block(sess, ctx.0, "try_err");
     let ok_block = new_block(sess, ctx.0, "try_ok");
     let tag_ptr = struct_gep(sess, inner_key, inner_ptr, 0, "")?;
@@ -1584,6 +1754,108 @@ fn emit_try<'ctx, 'a>(
     let ok_payload = sess.2.build_struct_gep(ok_pty, ok_region, 0, "").map_err(builder_fail)?;
     let out = declare_local(sess, result_key, "try_ok")?;
     copy_value(sess, result_key, out, ok_payload)?;
+    Ok(out)
+}
+
+/// Emits an array/slice index expression.  The attached type selects the
+/// shape: a direct element/reference type means the typechecker proved a
+/// constant index in range (zero runtime checks), while a Result type
+/// means the index or slice length is dynamic and a bounds check is
+/// emitted, branching to `Ok(element)` or `Err(IndexOutOfBounds(idx,
+/// len))`.  Every layout fact (element type, fixed length, variant tags,
+/// payload keys) is read from the typechecker's descriptors, never
+/// recomputed.
+fn emit_index<'ctx, 'a>(
+    sess: &mut Session<'ctx, '_, '_>,
+    ctx: &mut FnCtx<'ctx, 'a>,
+    expr: i64,
+) -> Result<PointerValue<'ctx>, CodegenError> {
+    let base = node_b(sess.5, expr);
+    let index = node_c(sess.5, expr);
+    let key = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, expr));
+    let base_key = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, base));
+    let base_ptr = emit_expr(sess, ctx, base)?;
+    let idx_key = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, index));
+    let idx_ptr = emit_expr(sess, ctx, index)?;
+    let idx_val = load_key(sess, idx_key, idx_ptr)?.into_int_value();
+
+    let base_kind = em_key_kind(sess, base_key);
+    let elem_key;
+    let len_val;
+    let data_ptr;
+    if base_kind == TYD_ARRAY {
+        elem_key = em_key_elem(sess, base_key);
+        data_ptr = base_ptr;
+        len_val = sess.0.i64_type().const_int(key_len_of(sess, base_key) as u64, false);
+    } else {
+        // A slice view `{data, len}` — bare, behind `&`, or behind
+        // `&mut` — carries its own dynamic length and data pointer.
+        let inner_key = em_key_elem(sess, base_key);
+        elem_key = if em_key_kind(sess, inner_key) == TYD_SLICE {
+            em_key_elem(sess, inner_key)
+        } else {
+            NONE
+        };
+        if elem_key == NONE {
+            return Err(builder_error(
+                node_file(sess.5, expr),
+                node_start(sess.5, expr),
+                node_end(sess.5, expr),
+                "internal: indexed value is not an array or slice",
+            ));
+        }
+        data_ptr = slice_data(sess, base_ptr)?;
+        len_val = slice_len_of(sess, base_ptr)?;
+    }
+
+    if em_key_kind(sess, key) != TYD_ENUM {
+        // The typechecker proved the constant index in range: the
+        // element address is the value directly, with no bounds check.
+        let eptr = offset_elem_ptr(sess, elem_key, data_ptr, idx_val)?;
+        return Ok(eptr);
+    }
+
+    // Dynamic index or slice: emit the bounds check.  Indices are Usize,
+    // so the comparison is unsigned.
+    let is_oob = sess.2.build_int_compare(IntPredicate::UGE, idx_val, len_val, "").map_err(builder_fail)?;
+    let ok_block = new_block(sess, ctx.0, "idx_ok");
+    let err_block = new_block(sess, ctx.0, "idx_err");
+    let merge = new_block(sess, ctx.0, "idx_merge");
+    sess.2.build_conditional_branch(is_oob, err_block, ok_block).map_err(builder_fail)?;
+
+    let proto = sess.12;
+    let payload_key = result_arg_key(sess, key, 0);
+    let err_key = result_arg_key(sess, key, 1);
+    let out = declare_local(sess, key, "idx")?;
+
+    sess.2.position_at_end(err_block);
+    let oob_tag = variant_tag_of(sess, err_key, proto.index_oob)?;
+    let f0 = variant_payload_key(sess, err_key, oob_tag, 0)?;
+    let f1 = variant_payload_key(sess, err_key, oob_tag, 1)?;
+    let e0 = declare_local(sess, f0, "iob_idx")?;
+    store_key(sess, e0, idx_val.into())?;
+    let e1 = declare_local(sess, f1, "iob_len")?;
+    store_key(sess, e1, len_val.into())?;
+    let oob_val = build_enum_value(sess, err_key, oob_tag, &[(f0, e0), (f1, e1)])?;
+    let err_variant = variant_tag_of(sess, key, proto.err)?;
+    build_enum_value_into(sess, key, err_variant, &[(err_key, oob_val)], out)?;
+    sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
+
+    sess.2.position_at_end(ok_block);
+    let eptr = offset_elem_ptr(sess, elem_key, data_ptr, idx_val)?;
+    let ok_tag = variant_tag_of(sess, key, proto.ok)?;
+    let payload_kind = em_key_kind(sess, payload_key);
+    if payload_kind == TYD_REF || payload_kind == TYD_REF_MUT {
+        // A borrowed payload is the element address, materialized in a
+        // slot of the reference type before being copied into the enum.
+        let ref_slot = declare_local(sess, payload_key, "idx_ref")?;
+        store_key(sess, ref_slot, eptr.into())?;
+        build_enum_value_into(sess, key, ok_tag, &[(payload_key, ref_slot)], out)?;
+    } else {
+        build_enum_value_into(sess, key, ok_tag, &[(payload_key, eptr)], out)?;
+    }
+    sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
+    sess.2.position_at_end(merge);
     Ok(out)
 }
 
@@ -1617,6 +1889,10 @@ fn emit_call<'ctx, 'a>(
     if node_tag(sess.5, fn_slot) == NODE_SYM {
         return emit_native_call(sess, ctx, expr, inst, fn_slot);
     }
+    // A call in tail position (the direct value of a return) is marked
+    // `tail`; argument expressions are never tail, so the flag is
+    // cleared for their emission and restored after.
+    let is_tail = ctx.6;
     let args_list = inst_args_of(sess.5, inst);
     let mono = inst_mono_of(sess.5, inst);
     let params_list = inst_params_of(sess.5, inst);
@@ -1627,8 +1903,15 @@ fn emit_call<'ctx, 'a>(
         Some(block) => sess.2.position_at_end(block),
         None => return Err(builder_error(-1, 0, 0, "internal: no insertion block")),
     }
-    let arg_vals = emit_call_args(sess, ctx, expr)?;
+    let saved_tail = ctx.6;
+    ctx.6 = false;
+    let arg_vals = emit_call_args(sess, ctx, expr);
+    ctx.6 = saved_tail;
+    let arg_vals = arg_vals?;
     let call = sess.2.build_call(fn_val, &arg_vals, "").map_err(builder_fail)?;
+    if is_tail {
+        call.set_tail_call(true);
+    }
     let out = declare_local(sess, ret_key, "call")?;
     let ret_val = match call.try_as_basic_value() {
         ValueKind::Basic(bv) => bv,
@@ -1657,6 +1940,7 @@ fn emit_deferred_trait_call<'ctx, 'a>(
     expr: i64,
     trow: i64,
 ) -> Result<PointerValue<'ctx>, CodegenError> {
+    let is_tail = ctx.6;
     let trait_sym = trait_call_trait(sess.5, trow);
     let method_name = trait_call_method(sess.5, trow);
     let arg_exprs = node_d(sess.5, expr);
@@ -1718,8 +2002,15 @@ fn emit_deferred_trait_call<'ctx, 'a>(
         Some(block) => sess.2.position_at_end(block),
         None => return Err(builder_error(-1, 0, 0, "internal: no insertion block")),
     }
-    let arg_vals = emit_call_args(sess, ctx, expr)?;
+    let saved_tail = ctx.6;
+    ctx.6 = false;
+    let arg_vals = emit_call_args(sess, ctx, expr);
+    ctx.6 = saved_tail;
+    let arg_vals = arg_vals?;
     let call = sess.2.build_call(fn_val, &arg_vals, "").map_err(builder_fail)?;
+    if is_tail {
+        call.set_tail_call(true);
+    }
     let out = declare_local(sess, result, "call")?;
     let ret_val = match call.try_as_basic_value() {
         ValueKind::Basic(bv) => bv,
@@ -1782,6 +2073,247 @@ fn build_fn_sig<'ctx>(sess: &mut Session<'ctx, '_, '_>, params_list: i64, ret_ke
     Ok(ret_ty.fn_type(&param_tys, false))
 }
 
+// ---------------------------------------------------------------------------
+// Stack guard.
+//
+// Defense in depth for recursion (MANIFESTO principle 11: recursion must
+// not be able to exhaust the stack).  Tail calls in tail position get
+// marked `tail` above and are eliminated by LLVM, but non-tail recursion
+// (`return recurse(n - 1) + 1`) inherently grows O(N) frames; without a
+// guard the process dies with a hardware SIGSEGV on the OS guard page.
+// Every user function therefore checks, at entry, how much of the
+// process stack it has consumed and, past a limit, calls a small runtime
+// that reports the overflow and exits cleanly instead of crashing.
+//
+// The measured facts are the process's own: the stack base is
+// `frameaddress(0)` at the entry of the real `main` wrapper, and the
+// limit is `RLIMIT_STACK`'s soft limit read once at startup.  Nothing is
+// a guess about the host: `getrlimit` returns the limit the process
+// actually runs under, and the base is where the process actually
+// started.
+// ---------------------------------------------------------------------------
+
+/// The guard margin: the check must fire while at least this much stack
+/// remains.  It must exceed the largest frame any single emitted
+/// function can allocate (the frame is already set up when the check
+/// runs, and the check must trip before the *next* call's frame would
+/// cross the limit); even a function holding a large array local stays
+/// far below one MiB, and the default 8 MiB soft limit keeps seven MiB
+/// usable.
+const STACK_GUARD_MARGIN: u64 = 1 << 20;
+
+/// The soft-stack-limit fallback when `getrlimit` itself fails (the
+/// POSIX default for a main thread).  Only used in that failure case;
+/// the real limit is read from the process.
+const DEFAULT_STACK_LIMIT: u64 = 8 << 20;
+
+/// The exit status of a stack overflow: EX_SOFTWARE, distinct from both
+/// a success code and a signal death (139), so the harness can assert
+/// that the guard fired rather than the OS.
+const STACK_OVERFLOW_EXIT: u64 = 70;
+
+/// `RLIMIT_STACK` on Linux, the resource the guard measures.
+const RLIMIT_STACK: u64 = 3;
+
+/// The diagnostic written to stderr before a guarded overflow exits.
+const STACK_OVERFLOW_MSG: &[u8] = b"Cinnabar: stack overflow\n";
+
+/// Ensures the stack-guard globals, libc externs, and overflow runtime
+/// exist in the module exactly once.  Called from every function's guard
+/// and from the main wrapper's measurement; idempotent.  The builder's
+/// insertion point is restored, because the overflow runtime's body is
+/// emitted in the middle of whatever function triggered the first call.
+fn ensure_stack_runtime<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> Result<(), CodegenError> {
+    let saved_block = sess.2.get_insert_block();
+    let i64_ty = sess.0.i64_type();
+    let i32_ty = sess.0.i32_type();
+    let pty = ptr_ty(sess);
+    // The two measurement globals, zero until the main wrapper fills
+    // them; no user function can run before that happens.
+    if sess.1.get_global("cn_stack_base").is_none() {
+        let base = sess.1.add_global(i64_ty, None, "cn_stack_base");
+        base.set_initializer(&i64_ty.const_zero());
+    }
+    if sess.1.get_global("cn_stack_limit").is_none() {
+        let limit = sess.1.add_global(i64_ty, None, "cn_stack_limit");
+        limit.set_initializer(&i64_ty.const_zero());
+    }
+    // The externs, shared by every guard and by the runtime body.
+    // LLVM mangles intrinsic names for pointer-typed returns: the
+    // frameaddress intrinsic over address space 0 is `llvm.frameaddress.p0`.
+    let frameaddress_sig = pty.fn_type(&[i32_ty.into()], false);
+    extern_fn(sess, "llvm.frameaddress.p0", frameaddress_sig);
+    let getrlimit_sig = i32_ty.fn_type(&[i32_ty.into(), pty.into()], false);
+    extern_fn(sess, "getrlimit", getrlimit_sig);
+    let write_sig = i64_ty.fn_type(&[i32_ty.into(), pty.into(), i64_ty.into()], false);
+    extern_fn(sess, "write", write_sig);
+    let exit_sig = sess.0.void_type().fn_type(&[i32_ty.into()], false);
+    extern_fn(sess, "exit", exit_sig);
+    // The overflow runtime: one message on stderr, then a clean exit
+    // with the dedicated status.  It deliberately has no locals of its
+    // own, so it can run on an almost-exhausted stack.
+    if sess.1.get_function("cn_stack_overflow").is_none() {
+        let msg = sess.0.const_string(STACK_OVERFLOW_MSG, false);
+        let msg_ty = msg.get_type();
+        let msg_g = sess.1.add_global(msg_ty, None, "cn_stack_overflow_msg");
+        msg_g.set_linkage(Linkage::Private);
+        msg_g.set_constant(true);
+        msg_g.set_initializer(&msg);
+        let body_sig = sess.0.void_type().fn_type(&[], false);
+        let rt = sess.1.add_function("cn_stack_overflow", body_sig, None);
+        let entry = sess.0.append_basic_block(rt, "entry");
+        sess.2.position_at_end(entry);
+        let write_fn = match sess.1.get_function("write") {
+            Some(fun) => fun,
+            None => return Err(builder_error(-1, 0, 0, "internal: write extern missing")),
+        };
+        let fd = i32_ty.const_int(2, false);
+        let len = i64_ty.const_int(STACK_OVERFLOW_MSG.len() as u64, false);
+        sess.2
+            .build_call(write_fn, &[fd.into(), msg_g.as_pointer_value().into(), len.into()], "")
+            .map_err(builder_fail)?;
+        let exit_fn = match sess.1.get_function("exit") {
+            Some(fun) => fun,
+            None => return Err(builder_error(-1, 0, 0, "internal: exit extern missing")),
+        };
+        let code = i32_ty.const_int(STACK_OVERFLOW_EXIT, false);
+        sess.2.build_call(exit_fn, &[code.into()], "").map_err(builder_fail)?;
+        sess.2.build_unreachable().map_err(builder_fail)?;
+    }
+    match saved_block {
+        Some(block) => sess.2.position_at_end(block),
+        None => return Err(builder_error(-1, 0, 0, "internal: no insertion block for the stack runtime")),
+    }
+    Ok(())
+}
+
+/// Emits the entry guard of one user function: measure the consumed
+/// stack, branch to the body while under the limit, and to the overflow
+/// runtime past it.  The body of the function continues in the new
+/// `body` block.
+fn emit_stack_guard<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    fn_val: FunctionValue<'ctx>,
+) -> Result<(), CodegenError> {
+    ensure_stack_runtime(sess)?;
+    let i64_ty = sess.0.i64_type();
+    let i32_ty = sess.0.i32_type();
+    let frameaddress_sig = ptr_ty(sess).fn_type(&[i32_ty.into()], false);
+    let frameaddress = extern_fn(sess, "llvm.frameaddress.p0", frameaddress_sig);
+    let zero = i32_ty.const_zero();
+    let fp_call = sess.2.build_call(frameaddress, &[zero.into()], "").map_err(builder_fail)?;
+    let fp = match fp_call.try_as_basic_value() {
+        ValueKind::Basic(value) => value.into_pointer_value(),
+        ValueKind::Instruction(inst) => {
+            return Err(builder_error(
+                -1,
+                0,
+                0,
+                &format!("internal: frameaddress returned void ({:?})", inst.get_opcode()),
+            ));
+        }
+    };
+    let fp_int = sess.2.build_ptr_to_int(fp, i64_ty, "").map_err(builder_fail)?;
+    let base_g = match sess.1.get_global("cn_stack_base") {
+        Some(global) => global,
+        None => return Err(builder_error(-1, 0, 0, "internal: stack base global missing")),
+    };
+    let base = sess.2.build_load(i64_ty, base_g.as_pointer_value(), "").map_err(builder_fail)?.into_int_value();
+    let used = sess.2.build_int_sub(base, fp_int, "").map_err(builder_fail)?;
+    let limit_g = match sess.1.get_global("cn_stack_limit") {
+        Some(global) => global,
+        None => return Err(builder_error(-1, 0, 0, "internal: stack limit global missing")),
+    };
+    let limit = sess.2.build_load(i64_ty, limit_g.as_pointer_value(), "").map_err(builder_fail)?.into_int_value();
+    let ok = sess.2.build_int_compare(IntPredicate::ULT, used, limit, "").map_err(builder_fail)?;
+    let body_block = new_block(sess, fn_val, "body");
+    let overflow_block = new_block(sess, fn_val, "stack_overflow");
+    sess.2.build_conditional_branch(ok, body_block, overflow_block).map_err(builder_fail)?;
+    sess.2.position_at_end(overflow_block);
+    let rt = match sess.1.get_function("cn_stack_overflow") {
+        Some(fun) => fun,
+        None => return Err(builder_error(-1, 0, 0, "internal: stack overflow runtime missing")),
+    };
+    sess.2.build_call(rt, &[], "").map_err(builder_fail)?;
+    sess.2.build_unreachable().map_err(builder_fail)?;
+    sess.2.position_at_end(body_block);
+    Ok(())
+}
+
+/// Measures the process stack in the real `main` wrapper's entry, before
+/// any user function runs: records the base (`frameaddress(0)`) and the
+/// guarded limit (`RLIMIT_STACK` soft limit minus the margin).
+fn measure_stack_limit<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> Result<(), CodegenError> {
+    ensure_stack_runtime(sess)?;
+    let i64_ty = sess.0.i64_type();
+    let i32_ty = sess.0.i32_type();
+    let zero = i32_ty.const_zero();
+    let frameaddress_sig = ptr_ty(sess).fn_type(&[i32_ty.into()], false);
+    let frameaddress = extern_fn(sess, "llvm.frameaddress.p0", frameaddress_sig);
+    let fp_call = sess.2.build_call(frameaddress, &[zero.into()], "").map_err(builder_fail)?;
+    let fp = match fp_call.try_as_basic_value() {
+        ValueKind::Basic(value) => value.into_pointer_value(),
+        ValueKind::Instruction(inst) => {
+            return Err(builder_error(
+                -1,
+                0,
+                0,
+                &format!("internal: frameaddress returned void ({:?})", inst.get_opcode()),
+            ));
+        }
+    };
+    let base = sess.2.build_ptr_to_int(fp, i64_ty, "").map_err(builder_fail)?;
+    let base_g = match sess.1.get_global("cn_stack_base") {
+        Some(global) => global,
+        None => return Err(builder_error(-1, 0, 0, "internal: stack base global missing")),
+    };
+    sess.2.build_store(base_g.as_pointer_value(), base).map_err(builder_fail)?;
+    // rlim_cur is the first field of `struct rlimit` (two u64s on the
+    // targets this compiler emits for), so the buffer's first word is
+    // loaded directly.  If `getrlimit` fails, fall back to the POSIX
+    // default main-thread soft limit rather than leaving the guard off.
+    let getrlimit_sig = i32_ty.fn_type(&[i32_ty.into(), ptr_ty(sess).into()], false);
+    let getrlimit = extern_fn(sess, "getrlimit", getrlimit_sig);
+    let rlim_ty = i64_ty.array_type(2);
+    let buf = sess.2.build_alloca(rlim_ty, "rlim").map_err(builder_fail)?;
+    let rl_stack = i32_ty.const_int(RLIMIT_STACK, false);
+    let rc_call = sess.2.build_call(getrlimit, &[rl_stack.into(), buf.into()], "").map_err(builder_fail)?;
+    let rc = match rc_call.try_as_basic_value() {
+        ValueKind::Basic(value) => value.into_int_value(),
+        ValueKind::Instruction(inst) => {
+            return Err(builder_error(
+                -1,
+                0,
+                0,
+                &format!("internal: getrlimit returned void ({:?})", inst.get_opcode()),
+            ));
+        }
+    };
+    let rc_ok = sess.2.build_int_compare(IntPredicate::EQ, rc, zero, "").map_err(builder_fail)?;
+    let cur = sess.2.build_load(i64_ty, buf, "").map_err(builder_fail)?.into_int_value();
+    // An unlimited soft limit (`ulimit -s unlimited`) reports
+    // RLIM_INFINITY — all bits set on the targets this compiler emits
+    // for.  Subtracting the margin from it would leave the guard
+    // effectively disabled (the limit stays astronomically large), so an
+    // infinite limit falls back to the POSIX default just like a failed
+    // getrlimit call: the guard always has a finite, honest limit to
+    // enforce.
+    let infinity = i64_ty.const_int(u64::MAX, false);
+    let is_infinity = sess.2.build_int_compare(IntPredicate::EQ, cur, infinity, "").map_err(builder_fail)?;
+    let not_infinity = sess.2.build_not(is_infinity, "").map_err(builder_fail)?;
+    let use_real = sess.2.build_and(rc_ok, not_infinity, "").map_err(builder_fail)?;
+    let fallback = i64_ty.const_int(DEFAULT_STACK_LIMIT, false);
+    let soft_limit = sess.2.build_select(use_real, cur, fallback, "").map_err(builder_fail)?.into_int_value();
+    let margin = i64_ty.const_int(STACK_GUARD_MARGIN, false);
+    let limit = sess.2.build_int_sub(soft_limit, margin, "").map_err(builder_fail)?;
+    let limit_g = match sess.1.get_global("cn_stack_limit") {
+        Some(global) => global,
+        None => return Err(builder_error(-1, 0, 0, "internal: stack limit global missing")),
+    };
+    sess.2.build_store(limit_g.as_pointer_value(), limit).map_err(builder_fail)?;
+    Ok(())
+}
+
 /// Returns the instance's LLVM function, emitting its body the first
 /// time.  The function is inserted into the instance cache before its
 /// body is emitted so recursive calls resolve.
@@ -1807,6 +2339,10 @@ fn get_or_emit_fn<'ctx>(
     let body = node_f(sess.5, fn_slot);
     let entry = sess.0.append_basic_block(fn_val, "entry");
     sess.2.position_at_end(entry);
+    // The recursion guard splits the entry: the check branches to the
+    // overflow runtime or to the `body` block where the function's real
+    // prologue and body continue.
+    emit_stack_guard(sess, fn_val)?;
     let mut body_locals: Locals<'ctx> = Vec::new();
     let fn_loops: LoopTargets<'ctx> = Vec::new();
     let param_values = fn_val.get_params();
@@ -1824,7 +2360,7 @@ fn get_or_emit_fn<'ctx>(
         bind_local(&mut body_locals, pname, pkey, ptr);
         idx += 1;
     }
-    let mut ctx: FnCtx<'ctx, '_> = (fn_val, body_locals, fn_loops, from.as_slice(), to.as_slice(), ret_key);
+    let mut ctx: FnCtx<'ctx, '_> = (fn_val, body_locals, fn_loops, from.as_slice(), to.as_slice(), ret_key, false);
     let body_result = emit_stmt_list(sess, &mut ctx, body);
     if let Err(err) = body_result {
         return Err(with_fn_span(err, fn_slot, sess));
@@ -1913,6 +2449,7 @@ fn emit_native_call<'ctx, 'a>(
     inst: i64,
     sym: i64,
 ) -> Result<PointerValue<'ctx>, CodegenError> {
+    let is_tail = ctx.6;
     let params_list = inst_params_of(sess.5, inst);
     let ret_key = sub_key(sess, ctx.3, ctx.4, inst_ret_of(sess.5, inst));
     let mono = inst_mono_of(sess.5, inst);
@@ -1928,13 +2465,20 @@ fn emit_native_call<'ctx, 'a>(
             let llvm_name = format!("{}_{}", name.replace('.', "_"), mono);
             let fn_val = sess.1.add_function(&llvm_name, sig, None);
             sess.10.push((mono, fn_val));
-            emit_native_body(sess, &name, params_list, ret_key, fn_val)?;
+            emit_native_body(sess, sym, params_list, ret_key, fn_val)?;
             sess.2.position_at_end(caller_block);
             fn_val
         }
     };
-    let arg_vals = emit_call_args(sess, ctx, expr)?;
+    let saved_tail = ctx.6;
+    ctx.6 = false;
+    let arg_vals = emit_call_args(sess, ctx, expr);
+    ctx.6 = saved_tail;
+    let arg_vals = arg_vals?;
     let call = sess.2.build_call(native_val, &arg_vals, "").map_err(builder_fail)?;
+    if is_tail {
+        call.set_tail_call(true);
+    }
     let out = declare_local(sess, ret_key, "call")?;
     let ret_val = match call.try_as_basic_value() {
         ValueKind::Basic(bv) => bv,
@@ -1953,10 +2497,11 @@ fn emit_native_call<'ctx, 'a>(
 
 /// Emits the runtime body of one native into `fn_val`.  The argument
 /// values are bound by position into fresh allocas; the body is the
-/// native's ABI, keyed by the qualified name.
+/// native's ABI, dispatched on the opcode the resolver stored on the
+/// symbol at declaration time.
 fn emit_native_body<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
-    name: &str,
+    sym: i64,
     params_list: i64,
     ret_key: i64,
     fn_val: FunctionValue<'ctx>,
@@ -1978,7 +2523,7 @@ fn emit_native_body<'ctx>(
         bind_local(&mut body_locals, idx, pkey, ptr);
         idx += 1;
     }
-    let out = dispatch_native(sess, &mut body_locals, fn_val, name, params_list, ret_key)?;
+    let out = dispatch_native(sess, &mut body_locals, fn_val, sym, params_list, ret_key)?;
     let loaded = load_key(sess, ret_key, out)?;
     sess.2.build_return(Some(&loaded)).map_err(builder_fail)?;
     Ok(())
@@ -1989,11 +2534,11 @@ fn native_arg_key(sess: &Session, params_list: i64, idx: i64) -> i64 {
 }
 
 fn result_ok_tag(sess: &Session, key: i64) -> Result<i64, CodegenError> {
-    variant_index_by_name(sess, key, "Ok")
+    variant_tag_of(sess, key, sess.12.ok)
 }
 
 fn result_err_tag(sess: &Session, key: i64) -> Result<i64, CodegenError> {
-    variant_index_by_name(sess, key, "Err")
+    variant_tag_of(sess, key, sess.12.err)
 }
 
 fn build_result_ok<'ctx>(sess: &mut Session<'ctx, '_, '_>, result_key: i64, payload_key: i64, payload_ptr: PointerValue<'ctx>) -> Result<PointerValue<'ctx>, CodegenError> {
@@ -2033,89 +2578,104 @@ fn copy_to_out<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, out: PointerVal
     copy_value(sess, key, out, src)
 }
 
+/// Dispatches one native runtime body on the opcode the resolver stored
+/// on the symbol at declaration time: a single integer dispatch over the
+/// ABI surface, never a name comparison.
 fn dispatch_native<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     locals: &mut Locals<'ctx>,
     f: FunctionValue<'ctx>,
-    name: &str,
+    sym: i64,
     params_list: i64,
     ret_key: i64,
 ) -> Result<PointerValue<'ctx>, CodegenError> {
     let out = declare_local(sess, ret_key, "ret")?;
-    if name == "U8.from_u8" || name == "U32.from_u8" || name == "Int.from_u8" || name == "Usize.from_u8" {
+    let op = sym_native_op(sess.5, sym);
+    if op == NAT_FROM_U8 {
         native_from_u8(sess, locals, ret_key, out)?;
         return Ok(out);
     }
-    if name == "Slice.len" {
+    if op == NAT_SLICE_LEN {
         native_slice_len(sess, locals, out)?;
         return Ok(out);
     }
-    if name == "Memory.allocate" {
+    if op == NAT_MEM_ALLOCATE {
         return native_allocate(sess, f, locals, ret_key, out);
     }
-    if name == "Memory.deallocate" {
+    if op == NAT_MEM_DEALLOCATE {
         native_deallocate(sess, locals, ret_key, out)?;
         return Ok(out);
     }
-    if name == "Memory.write_u8" {
+    if op == NAT_MEM_WRITE_U8 {
         native_write_u8(sess, f, locals, ret_key, out)?;
         return Ok(out);
     }
-    if name == "Memory.read_u8" {
+    if op == NAT_MEM_READ_U8 {
         native_read_u8(sess, f, locals, ret_key, out)?;
         return Ok(out);
     }
-    if name == "Collections.vec_new" {
+    if op == NAT_VEC_NEW {
         native_vec_new(sess, ret_key, out)?;
         return Ok(out);
     }
-    if name == "Collections.vec_push" {
+    if op == NAT_VEC_PUSH {
         return native_vec_push(sess, f, locals, params_list, ret_key, out);
     }
-    if name == "Collections.vec_view" {
+    if op == NAT_VEC_VIEW {
         native_vec_view(sess, locals, out)?;
         return Ok(out);
     }
-    if name == "Collections.vec_free" {
+    if op == NAT_VEC_FREE {
         native_vec_free(sess, locals, ret_key, out)?;
         return Ok(out);
     }
-    if name == "Collections.string_from_slice" {
+    if op == NAT_STRING_FROM_SLICE {
         return native_string_from_slice(sess, f, locals, ret_key, out);
     }
-    if name == "Collections.string_len" {
+    if op == NAT_STRING_LEN {
         native_string_len(sess, locals, out)?;
         return Ok(out);
     }
-    if name == "Collections.string_free" {
+    if op == NAT_STRING_FREE {
         native_string_free(sess, locals, ret_key, out)?;
         return Ok(out);
     }
-    if name == "Collections.hash_map_new" {
+    if op == NAT_HASH_MAP_NEW {
         native_hash_map_new(sess, ret_key, out)?;
         return Ok(out);
     }
-    if name == "Collections.hash_map_insert" {
+    if op == NAT_HASH_MAP_INSERT {
         return native_hash_map_insert(sess, f, locals, params_list, ret_key, out);
     }
-    if name == "Collections.hash_map_get" {
+    if op == NAT_HASH_MAP_GET {
         return native_hash_map_get(sess, f, locals, params_list, ret_key, out);
     }
-    if name == "Collections.hash_map_free" {
+    if op == NAT_HASH_MAP_FREE {
         native_hash_map_free(sess, locals, ret_key, out)?;
         return Ok(out);
     }
-    if name == "Runtime.self_check" {
+    if op == NAT_SELF_CHECK {
         native_self_check(sess, ret_key, out)?;
         return Ok(out);
     }
-    if name == "Terminal.print" || name == "Terminal.print_line" || name == "Terminal.eprint" {
-        let stderr = name == "Terminal.eprint";
-        let newline = name == "Terminal.print_line";
-        native_print(sess, locals, ret_key, out, stderr, newline)?;
+    if op == NAT_TERM_PRINT {
+        native_print(sess, locals, ret_key, out, false, false)?;
         return Ok(out);
     }
-    Err(builder_error(-1, 0, 0, &format!("native '{}' has no runtime body", name)))
+    if op == NAT_TERM_PRINT_LINE {
+        native_print(sess, locals, ret_key, out, false, true)?;
+        return Ok(out);
+    }
+    if op == NAT_TERM_EPRINT {
+        native_print(sess, locals, ret_key, out, true, false)?;
+        return Ok(out);
+    }
+    Err(builder_error(
+        -1,
+        0,
+        0,
+        &format!("native '{}' has no runtime body", em_name(sess, node_b(sess.5, sym))),
+    ))
 }
 
 fn native_from_u8<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>) -> Result<(), CodegenError> {
@@ -2163,7 +2723,7 @@ fn native_allocate<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     sess.2.build_conditional_branch(null_cmp, fail_block, ok_block).map_err(builder_fail)?;
     sess.2.position_at_end(fail_block);
     let err_key = result_arg_key(sess, ret_key, 1);
-    let alloc_fail_tag = variant_index_by_name(sess, err_key, "AllocationFailed")?;
+    let alloc_fail_tag = variant_tag_of(sess, err_key, sess.12.alloc_failed)?;
     let fkey = variant_payload_key(sess, err_key, alloc_fail_tag, 0)?;
     let fail_val = build_enum_value(sess, err_key, alloc_fail_tag, &[(fkey, p0)])?;
     let err_result = build_result_err(sess, ret_key, err_key, fail_val)?;
@@ -2213,7 +2773,7 @@ fn native_write_u8<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     sess.2.build_conditional_branch(ok_cmp, ok_block, fail_block).map_err(builder_fail)?;
     sess.2.position_at_end(fail_block);
     let err_key = result_arg_key(sess, ret_key, 1);
-    let oob_tag = variant_index_by_name(sess, err_key, "AccessOutOfBounds")?;
+    let oob_tag = variant_tag_of(sess, err_key, sess.12.oob)?;
     let f0 = variant_payload_key(sess, err_key, oob_tag, 0)?;
     let f1 = variant_payload_key(sess, err_key, oob_tag, 1)?;
     let e0 = declare_local(sess, f0, "o0")?;
@@ -2253,7 +2813,7 @@ fn native_read_u8<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>
     sess.2.build_conditional_branch(ok_cmp, ok_block, fail_block).map_err(builder_fail)?;
     sess.2.position_at_end(fail_block);
     let err_key = result_arg_key(sess, ret_key, 1);
-    let oob_tag = variant_index_by_name(sess, err_key, "AccessOutOfBounds")?;
+    let oob_tag = variant_tag_of(sess, err_key, sess.12.oob)?;
     let f0 = variant_payload_key(sess, err_key, oob_tag, 0)?;
     let f1 = variant_payload_key(sess, err_key, oob_tag, 1)?;
     let e0 = declare_local(sess, f0, "o0")?;
@@ -2355,7 +2915,7 @@ fn native_vec_push<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
     sess.2.position_at_end(fail_block);
     let err_key = result_arg_key(sess, ret_key, 1);
-    let alloc_fail_tag = variant_index_by_name(sess, err_key, "AllocationFailed")?;
+    let alloc_fail_tag = variant_tag_of(sess, err_key, sess.12.alloc_failed)?;
     let fkey = variant_payload_key(sess, err_key, alloc_fail_tag, 0)?;
     let fval = declare_local(sess, fkey, "need")?;
     store_key(sess, fval, needed.into())?;
@@ -2429,7 +2989,7 @@ fn native_print<'ctx>(
         .build_call(write, &[into_meta(fd.into()), into_meta(data.into()), into_meta(len.into())], "")
         .map_err(builder_fail)?;
     if newline {
-        let nl_slot = sess.2.build_alloca(sess.0.i8_type(), "nl").map_err(builder_fail)?;
+        let nl_slot = alloca_raw(sess, sess.0.i8_type().into(), "nl")?;
         let nl = sess.0.i8_type().const_int(10, false);
         sess.2.build_store(nl_slot, nl).map_err(builder_fail)?;
         let one = sess.0.i64_type().const_int(1, false);
@@ -2479,7 +3039,7 @@ fn native_hash_map_insert<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
     let data = load_ptr(sess, dptr)?;
     let len = load_i64(sess, lptr)?;
     let key_base = sess.2.build_pointer_cast(p1, ptr_ty(sess), "").map_err(builder_fail)?;
-    let i_slot = sess.2.build_alloca(sess.0.i64_type(), "i").map_err(builder_fail)?;
+    let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "i")?;
     store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
     let scan_cond = new_block(sess, f, "map_cond");
     let scan_body = new_block(sess, f, "map_body");
@@ -2572,7 +3132,7 @@ fn native_hash_map_insert<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
     sess.2.position_at_end(fail_block);
     let err_key = result_arg_key(sess, ret_key, 1);
-    let alloc_fail_tag = variant_index_by_name(sess, err_key, "AllocationFailed")?;
+    let alloc_fail_tag = variant_tag_of(sess, err_key, sess.12.alloc_failed)?;
     let fkey = variant_payload_key(sess, err_key, alloc_fail_tag, 0)?;
     let fval = declare_local(sess, fkey, "need")?;
     store_key(sess, fval, needed.into())?;
@@ -2600,7 +3160,7 @@ fn native_hash_map_get<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<
     let lptr = struct_gep(sess, map_key, map_ref, 1, "")?;
     let len = load_i64(sess, lptr)?;
     let key_base = sess.2.build_pointer_cast(p1, ptr_ty(sess), "").map_err(builder_fail)?;
-    let i_slot = sess.2.build_alloca(sess.0.i64_type(), "i").map_err(builder_fail)?;
+    let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "i")?;
     store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
     let scan_cond = new_block(sess, f, "g_cond");
     let scan_body = new_block(sess, f, "g_body");
@@ -2645,7 +3205,7 @@ fn native_hash_map_get<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
     sess.2.position_at_end(missing_block);
     let err_key = result_arg_key(sess, ret_key, 1);
-    let key_missing_tag = variant_index_by_name(sess, err_key, "KeyNotFound")?;
+    let key_missing_tag = variant_tag_of(sess, err_key, sess.12.key_not_found)?;
     let fail_val = build_enum_value(sess, err_key, key_missing_tag, &[])?;
     let err_result = build_result_err(sess, ret_key, err_key, fail_val)?;
     copy_to_out(sess, ret_key, out, err_result)?;
@@ -2710,7 +3270,7 @@ fn native_string_from_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionV
     let p0 = get_local(locals, 0)?;
     let data = slice_data(sess, p0)?;
     let len = slice_len_of(sess, p0)?;
-    let i_slot = sess.2.build_alloca(sess.0.i64_type(), "i").map_err(builder_fail)?;
+    let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "i")?;
     store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
     let loop_cond = new_block(sess, f, "utf8_cond");
     let loop_body = new_block(sess, f, "utf8_body");
@@ -2787,7 +3347,7 @@ fn native_string_from_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionV
     sess.2.build_unconditional_branch(invalid_block).map_err(builder_fail)?;
     sess.2.position_at_end(invalid_block);
     let err_key = result_arg_key(sess, ret_key, 1);
-    let invalid_tag = variant_index_by_name(sess, err_key, "InvalidUtf8")?;
+    let invalid_tag = variant_tag_of(sess, err_key, sess.12.invalid_utf8)?;
     let fail_val = build_enum_value(sess, err_key, invalid_tag, &[])?;
     let err_result = build_result_err(sess, ret_key, err_key, fail_val)?;
     copy_to_out(sess, ret_key, out, err_result)?;
@@ -2812,7 +3372,7 @@ fn native_string_from_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionV
     sess.2.build_conditional_branch(null_cmp, fail_alloc, copy_block).map_err(builder_fail)?;
     sess.2.position_at_end(fail_alloc);
     let err_key2 = result_arg_key(sess, ret_key, 1);
-    let alloc_fail_tag = variant_index_by_name(sess, err_key2, "AllocationFailed")?;
+    let alloc_fail_tag = variant_tag_of(sess, err_key2, sess.12.alloc_failed)?;
     let fkey = variant_payload_key(sess, err_key2, alloc_fail_tag, 0)?;
     let fval = declare_local(sess, fkey, "need")?;
     store_key(sess, fval, len.into())?;
@@ -2897,6 +3457,9 @@ pub fn emit_program<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> Result<(), Codege
     let main_wrapper = sess.1.add_function("main", sig, None);
     let entry = sess.0.append_basic_block(main_wrapper, "entry");
     sess.2.position_at_end(entry);
+    // Record the process's own stack base and guarded limit before any
+    // user function runs; every function's entry guard reads them.
+    measure_stack_limit(sess)?;
     let call = sess.2.build_call(main_val, &[], "").map_err(builder_fail)?;
     let exit_val = match call.try_as_basic_value() {
         ValueKind::Basic(bv) => bv,
@@ -2908,19 +3471,15 @@ pub fn emit_program<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> Result<(), Codege
     store_key(sess, exit_alloca, exit_val)?;
     let exit_kind = em_key_kind(sess, exit_key);
     if exit_kind == TYD_BUILTIN {
-        // A scalar return is the process exit code; `Unit` exits zero.
-        let scalar_sym = em_key_sym(sess, exit_key);
-        if scalar_sym == NONE {
-            return Err(builder_error(-1, 0, 0, "internal: scalar main return without a symbol"));
-        }
-        if name_is(sess.4, node_b(sess.5, scalar_sym), "Unit") {
-            let code0 = i32_ty.const_zero();
-            sess.2.build_return(Some(&code0)).map_err(builder_fail)?;
-        } else {
-            let code_val = load_key(sess, exit_key, exit_alloca)?.into_int_value();
-            let code = sess.2.build_int_cast(code_val, i32_ty, "").map_err(builder_fail)?;
-            sess.2.build_return(Some(&code)).map_err(builder_fail)?;
-        }
+        // A scalar return is the process exit code.  Unit is a declared
+        // enum (the resolver synthesizes it), never a builtin key, so a
+        // builtin exit key is always one of the scalar types; cast its
+        // value to i32 and return it.  A Unit-returning main falls
+        // through to the enum path below, where its single variant's tag
+        // 0 exits zero.
+        let code_val = load_key(sess, exit_key, exit_alloca)?.into_int_value();
+        let code = sess.2.build_int_cast(code_val, i32_ty, "").map_err(builder_fail)?;
+        sess.2.build_return(Some(&code)).map_err(builder_fail)?;
         return Ok(());
     }
     let tag_ptr = struct_gep(sess, exit_key, exit_alloca, 0, "")?;
@@ -2942,7 +3501,7 @@ pub fn emit_program<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> Result<(), Codege
     sess.2.position_at_end(fail_ret);
     let code1 = i32_ty.const_int(1, false);
     sess.2.build_return(Some(&code1)).map_err(builder_fail)?;
-    let diag_tag = variant_index_by_name_opt(sess, exit_key, "ExitDiagnostic");
+    let diag_tag = variant_tag_of_opt(sess, exit_key, sess.12.exit_diag);
     sess.2.position_at_end(diag_block);
     if diag_tag != NONE {
         let (region, pty) = enum_payload_ptr(sess, exit_alloca, exit_key, diag_tag)?;

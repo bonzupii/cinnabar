@@ -220,11 +220,12 @@ fn parse_pub_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: 
     }
 }
 
-/// True when the token at `pos` is the native-declaration keyword.  The
-/// spelling `nat` is an alias for `native`; both introduce opaque native
-/// type and function signatures.
+/// True when the token at `pos` is the native-declaration keyword:
+/// `nat` introduces an opaque native type or function signature.  The
+/// legacy spelling `native` is not a keyword and is rejected as an
+/// ordinary identifier.
 fn is_native_keyword(nodes: &[i64], names: &[String], pos: i64) -> bool {
-    is_name(nodes, names, pos, "native") || is_name(nodes, names, pos, "nat")
+    is_name(nodes, names, pos, "nat")
 }
 
 fn parse_native_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, is_pub: i64) -> Option<i64> {
@@ -941,15 +942,51 @@ fn parse_postfix(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &
         if is_sym(nodes, names, *pos, "(") {
             expr = parse_call_tail(pos, names, nodes, lists, errors, expr, NONE)?;
         } else if is_sym(nodes, names, *pos, "[") {
-            let targs = parse_type_args_tail(pos, names, nodes, lists, errors)?;
-            // parse_call_tail consumes the `(` itself, exactly as the
-            // plain-call branch above; never consume it here as well.
-            expr = parse_call_tail(pos, names, nodes, lists, errors, expr, targs)?;
+            // `expr[...]` is either a generic call's explicit type
+            // arguments (`f[T]()`) or an array/slice index (`arr[i]`).
+            // Both begin with a bracketed list; the call's `(` after the
+            // closing `]` disambiguates them.  Scan to the matching `]`
+            // and peek: a following `(` is a generic call, anything else
+            // is an index.  The scan stops just past the matching `]`, so
+            // the `(` (if present) sits at `scan` itself.
+            let mut scan = *pos + 1;
+            let mut depth = 1i64;
+            while depth > 0 && !at_eof(nodes, scan) {
+                if is_sym(nodes, names, scan, "[") {
+                    depth += 1;
+                } else if is_sym(nodes, names, scan, "]") {
+                    depth -= 1;
+                }
+                scan += 1;
+            }
+            if is_sym(nodes, names, scan, "(") {
+                let targs = parse_type_args_tail(pos, names, nodes, lists, errors)?;
+                // parse_call_tail consumes the `(` itself, exactly as the
+                // plain-call branch above; never consume it here as well.
+                expr = parse_call_tail(pos, names, nodes, lists, errors, expr, targs)?;
+            } else {
+                expr = parse_index_tail(pos, names, nodes, lists, errors, expr)?;
+            }
         } else {
             break;
         }
     }
     Some(expr)
+}
+
+/// Parses a postfix index `base[index]` into an EXPR_INDEX node.
+fn parse_index_tail(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, base: i64) -> Option<i64> {
+    let file = node_file(nodes, *pos);
+    let start = node_start(nodes, *pos);
+    *pos += 1;
+    skip_nl(nodes, pos);
+    let index = parse_expr(pos, names, nodes, lists, errors, 1)?;
+    skip_nl(nodes, pos);
+    if !expect(nodes, names, pos, "]", errors) {
+        return None;
+    }
+    let end = node_end(nodes, *pos - 1);
+    Some(alloc_expr(nodes, EXPR_INDEX, file, start, end, &[base, index, NONE]))
 }
 
 fn parse_primary(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, multi: i64) -> Option<i64> {
@@ -1372,9 +1409,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_generic_native() {
+    fn parses_generic_nat() {
         let errors = parse_all(
-            "pub mod Collections\n  pub native type Vec(T)\n  pub native fun vec_new<T>() impure Result(Vec(T), Error)\nend\n",
+            "pub mod Collections\n  pub nat type Vec(T)\n  pub nat fun vec_new<T>() impure Result(Vec(T), Error)\nend\n",
         );
         assert_eq!(errors.len(), 0);
     }
@@ -1390,7 +1427,7 @@ mod tests {
         // Multi-line parameters, payload types, struct-literal fields, and
         // call arguments each end with a newline before the close delimiter.
         let errors = parse_all(
-            "pub native fun write_u8(\n  block: &Block,\n  offset: Usize,\n  value: U8\n) impure Result(Unit, Error)\n\nfun make() MagicHeader\n  return MagicHeader(\n    bytes: [MAGIC_BYTE_0, MAGIC_BYTE_1],\n    expected: MAGIC_U32\n  )\nend\n",
+            "pub nat fun write_u8(\n  block: &Block,\n  offset: Usize,\n  value: U8\n) impure Result(Unit, Error)\n\nfun make() MagicHeader\n  return MagicHeader(\n    bytes: [MAGIC_BYTE_0, MAGIC_BYTE_1],\n    expected: MAGIC_U32\n  )\nend\n",
         );
         assert_eq!(errors.len(), 0);
     }
@@ -1412,8 +1449,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_native_on_const() {
-        let errors = parse_all("native const BAD: Int = 1\n");
+    fn rejects_nat_on_const() {
+        let errors = parse_all("nat const BAD: Int = 1\n");
         assert_eq!(errors.len(), 1);
     }
 }

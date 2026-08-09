@@ -31,9 +31,11 @@ const IMPL_STRIDE: i64 = 3;
 /// and every external module root are checked.
 /// The typechecker's shared tables, threaded through every check as one
 /// explicit tuple (the same shape as the emitter's session): source
-/// arenas, diagnostics, the scope stack, the impl table, and the
-/// inference constraint tables.  `(names, nodes, lists, errors, env,
-/// impls, vars, origins)`.
+/// arenas, diagnostics, the scope stack, the impl table, the inference
+/// constraint tables, and the five seeded primitive-enum symbols
+/// (Unit/Result/Option/DivError/IndexError) found once at setup.
+/// `(names, nodes, lists, errors, env, impls, vars, origins, unit_sym,
+/// result_sym, option_sym, div_err_sym, index_err_sym)`.
 type State<'a> = (
     &'a mut Vec<String>,
     &'a mut Vec<i64>,
@@ -43,6 +45,11 @@ type State<'a> = (
     &'a mut Vec<i64>,
     &'a mut Vec<(i64, i64)>,
     &'a mut Vec<(i64, i64, i64)>,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
 );
 
 pub fn typecheck(
@@ -51,9 +58,17 @@ pub fn typecheck(
     lists: &mut Vec<Vec<i64>>,
     errors: &mut Vec<Diag>,
     root: i64,
-    ext_mods: &[(String, i64)],
+    ext_mods: &[(i64, i64)],
 ) -> (bool, i64) {
     seed_builtins(names, nodes, lists);
+    // The seeded primitive-enum symbols, found once at setup and stored on
+    // the state so unit_key_of and division_result_key never scan the
+    // arena for them again.
+    let unit_sym = find_type_sym_by_name(nodes, intern(names, "Unit"));
+    let result_sym = find_type_sym_by_name(nodes, intern(names, "Result"));
+    let option_sym = find_type_sym_by_name(nodes, intern(names, "Option"));
+    let div_err_sym = find_type_sym_by_name(nodes, intern(names, "DivError"));
+    let index_err_sym = find_type_sym_by_name(nodes, intern(names, "IndexError"));
     let mut impls: Vec<i64> = Vec::new();
     let mut vars: Vec<(i64, i64)> = Vec::new();
     let mut origins: Vec<(i64, i64, i64)> = Vec::new();
@@ -68,6 +83,11 @@ pub fn typecheck(
         &mut impls,
         &mut vars,
         &mut origins,
+        unit_sym,
+        result_sym,
+        option_sym,
+        div_err_sym,
+        index_err_sym,
     );
 
     collect_types(&mut state, root);
@@ -129,6 +149,7 @@ pub fn typecheck(
     let impls_list = store_impls(state.2, state.5);
     pop_scope(state.4);
     resolve_all_vars(state.0, state.1, state.2, state.3, state.6, state.7);
+    attach_type_facts(state.0, state.1, state.2);
     (state.3.is_empty(), impls_list)
 }
 
@@ -178,15 +199,13 @@ fn sym_home(nodes: &[i64], sym: i64) -> i64 {
     node_d(nodes, sym)
 }
 
-/// The key of the builtin type whose name is `text`, or NONE.
-fn builtin_key_of(nodes: &[i64], names: &[String], text: &str) -> i64 {
+/// The key of the builtin whose sub-kind is `sub`, or NONE.  The sub-kind
+/// was stored in the descriptor row at seed time.
+fn builtin_key_of(nodes: &[i64], sub: i64) -> i64 {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_TYINFO && node_b(nodes, idx) == TYD_BUILTIN {
-            let sym = node_c(nodes, idx);
-            if name_is(names, sym_name(nodes, sym), text) {
-                return node_a(nodes, idx);
-            }
+        if node_tag(nodes, idx) == NODE_TYINFO && node_b(nodes, idx) == TYD_BUILTIN && node_f(nodes, idx) == sub {
+            return node_a(nodes, idx);
         }
         idx += 1;
     }
@@ -205,41 +224,40 @@ fn builtin_key_of_sym(nodes: &[i64], sym: i64) -> i64 {
     NONE
 }
 
-fn int_builtin_names(names: &mut Vec<String>) -> Vec<i64> {
-    vec![
-        intern(names, "Int"),
-        intern(names, "U8"),
-        intern(names, "U32"),
-        intern(names, "Usize"),
-    ]
-}
-
-/// Allocates canonical builtin keys for Int, U8, U32, Usize, and Bool.
-/// Unit, Result, and Option are declared enums synthesized by the
-/// resolver; the typechecker reads them through the same declaration
-/// path a user enum uses.  The scalar keys mirror the resolver's builtin
-/// seeding exactly: the resolver enters the type symbol into its scopes
-/// and the typechecker allocates the matching key.
+/// Allocates canonical builtin keys for Int, U8, U32, Usize, and Bool,
+/// each carrying its scalar sub-kind in the descriptor's slot `f` so that
+/// every later stage classifies scalars from the stored integer, never
+/// from the symbol's name.  Unit, Result, and Option are declared enums
+/// synthesized by the resolver; the typechecker reads them through the
+/// same declaration path a user enum uses.  The scalar keys mirror the
+/// resolver's builtin seeding exactly: the resolver enters the type
+/// symbol into its scopes and the typechecker allocates the matching key.
 fn seed_builtins(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut [Vec<i64>]) {
-    let ints = int_builtin_names(names);
+    let ints = [
+        (intern(names, "Int"), BUILTIN_INT),
+        (intern(names, "U8"), BUILTIN_U8),
+        (intern(names, "U32"), BUILTIN_U32),
+        (intern(names, "Usize"), BUILTIN_USIZE),
+    ];
     let mut idx = 0usize;
     while idx < ints.len() {
-        let int_key = match ints.get(idx) {
-            Some(key) => *key,
+        let (name_id, sub) = match ints.get(idx) {
+            Some(pair) => *pair,
             None => break,
         };
-        seed_builtin(nodes, lists, int_key);
+        seed_builtin(nodes, lists, name_id, sub);
         idx += 1;
     }
     let bool_name = intern(names, "Bool");
-    seed_builtin(nodes, lists, bool_name);
+    seed_builtin(nodes, lists, bool_name, BUILTIN_BOOL);
 }
 
-/// Allocates one builtin key, looking up the symbol the resolver seeded.
-fn seed_builtin(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], name: i64) {
+/// Allocates one builtin key with its scalar sub-kind, looking up the
+/// symbol the resolver seeded.
+fn seed_builtin(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], name: i64, sub: i64) {
     let sym = find_type_sym_by_name(nodes, name);
     if sym != NONE {
-        canon_tyinfo(nodes, lists, TYD_BUILTIN, sym, NONE, NONE, NONE);
+        canon_tyinfo(nodes, lists, TYD_BUILTIN, sym, NONE, NONE, sub);
     }
 }
 
@@ -626,36 +644,265 @@ fn key_len(nodes: &[i64], key: i64) -> i64 {
     }
 }
 
-fn is_int_key(nodes: &[i64], names: &[String], key: i64) -> bool {
+/// Whether the key is one of the four integer builtins (Int, U8, U32,
+/// Usize).  Classification reads the sub-kind the typechecker stored in
+/// the builtin descriptor at seed time; no name matching.
+fn is_int_key(nodes: &[i64], key: i64) -> bool {
     if key_kind(nodes, key) != TYD_BUILTIN {
         return false;
     }
-    let sym = key_sym(nodes, key);
-    let ints = ["Int", "U8", "U32", "Usize"];
-    let mut idx = 0usize;
-    loop {
-        match ints.get(idx) {
-            Some(text) => {
-                if name_is(names, sym_name(nodes, sym), text) {
-                    return true;
+    let sub = tyinfo_builtin_kind(nodes, key);
+    sub == BUILTIN_INT || sub == BUILTIN_U8 || sub == BUILTIN_U32 || sub == BUILTIN_USIZE
+}
+
+/// Whether the key is the Bool builtin, from its stored sub-kind.
+fn is_bool_key(nodes: &[i64], key: i64) -> bool {
+    key_kind(nodes, key) == TYD_BUILTIN && tyinfo_builtin_kind(nodes, key) == BUILTIN_BOOL
+}
+
+/// Whether `key` is the seeded Result enum, read from the primitive
+/// sub-kind the resolver stored on the enum's symbol — never by name.
+fn is_result_key(nodes: &[i64], key: i64) -> bool {
+    key_kind(nodes, key) == TYD_ENUM && sym_prim_kind(nodes, key_sym(nodes, key)) == PRIM_RESULT
+}
+
+/// Whether `key` is the seeded Option enum, read from the primitive
+/// sub-kind the resolver stored on the enum's symbol — never by name.
+fn is_option_key(nodes: &[i64], key: i64) -> bool {
+    key_kind(nodes, key) == TYD_ENUM && sym_prim_kind(nodes, key_sym(nodes, key)) == PRIM_OPTION
+}
+
+// ---------------------------------------------------------------------------
+// Type-fact attachment (after all checking): variant facts and linearity.
+//
+// Both facts are computed once here, stored on arena rows, and only read
+// downstream: codegen resolves variant tags from the recorded variant
+// symbols (never by re-searching an enum's variant list by name), and the
+// borrow checker reads the is_linear flag (never by re-matching handle
+// names).
+// ---------------------------------------------------------------------------
+
+/// Fills the variant-fact rows codegen reads.  For every canonical enum
+/// key, each variant's symbol (attached to its declaration by the
+/// resolver) is recorded under (key, variant name id), so codegen
+/// resolves a variant's declared-order tag from the symbol.
+fn attach_variant_facts(nodes: &mut Vec<i64>, lists: &[Vec<i64>]) {
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_TYINFO && node_b(nodes, idx) == TYD_ENUM {
+            let key = node_a(nodes, idx);
+            let sym = node_c(nodes, idx);
+            if sym != NONE {
+                let decl = sym_decl(nodes, sym);
+                if decl != NONE && node_tag(nodes, decl) == NODE_ITEM && node_a(nodes, decl) == ITEM_ENUM {
+                    let variants = node_e(nodes, decl);
+                    let count = list_len(lists, variants);
+                    let mut v = 0i64;
+                    while v < count {
+                        let variant = list_get(lists, variants, v);
+                        let vsym = variant_sym_of(nodes, variant);
+                        if vsym != NONE {
+                            alloc_varfact(nodes, key, node_a(nodes, variant), vsym);
+                        }
+                        v += 1;
+                    }
                 }
             }
-            None => return false,
         }
         idx += 1;
     }
 }
 
-fn is_bool_key(nodes: &[i64], names: &[String], key: i64) -> bool {
-    key_kind(nodes, key) == TYD_BUILTIN && name_is(names, sym_name(nodes, key_sym(nodes, key)), "Bool")
+/// The four native linear handles: the single definition of the
+/// language's linear surfaces.  Their interned ids are matched at
+/// collection time only; every later stage reads the stored flag.
+const LINEAR_HANDLES: [&str; 4] = [
+    "Memory.Block",
+    "Collections.Vec",
+    "Collections.String",
+    "Collections.HashMap",
+];
+
+/// Computes the is_linear flag of every canonical key and stores it in
+/// the descriptor row, once, after all checking (so every key the borrow
+/// checker and codegen will query already exists).  Native handles are
+/// linear by definition; structs and enums are linear when any declared
+/// member (substituted against the key's own type arguments) is; arrays
+/// follow their element.  A cycle (a recursive type) is not linear.  The
+/// computation is memoized in the row's flag slot, so a key created on
+/// the fly by substitution is computed recursively and never twice.
+fn attach_linearity(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) {
+    let handles: Vec<i64> = LINEAR_HANDLES.iter().map(|text| intern(names, text)).collect();
+    let mut seen: Vec<i64> = Vec::new();
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_TYINFO {
+            seen.clear();
+            linear_of(nodes, lists, node_a(nodes, idx), &handles, &mut seen);
+        }
+        idx += 1;
+    }
 }
 
-fn is_result_key(nodes: &[i64], names: &[String], key: i64) -> bool {
-    key_kind(nodes, key) == TYD_ENUM && name_is(names, sym_name(nodes, key_sym(nodes, key)), "Result")
+fn has_value(list: &[i64], value: i64) -> bool {
+    let mut idx = 0usize;
+    while idx < list.len() {
+        match list.get(idx) {
+            Some(cell) => {
+                if *cell == value {
+                    return true;
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    false
 }
 
-fn is_option_key(nodes: &[i64], names: &[String], key: i64) -> bool {
-    key_kind(nodes, key) == TYD_ENUM && name_is(names, sym_name(nodes, key_sym(nodes, key)), "Option")
+/// The linearity of one canonical key, memoized in the row's file slot
+/// (-1 uncomputed, 0 not linear, 1 linear).  Dependencies are older keys
+/// (arguments and elements are canonicalized before the containing key),
+/// so the flag is well-founded; `seen` guards recursive type graphs.
+fn linear_of(
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    key: i64,
+    handles: &[i64],
+    seen: &mut Vec<i64>,
+) -> i64 {
+    if key < 0 {
+        return 0;
+    }
+    let row = find_tyinfo(nodes, key);
+    if row == NONE {
+        return 0;
+    }
+    let stored = node_get(nodes, row, NODE_FILE);
+    if stored == 0 || stored == 1 {
+        return stored;
+    }
+    if has_value(seen, key) {
+        return 0;
+    }
+    seen.push(key);
+    let kind = node_b(nodes, row);
+    let flag = if kind == TYD_NATIVE {
+        let sym = node_c(nodes, row);
+        if sym != NONE && has_value(handles, node_b(nodes, sym)) {
+            1
+        } else {
+            0
+        }
+    } else if kind == TYD_ARRAY {
+        linear_of(nodes, lists, node_e(nodes, row), handles, seen)
+    } else if kind == TYD_STRUCT || kind == TYD_ENUM {
+        linear_members_of(nodes, lists, node_c(nodes, row), key, handles, seen)
+    } else {
+        0
+    };
+    node_set(nodes, row, NODE_FILE, flag);
+    flag
+}
+
+/// Whether a struct or enum declaration transitively contains a linear
+/// member.  Each declared member type is substituted against the key's
+/// own type arguments before the recursion, so a `T`-typed member counts
+/// as linear exactly when its instantiated type is linear.
+fn linear_members_of(
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    sym: i64,
+    key: i64,
+    handles: &[i64],
+    seen: &mut Vec<i64>,
+) -> i64 {
+    if sym == NONE {
+        return 0;
+    }
+    let decl = sym_decl(nodes, sym);
+    if decl == NONE || node_tag(nodes, decl) != NODE_ITEM {
+        return 0;
+    }
+    let kind = node_a(nodes, decl);
+    let row = find_tyinfo(nodes, key);
+    let args = if row == NONE { NONE } else { node_d(nodes, row) };
+    if kind == ITEM_STRUCT {
+        let fields = node_e(nodes, decl);
+        let count = list_len(lists, fields);
+        let mut idx = 0i64;
+        while idx < count {
+            let fty_node = node_b(nodes, list_get(lists, fields, idx));
+            let fty = subst_declared_key(nodes, lists, decl, args, ty_key_of(nodes, fty_node));
+            if linear_of(nodes, lists, fty, handles, seen) == 1 {
+                return 1;
+            }
+            idx += 1;
+        }
+    } else if kind == ITEM_ENUM {
+        let variants = node_e(nodes, decl);
+        let count = list_len(lists, variants);
+        let mut idx = 0i64;
+        while idx < count {
+            let payload = node_b(nodes, list_get(lists, variants, idx));
+            let pcount = list_len(lists, payload);
+            let mut pidx = 0i64;
+            while pidx < pcount {
+                let pty_node = list_get(lists, payload, pidx);
+                let pty = subst_declared_key(nodes, lists, decl, args, ty_key_of(nodes, pty_node));
+                if linear_of(nodes, lists, pty, handles, seen) == 1 {
+                    return 1;
+                }
+                pidx += 1;
+            }
+            idx += 1;
+        }
+    }
+    0
+}
+
+/// Substitutes a declared member type against the concrete type arguments
+/// of `key`, matching the declaration's type parameters by key.
+fn subst_declared_key(
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    decl: i64,
+    args: i64,
+    declared: i64,
+) -> i64 {
+    if declared == NONE {
+        return declared;
+    }
+    let params = node_f(nodes, decl);
+    let pcount = list_len(lists, params);
+    let acount = list_len(lists, args);
+    if pcount == 0 || pcount != acount {
+        return declared;
+    }
+    let mut from: Vec<i64> = Vec::new();
+    let mut to: Vec<i64> = Vec::new();
+    let mut idx = 0i64;
+    while idx < pcount {
+        let param = list_get(lists, params, idx);
+        if node_tag(nodes, param) == NODE_TY && node_a(nodes, param) == TY_PARAM {
+            from.push(ty_key_of(nodes, param));
+            to.push(list_get(lists, args, idx));
+        }
+        idx += 1;
+    }
+    if from.is_empty() {
+        return declared;
+    }
+    subst_key(nodes, lists, declared, &from, &to)
+}
+
+/// Attaches the post-check type facts downstream stages consume: the
+/// variant facts codegen needs and the is_linear flag the borrow checker
+/// reads.  Runs after all checking and after inference variables are
+/// substituted, so every canonical key that will be queried exists.
+fn attach_type_facts(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) {
+    attach_variant_facts(nodes, lists);
+    attach_linearity(names, nodes, lists);
 }
 
 // ---------------------------------------------------------------------------
@@ -962,55 +1209,21 @@ fn impl_methods(impls: &[i64], idx: i64) -> i64 {
     impl_at(impls, (idx * IMPL_STRIDE + 2) as usize)
 }
 
-fn is_unit_key(names: &[String], nodes: &[i64], key: i64) -> bool {
-    let kind = key_kind(nodes, key);
-    if kind != TYD_ENUM && kind != TYD_BUILTIN {
-        return false;
-    }
-    name_is(names, sym_name(nodes, key_sym(nodes, key)), "Unit")
+/// Whether `key` is the seeded Unit enum, read from the primitive
+/// sub-kind the resolver stored on the enum's symbol — never by name.
+fn is_unit_key(nodes: &[i64], key: i64) -> bool {
+    key_kind(nodes, key) == TYD_ENUM && sym_prim_kind(nodes, key_sym(nodes, key)) == PRIM_UNIT
 }
 
-/// The Unit key: the declared Unit enum when present, else the builtin.
-fn unit_key_of(names: &[String], nodes: &mut Vec<i64>, lists: &mut [Vec<i64>]) -> i64 {
-    let sym = find_enum_sym_by_text(nodes, names, "Unit");
-    if sym != NONE {
-        return canon_tyinfo(nodes, lists, TYD_ENUM, sym, NONE, NONE, NONE);
+/// The Unit key: the seeded Unit enum's canonical key, built from the
+/// symbol id the checker stored on the state at setup.
+fn unit_key_of(state: &mut State) -> i64 {
+    let sym = state.8;
+    if sym == NONE {
+        unknown_key(state.1, state.2)
+    } else {
+        canon_tyinfo(state.1, state.2, TYD_ENUM, sym, NONE, NONE, NONE)
     }
-    let builtin = find_type_sym_by_text(nodes, names, "Unit");
-    if builtin != NONE {
-        return canon_tyinfo(nodes, lists, TYD_BUILTIN, builtin, NONE, NONE, NONE);
-    }
-    unknown_key(nodes, lists)
-}
-
-fn find_enum_sym_by_text(nodes: &[i64], names: &[String], text: &str) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_SYM && node_a(nodes, idx) == SYM_ENUM {
-            let sym = idx;
-            if name_is(names, node_b(nodes, sym), text) {
-                return sym;
-            }
-        }
-        idx += 1;
-    }
-    NONE
-}
-
-fn find_type_sym_by_text(nodes: &[i64], names: &[String], text: &str) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_SYM {
-            let kind = node_a(nodes, idx);
-            if (kind == SYM_TYPE || kind == SYM_STRUCT || kind == SYM_ENUM || kind == SYM_TRAIT)
-                && name_is(names, node_b(nodes, idx), text)
-            {
-                return idx;
-            }
-        }
-        idx += 1;
-    }
-    NONE
 }
 
 // ---------------------------------------------------------------------------
@@ -1106,25 +1319,24 @@ fn check_fn(state: &mut State, fn_node: i64, self_key: i64) {
     let impure = node_e(state.1, fn_node);
     let body = node_f(state.1, fn_node);
     if body != NONE {
-        check_stmt_list(state, body, ret, impure, self_key, 0, 0);
+        check_stmt_list(state, body, ret, impure, self_key, 0);
     }
     pop_scope(state.4);
 }
 
-fn check_stmt_list(state: &mut State, list: i64, ret: i64, impure: i64, self_key: i64, loop_depth: i64, in_arm: i64) {
+fn check_stmt_list(state: &mut State, list: i64, ret: i64, impure: i64, self_key: i64, loop_depth: i64) {
     let count = list_len(state.2, list);
     let mut idx = 0i64;
     while idx < count {
-        check_stmt(state, list_get(state.2, list, idx), ret, impure, self_key, loop_depth, in_arm);
+        check_stmt(state, list_get(state.2, list, idx), ret, impure, self_key, loop_depth);
         idx += 1;
     }
 }
 
-/// Checks one statement, returning its value key (or `diverges` via the
-/// caller's `in_arm` flag).
-fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64, loop_depth: i64, in_arm: i64) -> i64 {
+/// Checks one statement, returning its value key.
+fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64, loop_depth: i64) -> i64 {
     if node_tag(state.1, stmt) != NODE_STMT {
-        return unit_key_of(state.0, state.1, state.2);
+        return unit_key_of(state);
     }
     let kind = node_a(state.1, stmt);
     let file = node_file(state.1, stmt);
@@ -1170,30 +1382,30 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
     }
     if kind == STMT_WHILE {
         let cond = check_expr(state, node_b(state.1, stmt), NONE, ret, impure, self_key);
-        if !is_bool_key(state.1, state.0, cond) {
+        if !is_bool_key(state.1, cond) {
             push_error(state.3, "while condition must be Bool", file, start, end);
         }
         push_scope(state.4);
-        check_stmt_list(state, node_c(state.1, stmt), ret, impure, self_key, loop_depth + 1, in_arm);
+        check_stmt_list(state, node_c(state.1, stmt), ret, impure, self_key, loop_depth + 1);
         pop_scope(state.4);
-        let unit = unit_key_of(state.0, state.1, state.2);
+        let unit = unit_key_of(state);
         stmt_set_ty(state.1, stmt, unit);
         return unit;
     }
     if kind == STMT_IF {
         let cond = check_expr(state, node_b(state.1, stmt), NONE, ret, impure, self_key);
-        if !is_bool_key(state.1, state.0, cond) {
+        if !is_bool_key(state.1, cond) {
             push_error(state.3, "if condition must be Bool", file, start, end);
         }
         push_scope(state.4);
-        check_stmt_list(state, node_c(state.1, stmt), ret, impure, self_key, loop_depth, in_arm);
+        check_stmt_list(state, node_c(state.1, stmt), ret, impure, self_key, loop_depth);
         pop_scope(state.4);
         if node_d(state.1, stmt) != NONE {
             push_scope(state.4);
-            check_stmt_list(state, node_d(state.1, stmt), ret, impure, self_key, loop_depth, in_arm);
+            check_stmt_list(state, node_d(state.1, stmt), ret, impure, self_key, loop_depth);
             pop_scope(state.4);
         }
-        let unit = unit_key_of(state.0, state.1, state.2);
+        let unit = unit_key_of(state);
         stmt_set_ty(state.1, stmt, unit);
         return unit;
     }
@@ -1201,10 +1413,10 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
         let value = node_b(state.1, stmt);
         let key;
         if value == NONE {
-            if !is_unit_key(state.0, state.1, ret) {
+            if !is_unit_key(state.1, ret) {
                 push_error(state.3, &format!("return with no value in a function returning '{}'", render_key(state.0, state.1, state.2, ret)), file, start, end);
             }
-            key = unit_key_of(state.0, state.1, state.2);
+            key = unit_key_of(state);
         } else {
             key = check_expr(state, value, ret, ret, impure, self_key);
             let ok = unify_key(state.1, state.2, state.6, key, ret);
@@ -1220,18 +1432,16 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
             let what = if kind == STMT_BREAK { "break" } else { "continue" };
             push_error(state.3, &format!("{} outside of a loop", what), file, start, end);
         }
-        let unit = unit_key_of(state.0, state.1, state.2);
+        let unit = unit_key_of(state);
         stmt_set_ty(state.1, stmt, unit);
         return unit;
     }
     let expr = node_b(state.1, stmt);
     let key = check_expr(state, expr, NONE, ret, impure, self_key);
-    if in_arm == 0 {
-        if is_result_key(state.1, state.0, key) {
-            push_error(state.3, "unhandled Result value: use try or match", file, start, end);
-        } else if is_option_key(state.1, state.0, key) {
-            push_error(state.3, "unhandled Option value: use try or match", file, start, end);
-        }
+    if is_result_key(state.1, key) {
+        push_error(state.3, "unhandled Result value: use try or match", file, start, end);
+    } else if is_option_key(state.1, key) {
+        push_error(state.3, "unhandled Option value: use try or match", file, start, end);
     }
     stmt_set_ty(state.1, stmt, key);
     key
@@ -1297,12 +1507,12 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
         let lit = node_b(state.1, expr);
         let value = node_c(state.1, expr);
         if lit == LIT_TRUE || lit == LIT_FALSE {
-            return (value, builtin_key_of(state.1, state.0, "Bool"));
+            return (value, builtin_key_of(state.1, BUILTIN_BOOL));
         }
-        let key = if is_int_key(state.1, state.0, declared) {
+        let key = if is_int_key(state.1, declared) {
             declared
         } else {
-            builtin_key_of(state.1, state.0, "Int")
+            builtin_key_of(state.1, BUILTIN_INT)
         };
         return (value, key);
     }
@@ -1356,9 +1566,33 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
     (0, unknown_key(state.1, state.2))
 }
 
+/// Euclidean division on i64, computed in wrapping arithmetic so no input
+/// can panic (matching the emitted runtime IR; the spec defines both `/`
+/// and `%` to keep the remainder in `[0, |divisor|)` regardless of the
+/// operands' signs).
+fn euclid_div_i64(lv: i64, rv: i64) -> i64 {
+    let rem = lv.wrapping_rem(rv);
+    let euclid_rem = if rem < 0 {
+        rem.wrapping_add(rv.wrapping_abs())
+    } else {
+        rem
+    };
+    lv.wrapping_sub(euclid_rem).wrapping_div(rv)
+}
+
+/// The Euclidean remainder of `lv mod rv`, in wrapping arithmetic.
+fn euclid_rem_i64(lv: i64, rv: i64) -> i64 {
+    let rem = lv.wrapping_rem(rv);
+    if rem < 0 {
+        rem.wrapping_add(rv.wrapping_abs())
+    } else {
+        rem
+    }
+}
+
 fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, i64, i64), quiet: i64) -> (i64, i64) {
     let (file, start, end) = span;
-    let bool_key = builtin_key_of(state.1, state.0, "Bool");
+    let bool_key = builtin_key_of(state.1, BUILTIN_BOOL);
     if op == BIN_ADD {
         return (lv.wrapping_add(rv), key);
     }
@@ -1375,7 +1609,7 @@ fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, 
             }
             return (0, unknown_key(state.1, state.2));
         }
-        return (lv.wrapping_div(rv), key);
+        return (euclid_div_i64(lv, rv), key);
     }
     if op == BIN_MOD {
         if rv == 0 {
@@ -1384,7 +1618,7 @@ fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, 
             }
             return (0, unknown_key(state.1, state.2));
         }
-        return (lv.wrapping_rem(rv), key);
+        return (euclid_rem_i64(lv, rv), key);
     }
     if op == BIN_SHL {
         return (lv.wrapping_shl(rv as u32), key);
@@ -1443,7 +1677,7 @@ fn check_expr(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64
     }
     let kind = node_a(state.1, expr);
     if kind == EXPR_LIT {
-        return check_lit(state.0, state.1, expr, expected);
+        return check_lit(state.1, expr, expected);
     }
     if kind == EXPR_PATH {
         return check_path(state, expr);
@@ -1469,23 +1703,26 @@ fn check_expr(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64
     if kind == EXPR_TRY {
         return check_try(state, expr, ret, impure, self_key);
     }
+    if kind == EXPR_INDEX {
+        return check_index(state, expr, 0, ret, impure, self_key);
+    }
     push_error(state.3, "malformed expression", node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
     let key = unknown_key(state.1, state.2);
     expr_set_ty(state.1, expr, key);
     key
 }
 
-fn check_lit(names: &[String], nodes: &mut [i64], expr: i64, expected: i64) -> i64 {
+fn check_lit(nodes: &mut [i64], expr: i64, expected: i64) -> i64 {
     let lit = node_b(nodes, expr);
     if lit == LIT_TRUE || lit == LIT_FALSE {
-        let key = builtin_key_of(nodes, names, "Bool");
+        let key = builtin_key_of(nodes, BUILTIN_BOOL);
         expr_set_ty(nodes, expr, key);
         return key;
     }
-    let key = if is_int_key(nodes, names, expected) {
+    let key = if is_int_key(nodes, expected) {
         expected
     } else {
-        builtin_key_of(nodes, names, "Int")
+        builtin_key_of(nodes, BUILTIN_INT)
     };
     expr_set_ty(nodes, expr, key);
     key
@@ -1497,22 +1734,32 @@ fn check_unary(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i6
     let file = node_file(state.1, expr);
     let start = node_start(state.1, expr);
     let end = node_end(state.1, expr);
-    let inner = check_expr(state, operand, NONE, ret, impure, self_key);
     let key;
-    if op == UN_REF {
-        key = canon_tyinfo(state.1, state.2, TYD_REF, NONE, NONE, inner, NONE);
-    } else if op == UN_REF_MUT {
-        key = canon_tyinfo(state.1, state.2, TYD_REF_MUT, NONE, NONE, inner, NONE);
-    } else if op == UN_NEG {
-        if !is_int_key(state.1, state.0, inner) {
-            push_error(state.3, "unary '-' requires an integer operand", file, start, end);
-        }
-        key = inner;
+    if (op == UN_REF || op == UN_REF_MUT) && node_tag(state.1, operand) == NODE_EXPR && node_a(state.1, operand) == EXPR_INDEX {
+        // A borrow of an indexed element is checked inside the index
+        // expression itself: its type is the borrowed element type
+        // (`&T`, or `Result(&T, IndexError)` when the access is
+        // dynamically checked), never a reference to the Result.  The
+        // borrow applies to the element, not to the bounds check.
+        let borrow = if op == UN_REF { 1 } else { 2 };
+        key = check_index(state, operand, borrow, ret, impure, self_key);
     } else {
-        if !is_bool_key(state.1, state.0, inner) {
-            push_error(state.3, "unary '!' requires a Bool operand", file, start, end);
+        let inner = check_expr(state, operand, NONE, ret, impure, self_key);
+        if op == UN_REF {
+            key = canon_tyinfo(state.1, state.2, TYD_REF, NONE, NONE, inner, NONE);
+        } else if op == UN_REF_MUT {
+            key = canon_tyinfo(state.1, state.2, TYD_REF_MUT, NONE, NONE, inner, NONE);
+        } else if op == UN_NEG {
+            if !is_int_key(state.1, inner) {
+                push_error(state.3, "unary '-' requires an integer operand", file, start, end);
+            }
+            key = inner;
+        } else {
+            if !is_bool_key(state.1, inner) {
+                push_error(state.3, "unary '!' requires a Bool operand", file, start, end);
+            }
+            key = inner;
         }
-        key = inner;
     }
     expr_set_ty(state.1, expr, key);
     key
@@ -1586,12 +1833,12 @@ fn check_static_zero_divisor(state: &mut State, op: i64, rhs: i64) {
 /// builtins read through the same declaration path as any user enum, so
 /// the variant order and layout are derived, never hardcoded.
 fn division_result_key(state: &mut State, payload: i64) -> i64 {
-    let err_sym = find_enum_sym_by_text(state.1, state.0, "DivError");
+    let err_sym = state.11;
     if err_sym == NONE {
         return unknown_key(state.1, state.2);
     }
     let err_key = canon_tyinfo(state.1, state.2, TYD_ENUM, err_sym, NONE, NONE, NONE);
-    let result_sym = find_enum_sym_by_text(state.1, state.0, "Result");
+    let result_sym = state.9;
     if result_sym == NONE {
         return unknown_key(state.1, state.2);
     }
@@ -1609,11 +1856,11 @@ fn check_binary(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i
     let file = node_file(state.1, expr);
     let start = node_start(state.1, expr);
     let end = node_end(state.1, expr);
-    let bool_key = builtin_key_of(state.1, state.0, "Bool");
+    let bool_key = builtin_key_of(state.1, BUILTIN_BOOL);
     if op == BIN_AND || op == BIN_OR {
         let l = check_expr(state, lhs, NONE, ret, impure, self_key);
         let r = check_expr(state, rhs, NONE, ret, impure, self_key);
-        if !is_bool_key(state.1, state.0, l) {
+        if !is_bool_key(state.1, l) {
             push_error(state.3, &format!("logical operator '{}' requires Bool operands", op_text(op)), file, start, end);
         }
         let ok = unify_key(state.1, state.2, state.6, l, r);
@@ -1634,7 +1881,7 @@ fn check_binary(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i
         return bool_key;
     }
     let l = check_expr(state, lhs, NONE, ret, impure, self_key);
-    if !is_int_key(state.1, state.0, l) {
+    if !is_int_key(state.1, l) {
         push_error(state.3, &format!("binary operator '{}' requires integer operands", op_text(op)), file, start, end);
     }
     let r = check_expr(state, rhs, l, ret, impure, self_key);
@@ -1682,6 +1929,112 @@ fn check_array(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
     key
 }
 
+/// Whether `key` is (or transitively contains) a linear handle, computed
+/// on demand during checking.  The full linearity pass runs after all
+/// checking; a key queried here is memoized into its descriptor row the
+/// same way, so the pass reads the stored flag and never recomputes it.
+fn key_is_linear_now(state: &mut State, key: i64) -> bool {
+    if key == NONE {
+        return false;
+    }
+    let mut handles: Vec<i64> = Vec::new();
+    let mut h_idx = 0usize;
+    while h_idx < LINEAR_HANDLES.len() {
+        match LINEAR_HANDLES.get(h_idx) {
+            Some(text) => handles.push(intern(state.0, text)),
+            None => break,
+        }
+        h_idx += 1;
+    }
+    let mut seen: Vec<i64> = Vec::new();
+    linear_of(state.1, state.2, key, &handles, &mut seen) == 1
+}
+
+/// The result key of an index expression: `Result(T, IndexError)` where
+/// T is the element (or borrowed element) type.  IndexError is the
+/// seeded primitive enum carrying `IndexOutOfBounds(Usize, Usize)`, read
+/// through the same declaration path as any user enum.
+fn index_result_key(state: &mut State, payload: i64) -> i64 {
+    let err_sym = state.12;
+    if err_sym == NONE {
+        return unknown_key(state.1, state.2);
+    }
+    let err_key = canon_tyinfo(state.1, state.2, TYD_ENUM, err_sym, NONE, NONE, NONE);
+    let result_sym = state.9;
+    if result_sym == NONE {
+        return unknown_key(state.1, state.2);
+    }
+    let args = alloc_list(state.2);
+    list_push(state.2, args, payload);
+    list_push(state.2, args, err_key);
+    canon_tyinfo(state.1, state.2, TYD_ENUM, result_sym, args, NONE, NONE)
+}
+
+/// Checks an array/slice index expression `base[index]`.  `borrow` is 0
+/// for a value position, 1 under `&`, 2 under `&mut`.  A fixed-size
+/// array with a statically-known constant index is proven in range (or
+/// rejected) at compile time and evaluates directly to the element type
+/// `T` (or `&T`/`&mut T` when borrowed), with no `Result` wrapper.
+/// Every dynamic index, and every index into a slice, evaluates to
+/// `Result(T, IndexError)` (or the borrowed-element variant when under a
+/// borrow).  A value-position index of a linear-element array or slice
+/// is a compile error: an indexed element is never moved out.
+fn check_index(state: &mut State, expr: i64, borrow: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
+    let base = node_b(state.1, expr);
+    let index = node_c(state.1, expr);
+    let file = node_file(state.1, expr);
+    let start = node_start(state.1, expr);
+    let end = node_end(state.1, expr);
+    let usize_key = builtin_key_of(state.1, BUILTIN_USIZE);
+    let base_key = check_expr(state, base, NONE, ret, impure, self_key);
+    let idx_key = check_expr(state, index, usize_key, ret, impure, self_key);
+    let idx_ok = unify_key(state.1, state.2, state.6, usize_key, idx_key);
+    if !idx_ok {
+        push_error(state.3, "array index must be Usize", file, start, end);
+    }
+    let base_kind = key_kind(state.1, base_key);
+    let (elem_key, fixed_len) = if base_kind == TYD_ARRAY {
+        (key_elem(state.1, base_key), key_len(state.1, base_key))
+    } else if base_kind == TYD_REF || base_kind == TYD_REF_MUT || base_kind == TYD_SLICE {
+        let inner = key_elem(state.1, base_key);
+        let slice_elem = if key_kind(state.1, inner) == TYD_SLICE {
+            key_elem(state.1, inner)
+        } else {
+            NONE
+        };
+        if slice_elem == NONE {
+            push_error(state.3, "cannot index a value that is not an array or slice", file, start, end);
+        }
+        (slice_elem, NONE)
+    } else {
+        push_error(state.3, "cannot index a value that is not an array or slice", file, start, end);
+        (unknown_key(state.1, state.2), NONE)
+    };
+    if elem_key != NONE && borrow == 0 && key_is_linear_now(state, elem_key) {
+        push_error(state.3, "cannot move linear element out of array by index: borrow with & or &mut instead", file, start, end);
+    }
+    let payload = if borrow == 1 {
+        canon_tyinfo(state.1, state.2, TYD_REF, NONE, NONE, elem_key, NONE)
+    } else if borrow == 2 {
+        canon_tyinfo(state.1, state.2, TYD_REF_MUT, NONE, NONE, elem_key, NONE)
+    } else {
+        elem_key
+    };
+    if base_kind == TYD_ARRAY && fixed_len != NONE {
+        let (value, ckey) = fold_const(state, index, NONE, 1);
+        if key_kind(state.1, ckey) != TYD_UNKNOWN {
+            if value < 0 || value >= fixed_len {
+                push_error(state.3, &format!("array index out of bounds: index is {} but array length is {}", value, fixed_len), file, start, end);
+            }
+            expr_set_ty(state.1, expr, payload);
+            return payload;
+        }
+    }
+    let key = index_result_key(state, payload);
+    expr_set_ty(state.1, expr, key);
+    key
+}
+
 fn check_try(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     let inner = node_b(state.1, expr);
     let file = node_file(state.1, expr);
@@ -1689,8 +2042,8 @@ fn check_try(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i64)
     let end = node_end(state.1, expr);
     let key = check_expr(state, inner, NONE, ret, impure, self_key);
     let result;
-    if is_result_key(state.1, state.0, key) {
-        if !is_result_key(state.1, state.0, ret) {
+    if is_result_key(state.1, key) {
+        if !is_result_key(state.1, ret) {
             push_error(state.3, "try on Result requires the enclosing function to return Result", file, start, end);
             result = unknown_key(state.1, state.2);
         } else {
@@ -1704,8 +2057,8 @@ fn check_try(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i64)
             }
             result = list_get(state.2, args, 0);
         }
-    } else if is_option_key(state.1, state.0, key) {
-        if !is_option_key(state.1, state.0, ret) {
+    } else if is_option_key(state.1, key) {
+        if !is_option_key(state.1, ret) {
             push_error(state.3, "try on Option requires the enclosing function to return Option", file, start, end);
             result = unknown_key(state.1, state.2);
         } else {
@@ -1768,7 +2121,7 @@ fn variant_value_key(state: &mut State, expr: i64, expected: i64, sym: i64) -> i
     let decl = sym_decl(state.1, sym);
     let key;
     if decl == NONE {
-        key = unit_key_of(state.0, state.1, state.2);
+        key = unit_key_of(state);
     } else {
         let enum_sym = enum_sym_of_variant(state.1, sym);
         if enum_sym == NONE {
@@ -2139,7 +2492,7 @@ fn check_from_u8(state: &mut State, expr: i64, sym: i64, ret: i64, impure: i64, 
         return key;
     }
     let receiver_key = builtin_key_of_sym(state.1, receiver_sym);
-    let u8_key = builtin_key_of(state.1, state.0, "U8");
+    let u8_key = builtin_key_of(state.1, BUILTIN_U8);
     let arg_exprs = node_d(state.1, expr);
     let acount = list_len(state.2, arg_exprs);
     if acount != 1 {
@@ -2399,7 +2752,7 @@ fn check_variant_construct(state: &mut State, expr: i64, sym: i64, ret: i64, imp
     let end = node_end(state.1, expr);
     let decl = sym_decl(state.1, sym);
     if decl == NONE {
-        let key = unit_key_of(state.0, state.1, state.2);
+        let key = unit_key_of(state);
         return key;
     }
     let enum_sym = enum_sym_of_variant(state.1, sym);
@@ -2467,21 +2820,28 @@ fn check_match(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i6
         idx += 1;
     }
     if merged == NONE {
-        merged = unit_key_of(state.0, state.1, state.2);
+        merged = unit_key_of(state);
     }
     check_exhaustive(state, s_key, arms, file, start, end);
     expr_set_ty(state.1, expr, merged);
     merged
 }
 
-/// Checks one match arm: binds its pattern variables, checks the body
-/// statement, and returns the body's value key.  Arm bodies suppress the
-/// unhandled-Result/Option check: the match as a whole handles it.
+/// Checks one match arm: binds its pattern variables and checks the body,
+/// returning the body's value key.  A body that is a bare expression
+/// statement is checked in expression position — its value is the arm's
+/// value, so the unhandled-Result/Option check (which guards discarded
+/// statement values) never applies to it.  Compound bodies (let, if,
+/// return) are checked as statements.
 fn check_arm(state: &mut State, arm: i64, s_key: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     push_scope(state.4);
     check_pattern(state, node_a(state.1, arm), s_key);
     let body = node_b(state.1, arm);
-    let key = check_stmt(state, body, ret, impure, self_key, 0, 1);
+    let key = if node_tag(state.1, body) == NODE_STMT && node_a(state.1, body) == STMT_EXPR {
+        check_expr(state, node_b(state.1, body), NONE, ret, impure, self_key)
+    } else {
+        check_stmt(state, body, ret, impure, self_key, 0)
+    };
     pop_scope(state.4);
     key
 }
@@ -2506,9 +2866,9 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64) -> i64 {
     if kind == PAT_LIT {
         let lit = node_b(state.1, pat);
         let key = if lit == LIT_TRUE || lit == LIT_FALSE {
-            builtin_key_of(state.1, state.0, "Bool")
+            builtin_key_of(state.1, BUILTIN_BOOL)
         } else {
-            builtin_key_of(state.1, state.0, "Int")
+            builtin_key_of(state.1, BUILTIN_INT)
         };
         let ok = unify_key(state.1, state.2, state.6, key, s_key);
         if !ok {
@@ -2571,7 +2931,7 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64) -> i64 {
     }
     let rest = node_c(state.1, pat);
     if rest != NONE {
-        let rest_key = rest_type_of(state.1, state.2, s_key, inner, ecount);
+        let rest_key = rest_type_of(state.1, state.2, s_key, inner);
         bind(state.4, rest, rest_key, 0);
         pat_set_rest_key(state.1, pat, rest_key);
     }
@@ -2579,23 +2939,18 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64) -> i64 {
     s_key
 }
 
-/// The key of the rest binder: the remaining elements with the same
-/// reference-ness as the scrutinee.
-fn rest_type_of(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], s_key: i64, inner: i64, fixed: i64) -> i64 {
-    let is_ref = key_kind(nodes, s_key) == TYD_REF || key_kind(nodes, s_key) == TYD_REF_MUT;
-    let rest = if key_kind(nodes, inner) == TYD_SLICE {
-        inner
-    } else {
-        let len = key_len(nodes, inner);
-        let remaining = if len - fixed < 0 { 0 } else { len - fixed };
-        canon_tyinfo(nodes, lists, TYD_ARRAY, NONE, NONE, key_elem(nodes, inner), remaining)
-    };
-    if is_ref {
-        let kind_of = if key_kind(nodes, s_key) == TYD_REF { TYD_REF } else { TYD_REF_MUT };
-        canon_tyinfo(nodes, lists, kind_of, NONE, NONE, rest, NONE)
-    } else {
-        rest
-    }
+/// The key of the rest binder: always a reference to the remaining
+/// elements.  The emitter materializes the rest as a `{data, len}` slice
+/// view pointing into the scrutinee's storage — for array and slice
+/// scrutinees alike — so the binder is `&[T]` (or `&mut [T]` for a
+/// `&mut` scrutinee), never a bare value or array.  A rest over a value
+/// array borrows that array for the arm's duration, which the borrow
+/// checker models as a shared loan on the scrutinee binding.
+fn rest_type_of(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], s_key: i64, inner: i64) -> i64 {
+    let is_mut = key_kind(nodes, s_key) == TYD_REF_MUT;
+    let rest = canon_tyinfo(nodes, lists, TYD_SLICE, NONE, NONE, key_elem(nodes, inner), NONE);
+    let kind_of = if is_mut { TYD_REF_MUT } else { TYD_REF };
+    canon_tyinfo(nodes, lists, kind_of, NONE, NONE, rest, NONE)
 }
 
 /// True when `variant_sym` is a variant of the enum `s_key` denotes.

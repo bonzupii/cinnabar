@@ -1,11 +1,11 @@
 pub mod Memory
-  pub native type Block
+  pub nat type Block
   pub type Error
     pub AllocationFailed(Usize)
     pub AccessOutOfBounds(Usize, Usize)
   end
-  pub native fun allocate(size: Usize) impure Result(Block, Error)
-  pub native fun deallocate(block: Block) impure Unit
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
 end
 
 use Memory.allocate

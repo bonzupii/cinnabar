@@ -186,7 +186,7 @@ pub mod Runtime
     pub ProbeFailed(Int)
   end
 
-  pub native fun self_check() impure Result(Unit, Error)
+  pub nat fun self_check() impure Result(Unit, Error)
 
   #! Compiler error if a local inside probe_twice were marked pub:
   #!   pub val probe_count: Int = 2
@@ -219,24 +219,24 @@ pub mod Memory
   #! - dropping Block without deallocate: linear value Memory.Block must be consumed
   #! - using Block after deallocate: value used after move
   #! - duplicating Block: linear value cannot be copied
-  pub native type Block
+  pub nat type Block
 
   pub type Error
     pub AllocationFailed(Usize)
     pub AccessOutOfBounds(Usize, Usize)
   end
 
-  pub native fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
 
-  pub native fun deallocate(block: Block) impure Unit
+  pub nat fun deallocate(block: Block) impure Unit
 
-  pub native fun write_u8(
+  pub nat fun write_u8(
     block: &Block,
     offset: Usize,
     value: U8
   ) impure Result(Unit, Error)
 
-  pub native fun read_u8(
+  pub nat fun read_u8(
     block: &Block,
     offset: Usize
   ) impure Result(U8, Error)
@@ -283,19 +283,19 @@ end
 
 #! Slice is a public mod.
 pub mod Slice
-  pub native fun len<T>(view: &[T]) Usize
+  pub nat fun len<T>(view: &[T]) Usize
 end
 
 #! Collections is a public mod.
 #! These are the standard growable collection surfaces required for self-hosting.
 pub mod Collections
-  pub native type Vec(T)
+  pub nat type Vec(T)
 
   #! String is UTF-8 validated.
   #! string_from_slice returns InvalidUtf8 for malformed input.
-  pub native type String
+  pub nat type String
 
-  pub native type HashMap(K, V)
+  pub nat type HashMap(K, V)
 
   pub type Error
     pub AllocationFailed(Usize)
@@ -305,37 +305,37 @@ pub mod Collections
     pub InvalidUtf8
   end
 
-  pub native fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
 
-  pub native fun vec_push<T>(
+  pub nat fun vec_push<T>(
     vec: &mut Vec(T),
     value: T
   ) impure Result(Unit, Error)
 
-  pub native fun vec_view<T>(vec: &Vec(T)) &[T]
+  pub nat fun vec_view<T>(vec: &Vec(T)) &[T]
 
-  pub native fun vec_free<T>(vec: Vec(T)) impure Unit
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
 
-  pub native fun string_from_slice(view: &[U8]) impure Result(String, Error)
+  pub nat fun string_from_slice(view: &[U8]) impure Result(String, Error)
 
-  pub native fun string_len(value: &String) Usize
+  pub nat fun string_len(value: &String) Usize
 
-  pub native fun string_free(value: String) impure Unit
+  pub nat fun string_free(value: String) impure Unit
 
-  pub native fun hash_map_new<K, V>() impure Result(HashMap(K, V), Error)
+  pub nat fun hash_map_new<K, V>() impure Result(HashMap(K, V), Error)
 
-  pub native fun hash_map_insert<K, V>(
+  pub nat fun hash_map_insert<K, V>(
     map: &mut HashMap(K, V),
     key: K,
     value: V
   ) impure Result(Unit, Error)
 
-  pub native fun hash_map_get<K, V>(
+  pub nat fun hash_map_get<K, V>(
     map: &HashMap(K, V),
     key: K
   ) impure Result(V, Error)
 
-  pub native fun hash_map_free<K, V>(map: HashMap(K, V)) impure Unit
+  pub nat fun hash_map_free<K, V>(map: HashMap(K, V)) impure Unit
 end
 
 #! Explicit imports.

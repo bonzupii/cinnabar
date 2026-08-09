@@ -136,6 +136,7 @@ pub const EXPR_STRUCT_LIT: i64 = 5; // b: path segments name-id list, c: field n
 pub const EXPR_ARRAY: i64 = 6; // b: element expr-id list
 pub const EXPR_MATCH: i64 = 7; // b: scrutinee expr id, c: arm ids list
 pub const EXPR_TRY: i64 = 8; // b: inner expr id
+pub const EXPR_INDEX: i64 = 9; // b: base expr id, c: index expr id
 
 // Literal kinds.
 pub const LIT_INT: i64 = 0;
@@ -250,6 +251,25 @@ pub fn name_text(names: &[String], id: i64) -> String {
         Some(text) => text.clone(),
         None => String::new(),
     }
+}
+
+/// The interned id of `text`, or NONE when the name is not interned.
+/// A read-only interning lookup: turns a compiler-known literal into its
+/// stable integer id before integer-keyed table lookups.
+pub fn find_name(names: &[String], text: &str) -> i64 {
+    let mut idx = 0i64;
+    while idx < names.len() as i64 {
+        match names.get(idx as usize) {
+            Some(existing) => {
+                if *existing == text {
+                    return idx;
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    NONE
 }
 
 /// Joins interned name ids into a dotted path.
@@ -492,6 +512,39 @@ pub fn pat_set_rest_key(nodes: &mut [i64], id: i64, key: i64) -> bool {
     node_set_f(nodes, id, key)
 }
 
+/// The variant symbol attached to a variant declaration node by the
+/// resolver (slot d; slots a-c hold the name, payload list, and pub
+/// flag).
+pub fn variant_sym_of(nodes: &[i64], id: i64) -> i64 {
+    node_d(nodes, id)
+}
+
+pub fn variant_set_sym(nodes: &mut [i64], id: i64, sym: i64) -> bool {
+    node_set_d(nodes, id, sym)
+}
+
+/// The native opcode stored on a SYM_NATIVE_FUN symbol (slot f), assigned
+/// by the resolver at declaration/seeding time.
+pub fn sym_native_op(nodes: &[i64], sym: i64) -> i64 {
+    node_f(nodes, sym)
+}
+
+pub fn sym_set_native_op(nodes: &mut [i64], sym: i64, op: i64) -> bool {
+    node_set_f(nodes, sym, op)
+}
+
+/// The primitive-enum sub-kind stored on a SYM_ENUM symbol (slot f),
+/// assigned by the resolver at declaration time for the seeded
+/// Unit/Result/Option/DivError enums.  The typechecker and codegen read
+/// the flag instead of matching enum names.
+pub fn sym_prim_kind(nodes: &[i64], sym: i64) -> i64 {
+    node_f(nodes, sym)
+}
+
+pub fn sym_set_prim_kind(nodes: &mut [i64], sym: i64, kind: i64) -> bool {
+    node_set_f(nodes, sym, kind)
+}
+
 // ---------------------------------------------------------------------------
 // Type-node helpers.  The resolver attaches the resolved symbol id in slot
 // e; the typechecker attaches the canonical type key in slot d.  Both are
@@ -516,10 +569,14 @@ pub fn ty_set_sym(nodes: &mut [i64], id: i64, sym: i64) -> bool {
 
 // ---------------------------------------------------------------------------
 // Type-descriptor rows.  (tag=NODE_TYINFO, a=key, b=kind, c=sym, d=args
-// list, e=element key, f=len/bound).  One row per canonical type key,
-// built by the typechecker from the program's declarations; consumed by
-// the typechecker and codegen.  Compiler-internal facts have no Cinnabar
-// source origin and carry NO_FILE spans.
+// list, e=element key, f=len/bound/sub-kind).  One row per canonical type
+// key, built by the typechecker from the program's declarations; consumed
+// by the typechecker and codegen.  Slot `f` is the array length for
+// TYD_ARRAY, the builtin sub-kind for TYD_BUILTIN, and the bound for
+// TYD_PARAM; for every other kind it is NONE.  The row's file slot
+// (otherwise NO_FILE: compiler-internal facts have no source origin)
+// stores the is_linear flag: -1 uncomputed, 0 not linear, 1 linear, set
+// once by the typechecker's linearity pass and only read downstream.
 // ---------------------------------------------------------------------------
 
 pub const TYD_UNKNOWN: i64 = 0;
@@ -533,6 +590,59 @@ pub const TYD_SLICE: i64 = 7;
 pub const TYD_ARRAY: i64 = 8;
 pub const TYD_PARAM: i64 = 9;
 pub const TYD_MONO: i64 = 10; // (fn node, type-arg keys): one key per monomorphized function
+
+// ---------------------------------------------------------------------------
+// Builtin scalar sub-kinds.  Stored in slot `f` of TYD_BUILTIN descriptor
+// rows at seed time; every later stage classifies scalars from this
+// integer, never from the symbol's name.
+// ---------------------------------------------------------------------------
+
+pub const BUILTIN_INT: i64 = 0;
+pub const BUILTIN_U8: i64 = 1;
+pub const BUILTIN_U32: i64 = 2;
+pub const BUILTIN_USIZE: i64 = 3;
+pub const BUILTIN_BOOL: i64 = 4;
+
+// ---------------------------------------------------------------------------
+// Native-surface opcodes.  Stored in slot `f` of SYM_NATIVE_FUN symbols
+// by the resolver at declaration/seeding time; codegen dispatches the
+// runtime body on the integer opcode, never on the qualified name.
+// ---------------------------------------------------------------------------
+
+pub const NAT_NONE: i64 = 0;
+pub const NAT_FROM_U8: i64 = 1;
+pub const NAT_SLICE_LEN: i64 = 2;
+pub const NAT_MEM_ALLOCATE: i64 = 3;
+pub const NAT_MEM_DEALLOCATE: i64 = 4;
+pub const NAT_MEM_WRITE_U8: i64 = 5;
+pub const NAT_MEM_READ_U8: i64 = 6;
+pub const NAT_VEC_NEW: i64 = 7;
+pub const NAT_VEC_PUSH: i64 = 8;
+pub const NAT_VEC_VIEW: i64 = 9;
+pub const NAT_VEC_FREE: i64 = 10;
+pub const NAT_STRING_FROM_SLICE: i64 = 11;
+pub const NAT_STRING_LEN: i64 = 12;
+pub const NAT_STRING_FREE: i64 = 13;
+pub const NAT_HASH_MAP_NEW: i64 = 14;
+pub const NAT_HASH_MAP_INSERT: i64 = 15;
+pub const NAT_HASH_MAP_GET: i64 = 16;
+pub const NAT_HASH_MAP_FREE: i64 = 17;
+pub const NAT_SELF_CHECK: i64 = 18;
+pub const NAT_TERM_PRINT: i64 = 19;
+pub const NAT_TERM_PRINT_LINE: i64 = 20;
+pub const NAT_TERM_EPRINT: i64 = 21;
+
+/// Primitive-enum sub-kinds stored on SYM_ENUM symbols (slot f).  The
+/// resolver assigns one of these at declaration time to exactly the four
+/// seeded enums (Unit, Result, Option, DivError); every user enum stays
+/// PRIM_NONE.  A non-zero kind means the enum is a language primitive,
+/// so the typechecker and codegen never identify them by name.
+pub const PRIM_NONE: i64 = 0;
+pub const PRIM_UNIT: i64 = 1;
+pub const PRIM_RESULT: i64 = 2;
+pub const PRIM_OPTION: i64 = 3;
+pub const PRIM_DIV_ERROR: i64 = 4;
+pub const PRIM_INDEX_ERROR: i64 = 5;
 
 pub fn alloc_tyinfo(nodes: &mut Vec<i64>, key: i64, kind: i64, sym: i64, args: i64, elem: i64, len: i64) -> i64 {
     alloc_node(nodes, &[NODE_TYINFO, NO_FILE, NO_FILE, NO_FILE, key, kind, sym, args, elem, len])
@@ -548,6 +658,30 @@ pub fn find_tyinfo(nodes: &[i64], key: i64) -> i64 {
         idx += 1;
     }
     NONE
+}
+
+/// The is_linear flag of the canonical key's descriptor row: NONE when
+/// the row does not exist, -1 when not yet computed, 0 not linear, 1
+/// linear.  Stored in the row's file slot, which tyinfo rows otherwise
+/// leave as NO_FILE.  Computed once by the typechecker's linearity pass;
+/// the borrow checker and codegen only read it.
+pub fn tyinfo_is_linear(nodes: &[i64], key: i64) -> i64 {
+    let row = find_tyinfo(nodes, key);
+    if row == NONE {
+        NONE
+    } else {
+        node_get(nodes, row, NODE_FILE)
+    }
+}
+
+/// The builtin sub-kind of a builtin key (slot `f`), stored at seed time.
+pub fn tyinfo_builtin_kind(nodes: &[i64], key: i64) -> i64 {
+    let row = find_tyinfo(nodes, key);
+    if row == NONE {
+        NONE
+    } else {
+        node_f(nodes, row)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -672,6 +806,34 @@ pub fn find_trait_call(nodes: &[i64], expr: i64) -> i64 {
     while idx < nodes.len() as i64 / NODE_STRIDE {
         if node_tag(nodes, idx) == NODE_TRAIT && node_a(nodes, idx) == expr {
             return idx;
+        }
+        idx += 1;
+    }
+    NONE
+}
+
+// ---------------------------------------------------------------------------
+// Variant-fact rows.  (tag=NODE_VARFACT, a=enum key, b=variant name id,
+// c=variant symbol).  One row per (enum key, variant) pair, filled by the
+// typechecker after checking from the variant symbols the resolver
+// attached to the variant declarations; codegen resolves a variant's
+// declared-order tag from the symbol, never by re-searching the enum's
+// variant list by name.
+// ---------------------------------------------------------------------------
+
+pub const NODE_VARFACT: i64 = 16;
+
+pub fn alloc_varfact(nodes: &mut Vec<i64>, key: i64, name: i64, sym: i64) -> i64 {
+    alloc_node(nodes, &[NODE_VARFACT, NO_FILE, NO_FILE, NO_FILE, key, name, sym, NONE, NONE, NONE])
+}
+
+/// The variant symbol of the variant named `name` in the enum at `key`,
+/// or NONE.
+pub fn find_varfact(nodes: &[i64], key: i64, name: i64) -> i64 {
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_VARFACT && node_a(nodes, idx) == key && node_b(nodes, idx) == name {
+            return node_c(nodes, idx);
         }
         idx += 1;
     }

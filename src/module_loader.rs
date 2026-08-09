@@ -14,13 +14,15 @@ use crate::ast::*;
 use std::path::Path;
 
 /// The loaded program: the entry item-list id and the external modules
-/// `(name, root list)`.  The files table travels separately so failures
-/// during loading still render diagnostics at their real origin.
-type Loaded = (i64, Vec<(String, i64)>);
+/// `(name id, root list)`.  The module name is carried as its interned
+/// id so every later comparison is an integer equality, never a string
+/// compare.  The files table travels separately so failures during
+/// loading still render diagnostics at their real origin.
+type Loaded = (i64, Vec<(i64, i64)>);
 
 /// The loader's own tables: loaded `(path, source)` files, external
-/// modules `(name, root list)`, and the work queue `(path, root list)`.
-type Loader = (Vec<(String, String)>, Vec<(String, i64)>, Vec<(String, i64)>);
+/// modules `(name id, root list)`, and the work queue `(path, root list)`.
+type Loader = (Vec<(String, String)>, Vec<(i64, i64)>, Vec<(String, i64)>);
 
 pub fn load(
     names: &mut Vec<String>,
@@ -85,7 +87,7 @@ fn process_imports(
     let mut idx = 0usize;
     while let Some(pair) = uses.get(idx) {
         if !name_in(&declared, pair.0)
-            && !loaded_name(&loader.1, names, pair.0)
+            && !loaded_name(&loader.1, pair.0)
             && let Some(module) = sibling_module(&dir, names, pair.0)
         {
             load_sibling(names, nodes, lists, errors, module, pair.1, loader);
@@ -94,12 +96,11 @@ fn process_imports(
     }
 }
 
-/// Resolves one external module to `(path, module name)`, or None when
-/// no sibling file exists.
-fn sibling_module(dir: &str, names: &[String], seg: i64) -> Option<(String, String)> {
+/// Resolves one external module to `(path, module name id)`, or None
+/// when no sibling file exists.
+fn sibling_module(dir: &str, names: &[String], seg: i64) -> Option<(String, i64)> {
     let mod_path = sibling_path(dir, names, seg)?;
-    let mod_name = name_text(names, seg);
-    Some((mod_path, mod_name))
+    Some((mod_path, seg))
 }
 
 /// Loads one external module file: reads it, parses it into its own item
@@ -109,7 +110,7 @@ fn load_sibling(
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
     errors: &mut Vec<Diag>,
-    module: (String, String),
+    module: (String, i64),
     use_item: i64,
     loader: &mut Loader,
 ) {
@@ -125,7 +126,7 @@ fn load_sibling(
     if !parse_file(names, nodes, lists, errors, &mod_source, child_id, child_list) {
         return;
     }
-    loader.1.push((mod_name.clone(), child_list));
+    loader.1.push((mod_name, child_list));
     loader.2.push((mod_path, child_list));
 }
 
@@ -179,13 +180,13 @@ fn sibling_path(dir: &str, names: &[String], seg: i64) -> Option<String> {
 }
 
 /// True when `seg` names a module that is already loaded (or queued).
-fn loaded_name(ext_mods: &[(String, i64)], names: &[String], seg: i64) -> bool {
-    let text = name_text(names, seg);
+/// The module names are interned ids, so this is an integer equality.
+fn loaded_name(ext_mods: &[(i64, i64)], seg: i64) -> bool {
     let mut idx = 0usize;
     loop {
         match ext_mods.get(idx) {
             Some(pair) => {
-                if pair.0 == text {
+                if pair.0 == seg {
                     return true;
                 }
             }

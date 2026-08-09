@@ -1,0 +1,17 @@
+# Self-tail-recursive countdown: the `return tail_recurse(...)` call is
+# in tail position, so codegen marks it `tail` and LLVM's tail-call
+# elimination turns it into a jump.  One million iterations therefore
+# run in O(1) stack; without the elimination they would overflow the
+# stack (and now the recursion guard) long before finishing.  The exit
+# status is 1000000 mod 256 = 64.
+
+fun tail_recurse(n: Int, acc: Int) Int
+  if n <= 0
+    return acc
+  end
+  return tail_recurse(n - 1, acc + 1)
+end
+
+pub fun main() Int
+  return tail_recurse(1000000, 0)
+end
