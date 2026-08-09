@@ -1,0 +1,117 @@
+pub mod Runtime
+  pub type Error
+    pub NotReady
+    pub ProbeFailed(Int)
+  end
+
+  pub native fun self_check() impure Result(Unit, Error)
+
+  fun probe_twice() impure Result(Unit, Error)
+    try self_check()
+    try self_check()
+    return Ok(Unit)
+  end
+
+  pub fun gate() impure Result(Unit, Error)
+    try probe_twice()
+    return Ok(Unit)
+  end
+end
+
+pub mod Memory
+  pub native type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub AccessOutOfBounds(Usize, Usize)
+  end
+  pub native fun allocate(size: Usize) impure Result(Block, Error)
+  pub native fun deallocate(block: Block) impure Unit
+  pub native fun write_u8(block: &Block, offset: Usize, value: U8) impure Result(Unit, Error)
+  pub native fun read_u8(block: &Block, offset: Usize) impure Result(U8, Error)
+end
+
+pub mod Binary
+  pub type Error
+    pub MagicMismatch(U32)
+  end
+end
+
+pub mod Slice
+  pub native fun len<T>(view: &[T]) Usize
+end
+
+pub mod Collections
+  pub native type Vec(T)
+  pub native type String
+  pub native type HashMap(K, V)
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+    pub KeyNotFound
+    pub EmptySlice
+    pub InvalidUtf8
+  end
+
+  pub native fun vec_new<T>() impure Result(Vec(T), Error)
+  pub native fun vec_push<T>(vec: &mut Vec(T), value: T) impure Result(Unit, Error)
+  pub native fun vec_view<T>(vec: &Vec(T)) &[T]
+  pub native fun vec_free<T>(vec: Vec(T)) impure Unit
+  pub native fun string_from_slice(view: &[U8]) impure Result(String, Error)
+  pub native fun string_len(value: &String) Usize
+  pub native fun string_free(value: String) impure Unit
+  pub native fun hash_map_new<K, V>() impure Result(HashMap(K, V), Error)
+  pub native fun hash_map_insert<K, V>(map: &mut HashMap(K, V), key: K, value: V) impure Result(Unit, Error)
+  pub native fun hash_map_get<K, V>(map: &HashMap(K, V), key: K) impure Result(V, Error)
+  pub native fun hash_map_free<K, V>(map: HashMap(K, V)) impure Unit
+end
+
+use Runtime.gate
+use Memory.allocate
+use Memory.deallocate
+use Memory.write_u8
+use Memory.read_u8
+use Slice.len as slice_len
+use Collections.vec_new
+use Collections.vec_push
+use Collections.vec_view
+use Collections.vec_free
+use Collections.string_from_slice
+use Collections.string_len
+use Collections.string_free
+use Collections.hash_map_new
+use Collections.hash_map_insert
+use Collections.hash_map_get
+use Collections.hash_map_free
+
+fun fill_squares(vec: &mut Collections.Vec(Int)) Result(Unit, Collections.Error)
+  var i: Int = 0
+  while i < 5
+    try vec_push(vec, i * i)
+    i = i + 1
+  end
+  return Ok(Unit)
+end
+
+fun fail_vec<T>(vec: Collections.Vec(T)) Int
+  vec_free(vec)
+  return 2
+end
+
+pub fun main() Int
+  val vec = match vec_new[Int]()
+    Ok(v) => v
+    Err(error) => return 1
+  end
+
+  val fill_result = fill_squares(&mut vec)
+  match fill_result
+    Ok(Unit) => Unit
+    Err(error) => return fail_vec(vec)
+  end
+
+  val view = vec_view(&vec)
+  val n = slice_len(view)
+  vec_free(vec)
+  return 0
+end

@@ -1,0 +1,12 @@
+pub fun main() Int
+  var x: Int = 7
+  if x < 3
+    return 1
+  elif x < 5
+    return 2
+  elif x < 8
+    return 3
+  else
+    return 4
+  end
+end

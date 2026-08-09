@@ -202,7 +202,7 @@ fn alloc_pat(nodes: &mut Vec<i64>, kind: i64, file: i64, start: i64, end: i64, o
 fn parse_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
     if is_name(nodes, names, *pos, "pub") {
         parse_pub_item(pos, names, nodes, lists, errors)
-    } else if is_name(nodes, names, *pos, "native") {
+    } else if is_native_keyword(nodes, names, *pos) {
         *pos += 1;
         parse_native_item(pos, names, nodes, lists, errors, 0)
     } else {
@@ -212,12 +212,19 @@ fn parse_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut
 
 fn parse_pub_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
     *pos += 1;
-    if is_name(nodes, names, *pos, "native") {
+    if is_native_keyword(nodes, names, *pos) {
         *pos += 1;
         parse_native_item(pos, names, nodes, lists, errors, 1)
     } else {
         parse_item_body(pos, names, nodes, lists, errors, 1)
     }
+}
+
+/// True when the token at `pos` is the native-declaration keyword.  The
+/// spelling `nat` is an alias for `native`; both introduce opaque native
+/// type and function signatures.
+fn is_native_keyword(nodes: &[i64], names: &[String], pos: i64) -> bool {
+    is_name(nodes, names, pos, "native") || is_name(nodes, names, pos, "nat")
 }
 
 fn parse_native_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, is_pub: i64) -> Option<i64> {
@@ -437,7 +444,7 @@ fn parse_const(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mu
         return None;
     }
     skip_nl(nodes, pos);
-    let value = parse_expr(pos, names, nodes, lists, errors)?;
+    let value = parse_expr(pos, names, nodes, lists, errors, 0)?;
     let end = node_end(nodes, value);
     Some(alloc_item(nodes, ITEM_CONST, file, start, end, is_pub, &[name, ty, value]))
 }
@@ -755,7 +762,7 @@ fn parse_let(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut 
         return None;
     }
     skip_nl(nodes, pos);
-    let init = parse_expr(pos, names, nodes, lists, errors)?;
+    let init = parse_expr(pos, names, nodes, lists, errors, 0)?;
     let end = node_end(nodes, init);
     Some(alloc_stmt(nodes, STMT_LET, file, start, end, &[is_mut, name, ty, init]))
 }
@@ -764,7 +771,7 @@ fn parse_while(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mu
     let file = node_file(nodes, *pos);
     let start = node_start(nodes, *pos);
     *pos += 1;
-    let cond = parse_expr(pos, names, nodes, lists, errors)?;
+    let cond = parse_expr(pos, names, nodes, lists, errors, 0)?;
     let body = parse_block(pos, names, nodes, lists, errors, &["end"])?;
     let end = expect_end(pos, names, nodes, errors)?;
     Some(alloc_stmt(nodes, STMT_WHILE, file, start, end, &[cond, body, NONE, NONE]))
@@ -774,13 +781,49 @@ fn parse_if(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut V
     let file = node_file(nodes, *pos);
     let start = node_start(nodes, *pos);
     *pos += 1;
-    let cond = parse_expr(pos, names, nodes, lists, errors)?;
-    let then_body = parse_block(pos, names, nodes, lists, errors, &["end", "else"])?;
+    let cond = parse_expr(pos, names, nodes, lists, errors, 0)?;
+    let then_body = parse_block(pos, names, nodes, lists, errors, &["end", "else", "elif"])?;
     let mut else_body = NONE;
-    if accept(nodes, names, pos, "else") {
+    if is_name(nodes, names, *pos, "elif") {
+        let elif_pos = *pos;
+        *pos += 1;
+        let chain = parse_elif_chain(pos, names, nodes, lists, errors, elif_pos)?;
+        else_body = single_stmt_list(lists, chain);
+    } else if accept(nodes, names, pos, "else") {
         else_body = parse_block(pos, names, nodes, lists, errors, &["end"])?;
     }
     let end = expect_end(pos, names, nodes, errors)?;
+    Some(alloc_stmt(nodes, STMT_IF, file, start, end, &[cond, then_body, else_body, NONE]))
+}
+
+/// Wraps one statement id in a fresh single-element statement list.  The
+/// STMT_IF else slot is a list id, so a desugared elif chain (a single
+/// nested STMT_IF) must be wrapped before it can live there.
+fn single_stmt_list(lists: &mut Vec<Vec<i64>>, stmt: i64) -> i64 {
+    let list = alloc_list(lists);
+    list_push(lists, list, stmt);
+    list
+}
+
+/// Parses the rest of an if-chain after the `elif` keyword at
+/// `elif_pos`: the condition, the then-block, and (recursively) the next
+/// `elif` or the `else` block.  Each `elif` becomes the else-branch of
+/// the previous if, so the chain desugars to nested STMT_IF nodes.
+fn parse_elif_chain(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, elif_pos: i64) -> Option<i64> {
+    let file = node_file(nodes, elif_pos);
+    let start = node_start(nodes, elif_pos);
+    let cond = parse_expr(pos, names, nodes, lists, errors, 0)?;
+    let then_body = parse_block(pos, names, nodes, lists, errors, &["end", "else", "elif"])?;
+    let mut else_body = NONE;
+    if is_name(nodes, names, *pos, "elif") {
+        let next_elif = *pos;
+        *pos += 1;
+        let chain = parse_elif_chain(pos, names, nodes, lists, errors, next_elif)?;
+        else_body = single_stmt_list(lists, chain);
+    } else if accept(nodes, names, pos, "else") {
+        else_body = parse_block(pos, names, nodes, lists, errors, &["end"])?;
+    }
+    let end = node_end(nodes, *pos - 1);
     Some(alloc_stmt(nodes, STMT_IF, file, start, end, &[cond, then_body, else_body, NONE]))
 }
 
@@ -791,7 +834,7 @@ fn parse_return(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &m
     let mut value = NONE;
     let mut end = node_end(nodes, *pos - 1);
     if !at_eof(nodes, *pos) && node_a(nodes, *pos) != TOK_NL {
-        let expr = parse_expr(pos, names, nodes, lists, errors)?;
+        let expr = parse_expr(pos, names, nodes, lists, errors, 0)?;
         value = expr;
         end = node_end(nodes, expr);
     }
@@ -820,7 +863,7 @@ fn parse_assign(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &m
     let target = node_b(nodes, *pos);
     *pos += 2;
     skip_nl(nodes, pos);
-    let value = parse_expr(pos, names, nodes, lists, errors)?;
+    let value = parse_expr(pos, names, nodes, lists, errors, 0)?;
     let end = node_end(nodes, value);
     Some(alloc_stmt(nodes, STMT_ASSIGN, file, start, end, &[target, value, NONE, NONE]))
 }
@@ -828,7 +871,7 @@ fn parse_assign(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &m
 fn parse_expr_stmt(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
     let file = node_file(nodes, *pos);
     let start = node_start(nodes, *pos);
-    let expr = parse_expr(pos, names, nodes, lists, errors)?;
+    let expr = parse_expr(pos, names, nodes, lists, errors, 0)?;
     let end = node_end(nodes, expr);
     Some(alloc_stmt(nodes, STMT_EXPR, file, start, end, &[expr, NONE, NONE, NONE]))
 }
@@ -837,18 +880,29 @@ fn parse_expr_stmt(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists:
 // Expressions.
 // ---------------------------------------------------------------------------
 
-fn parse_expr(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
-    parse_binary(pos, names, nodes, lists, errors, 0)
+/// `multi` is 1 inside a delimiter (parens, call args, array literals,
+/// struct-literal fields): newlines there separate sub-expressions, not
+/// statements, so the binary loop skips them.  At statement level it is
+/// 0 and a newline always ends the expression.
+fn parse_expr(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, multi: i64) -> Option<i64> {
+    parse_binary(pos, names, nodes, lists, errors, 0, multi)
 }
 
-fn parse_binary(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, min_prec: i64) -> Option<i64> {
-    let mut lhs = parse_unary(pos, names, nodes, lists, errors)?;
-    while let Some((op, prec)) = bin_op_at(nodes, names, *pos) {
+fn parse_binary(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, min_prec: i64, multi: i64) -> Option<i64> {
+    let mut lhs = parse_unary(pos, names, nodes, lists, errors, multi)?;
+    loop {
+        if multi == 1 {
+            skip_nl(nodes, pos);
+        }
+        let (op, prec) = match bin_op_at(nodes, names, *pos) {
+            Some(pair) => pair,
+            None => break,
+        };
         if prec < min_prec {
             break;
         }
         *pos += 1;
-        let rhs = parse_binary(pos, names, nodes, lists, errors, prec + 1)?;
+        let rhs = parse_binary(pos, names, nodes, lists, errors, prec + 1, multi)?;
         let file = node_file(nodes, lhs);
         let start = node_start(nodes, lhs);
         let end = node_end(nodes, rhs);
@@ -857,32 +911,32 @@ fn parse_binary(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &m
     Some(lhs)
 }
 
-fn parse_unary(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+fn parse_unary(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, multi: i64) -> Option<i64> {
     let file = node_file(nodes, *pos);
     let start = node_start(nodes, *pos);
     if is_sym(nodes, names, *pos, "-") {
         *pos += 1;
-        let operand = parse_unary(pos, names, nodes, lists, errors)?;
+        let operand = parse_unary(pos, names, nodes, lists, errors, multi)?;
         let end = node_end(nodes, operand);
         Some(alloc_expr(nodes, EXPR_UNARY, file, start, end, &[UN_NEG, operand, NONE]))
     } else if is_sym(nodes, names, *pos, "!") {
         *pos += 1;
-        let operand = parse_unary(pos, names, nodes, lists, errors)?;
+        let operand = parse_unary(pos, names, nodes, lists, errors, multi)?;
         let end = node_end(nodes, operand);
         Some(alloc_expr(nodes, EXPR_UNARY, file, start, end, &[UN_NOT, operand, NONE]))
     } else if is_sym(nodes, names, *pos, "&") {
         *pos += 1;
         let op = if accept(nodes, names, pos, "mut") { UN_REF_MUT } else { UN_REF };
-        let operand = parse_unary(pos, names, nodes, lists, errors)?;
+        let operand = parse_unary(pos, names, nodes, lists, errors, multi)?;
         let end = node_end(nodes, operand);
         Some(alloc_expr(nodes, EXPR_UNARY, file, start, end, &[op, operand, NONE]))
     } else {
-        parse_postfix(pos, names, nodes, lists, errors)
+        parse_postfix(pos, names, nodes, lists, errors, multi)
     }
 }
 
-fn parse_postfix(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
-    let mut expr = parse_primary(pos, names, nodes, lists, errors)?;
+fn parse_postfix(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, multi: i64) -> Option<i64> {
+    let mut expr = parse_primary(pos, names, nodes, lists, errors, multi)?;
     loop {
         if is_sym(nodes, names, *pos, "(") {
             expr = parse_call_tail(pos, names, nodes, lists, errors, expr, NONE)?;
@@ -898,7 +952,7 @@ fn parse_postfix(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &
     Some(expr)
 }
 
-fn parse_primary(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
+fn parse_primary(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, multi: i64) -> Option<i64> {
     let file = node_file(nodes, *pos);
     let start = node_start(nodes, *pos);
     let kind = node_a(nodes, *pos);
@@ -918,7 +972,9 @@ fn parse_primary(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &
         Some(alloc_expr(nodes, EXPR_LIT, file, start, end, &[LIT_FALSE, 0, NONE]))
     } else if is_sym(nodes, names, *pos, "(") {
         *pos += 1;
-        let inner = parse_expr(pos, names, nodes, lists, errors)?;
+        skip_nl(nodes, pos);
+        let inner = parse_expr(pos, names, nodes, lists, errors, 1)?;
+        skip_nl(nodes, pos);
         if !expect(nodes, names, pos, ")", errors) {
             return None;
         }
@@ -929,7 +985,7 @@ fn parse_primary(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &
         parse_match_expr(pos, names, nodes, lists, errors)
     } else if is_name(nodes, names, *pos, "try") {
         *pos += 1;
-        let inner = parse_unary(pos, names, nodes, lists, errors)?;
+        let inner = parse_unary(pos, names, nodes, lists, errors, multi)?;
         let end = node_end(nodes, inner);
         Some(alloc_expr(nodes, EXPR_TRY, file, start, end, &[inner, NONE, NONE]))
     } else if is_word(nodes, *pos) {
@@ -948,7 +1004,7 @@ fn parse_array_lit(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists:
     let elements = alloc_list(lists);
     skip_nl(nodes, pos);
     while !is_sym(nodes, names, *pos, "]") && !at_eof(nodes, *pos) {
-        let element = parse_expr(pos, names, nodes, lists, errors)?;
+        let element = parse_expr(pos, names, nodes, lists, errors, 1)?;
         list_push(lists, elements, element);
         if !accept(nodes, names, pos, ",") {
             break;
@@ -986,7 +1042,7 @@ fn parse_call_args(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists:
     let start = node_start(nodes, callee);
     let args = alloc_list(lists);
     while !is_sym(nodes, names, *pos, ")") && !at_eof(nodes, *pos) {
-        let arg = parse_expr(pos, names, nodes, lists, errors)?;
+        let arg = parse_expr(pos, names, nodes, lists, errors, 1)?;
         list_push(lists, args, arg);
         if !accept(nodes, names, pos, ",") {
             break;
@@ -1013,7 +1069,7 @@ fn parse_struct_lit_fields(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>
             return None;
         }
         skip_nl(nodes, pos);
-        let value = parse_expr(pos, names, nodes, lists, errors)?;
+        let value = parse_expr(pos, names, nodes, lists, errors, 1)?;
         list_push(lists, field_names, field_name);
         list_push(lists, field_vals, value);
         if !accept(nodes, names, pos, ",") {
@@ -1052,7 +1108,7 @@ fn parse_match_expr(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists
     let file = node_file(nodes, *pos);
     let start = node_start(nodes, *pos);
     *pos += 1;
-    let scrutinee = parse_expr(pos, names, nodes, lists, errors)?;
+    let scrutinee = parse_expr(pos, names, nodes, lists, errors, 0)?;
     let arms = parse_match_arms(pos, names, nodes, lists, errors)?;
     let end = expect_end(pos, names, nodes, errors)?;
     Some(alloc_expr(nodes, EXPR_MATCH, file, start, end, &[scrutinee, arms, NONE]))
@@ -1256,6 +1312,8 @@ fn arith_op_at(nodes: &[i64], names: &[String], pos: i64) -> Option<(i64, i64)> 
         Some((BIN_MUL, 9))
     } else if is_sym(nodes, names, pos, "/") {
         Some((BIN_DIV, 9))
+    } else if is_sym(nodes, names, pos, "%") {
+        Some((BIN_MOD, 9))
     } else {
         None
     }

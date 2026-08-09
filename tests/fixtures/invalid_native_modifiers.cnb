@@ -15,3 +15,7 @@ end
 # 5. Native on impl
 native impl BadNativeTrait for Int
 end
+
+pub fun main() Int
+  return 0
+end

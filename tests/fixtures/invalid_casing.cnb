@@ -10,3 +10,7 @@ pub const Bad_Const_Name: Int = 2
 pub type bad_type_name
   pub Unit
 end
+
+pub fun main() Int
+  return 0
+end

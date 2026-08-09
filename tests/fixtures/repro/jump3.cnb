@@ -1,0 +1,31 @@
+fun f(x: Int) Int
+  return (x * 8) & 0xF
+end
+
+pub fun main() Int
+  var pc: Int = 0
+  var running: Bool = true
+  var count: Int = 0
+
+  while running
+    val code = f(pc)
+    if code == 0
+      pc = 1
+      continue
+    end
+
+    if code == 8
+      count = count + 1
+      if count >= 3
+        running = false
+        continue
+      end
+      pc = 0
+      continue
+    end
+
+    running = false
+  end
+
+  return count
+end

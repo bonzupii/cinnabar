@@ -1,3 +1,8 @@
 pub fun test_func() Unit
   pub val local_val: Int = 10
 end
+
+pub fun main() Int
+  test_func()
+  return 0
+end

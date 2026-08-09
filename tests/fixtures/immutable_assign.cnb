@@ -3,3 +3,7 @@ pub fun test_func() Int
   x = 20
   return x
 end
+
+pub fun main() Int
+  return test_func()
+end

@@ -1,0 +1,11 @@
+pub const PROG: Int = (
+  0x01
+  | (0x70 << 8)
+)
+
+pub fun main() Int
+  if PROG == (0x01 | (0x70 << 8))
+    return 30
+  end
+  return 31
+end

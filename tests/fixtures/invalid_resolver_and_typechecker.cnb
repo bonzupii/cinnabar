@@ -147,3 +147,7 @@ pub fun test_resolver_unknown_symbols() Int
 
   return x
 end
+
+pub fun main() Int
+  return 0
+end

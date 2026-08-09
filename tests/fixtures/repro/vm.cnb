@@ -1,0 +1,103 @@
+#! vm.cnb
+#! A tiny accumulator-machine interpreter, fully data-driven.
+#!
+#! The whole program is bit-packed into a single Int: each instruction is 8
+#! bits = (op << 4) | arg. Instruction at pc is fetched with:
+#!   code = (prog >> (pc * 8)) & 0xFF
+#!   op   = code >> 4
+#!   arg  = code & 0xF
+#!
+#! Opcodes:
+#!   op 0 LOAD  arg   acc = arg
+#!   op 1 MOVC  arg   cnt = arg
+#!   op 2 DECC        cnt = cnt - 1
+#!   op 3 ACCA        acc = acc + cnt
+#!   op 4 ACCM        acc = acc * cnt
+#!   op 5 JMP   arg   pc = arg
+#!   op 6 JZC   arg   if cnt == 0: pc = arg
+#!   op 7 HALT        stop
+#!
+#! Bundled program computes 5! = 120; main returns acc as the exit code.
+
+const OP_LOAD: Int = 0
+const OP_MOVC: Int = 1
+const OP_DECC: Int = 2
+const OP_ACCM: Int = 4
+const OP_JMP: Int = 5
+const OP_JZC: Int = 6
+const OP_HALT: Int = 7
+
+const FACTORIAL: Int = 5
+const LOOP_START: Int = 2
+const HALT_POS: Int = 6
+
+#! prog: LOAD 1; MOVC 5; JZC 6; ACCM; DECC; JMP 2; HALT
+pub const PROG: Int = (0x01) | (0x15 << 8) | (0x26 << 16) | (0x30 << 24) | (0x40 << 32) | (0x52 << 40) | (0x70 << 48)
+
+fun fetch(prog: Int, pc: Int) Int
+  return (prog >> (pc * 8)) & 0xFF
+end
+
+fun execute(prog: Int) Int
+  var acc: Int = 0
+  var cnt: Int = 0
+  var pc: Int = 0
+  var running: Bool = true
+
+  while running
+    val code = fetch(prog, pc)
+    val op = code >> 4
+    val arg = code & 0xF
+
+    if op == OP_HALT
+      running = false
+      continue
+    end
+
+    if op == OP_LOAD
+      acc = arg
+      pc = pc + 1
+      continue
+    end
+
+    if op == OP_MOVC
+      cnt = arg
+      pc = pc + 1
+      continue
+    end
+
+    if op == OP_DECC
+      cnt = cnt - 1
+      pc = pc + 1
+      continue
+    end
+
+    if op == OP_ACCM
+      acc = acc * cnt
+      pc = pc + 1
+      continue
+    end
+
+    if op == OP_JMP
+      pc = arg
+      continue
+    end
+
+    if op == OP_JZC
+      if cnt == 0
+        pc = arg
+        continue
+      end
+      pc = pc + 1
+      continue
+    end
+
+    pc = pc + 1
+  end
+
+  return acc
+end
+
+pub fun main() Int
+  return execute(PROG)
+end

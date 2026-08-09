@@ -1,1 +1,5 @@
 native const INVALID_NATIVE: Int = 42
+
+pub fun main() Int
+  return 0
+end

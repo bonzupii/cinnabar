@@ -1,0 +1,18 @@
+pub mod Collections
+  pub native type Vec(T)
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+  end
+  pub native fun vec_new<T>() impure Result(Vec(T), Error)
+end
+
+use Collections.vec_new
+
+pub fun main() Int
+  val vec = match vec_new[Int]()
+    Ok(v) => v
+    Err(error) => return 1
+  end
+  return 0
+end

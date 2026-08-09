@@ -66,7 +66,7 @@ pub fn resolve(
         &mut item_scopes,
         &mut used,
     );
-    seed_builtins(&mut state, root_scope);
+    seed_builtins(&mut state, root_scope, root);
 
     collect_list(&mut state, root_scope, root);
 
@@ -453,7 +453,12 @@ fn insert_decl(state: &mut State, scope: i64, name: i64, sym: i64, ns: i64, casi
     let existing_src = existing.1;
     let existing_decl = sym_decl_of(state.1, existing.0);
     if existing_src != NONE || existing_decl != NONE {
-        push_error(state.3, &format!("duplicate symbol '{}'", name_text(state.0, name)), span.0, span.1, span.2);
+        let message = if existing_decl != NONE && node_file(state.1, existing_decl) == NO_FILE {
+            format!("cannot redeclare builtin '{}'", name_text(state.0, name))
+        } else {
+            format!("duplicate symbol '{}'", name_text(state.0, name))
+        };
+        push_error(state.3, &message, span.0, span.1, span.2);
         return;
     }
     let entries = match state.4.get_mut(scope as usize) {
@@ -623,7 +628,8 @@ fn insert_hoisted(state: &mut State, scope: i64, name: i64, sym: i64, decl: i64)
         return;
     }
     let existing_decl = sym_decl_of(state.1, existing.0);
-    if existing.1 != NONE || existing_decl != NONE {
+    let is_builtin = existing_decl == NONE || node_file(state.1, existing_decl) == NO_FILE;
+    if existing.1 != NONE || !is_builtin {
         push_error(state.3, &format!("duplicate symbol '{}'", name_text(state.0, name)), node_file(state.1, decl), node_start(state.1, decl), node_end(state.1, decl));
         return;
     }
@@ -661,9 +667,15 @@ fn collect_trait_methods(state: &mut State, sub: i64, trait_full: i64, item: i64
 // Builtins.
 // ---------------------------------------------------------------------------
 
-/// Seeds the builtin integer types, Bool, the Unit type and its value,
-/// and the `from_u8` conversion methods on every integer type.
-fn seed_builtins(state: &mut State, root_scope: i64) {
+/// Seeds the builtin integer types, Bool, and the primitive enums
+/// (Unit, Result(T, E), Option(T), DivError), plus the `from_u8` conversion methods
+/// on every integer type.  The primitives are synthesized as real enum
+/// declarations pushed into the root item list: the collect phase then
+/// declares their symbols exactly like a user enum, so the typechecker
+/// and codegen read their variants, payloads, and layouts through the
+/// same declaration path as any other enum.  The synthesized items carry
+/// NO_FILE spans — they have no Cinnabar source origin.
+fn seed_builtins(state: &mut State, root_scope: i64, root: i64) {
     let ints = builtin_int_names(state.0);
     let mut idx = 0usize;
     while idx < ints.len() {
@@ -677,11 +689,62 @@ fn seed_builtins(state: &mut State, root_scope: i64) {
     }
     let bool_name = intern(state.0, "Bool");
     seed_builtin_type(state, root_scope, bool_name);
-    let unit = intern(state.0, "Unit");
-    let unit_scope = seed_builtin_type(state, root_scope, unit);
-    let unit_value = alloc_sym(state.1, SYM_VARIANT, unit, NONE, unit_scope, NONE);
-    push_entry(state.4, root_scope, unit, unit_value, NS_VALUE, NONE);
-    push_entry(state.4, unit_scope, unit, unit_value, NS_VALUE, NONE);
+    seed_primitive(state, root, "Unit", &[], &[("Unit", &[])]);
+    seed_primitive(state, root, "Result", &["T", "E"], &[("Ok", &["T"]), ("Err", &["E"])]);
+    seed_primitive(state, root, "Option", &["T"], &[("Some", &["T"]), ("None", &[])]);
+    seed_primitive(state, root, "DivError", &[], &[("DivByZero", &[])]);
+}
+
+/// Synthesizes one primitive enum declaration and pushes it into the root
+/// item list.  `params` names the type parameters and `variants` the
+/// variant names with their payload type-parameter names.
+fn seed_primitive(state: &mut State, root: i64, name: &str, params: &[&str], variants: &[(&str, &[&str])]) {
+    let params_list = alloc_list(state.2);
+    let mut p_idx = 0usize;
+    while p_idx < params.len() {
+        let param_name = match params.get(p_idx) {
+            Some(text) => *text,
+            None => break,
+        };
+        let param_id = intern(state.0, param_name);
+        list_push(state.2, params_list, seed_ty_node(state.1, TY_PARAM, param_id));
+        p_idx += 1;
+    }
+    let variants_list = alloc_list(state.2);
+    let mut v_idx = 0usize;
+    while v_idx < variants.len() {
+        let (variant_name, payloads) = match variants.get(v_idx) {
+            Some(pair) => *pair,
+            None => break,
+        };
+        let payload_list = alloc_list(state.2);
+        let mut pl_idx = 0usize;
+        while pl_idx < payloads.len() {
+            let payload_name = match payloads.get(pl_idx) {
+                Some(text) => *text,
+                None => break,
+            };
+            let payload_id = intern(state.0, payload_name);
+            list_push(state.2, payload_list, seed_ty_node(state.1, TY_NAMED, payload_id));
+            pl_idx += 1;
+        }
+        let var_id = intern(state.0, variant_name);
+        let variant = alloc_node(state.1, &[NODE_VARIANT, NO_FILE, 0, 0, var_id, payload_list, 1]);
+        list_push(state.2, variants_list, variant);
+        v_idx += 1;
+    }
+    let name_id = intern(state.0, name);
+    let item = alloc_node(
+        state.1,
+        &[NODE_ITEM, NO_FILE, 0, 0, ITEM_ENUM, 1, NONE, name_id, variants_list, params_list],
+    );
+    list_push(state.2, root, item);
+}
+
+/// Allocates a bare type node (a type parameter or a payload reference)
+/// with a source-less span.
+fn seed_ty_node(nodes: &mut Vec<i64>, kind: i64, name: i64) -> i64 {
+    alloc_node(nodes, &[NODE_TY, NO_FILE, 0, 0, kind, name, NONE])
 }
 
 /// Adds the `from_u8` conversion method to one builtin integer type's

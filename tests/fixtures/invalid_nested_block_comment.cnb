@@ -4,3 +4,7 @@
     Nested inner comment (forbidden)
   |#
 |#
+
+pub fun main() Int
+  return 0
+end

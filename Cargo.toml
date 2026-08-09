@@ -20,6 +20,7 @@ tracing-subscriber = "0.3.23"
 
 [lints.rust]
 warnings = "deny"
+dead_code = "deny"
 non_snake_case = "deny"
 non_upper_case_globals = "deny"
 non_camel_case_types = "deny"

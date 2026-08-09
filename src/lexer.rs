@@ -477,6 +477,8 @@ fn math_symbol(byte: u8) -> Option<&'static str> {
         Some("*")
     } else if byte == b'/' {
         Some("/")
+    } else if byte == b'%' {
+        Some("%")
     } else {
         None
     }

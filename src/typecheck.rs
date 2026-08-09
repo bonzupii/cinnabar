@@ -214,11 +214,12 @@ fn int_builtin_names(names: &mut Vec<String>) -> Vec<i64> {
     ]
 }
 
-/// Allocates canonical builtin keys for Int, U8, U32, Usize, Bool, and
-/// Unit.  This must mirror the resolver's builtin seeding exactly: the
-/// resolver enters the type symbol into its scopes and the typechecker
-/// allocates the matching key, so a bare `Unit` return type resolves to
-/// the same key the `return Unit` expression produces.
+/// Allocates canonical builtin keys for Int, U8, U32, Usize, and Bool.
+/// Unit, Result, and Option are declared enums synthesized by the
+/// resolver; the typechecker reads them through the same declaration
+/// path a user enum uses.  The scalar keys mirror the resolver's builtin
+/// seeding exactly: the resolver enters the type symbol into its scopes
+/// and the typechecker allocates the matching key.
 fn seed_builtins(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut [Vec<i64>]) {
     let ints = int_builtin_names(names);
     let mut idx = 0usize;
@@ -232,8 +233,6 @@ fn seed_builtins(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut [Vec
     }
     let bool_name = intern(names, "Bool");
     seed_builtin(nodes, lists, bool_name);
-    let unit_name = intern(names, "Unit");
-    seed_builtin(nodes, lists, unit_name);
 }
 
 /// Allocates one builtin key, looking up the symbol the resolver seeded.
@@ -1270,7 +1269,7 @@ fn collect_const_item(state: &mut State, item: i64) {
     let file = node_file(state.1, item);
     let start = node_start(state.1, item);
     let end = node_end(state.1, item);
-    let (value, key) = fold_const(state, value_expr, declared);
+    let (value, key) = fold_const(state, value_expr, declared, 0);
     let ok = unify_key(state.1, state.2, state.6, key, declared);
     if !ok {
         push_error(state.3, &format!("constant initializer type mismatch: expected '{}', found '{}'", render_key(state.0, state.1, state.2, declared), render_key(state.0, state.1, state.2, key)), file, start, end);
@@ -1280,10 +1279,14 @@ fn collect_const_item(state: &mut State, item: i64) {
 }
 
 /// Folds a constant expression, returning `(value, key)`.  On failure an
-/// error is reported and the unknown key is returned.
-fn fold_const(state: &mut State, expr: i64, declared: i64) -> (i64, i64) {
+/// error is reported and the unknown key is returned.  With `quiet` set
+/// (the statically-known-zero-divisor probe) failures are silent: the
+/// unknown key means "not statically known".
+fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, i64) {
     if node_tag(state.1, expr) != NODE_EXPR {
-        push_error(state.3, "constant expression required", node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
+        if quiet == 0 {
+            push_error(state.3, "constant expression required", node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
+        }
         return (0, unknown_key(state.1, state.2));
     }
     let kind = node_a(state.1, expr);
@@ -1304,7 +1307,7 @@ fn fold_const(state: &mut State, expr: i64, declared: i64) -> (i64, i64) {
         return (value, key);
     }
     if kind == EXPR_UNARY && node_b(state.1, expr) == UN_NEG {
-        let (value, key) = fold_const(state, node_c(state.1, expr), declared);
+        let (value, key) = fold_const(state, node_c(state.1, expr), declared, quiet);
         if key_kind(state.1, key) == TYD_UNKNOWN {
             return (0, key);
         }
@@ -1315,37 +1318,45 @@ fn fold_const(state: &mut State, expr: i64, declared: i64) -> (i64, i64) {
         if sym != NONE && sym_kind(state.1, sym) == SYM_CONST {
             let item = sym_decl(state.1, sym);
             if !has_const_value(state.1, sym) {
-                push_error(state.3, &format!("constant '{}' must be declared before use", name_text(state.0, node_d(state.1, item))), file, start, end);
+                if quiet == 0 {
+                    push_error(state.3, &format!("constant '{}' must be declared before use", name_text(state.0, node_d(state.1, item))), file, start, end);
+                }
                 return (0, unknown_key(state.1, state.2));
             }
             let value = find_const_value(state.1, sym);
             let key = ty_key_of(state.1, node_e(state.1, item));
             return (value, key);
         }
-        push_error(state.3, "constant expression required", file, start, end);
+        if quiet == 0 {
+            push_error(state.3, "constant expression required", file, start, end);
+        }
         return (0, unknown_key(state.1, state.2));
     }
     if kind == EXPR_BINARY {
-        let (lv, lk) = fold_const(state, node_c(state.1, expr), declared);
+        let (lv, lk) = fold_const(state, node_c(state.1, expr), declared, quiet);
         if key_kind(state.1, lk) == TYD_UNKNOWN {
             return (0, lk);
         }
-        let (rv, rk) = fold_const(state, node_d(state.1, expr), declared);
+        let (rv, rk) = fold_const(state, node_d(state.1, expr), declared, quiet);
         if key_kind(state.1, rk) == TYD_UNKNOWN {
             return (0, rk);
         }
         let ok = unify_key(state.1, state.2, state.6, lk, rk);
         if !ok {
-            push_error(state.3, "constant operands have different types", file, start, end);
+            if quiet == 0 {
+                push_error(state.3, "constant operands have different types", file, start, end);
+            }
             return (0, unknown_key(state.1, state.2));
         }
-        return fold_bin(state, node_b(state.1, expr), lv, rv, lk, (file, start, end));
+        return fold_bin(state, node_b(state.1, expr), lv, rv, lk, (file, start, end), quiet);
     }
-    push_error(state.3, "constant expression required", file, start, end);
+    if quiet == 0 {
+        push_error(state.3, "constant expression required", file, start, end);
+    }
     (0, unknown_key(state.1, state.2))
 }
 
-fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, i64, i64)) -> (i64, i64) {
+fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, i64, i64), quiet: i64) -> (i64, i64) {
     let (file, start, end) = span;
     let bool_key = builtin_key_of(state.1, state.0, "Bool");
     if op == BIN_ADD {
@@ -1359,10 +1370,21 @@ fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, 
     }
     if op == BIN_DIV {
         if rv == 0 {
-            push_error(state.3, "division by zero in constant", file, start, end);
+            if quiet == 0 {
+                push_error(state.3, "division by zero in constant", file, start, end);
+            }
             return (0, unknown_key(state.1, state.2));
         }
         return (lv.wrapping_div(rv), key);
+    }
+    if op == BIN_MOD {
+        if rv == 0 {
+            if quiet == 0 {
+                push_error(state.3, "modulo by zero in constant", file, start, end);
+            }
+            return (0, unknown_key(state.1, state.2));
+        }
+        return (lv.wrapping_rem(rv), key);
     }
     if op == BIN_SHL {
         return (lv.wrapping_shl(rv as u32), key);
@@ -1403,7 +1425,9 @@ fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, 
     if op == BIN_OR {
         return ((lv | rv), bool_key);
     }
-    push_error(state.3, "unknown constant operator", file, start, end);
+    if quiet == 0 {
+        push_error(state.3, "unknown constant operator", file, start, end);
+    }
     (0, unknown_key(state.1, state.2))
 }
 
@@ -1503,6 +1527,8 @@ fn op_text(op: i64) -> &'static str {
         "*"
     } else if op == BIN_DIV {
         "/"
+    } else if op == BIN_MOD {
+        "%"
     } else if op == BIN_SHL {
         "<<"
     } else if op == BIN_SHR {
@@ -1532,10 +1558,54 @@ fn op_text(op: i64) -> &'static str {
     }
 }
 
+/// Reports a division or modulo whose divisor is statically known to be
+/// zero — a literal, a folded const reference, or any arithmetic
+/// combination of them — wherever the expression appears.  The numerator
+/// is irrelevant: `N / 0`, `5 / 0`, and `x / (3 - 3)` are all compile
+/// errors.  The constant fold is the single source of truth: this probe
+/// folds the divisor with errors suppressed and only reports when the
+/// fold proves zero.  Everything else is a runtime `Result`, never a
+/// trap.
+fn check_static_zero_divisor(state: &mut State, op: i64, rhs: i64) {
+    if op != BIN_DIV && op != BIN_MOD {
+        return;
+    }
+    let (value, key) = fold_const(state, rhs, NONE, 1);
+    if key_kind(state.1, key) != TYD_UNKNOWN && value == 0 {
+        let message = if op == BIN_DIV {
+            "division by zero"
+        } else {
+            "modulo by zero"
+        };
+        push_error(state.3, message, node_file(state.1, rhs), node_start(state.1, rhs), node_end(state.1, rhs));
+    }
+}
+
+/// The result key of a division or modulo expression: `Result(T,
+/// DivError)` where T is the operand type.  Both enums are synthesized
+/// builtins read through the same declaration path as any user enum, so
+/// the variant order and layout are derived, never hardcoded.
+fn division_result_key(state: &mut State, payload: i64) -> i64 {
+    let err_sym = find_enum_sym_by_text(state.1, state.0, "DivError");
+    if err_sym == NONE {
+        return unknown_key(state.1, state.2);
+    }
+    let err_key = canon_tyinfo(state.1, state.2, TYD_ENUM, err_sym, NONE, NONE, NONE);
+    let result_sym = find_enum_sym_by_text(state.1, state.0, "Result");
+    if result_sym == NONE {
+        return unknown_key(state.1, state.2);
+    }
+    let args = alloc_list(state.2);
+    list_push(state.2, args, payload);
+    list_push(state.2, args, err_key);
+    canon_tyinfo(state.1, state.2, TYD_ENUM, result_sym, args, NONE, NONE)
+}
+
 fn check_binary(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     let op = node_b(state.1, expr);
     let lhs = node_c(state.1, expr);
     let rhs = node_d(state.1, expr);
+    check_static_zero_divisor(state, op, rhs);
     let file = node_file(state.1, expr);
     let start = node_start(state.1, expr);
     let end = node_end(state.1, expr);
@@ -1571,6 +1641,11 @@ fn check_binary(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i
     let ok = unify_key(state.1, state.2, state.6, l, r);
     if !ok {
         push_error(state.3, &format!("binary operator '{}' requires operands of the same type", op_text(op)), file, start, end);
+    }
+    if op == BIN_DIV || op == BIN_MOD {
+        let key = division_result_key(state, l);
+        expr_set_ty(state.1, expr, key);
+        return key;
     }
     expr_set_ty(state.1, expr, l);
     l

@@ -685,7 +685,15 @@ fn enum_payload_ptr<'ctx>(sess: &mut Session<'ctx, '_, '_>, ptr: PointerValue<'c
 /// field copied into the payload region.
 fn build_enum_value<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, variant_idx: i64, payloads: &[(i64, PointerValue<'ctx>)]) -> Result<PointerValue<'ctx>, CodegenError> {
     let ptr = declare_local(sess, key, "enum")?;
-    let tag_ptr = struct_gep(sess, key, ptr, 0, "")?;
+    build_enum_value_into(sess, key, variant_idx, payloads, ptr)?;
+    Ok(ptr)
+}
+
+/// Stores tag `variant_idx` and its payloads into an already-allocated
+/// enum slot `out`.  The one implementation of enum construction, shared
+/// by the allocating `build_enum_value` and by division's result branch.
+fn build_enum_value_into<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, variant_idx: i64, payloads: &[(i64, PointerValue<'ctx>)], out: PointerValue<'ctx>) -> Result<(), CodegenError> {
+    let tag_ptr = struct_gep(sess, key, out, 0, "")?;
     let tag = sess.0.i64_type().const_int(variant_idx as u64, false);
     store_key(sess, tag_ptr, tag.into())?;
     let mut idx = 0usize;
@@ -694,12 +702,12 @@ fn build_enum_value<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, variant_id
             Some(pair) => *pair,
             None => break,
         };
-        let (region, pty) = enum_payload_ptr(sess, ptr, key, variant_idx)?;
+        let (region, pty) = enum_payload_ptr(sess, out, key, variant_idx)?;
         let fptr = sess.2.build_struct_gep(pty, region, idx as u32, "").map_err(builder_fail)?;
         copy_value(sess, pkey, fptr, pptr)?;
         idx += 1;
     }
-    Ok(ptr)
+    Ok(())
 }
 
 /// The data pointer of a slice view `{ptr, len}`.
@@ -1070,7 +1078,17 @@ fn emit_unary<'ctx, 'a>(
     let inner = node_c(sess.5, expr);
     let key = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, expr));
     if op == UN_REF || op == UN_REF_MUT {
-        return emit_expr(sess, ctx, inner);
+        // The value of `&x` is a pointer, materialized in a slot of the
+        // reference type (which lowers to a pointer).  Every consumer
+        // (call arguments, let/assign copies, returns) loads through
+        // the expression's key, so the address must be stored into a
+        // slot, not returned raw: returning the referent's storage
+        // address directly would make the load read the referent's own
+        // first bytes as if they were the pointer.
+        let inner_ptr = emit_expr(sess, ctx, inner)?;
+        let out = declare_local(sess, key, "ref")?;
+        store_key(sess, out, inner_ptr.into())?;
+        return Ok(out);
     }
     let ikey = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, inner));
     let iptr = emit_expr(sess, ctx, inner)?;
@@ -1146,18 +1164,15 @@ fn emit_binary<'ctx, 'a>(
     let rv = load_key(sess, rkey, rptr)?.into_int_value();
     let out = declare_local(sess, result_key, "bin")?;
     let r;
-    if op == BIN_ADD {
+    if op == BIN_DIV || op == BIN_MOD {
+        emit_div_rem_result(sess, ctx, op, lkey, (lv, rv), result_key, out)?;
+        return Ok(out);
+    } else if op == BIN_ADD {
         r = sess.2.build_int_add(lv, rv, "").map_err(builder_fail)?;
     } else if op == BIN_SUB {
         r = sess.2.build_int_sub(lv, rv, "").map_err(builder_fail)?;
     } else if op == BIN_MUL {
         r = sess.2.build_int_mul(lv, rv, "").map_err(builder_fail)?;
-    } else if op == BIN_DIV {
-        r = if key_is_signed(sess, lkey) {
-            sess.2.build_int_signed_div(lv, rv, "").map_err(builder_fail)?
-        } else {
-            sess.2.build_int_unsigned_div(lv, rv, "").map_err(builder_fail)?
-        };
     } else if op == BIN_SHL {
         r = sess.2.build_left_shift(lv, rv, "").map_err(builder_fail)?;
     } else if op == BIN_SHR {
@@ -1198,6 +1213,57 @@ fn emit_binary<'ctx, 'a>(
     }
     store_key(sess, out, r.into())?;
     Ok(out)
+}
+
+/// The runtime body of `/` and `%`: builds `Ok(quotient)` when the
+/// divisor is non-zero and `Err(DivByZero)` when it is zero — a
+/// `Result`, never a trap.  The payload type is the operand type `lkey`
+/// (arg 0 of the result key); the error tag comes from the declared
+/// DivError variants, and both tags from each enum's declared variant
+/// order.
+fn emit_div_rem_result<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    ctx: &mut FnCtx<'ctx, '_>,
+    op: i64,
+    lkey: i64,
+    operands: (IntValue<'ctx>, IntValue<'ctx>),
+    result_key: i64,
+    out: PointerValue<'ctx>,
+) -> Result<(), CodegenError> {
+    let (lv, rv) = operands;
+    let zero = sess.0.i64_type().const_zero();
+    let is_zero = sess.2.build_int_compare(IntPredicate::EQ, rv, zero, "").map_err(builder_fail)?;
+    let ok_block = new_block(sess, ctx.0, "div_ok");
+    let err_block = new_block(sess, ctx.0, "div_err");
+    let merge_block = new_block(sess, ctx.0, "div_merge");
+    sess.2.build_conditional_branch(is_zero, err_block, ok_block).map_err(builder_fail)?;
+    sess.2.position_at_end(err_block);
+    let err_key = result_arg_key(sess, result_key, 1);
+    let err_tag = variant_index_by_name(sess, err_key, "DivByZero")?;
+    let div_error = declare_local(sess, err_key, "div_err_val")?;
+    build_enum_value_into(sess, err_key, err_tag, &[], div_error)?;
+    let err_variant = variant_index_by_name(sess, result_key, "Err")?;
+    build_enum_value_into(sess, result_key, err_variant, &[(err_key, div_error)], out)?;
+    sess.2.build_unconditional_branch(merge_block).map_err(builder_fail)?;
+    sess.2.position_at_end(ok_block);
+    let q = if op == BIN_DIV {
+        if key_is_signed(sess, lkey) {
+            sess.2.build_int_signed_div(lv, rv, "").map_err(builder_fail)?
+        } else {
+            sess.2.build_int_unsigned_div(lv, rv, "").map_err(builder_fail)?
+        }
+    } else if key_is_signed(sess, lkey) {
+        sess.2.build_int_signed_rem(lv, rv, "").map_err(builder_fail)?
+    } else {
+        sess.2.build_int_unsigned_rem(lv, rv, "").map_err(builder_fail)?
+    };
+    let quotient = declare_local(sess, lkey, "quo")?;
+    store_key(sess, quotient, q.into())?;
+    let ok_tag = variant_index_by_name(sess, result_key, "Ok")?;
+    build_enum_value_into(sess, result_key, ok_tag, &[(lkey, quotient)], out)?;
+    sess.2.build_unconditional_branch(merge_block).map_err(builder_fail)?;
+    sess.2.position_at_end(merge_block);
+    Ok(())
 }
 
 fn emit_array<'ctx, 'a>(
@@ -1829,6 +1895,17 @@ fn extern_memcmp<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> 
     )
 }
 
+fn extern_write<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
+    let i8p = ptr_ty(sess);
+    extern_fn(
+        sess,
+        "write",
+        sess.0
+            .i64_type()
+            .fn_type(&[sess.0.i32_type().into(), i8p.into(), sess.0.i64_type().into()], false),
+    )
+}
+
 fn emit_native_call<'ctx, 'a>(
     sess: &mut Session<'ctx, '_, '_>,
     ctx: &mut FnCtx<'ctx, 'a>,
@@ -2032,6 +2109,12 @@ fn dispatch_native<'ctx>(
         native_self_check(sess, ret_key, out)?;
         return Ok(out);
     }
+    if name == "Terminal.print" || name == "Terminal.print_line" || name == "Terminal.eprint" {
+        let stderr = name == "Terminal.eprint";
+        let newline = name == "Terminal.print_line";
+        native_print(sess, locals, ret_key, out, stderr, newline)?;
+        return Ok(out);
+    }
     Err(builder_error(-1, 0, 0, &format!("native '{}' has no runtime body", name)))
 }
 
@@ -2040,7 +2123,16 @@ fn native_from_u8<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>,
     let k0 = get_local_key(locals, 0)?;
     let v = load_key(sess, k0, p0)?.into_int_value();
     let ret_ty = llvm_of(sess, ret_key)?.into_int_type();
-    let r = sess.2.build_int_cast(v, ret_ty, "").map_err(builder_fail)?;
+    let src_ty = v.get_type();
+    // U8 is unsigned: widening must zero-extend, never sign-extend
+    // (0xF0 is 240, not -16).  A raw int-cast sign-extends from i8.
+    let r = if src_ty.get_bit_width() < ret_ty.get_bit_width() {
+        sess.2.build_int_z_extend(v, ret_ty, "").map_err(builder_fail)?
+    } else if src_ty.get_bit_width() > ret_ty.get_bit_width() {
+        sess.2.build_int_truncate(v, ret_ty, "").map_err(builder_fail)?
+    } else {
+        v
+    };
     store_key(sess, out, r.into())?;
     Ok(())
 }
@@ -2094,8 +2186,7 @@ fn native_allocate<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
 fn native_deallocate<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>) -> Result<(), CodegenError> {
     let p0 = get_local(locals, 0)?;
     let block_key = deref_key_of(sess, get_local_key(locals, 0)?);
-    let block_ptr = load_ptr(sess, p0)?;
-    let bd = struct_gep(sess, block_key, block_ptr, 0, "")?;
+    let bd = struct_gep(sess, block_key, p0, 0, "")?;
     let data = load_ptr(sess, bd)?;
     let free = extern_free(sess);
     sess.2.build_call(free, &[into_meta(data.into())], "").map_err(builder_fail)?;
@@ -2294,8 +2385,7 @@ fn native_vec_view<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>
 fn native_vec_free<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>) -> Result<(), CodegenError> {
     let p0 = get_local(locals, 0)?;
     let vec_key = deref_key_of(sess, get_local_key(locals, 0)?);
-    let vec_ref = load_ptr(sess, p0)?;
-    let d = struct_gep(sess, vec_key, vec_ref, 0, "")?;
+    let d = struct_gep(sess, vec_key, p0, 0, "")?;
     let data = load_ptr(sess, d)?;
     let free = extern_free(sess);
     sess.2.build_call(free, &[into_meta(data.into())], "").map_err(builder_fail)?;
@@ -2313,11 +2403,48 @@ fn native_string_len<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ct
     Ok(())
 }
 
-fn native_string_free<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>) -> Result<(), CodegenError> {
+/// The runtime body of the Terminal printing natives.  Writes the
+/// string's bytes to fd 1 (stdout) or fd 2 (stderr), appending a
+/// newline for `print_line`, then returns Unit.  The string's {data,
+/// len} layout comes from the declared native type; the libc `write` is
+/// declared once and shared by all three natives.
+fn native_print<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    locals: &Locals<'ctx>,
+    ret_key: i64,
+    out: PointerValue<'ctx>,
+    stderr: bool,
+    newline: bool,
+) -> Result<(), CodegenError> {
     let p0 = get_local(locals, 0)?;
     let str_key = deref_key_of(sess, get_local_key(locals, 0)?);
     let str_ref = load_ptr(sess, p0)?;
-    let d = struct_gep(sess, str_key, str_ref, 0, "")?;
+    let data_ptr = struct_gep(sess, str_key, str_ref, 0, "")?;
+    let data = load_ptr(sess, data_ptr)?;
+    let len_ptr = struct_gep(sess, str_key, str_ref, 1, "")?;
+    let len = load_i64(sess, len_ptr)?;
+    let write = extern_write(sess);
+    let fd = sess.0.i32_type().const_int(if stderr { 2 } else { 1 }, false);
+    sess.2
+        .build_call(write, &[into_meta(fd.into()), into_meta(data.into()), into_meta(len.into())], "")
+        .map_err(builder_fail)?;
+    if newline {
+        let nl_slot = sess.2.build_alloca(sess.0.i8_type(), "nl").map_err(builder_fail)?;
+        let nl = sess.0.i8_type().const_int(10, false);
+        sess.2.build_store(nl_slot, nl).map_err(builder_fail)?;
+        let one = sess.0.i64_type().const_int(1, false);
+        sess.2
+            .build_call(write, &[into_meta(fd.into()), into_meta(nl_slot.into()), into_meta(one.into())], "")
+            .map_err(builder_fail)?;
+    }
+    build_unit_value_into(sess, ret_key, out)?;
+    Ok(())
+}
+
+fn native_string_free<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>) -> Result<(), CodegenError> {
+    let p0 = get_local(locals, 0)?;
+    let str_key = deref_key_of(sess, get_local_key(locals, 0)?);
+    let d = struct_gep(sess, str_key, p0, 0, "")?;
     let data = load_ptr(sess, d)?;
     let free = extern_free(sess);
     sess.2.build_call(free, &[into_meta(data.into())], "").map_err(builder_fail)?;
@@ -2530,8 +2657,7 @@ fn native_hash_map_get<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<
 fn native_hash_map_free<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>) -> Result<(), CodegenError> {
     let p0 = get_local(locals, 0)?;
     let map_key = deref_key_of(sess, get_local_key(locals, 0)?);
-    let map_ref = load_ptr(sess, p0)?;
-    let d = struct_gep(sess, map_key, map_ref, 0, "")?;
+    let d = struct_gep(sess, map_key, p0, 0, "")?;
     let data = load_ptr(sess, d)?;
     let free = extern_free(sess);
     sess.2.build_call(free, &[into_meta(data.into())], "").map_err(builder_fail)?;
@@ -2752,30 +2878,20 @@ fn fn_param_key_list(sess: &mut Session, fn_slot: i64) -> Result<i64, CodegenErr
 
 /// Emits the process `main` wrapper: calls the cinnabar `main` and maps
 /// the returned ExitCode (ExitSuccess, ExitFailure, ExitDiagnostic) to a
-/// process exit code.  A program without `main` gets a `main` returning
-/// zero so every fixture links and runs.
+/// process exit code.  A program without a `main` function is an error:
+/// the compiler never invents an entry point the source did not declare.
 pub fn emit_program<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> Result<(), CodegenError> {
     let main_fn = find_main_fn(sess);
-    let main_val;
-    let exit_key;
-    if main_fn != NONE {
-        let params_list = fn_param_key_list(sess, main_fn)?;
-        let ret_key = ty_key_of(sess.5, node_d(sess.5, main_fn));
-        let nodes = &mut sess.5;
-        let lists = &mut sess.6;
-        let mono = canon_tyinfo(nodes, lists, TYD_MONO, main_fn, NONE, NONE, NONE);
-        main_val = get_or_emit_fn(sess, main_fn, NONE, mono, params_list, ret_key)?;
-        exit_key = ret_key;
-    } else {
-        let i32_ty = sess.0.i32_type();
-        let sig = i32_ty.fn_type(&[], false);
-        let stub = sess.1.add_function("main", sig, None);
-        let entry = sess.0.append_basic_block(stub, "entry");
-        sess.2.position_at_end(entry);
-        let zero = i32_ty.const_zero();
-        sess.2.build_return(Some(&zero)).map_err(builder_fail)?;
-        return Ok(());
+    if main_fn == NONE {
+        return Err(builder_error(-1, 0, 0, "program has no main function"));
     }
+    let params_list = fn_param_key_list(sess, main_fn)?;
+    let ret_key = ty_key_of(sess.5, node_d(sess.5, main_fn));
+    let nodes = &mut sess.5;
+    let lists = &mut sess.6;
+    let mono = canon_tyinfo(nodes, lists, TYD_MONO, main_fn, NONE, NONE, NONE);
+    let main_val = get_or_emit_fn(sess, main_fn, NONE, mono, params_list, ret_key)?;
+    let exit_key = ret_key;
     let i32_ty = sess.0.i32_type();
     let sig = i32_ty.fn_type(&[], false);
     let main_wrapper = sess.1.add_function("main", sig, None);

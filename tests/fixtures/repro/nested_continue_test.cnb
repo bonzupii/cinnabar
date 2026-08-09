@@ -1,0 +1,16 @@
+pub fun main() Int
+  var total: Int = 0
+  var i: Int = 0
+  while i < 6
+    i = i + 1
+    if (i & 1) == 0
+      if i > 4
+        total = total + 100
+        continue
+      end
+      continue
+    end
+    total = total + i
+  end
+  return total
+end

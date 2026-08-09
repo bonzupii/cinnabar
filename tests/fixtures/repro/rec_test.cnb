@@ -1,0 +1,10 @@
+fun fact(n: Int) Int
+  if n <= 1
+    return 1
+  end
+  return n * fact(n - 1)
+end
+
+pub fun main() Int
+  return fact(5)
+end

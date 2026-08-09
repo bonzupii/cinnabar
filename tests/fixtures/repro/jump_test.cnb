@@ -1,0 +1,26 @@
+pub fun main() Int
+  var pc: Int = 0
+  var running: Bool = true
+  var count: Int = 0
+
+  while running
+    if pc == 0
+      pc = 1
+      continue
+    end
+
+    if pc == 1
+      count = count + 1
+      if count >= 3
+        running = false
+        continue
+      end
+      pc = 0
+      continue
+    end
+
+    running = false
+  end
+
+  return count
+end

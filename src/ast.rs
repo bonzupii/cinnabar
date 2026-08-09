@@ -167,6 +167,7 @@ pub const BIN_LE: i64 = 13;
 pub const BIN_GE: i64 = 14;
 pub const BIN_AND: i64 = 15;
 pub const BIN_OR: i64 = 16;
+pub const BIN_MOD: i64 = 17;
 
 // ---------------------------------------------------------------------------
 // Statement rows.  (tag=NODE_STMT, a=kind, b..e kind-specific, f=ty).

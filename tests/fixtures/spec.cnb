@@ -1,59 +1,58 @@
 #!|
-  Cinnabar version one reference implementation.
+  Cinnabar Language Specification & Reference Implementation (Version 1).
 
-  This program exercises modules, traits, generics, fixed-size arrays,
-  slices, rest patterns, growable collections, bitwise math, opaque native
-  memory handles, explicit Result handling, explicit Option handling,
-  structs, visibility, imports, loop control, and compiler-enforced casing.
+  This program is the normative executable reference for the Cinnabar language.
+  It exercises every language feature in full: modules, traits, generics,
+  fixed-size arrays, slices, rest patterns, growable collections, bitwise and
+  modulo math, opaque native memory/terminal handles, explicit Result handling,
+  explicit Option handling, structs, enums, visibility, imports, loop control,
+  if/elif/else branching, comment forms, and compiler-enforced casing.
 
-  Casing:
-  - functions, val names, and var names: snake_case
-  - types, traits, modules, enum variants: PascalCase
-  - constants: SCREAMING_SNAKE_CASE
-
-  Bindings:
-  - const: compile-time constant
-  - val: immutable local binding
-  - var: mutable local binding
-
-  Borrowing:
-  - &T is a shared borrow
-  - &mut T is an exclusive mutable borrow
-  - borrow scopes are flow-sensitive and cannot outlive the owner
-  - no lifetime annotations exist
-  - ambiguous returned borrows are compiler errors
-  - linear handles must be consumed exactly once
-
-  Generics:
-  - type constructors use parentheses: Vec(T)
-  - function type parameters use angle brackets: fun f<T>
-  - explicit call-site instantiation uses square brackets: f[U8]()
-  - return-type-only type parameters are inferred from call context
-
-  Control flow:
-  - while supports break and continue
-  - try works for Result and Option
-  - use imports are explicit and may alias with as
-  - slice and array rest patterns must bind remaining elements
-  - trailing comments may appear after any line of code
-
-  Visibility:
-  - declarations are private by default
-  - pub exposes a declaration
-  - pub on local val/var is a compiler error
-  - pub inside a private mod is legal but not externally reachable until the mod is pub
-  - compiler diagnostics are errors only; no warning severity
+  Language Rules Summary:
+  - Casing:
+      - functions, val names, and var names: snake_case
+      - types, traits, modules, enum variants: PascalCase
+      - constants: SCREAMING_SNAKE_CASE
+  - Bindings:
+      - const: compile-time constant
+      - val: immutable local binding
+      - var: mutable local binding
+  - Borrowing & Memory:
+      - &T is a shared borrow
+      - &mut T is an exclusive mutable borrow
+      - borrow scopes are flow-sensitive and cannot outlive the owner
+      - no lifetime annotations exist; ambiguous returned borrows are compiler errors
+      - linear handles (Memory.Block, Vec, String, HashMap) must be consumed exactly once
+  - Generics:
+      - type constructors use parentheses: Vec(T)
+      - function type parameters use angle brackets: fun f<T>
+      - explicit call-site instantiation uses square brackets: f[U8]()
+      - return-type-only type parameters are inferred from call context
+  - Control Flow & Operators:
+      - if, elif, else branching
+      - while loops with break and continue
+      - try operator for Result and Option
+      - arithmetic (+, -, *, /, %), bitwise (&, |, ^, <<, >>), logical (&&, ||, !)
+      - / and % return Result(T, DivError); a statically-known-zero divisor is a compile error
+  - Native Surfaces:
+      - Runtime, Memory, Binary, Slice, Collections, Terminal
+  - Built-in Primitives:
+      - Unit, Result(T, E), Option(T) are built-in language primitives
+      - Int, U8, U32, Usize, Bool are built-in scalar types
 |#
 
-# This is an ordinary comment.
-#! This is a documentation comment.
+# Line comment: Ignored by the lexer and parser.
+#! Line documentation comment: Attaches to the subsequent declaration.
 #|
-  This is a block comment.
+  Block comment: Multi-line comment block.
+  Block comments do not nest in Cinnabar.
 |#
 #!|
-  This is a block documentation comment.
+  Block documentation comment: Multi-line documentation block
+  attaching to the subsequent top-level module or declaration.
 |#
 
+#! Compile-time constant declarations enforcing SCREAMING_SNAKE_CASE.
 pub const SENTINEL_INT: Int = 999999 # Trailing comments may follow any line of code.
 pub const ZERO_INT: Int = 0
 
@@ -92,10 +91,21 @@ pub const MAGIC_BYTE_1: U8 = 0xF0
 pub const MAGIC_BYTE_2: U8 = 0xAD
 pub const MAGIC_BYTE_3: U8 = 0x0B
 
-pub const STRING_BYTE_0: U8 = 0x43 # UTF-8 'C'
-pub const STRING_BYTE_1: U8 = 0x69 # UTF-8 'i'
-pub const STRING_BYTE_2: U8 = 0x6E # UTF-8 'n'
-pub const STRING_BYTE_3: U8 = 0x21 # UTF-8 '!'
+pub const STRING_BYTE_0: U8 = 0x48 # UTF-8 'H'
+pub const STRING_BYTE_1: U8 = 0x65 # UTF-8 'e'
+pub const STRING_BYTE_2: U8 = 0x6C # UTF-8 'l'
+pub const STRING_BYTE_3: U8 = 0x6C # UTF-8 'l'
+pub const STRING_BYTE_4: U8 = 0x6F # UTF-8 'o'
+pub const STRING_BYTE_5: U8 = 0x20 # UTF-8 ' '
+pub const STRING_BYTE_6: U8 = 0x43 # UTF-8 'C'
+pub const STRING_BYTE_7: U8 = 0x69 # UTF-8 'i'
+pub const STRING_BYTE_8: U8 = 0x6E # UTF-8 'n'
+pub const STRING_BYTE_9: U8 = 0x6E # UTF-8 'n'
+pub const STRING_BYTE_10: U8 = 0x61 # UTF-8 'a'
+pub const STRING_BYTE_11: U8 = 0x62 # UTF-8 'b'
+pub const STRING_BYTE_12: U8 = 0x61 # UTF-8 'a'
+pub const STRING_BYTE_13: U8 = 0x72 # UTF-8 'r'
+pub const STRING_BYTE_14: U8 = 0x21 # UTF-8 '!'
 
 pub const MEMORY_BYTE: U8 = 0xA5
 pub const MEMORY_SIZE: Usize = 1
@@ -103,40 +113,24 @@ pub const ZERO_USIZE: Usize = 0
 pub const SENTINEL_USIZE: Usize = 999999
 
 pub const EXPECTED_REST_LEN: Usize = 3
-pub const EXPECTED_STRING_LEN: Usize = 4
+pub const EXPECTED_STRING_LEN: Usize = 15
 
 pub const HEADER_KIND: U32 = 7
 pub const HEADER_FLAGS: U32 = 3
 pub const TAG_VALUE: U32 = 0x5A
 pub const CHECKSUM_SALT: U32 = 0x0F
 
-#! Expected checksum for Header(kind: HEADER_KIND, flags: HEADER_FLAGS).
 pub const EXPECTED_HEADER_CHECKSUM: U32 = 0x00070304
-
-#! Expected checksum for Tag(value: TAG_VALUE).
 pub const EXPECTED_TAG_CHECKSUM: U32 = 0x00000055
 
-# Core algebraic types.
-pub type Unit
-  pub Unit
-end
-
-pub type Result(T, E)
-  pub Ok(T)
-  pub Err(E)
-end
-
-pub type Option(T)
-  pub Some(T)
-  pub None
-end
-
+#! User-defined sum-type enum representing program exit statuses.
 pub type ExitCode
   pub ExitSuccess
   pub ExitFailure
   pub ExitDiagnostic(Int)
 end
 
+#! Enum variants demonstrating payload data.
 pub type RangeError
   pub TooSmall(Int)
   pub TooLarge(Int)
@@ -146,15 +140,18 @@ pub type PortError
   pub PortInvalid(Int)
 end
 
+#! Nested sum type demonstrating error wrapping.
 pub type AppError
   pub AppRange(RangeError)
   pub AppPort(PortError)
 end
 
+#! Nominal single-payload struct wrapper.
 pub type Port
   pub Port(Int)
 end
 
+#! Product type struct demonstrating named fields in PascalCase.
 pub type Point
   pub x: Int
   pub y: Int
@@ -169,103 +166,90 @@ pub type Tag
   pub value: U32
 end
 
-#! Groups binary magic data that is always passed together.
+#! Groups fixed-size byte arrays with expected U32 magic digests.
 pub type MagicHeader
   pub bytes: [U8; 4]
   pub expected: U32
 end
 
-#! Groups memory test parameters that are always used together.
+#! Groups memory test parameters.
 pub type MemoryPlan
   pub size: Usize
   pub byte: U8
 end
 
-#! Groups expected trait-check digests that are always compared together.
 pub type ChecksumExpectation
   pub header: U32
   pub tag: U32
 end
 
-#! Groups the first byte of a slice and the length of the remaining slice.
+#! Demonstrates struct containing slice length metadata.
 pub type SplitFirst
   pub first: U8
   pub rest_len: Usize
 end
 
-#! Runtime is a public mod.
+#! Demonstrates nested public module scoping.
 pub mod Runtime
   pub type Error
     pub NotReady
     pub ProbeFailed(Int)
   end
 
-  pub native fun self_check() impure Result(Unit, Error)
+  #! Opaque native runtime check surface.
+  pub nat fun self_check() impure Result(Unit, Error)
 
-  #! Compiler error if a local inside probe_twice were marked pub:
-  #!   pub val probe_count: Int = 2
-  #! pub cannot appear on local val/var.
+  #! Internal private function.
   fun probe_twice() impure Result(Unit, Error)
     try self_check()
     try self_check()
     return Ok(Unit)
   end
 
-  #! Compiler errors:
-  #! - unhandled Result from Runtime.gate: propagate with try or match both variants
-  #! - missing Runtime.Error branch: match must be exhaustive
+  #! Public gate interface propagating errors with try.
   pub fun gate() impure Result(Unit, Error)
     try probe_twice()
     return Ok(Unit)
   end
 end
 
-#! Memory is a public mod.
 #|
-  Raw memory quarantine.
+  Raw Memory Quarantine.
 
-  Cinnabar code sees opaque Block handles.
-  It never sees pointers.
+  Demonstrates native linear types (Block) and memory operations.
+  Cinnabar user code sees opaque linear Block handles, never raw pointers.
 |#
 pub mod Memory
   #! Block is a linear handle.
-  #! Compiler errors:
-  #! - dropping Block without deallocate: linear value Memory.Block must be consumed
-  #! - using Block after deallocate: value used after move
-  #! - duplicating Block: linear value cannot be copied
-  pub native type Block
+  #! Invariant: Block MUST be consumed exactly once on every execution path.
+  pub nat type Block
 
   pub type Error
     pub AllocationFailed(Usize)
     pub AccessOutOfBounds(Usize, Usize)
   end
 
-  pub native fun allocate(size: Usize) impure Result(Block, Error)
-
-  pub native fun deallocate(block: Block) impure Unit
-
-  pub native fun write_u8(
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+  pub nat fun write_u8(
     block: &Block,
     offset: Usize,
     value: U8
   ) impure Result(Unit, Error)
 
-  pub native fun read_u8(
+  pub nat fun read_u8(
     block: &Block,
     offset: Usize
   ) impure Result(U8, Error)
 end
 
-#! Binary is a public mod.
-#|
-  Binary parsing helpers.
-|#
+#! Binary parsing module.
 pub mod Binary
   pub type Error
     pub MagicMismatch(U32)
   end
 
-  # Private helper.
+  # Private bit-shifting helper.
   fun combine_le_bytes(b0: U8, b1: U8, b2: U8, b3: U8) U32
     val v0 = U32.from_u8(b0)
     val v1 = U32.from_u8(b1)
@@ -275,15 +259,13 @@ pub mod Binary
     return (v3 << 24) | (v2 << 16) | (v1 << 8) | v0
   end
 
-  # Private helper.
+  # Private helper demonstrating array pattern destructuring.
   fun u32_from_le_bytes(bytes: [U8; 4]) U32
     match bytes
       [b0, b1, b2, b3] => return combine_le_bytes(b0, b1, b2, b3)
     end
   end
 
-  #! Compiler errors:
-  #! - unhandled Result: propagate with try or match MagicMismatch explicitly
   pub fun check_magic(header: &MagicHeader) Result(Unit, Error)
     val value = u32_from_le_bytes(header.bytes)
 
@@ -295,21 +277,16 @@ pub mod Binary
   end
 end
 
-#! Slice is a public mod.
+#! Slice operations module.
 pub mod Slice
-  pub native fun len<T>(view: &[T]) Usize
+  pub nat fun len<T>(view: &[T]) Usize
 end
 
-#! Collections is a public mod.
-#! These are the standard growable collection surfaces required for self-hosting.
+#! Standard growable collection surfaces required for self-hosting.
 pub mod Collections
-  pub native type Vec(T)
-
-  #! String is UTF-8 validated.
-  #! string_from_slice returns InvalidUtf8 for malformed input.
-  pub native type String
-
-  pub native type HashMap(K, V)
+  pub nat type Vec(T)
+  pub nat type String
+  pub nat type HashMap(K, V)
 
   pub type Error
     pub AllocationFailed(Usize)
@@ -319,41 +296,42 @@ pub mod Collections
     pub InvalidUtf8
   end
 
-  pub native fun vec_new<T>() impure Result(Vec(T), Error)
-
-  pub native fun vec_push<T>(
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_push<T>(
     vec: &mut Vec(T),
     value: T
   ) impure Result(Unit, Error)
 
-  pub native fun vec_view<T>(vec: &Vec(T)) &[T]
+  pub nat fun vec_view<T>(vec: &Vec(T)) &[T]
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
 
-  pub native fun vec_free<T>(vec: Vec(T)) impure Unit
+  pub nat fun string_from_slice(view: &[U8]) impure Result(String, Error)
+  pub nat fun string_len(value: &String) Usize
+  pub nat fun string_free(value: String) impure Unit
 
-  pub native fun string_from_slice(view: &[U8]) impure Result(String, Error)
-
-  pub native fun string_len(value: &String) Usize
-
-  pub native fun string_free(value: String) impure Unit
-
-  pub native fun hash_map_new<K, V>() impure Result(HashMap(K, V), Error)
-
-  pub native fun hash_map_insert<K, V>(
+  pub nat fun hash_map_new<K, V>() impure Result(HashMap(K, V), Error)
+  pub nat fun hash_map_insert<K, V>(
     map: &mut HashMap(K, V),
     key: K,
     value: V
   ) impure Result(Unit, Error)
 
-  pub native fun hash_map_get<K, V>(
+  pub nat fun hash_map_get<K, V>(
     map: &HashMap(K, V),
     key: K
   ) impure Result(V, Error)
 
-  pub native fun hash_map_free<K, V>(map: HashMap(K, V)) impure Unit
+  pub nat fun hash_map_free<K, V>(map: HashMap(K, V)) impure Unit
 end
 
-#! Explicit imports.
-#! Unknown or unused imports are compiler errors.
+#! Native Terminal I/O surface for stdout, stderr, and line input.
+pub mod Terminal
+  pub nat fun print(text: &Collections.String) impure Unit
+  pub nat fun print_line(text: &Collections.String) impure Unit
+  pub nat fun eprint(text: &Collections.String) impure Unit
+end
+
+#! Explicit import declarations and aliasing (`as`).
 use Runtime.gate
 use Memory.allocate
 use Memory.deallocate
@@ -372,8 +350,8 @@ use Collections.hash_map_new
 use Collections.hash_map_insert
 use Collections.hash_map_get
 use Collections.hash_map_free
+use Terminal.print_line
 
-# Trait-based polymorphism.
 pub trait Checksum
   pub fun checksum(value: &Self) U32
 end
@@ -390,13 +368,11 @@ pub impl Checksum for Tag
   end
 end
 
-#! Compiler error if T does not implement Checksum:
-#! implement Checksum for T.
+#! Bounded generic function constrained by trait Checksum.
 fun checksum_value<T: Checksum>(value: &T) U32
   return Checksum.checksum(value)
 end
 
-#! Groups magic bytes and expected magic value.
 fun magic_header() MagicHeader
   return MagicHeader(
     bytes: [MAGIC_BYTE_0, MAGIC_BYTE_1, MAGIC_BYTE_2, MAGIC_BYTE_3],
@@ -404,7 +380,6 @@ fun magic_header() MagicHeader
   )
 end
 
-#! Groups memory test parameters.
 fun memory_plan() MemoryPlan
   return MemoryPlan(
     size: MEMORY_SIZE,
@@ -412,7 +387,6 @@ fun memory_plan() MemoryPlan
   )
 end
 
-#! Groups expected checksum digests.
 fun checksum_expectation() ChecksumExpectation
   return ChecksumExpectation(
     header: EXPECTED_HEADER_CHECKSUM,
@@ -420,20 +394,32 @@ fun checksum_expectation() ChecksumExpectation
   )
 end
 
-#! Validates an Int and constructs a nominal Port.
-#! Compiler errors:
-#! - using Int where Port is expected: call port_from_int and handle Result
-#! - discarding this Result: use try or match both variants
+#!|
+  `/` and `%` on Int use Euclidean division: the remainder is always
+  non-negative (0 <= r < abs(divisor)), regardless of operand signs.
+     -10 / 3 = -4    -10 % 3 = 2
+      10 / -3 = -3    10 % -3 = 1
+|#
+
+#! Demonstrates modulo returning Result(Int, DivError).
+fun modulo_demo(value: Int, divisor: Int) Result(Int, DivError)
+  return value % divisor
+end
+
+#! Demonstrates division returning Result(Int, DivError).
+fun div_demo(value: Int, divisor: Int) Result(Int, DivError)
+  return value / divisor
+end
+
+#! Demonstrates `if`, `elif`, and `else` conditional branching chains.
 fun port_from_int(value: Int) Result(Port, PortError)
   if value < MIN_PORT
     return Err(PortInvalid(value))
-  end
-
-  if value > MAX_PORT
+  elif value > MAX_PORT
     return Err(PortInvalid(value))
+  else
+    return Ok(Port(value))
   end
-
-  return Ok(Port(value))
 end
 
 fun port_value(port: Port) Int
@@ -445,13 +431,11 @@ end
 fun normalize(value: Int) Result(Int, RangeError)
   if value < ZERO_INT
     return Err(TooSmall(value))
-  end
-
-  if value > MAX_RANGE
+  elif value > MAX_RANGE
     return Err(TooLarge(value))
+  else
+    return Ok(value)
   end
-
-  return Ok(value)
 end
 
 fun double_positive(value: Int) Result(Int, RangeError)
@@ -462,16 +446,12 @@ fun double_positive(value: Int) Result(Int, RangeError)
   return Ok(value + value)
 end
 
-#! Compiler error if normalize or double_positive Result is discarded:
-#! use try or match both variants.
 fun range_workflow(input: Int) Result(Int, RangeError)
   val normalized = try normalize(input)
   val doubled = try double_positive(normalized)
   return Ok(doubled)
 end
 
-#! Explicit error conversion.
-#! Compiler error if a RangeError branch is missing: match must be exhaustive.
 fun range_to_app(error: RangeError) AppError
   match error
     TooSmall(value) => return AppRange(TooSmall(value))
@@ -479,8 +459,6 @@ fun range_to_app(error: RangeError) AppError
   end
 end
 
-#! Compiler error if RangeError is returned where AppError is expected:
-#! convert explicitly with range_to_app.
 fun app_workflow(input: Int) Result(Int, AppError)
   val normalized = match normalize(input)
     Ok(value) => value
@@ -498,17 +476,13 @@ end
 fun half_if_even(value: Int) Option(Int)
   if value == EVEN_TWO
     return Some(HALF_TWO)
-  end
-
-  if value == EVEN_FOUR
+  elif value == EVEN_FOUR
     return Some(HALF_FOUR)
+  else
+    return None
   end
-
-  return None
 end
 
-#! Demonstrates var for mutable local state.
-#! Compiler error if total or i is val: assignment requires var.
 fun sum_to(limit: Int) Int
   var total: Int = ZERO_INT
   var i: Int = ZERO_INT
@@ -521,11 +495,9 @@ fun sum_to(limit: Int) Int
   return total
 end
 
-#! Demonstrates break and continue.
-#! Compiler error if break or continue appears outside a loop.
 fun break_continue_demo() Int
   var total: Int = ZERO_INT
-  var i: Int = ZERO_INT # loop counter
+  var i: Int = ZERO_INT
 
   while true
     if i >= LOOP_LIMIT
@@ -544,8 +516,6 @@ fun break_continue_demo() Int
   return total
 end
 
-#! try works on Option here because the function returns Option.
-#! Compiler error if try on Option appears in a function that does not return Option.
 fun option_try_demo() Option(Int)
   val half = try half_if_even(EVEN_FOUR)
   return Some(half + HALF_TWO)
@@ -555,9 +525,6 @@ fun move_point(point: Point, dx: Int, dy: Int) Point
   return Point(x: point.x + dx, y: point.y + dy)
 end
 
-#! Consumes a linear Memory.Block on every path.
-#! Compiler error if deallocate is missing:
-#! linear value Memory.Block must be consumed.
 fun use_memory_block(block: Memory.Block, plan: &MemoryPlan) impure Result(U8, Memory.Error)
   val write_result = write_u8(&block, ZERO_USIZE, plan.byte)
 
@@ -575,15 +542,11 @@ fun memory_roundtrip(plan: &MemoryPlan) impure Result(U8, Memory.Error)
   return use_memory_block(block, plan)
 end
 
-#! T appears only in the return type.
-#! The compiler infers T from the call site.
 fun fail_free_vec<T>(vec: Collections.Vec(U8), error: Collections.Error) impure Result(T, Collections.Error)
   vec_free(vec)
   return Err(error)
 end
 
-#! T appears only in the return type.
-#! The compiler infers T from the call site.
 fun fail_free_map<T>(map: Collections.HashMap(U8, U8), error: Collections.Error) impure Result(T, Collections.Error)
   hash_map_free(map)
   return Err(error)
@@ -597,16 +560,26 @@ fun push_all_magic(vec: &mut Collections.Vec(U8)) impure Result(Unit, Collection
   return Ok(Unit)
 end
 
-#! Pushes valid UTF-8 bytes for String construction.
 fun push_string_bytes(vec: &mut Collections.Vec(U8)) impure Result(Unit, Collections.Error)
   try vec_push(vec, STRING_BYTE_0)
   try vec_push(vec, STRING_BYTE_1)
   try vec_push(vec, STRING_BYTE_2)
   try vec_push(vec, STRING_BYTE_3)
+  try vec_push(vec, STRING_BYTE_4)
+  try vec_push(vec, STRING_BYTE_5)
+  try vec_push(vec, STRING_BYTE_6)
+  try vec_push(vec, STRING_BYTE_7)
+  try vec_push(vec, STRING_BYTE_8)
+  try vec_push(vec, STRING_BYTE_9)
+  try vec_push(vec, STRING_BYTE_10)
+  try vec_push(vec, STRING_BYTE_11)
+  try vec_push(vec, STRING_BYTE_12)
+  try vec_push(vec, STRING_BYTE_13)
+  try vec_push(vec, STRING_BYTE_14)
   return Ok(Unit)
 end
 
-#! Rest pattern binds the remainder instead of discarding it.
+
 fun split_first(view: &[U8]) Option(SplitFirst)
   match view
     [] => return None
@@ -615,7 +588,6 @@ fun split_first(view: &[U8]) Option(SplitFirst)
   end
 end
 
-#! Demonstrates Vec, slice views, and rest patterns using binary magic bytes.
 fun vec_demo() impure Result(SplitFirst, Collections.Error)
   val vec = try vec_new[U8]()
 
@@ -637,7 +609,7 @@ fun vec_demo() impure Result(SplitFirst, Collections.Error)
   return result
 end
 
-#! Demonstrates String construction from valid UTF-8 bytes.
+#! Demonstrates String construction and Terminal printing.
 fun string_demo() impure Result(Usize, Collections.Error)
   val vec = try vec_new[U8]()
 
@@ -657,12 +629,14 @@ fun string_demo() impure Result(Usize, Collections.Error)
 
   val length = string_len(&string)
 
+  # Exercise native terminal printing
+  print_line(&string)
+
   string_free(string)
   vec_free(vec)
   return Ok(length)
 end
 
-#! Demonstrates HashMap insertion and retrieval.
 fun hash_map_demo() impure Result(U8, Collections.Error)
   val map = try hash_map_new[U8, U8]()
 
@@ -796,6 +770,34 @@ fun check_flags() Bool
   return active && admin
 end
 
+fun check_modulo() Bool
+  val rem1 = match modulo_demo(10, 3)
+    Ok(rem) => rem
+    Err(DivByZero) => SENTINEL_INT
+  end
+
+  val rem2 = match modulo_demo(14, 5)
+    Ok(rem) => rem
+    Err(DivByZero) => SENTINEL_INT
+  end
+
+  return rem1 == 1 && rem2 == 4
+end
+
+fun check_div() Bool
+  val q1 = match div_demo(21, 3)
+    Ok(quotient) => quotient
+    Err(DivByZero) => SENTINEL_INT
+  end
+
+  val q2 = match div_demo(21, 5)
+    Ok(quotient) => quotient
+    Err(DivByZero) => SENTINEL_INT
+  end
+
+  return q1 == 7 && q2 == 4
+end
+
 fun check_memory() impure Bool
   val plan = memory_plan()
   val result = memory_roundtrip(&plan)
@@ -818,9 +820,6 @@ fun check_binary() Bool
   end
 end
 
-#! This check can fail.
-#! It verifies known digests and verifies that distinct implementations
-#! produce distinct checksum values.
 fun check_trait() Bool
   val header = Header(kind: HEADER_KIND, flags: HEADER_FLAGS)
   val tag = Tag(value: TAG_VALUE)
@@ -894,12 +893,14 @@ fun reference_checks() impure ExitCode
   val break_continue_ok = check_break_continue()
   val struct_ok = check_struct()
   val flags_ok = check_flags()
+  val modulo_ok = check_modulo()
+  val div_ok = check_div()
   val memory_ok = check_memory()
   val binary_ok = check_binary()
   val trait_ok = check_trait()
   val collections_ok = check_collections()
 
-  val all_ok = range_ok && app_ok && port_ok && option_ok && option_try_ok && loop_ok && break_continue_ok && struct_ok && flags_ok && memory_ok && binary_ok && trait_ok && collections_ok
+  val all_ok = range_ok && app_ok && port_ok && option_ok && option_try_ok && loop_ok && break_continue_ok && struct_ok && flags_ok && modulo_ok && div_ok && memory_ok && binary_ok && trait_ok && collections_ok
 
   if all_ok
     return ExitSuccess
@@ -908,9 +909,6 @@ fun reference_checks() impure ExitCode
   return ExitFailure
 end
 
-#! Program entry point.
-#! Compiler error if any Runtime.Error branch is missing:
-#! match must be exhaustive.
 pub fun main() impure ExitCode
   match gate()
     Ok(Unit) => return reference_checks()

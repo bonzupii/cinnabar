@@ -1,0 +1,35 @@
+const OP_LOAD: Int = 0
+const OP_HALT: Int = 7
+
+pub const PROG: Int = (0x01) | (0x15 << 8) | (0x26 << 16) | (0x30 << 24) | (0x40 << 32) | (0x52 << 40) | (0x70 << 48)
+
+fun fetch(prog: Int, pc: Int) Int
+  return (prog >> (pc * 8)) & 0xFF
+end
+
+pub fun main() Int
+  var acc: Int = 0
+  var pc: Int = 0
+  var running: Bool = true
+
+  while running
+    val code = fetch(PROG, pc)
+    val op = code >> 4
+    val arg = code & 0xF
+
+    if op == OP_HALT
+      running = false
+      continue
+    end
+
+    if op == OP_LOAD
+      acc = arg
+      pc = pc + 1
+      continue
+    end
+
+    pc = pc + 1
+  end
+
+  return acc
+end

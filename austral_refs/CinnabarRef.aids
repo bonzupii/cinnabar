@@ -1,0 +1,230 @@
+module CinnabarRef is
+    -- Core Scalar Constants
+    constant SENTINEL_INT: Int64;
+    constant ZERO_INT: Int64;
+    constant GOOD_RANGE_INPUT: Int64;
+    constant SMALL_RANGE_INPUT: Int64;
+    constant LARGE_RANGE_INPUT: Int64;
+    constant GOOD_RANGE_OUTPUT: Int64;
+    constant MAX_RANGE: Int64;
+
+    constant GOOD_PORT: Int64;
+    constant BAD_PORT: Int64;
+    constant MIN_PORT: Int64;
+    constant MAX_PORT: Int64;
+
+    constant EVEN_TWO: Int64;
+    constant EVEN_FOUR: Int64;
+    constant HALF_TWO: Int64;
+    constant HALF_FOUR: Int64;
+
+    constant LOOP_LIMIT: Int64;
+    constant LOOP_EXPECTED: Int64;
+    constant BREAK_CONTINUE_EXPECTED: Int64;
+    constant OPTION_TRY_EXPECTED: Int64;
+
+    constant POINT_DX: Int64;
+    constant POINT_DY: Int64;
+
+    constant FLAG_ACTIVE: Int64;
+    constant FLAG_ADMIN: Int64;
+
+    constant MAGIC_U32: Nat32;
+    constant SENTINEL_U32: Nat32;
+
+    constant MAGIC_BYTE_0: Nat8;
+    constant MAGIC_BYTE_1: Nat8;
+    constant MAGIC_BYTE_2: Nat8;
+    constant MAGIC_BYTE_3: Nat8;
+
+    constant STRING_BYTE_0: Nat8;
+    constant STRING_BYTE_1: Nat8;
+    constant STRING_BYTE_2: Nat8;
+    constant STRING_BYTE_3: Nat8;
+
+    constant MEMORY_BYTE: Nat8;
+    constant MEMORY_SIZE: Index;
+    constant ZERO_USIZE: Index;
+    constant SENTINEL_USIZE: Index;
+
+    constant EXPECTED_REST_LEN: Index;
+    constant EXPECTED_STRING_LEN: Index;
+
+    constant HEADER_KIND: Nat32;
+    constant HEADER_FLAGS: Nat32;
+    constant TAG_VALUE: Nat32;
+    constant CHECKSUM_SALT: Nat32;
+
+    constant EXPECTED_HEADER_CHECKSUM: Nat32;
+    constant EXPECTED_TAG_CHECKSUM: Nat32;
+
+    -- Generic Result / Either Container.
+    -- Universe is `Type` because the type parameters are Type-universe
+    -- (instantiable with linear types).
+    union Result[T: Type, E: Type]: Type is
+        case Ok is
+            value: T;
+        case Err is
+            error: E;
+    end;
+
+    -- Note: Option and ExitCode come from the implicitly-imported
+    -- Austral.Pervasive prelude (which provides Some/None and
+    -- ExitSuccess/ExitFailure).  Pervasive ExitCode has no ExitDiagnostic
+    -- variant, so the gate's ProbeFailed arm maps to ExitFailure.
+
+    -- Domain Sum Types
+    union RangeError: Free is
+        case TooSmall is
+            val: Int64;
+        case TooLarge is
+            val: Int64;
+    end;
+
+    union PortError: Free is
+        case PortInvalid is
+            val: Int64;
+    end;
+
+    union AppError: Free is
+        case AppRange is
+            err: RangeError;
+        case AppPort is
+            err: PortError;
+    end;
+
+    union DivError: Free is
+        case DivByZero;
+    end;
+
+    -- Domain Product Structs
+    record Port: Free is
+        value: Int64;
+    end;
+
+    record Point: Free is
+        x: Int64;
+        y: Int64;
+    end;
+
+    record Header: Free is
+        kind: Nat32;
+        flags: Nat32;
+    end;
+
+    record Tag: Free is
+        value: Nat32;
+    end;
+
+    record MagicHeader: Free is
+        b0: Nat8;
+        b1: Nat8;
+        b2: Nat8;
+        b3: Nat8;
+        expected: Nat32;
+    end;
+
+    record MemoryPlan: Free is
+        size: Index;
+        byte: Nat8;
+    end;
+
+    record ChecksumExpectation: Free is
+        header: Nat32;
+        tag: Nat32;
+    end;
+
+    record SplitFirst: Free is
+        first: Nat8;
+        rest_len: Index;
+    end;
+
+    -- Linear Native Handles
+    record MemoryBlock: Linear is
+        size: Index;
+        id: Nat64;
+    end;
+
+    record Vector[T: Type]: Linear is
+        capacity: Index;
+        length: Index;
+    end;
+
+    record StringHandle: Linear is
+        length: Index;
+    end;
+
+    -- V is constrained to Free so the stored value can be read back
+    -- through a shared reference (as in Standard.Box.readFree).
+    record HashMapHandle[K: Type, V: Free]: Linear is
+        value: V;
+        count: Index;
+    end;
+
+    -- Error Enums for Native Surfaces
+    union RuntimeError: Free is
+        case NotReady;
+        case ProbeFailed is
+            code: Int64;
+    end;
+
+    union MemoryError: Free is
+        case AllocationFailed is
+            size: Index;
+        case AccessOutOfBounds is
+            offset: Index;
+            size: Index;
+    end;
+
+    union BinaryError: Free is
+        case MagicMismatch is
+            found: Nat32;
+    end;
+
+    union CollectionsError: Free is
+        case CollAllocationFailed is
+            size: Index;
+        case IndexOutOfBounds is
+            index: Index;
+        case KeyNotFound;
+        case EmptySlice;
+        case InvalidUtf8;
+    end;
+
+    -- Typeclasses (Traits)
+    typeclass Checksum(T: Type) is
+        generic [R: Region]
+        method checksum(val: &[T, R]): Nat32;
+    end;
+
+    -- Runtime Surface (native in the spec; stubbed here)
+    function self_check(): Result[Unit, RuntimeError];
+    function gate(): Result[Unit, RuntimeError];
+
+    -- Collections Surfaces
+    function string_from_slice(b0: Nat8, b1: Nat8, b2: Nat8, b3: Nat8): Result[StringHandle, CollectionsError];
+
+    generic [R: Region]
+    function string_len(str: &[StringHandle, R]): Index;
+
+    function string_free(str: StringHandle): Unit;
+
+    generic [K: Type, V: Free]
+    function hash_map_new(): Result[HashMapHandle[K, V], CollectionsError];
+
+    generic [K: Type, V: Free, R: Region]
+    function hash_map_insert(map: &![HashMapHandle[K, V], R], key: K, val: V): Result[Unit, CollectionsError];
+
+    generic [K: Type, V: Free, R: Region]
+    function hash_map_get(map: &[HashMapHandle[K, V], R], key: K): Result[V, CollectionsError];
+
+    generic [K: Type, V: Free]
+    function hash_map_free(map: HashMapHandle[K, V]): Unit;
+
+    -- Terminal Surface
+    generic [R: Region]
+    function print_line(str: &[StringHandle, R]): Unit;
+
+    -- Main Entry Point
+    function main(): ExitCode;
+end module.

@@ -1,0 +1,21 @@
+pub mod Memory
+  pub native type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub AccessOutOfBounds(Usize, Usize)
+  end
+  pub native fun allocate(size: Usize) impure Result(Block, Error)
+  pub native fun deallocate(block: Block) impure Unit
+end
+
+use Memory.allocate
+use Memory.deallocate
+
+pub fun main() Int
+  val block = match allocate(1)
+    Ok(b) => b
+    Err(error) => return 1
+  end
+  deallocate(block)
+  return 0
+end

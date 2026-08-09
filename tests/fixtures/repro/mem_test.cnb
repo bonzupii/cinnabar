@@ -1,0 +1,52 @@
+pub mod Memory
+  pub native type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub AccessOutOfBounds(Usize, Usize)
+  end
+  pub native fun allocate(size: Usize) impure Result(Block, Error)
+  pub native fun deallocate(block: Block) impure Unit
+  pub native fun write_u8(block: &Block, offset: Usize, value: U8) impure Result(Unit, Error)
+  pub native fun read_u8(block: &Block, offset: Usize) impure Result(U8, Error)
+end
+
+use Memory.allocate
+use Memory.deallocate
+use Memory.write_u8
+use Memory.read_u8
+
+fun fail_alloc() Int
+  return 1
+end
+
+fun fail_write(block: Memory.Block) Int
+  deallocate(block)
+  return 2
+end
+
+fun fail_read(block: Memory.Block) Int
+  deallocate(block)
+  return 3
+end
+
+pub fun main() Int
+  val block = match allocate(1)
+    Ok(b) => b
+    Err(error) => return fail_alloc()
+  end
+
+  val w = write_u8(&block, 0, 0x41)
+  match w
+    Ok(Unit) => Unit
+    Err(error) => return fail_write(block)
+  end
+
+  val r = read_u8(&block, 0)
+  val value = match r
+    Ok(v) => v
+    Err(error) => return fail_read(block)
+  end
+
+  deallocate(block)
+  return 0
+end

@@ -24,6 +24,8 @@
             clippy
             pkg-config
             semgrep
+            valgrind
+            gdb
           ];
 
           shellHook = ''
@@ -31,6 +33,7 @@
             echo "Rust $(rustc --version)"
             export NIX_CFLAGS_COMPILE=""
             export NIX_HARDENING_ENABLE=""
+            export RUST_BACKTRACE=full
           '';
         };
       }

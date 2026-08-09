@@ -1,0 +1,13 @@
+pub const ZERO_INT: Int = 0
+
+pub fun sum_to(limit: Int) Int
+  var total: Int = ZERO_INT
+  var i: Int = ZERO_INT
+  total = total + i
+  i = i + 1
+  return total
+end
+
+pub fun main() Int
+  return sum_to(3)
+end

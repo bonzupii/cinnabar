@@ -1,0 +1,52 @@
+pub const PROG: Int = (0x00) | (0x12 << 8) | (0x65 << 16) | (0x30 << 24) | (0x52 << 32) | (0x70 << 40)
+
+pub fun main() Int
+  var pc: Int = 0
+  var running: Bool = true
+  var count: Int = 0
+
+  while running
+    val code = (PROG >> (pc * 8)) & 0xFF
+    val op = code >> 4
+    val arg = code & 0xF
+
+    if op == 7
+      running = false
+      continue
+    end
+
+    if op == 0
+      pc = 1
+      continue
+    end
+
+    if op == 1
+      pc = 2
+      continue
+    end
+
+    if op == 6
+      count = count + 1
+      if arg == 5
+        pc = 5
+        continue
+      end
+      pc = pc + 1
+      continue
+    end
+
+    if op == 3
+      pc = pc + 1
+      continue
+    end
+
+    if op == 5
+      pc = arg
+      continue
+    end
+
+    pc = pc + 1
+  end
+
+  return count
+end

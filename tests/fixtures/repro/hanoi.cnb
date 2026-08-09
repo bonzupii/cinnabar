@@ -1,0 +1,27 @@
+#! hanoi.cnb
+#! Towers of Hanoi recursive solver.
+#! Returns the move count for DISKS disks. Optimal solution = 2^DISKS - 1.
+#! main returns Int = process exit code.
+
+pub const DISKS: Int = 8
+
+pub type MoveCount
+  pub moves: Int
+end
+
+fun hanoi_moves(disks: Int) Int
+  if disks <= 0
+    return 0
+  end
+  val rest = hanoi_moves(disks - 1)
+  return rest + rest + 1
+end
+
+fun hanoi(n: Int) MoveCount
+  return MoveCount(moves: hanoi_moves(n))
+end
+
+pub fun main() Int
+  val result = hanoi(DISKS)
+  return result.moves
+end

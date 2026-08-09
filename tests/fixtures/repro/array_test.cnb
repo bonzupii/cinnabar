@@ -1,0 +1,12 @@
+pub const MAGIC_BYTE_0: U8 = 0x0D
+pub const MAGIC_BYTE_1: U8 = 0xF0
+
+fun array_probe() Int
+  val bytes: [U8; 2] = [MAGIC_BYTE_0, MAGIC_BYTE_1]
+  val first = bytes[0]
+  return 0
+end
+
+pub fun main() Int
+  return array_probe()
+end

@@ -1,0 +1,37 @@
+#! fib.cnb
+#! Fibonacci and an even-term sum, exercise 2.
+#! main returns an Int that maps directly to the process exit code.
+
+const TEN: Int = 10
+
+fun fib(n: Int) Int
+  var a: Int = 0
+  var b: Int = 1
+  var i: Int = 0
+  while i < n
+    val nxt: Int = a + b
+    a = b
+    b = nxt
+    i = i + 1
+  end
+  return a
+end
+
+fun sum_even_fib_below(cap: Int) Int
+  var sum: Int = 0
+  var a: Int = 1
+  var b: Int = 1
+  while b < cap
+    if (b & 1) == 0
+      sum = sum + b
+    end
+    val nxt: Int = a + b
+    a = b
+    b = nxt
+  end
+  return sum
+end
+
+pub fun main() Int
+  return fib(TEN) + sum_even_fib_below(4000000)
+end

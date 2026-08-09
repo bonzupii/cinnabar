@@ -5,3 +5,7 @@ inner
 |#
 still outer
 |#
+
+pub fun main() Int
+  return 0
+end

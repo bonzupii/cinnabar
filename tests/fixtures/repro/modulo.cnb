@@ -1,0 +1,13 @@
+#! % returns Result(Int, DivError); a non-zero divisor at runtime is Ok.
+pub fun main() Int
+  var x: Int = 17
+  var y: Int = 5
+  val rem = match x % y
+    Ok(value) => value
+    Err(DivByZero) => 0
+  end
+  if rem == 2
+    return 42
+  end
+  return 41
+end

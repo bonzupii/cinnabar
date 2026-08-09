@@ -590,9 +590,9 @@ fn dump_arm_list(names: &[String], nodes: &[i64], lists: &[Vec<i64>], list: i64,
         let arm = list_get(lists, list, idx);
         let pad = pad_str(depth);
         println!("{}Arm(pattern: ", pad);
-        dump_pat(names, nodes, lists, node_d(nodes, arm), depth + 1);
+        dump_pat(names, nodes, lists, node_a(nodes, arm), depth + 1);
         println!("{}body:", pad);
-        dump_stmt_list(names, nodes, lists, node_e(nodes, arm), depth + 1);
+        dump_stmt_list(names, nodes, lists, node_b(nodes, arm), depth + 1);
         println!("{})", pad);
         idx += 1;
     }
@@ -666,6 +666,8 @@ fn bin_name(op: i64) -> &'static str {
         "*"
     } else if op == BIN_DIV {
         "/"
+    } else if op == BIN_MOD {
+        "%"
     } else if op == BIN_SHL {
         "<<"
     } else if op == BIN_SHR {

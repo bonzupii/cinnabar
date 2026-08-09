@@ -1,0 +1,274 @@
+#! Euclidean division verification fixture.
+#!
+#! `/` and `%` on Int use Euclidean division: the remainder is always
+#! non-negative (0 <= r < abs(divisor)), regardless of operand signs.
+#!
+#! Each line prints "a/b=q r" for one (a, b) pair — the quotient of `a / b`
+#! and the remainder of `a % b`, computed at runtime by the compiled
+#! program and printed to stdout so the actual results are visible.  The
+#! Rust oracle in tests/verify_math.rs recomputes these values
+#! independently and compares them against this output line by line.
+#!
+#!   10 / 3  =  3    10 % 3  =  1
+#!   21 / 3  =  7    21 % 3  =  0
+#!   21 / 5  =  4    21 % 5  =  1
+#!  -10 / 3  = -4   -10 % 3  =  2
+#!   10 / -3 = -3    10 % -3 =  1
+#!  -10 / -3 =  4   -10 % -3 =  2
+
+pub const MINUS: U8 = 0x2D
+pub const ZERO_DIGIT: U8 = 0x30
+pub const SLASH: U8 = 0x2F
+pub const EQUALS: U8 = 0x3D
+pub const SPACE: U8 = 0x20
+
+pub type ExitCode
+  pub ExitSuccess
+  pub ExitFailure
+  pub ExitDiagnostic(Int)
+end
+
+pub mod Collections
+  pub nat type Vec(T)
+  pub nat type String
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+    pub KeyNotFound
+    pub EmptySlice
+    pub InvalidUtf8
+  end
+
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_push<T>(
+    vec: &mut Vec(T),
+    value: T
+  ) impure Result(Unit, Error)
+
+  pub nat fun vec_view<T>(vec: &Vec(T)) &[T]
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
+  pub nat fun string_from_slice(view: &[U8]) impure Result(String, Error)
+  pub nat fun string_free(value: String) impure Unit
+end
+
+pub mod Terminal
+  pub nat fun print(text: &Collections.String) impure Unit
+  pub nat fun print_line(text: &Collections.String) impure Unit
+end
+
+use Collections.vec_new
+use Collections.vec_push
+use Collections.vec_view
+use Collections.vec_free
+use Collections.string_from_slice
+use Collections.string_free
+use Terminal.print
+use Terminal.print_line
+
+#! ASCII byte for one decimal digit (0-9): '0'..'9'.  A remainder from
+#! Euclidean `% 10` is always in 0..=9, so the final else is the 9 case.
+fun digit_byte(digit: Int) U8
+  if digit == 0
+    return 0x30
+  elif digit == 1
+    return 0x31
+  elif digit == 2
+    return 0x32
+  elif digit == 3
+    return 0x33
+  elif digit == 4
+    return 0x34
+  elif digit == 5
+    return 0x35
+  elif digit == 6
+    return 0x36
+  elif digit == 7
+    return 0x37
+  elif digit == 8
+    return 0x38
+  else
+    return 0x39
+  end
+end
+
+#! Frees the vec and returns the error (linearity: vec consumed once).
+fun fail_free_vec<T>(vec: Collections.Vec(U8), error: Collections.Error) Result(T, Collections.Error)
+  vec_free(vec)
+  return Err(error)
+end
+
+#! Appends the decimal digits of `value` (>= 0) to `vec`, most significant
+#! first, extracting digits with Euclidean division by 10.
+fun append_int_digits(vec: &mut Collections.Vec(U8), value: Int) Result(Unit, Collections.Error)
+  val quotient = match value / 10
+    Ok(qv) => qv
+    Err(DivByZero) => 0
+  end
+
+  if quotient != 0
+    try append_int_digits(vec, quotient)
+  end
+
+  val remainder = match value % 10
+    Ok(rv) => rv
+    Err(DivByZero) => 0
+  end
+
+  try vec_push(vec, digit_byte(remainder))
+  return Ok(Unit)
+end
+
+#! Prints `value` as a decimal string; `newline` selects print_line vs print.
+fun print_int(value: Int, newline: Bool) Result(Unit, Collections.Error)
+  val vec = try vec_new[U8]()
+
+  if value < 0
+    val minus_result = vec_push(&mut vec, MINUS)
+    match minus_result
+      Ok(Unit) => Unit
+      Err(error) => return fail_free_vec(vec, error)
+    end
+  end
+
+  var magnitude: Int = value
+  if magnitude < 0
+    magnitude = -magnitude
+  end
+
+  if magnitude == 0
+    val zero_result = vec_push(&mut vec, ZERO_DIGIT)
+    match zero_result
+      Ok(Unit) => Unit
+      Err(error) => return fail_free_vec(vec, error)
+    end
+  else
+    val digits_result = append_int_digits(&mut vec, magnitude)
+    match digits_result
+      Ok(Unit) => Unit
+      Err(error) => return fail_free_vec(vec, error)
+    end
+  end
+
+  val view = vec_view(&vec)
+  val string = match string_from_slice(view)
+    Ok(s) => s
+    Err(error) => return fail_free_vec(vec, error)
+  end
+
+  if newline
+    print_line(&string)
+  else
+    print(&string)
+  end
+
+  string_free(string)
+  vec_free(vec)
+  return Ok(Unit)
+end
+
+#! Variant of print_int without the conditional print, for bisection.
+fun print_int_plain(value: Int) Result(Unit, Collections.Error)
+  val vec = try vec_new[U8]()
+
+  if value < 0
+    val minus_result = vec_push(&mut vec, MINUS)
+    match minus_result
+      Ok(Unit) => Unit
+      Err(error) => return fail_free_vec(vec, error)
+    end
+  end
+
+  var magnitude: Int = value
+  if magnitude < 0
+    magnitude = -magnitude
+  end
+
+  if magnitude == 0
+    val zero_result = vec_push(&mut vec, ZERO_DIGIT)
+    match zero_result
+      Ok(Unit) => Unit
+      Err(error) => return fail_free_vec(vec, error)
+    end
+  else
+    val digits_result = append_int_digits(&mut vec, magnitude)
+    match digits_result
+      Ok(Unit) => Unit
+      Err(error) => return fail_free_vec(vec, error)
+    end
+  end
+
+  val view = vec_view(&vec)
+  val string = match string_from_slice(view)
+    Ok(s) => s
+    Err(error) => return fail_free_vec(vec, error)
+  end
+
+  print_line(&string)
+
+  string_free(string)
+  vec_free(vec)
+  return Ok(Unit)
+end
+
+#! Prints one one-byte piece (a separator) without a newline.
+fun print_byte_string(byte: U8) Result(Unit, Collections.Error)
+  val vec = try vec_new[U8]()
+
+  val push_result = vec_push(&mut vec, byte)
+  match push_result
+    Ok(Unit) => Unit
+    Err(error) => return fail_free_vec(vec, error)
+  end
+
+  val view = vec_view(&vec)
+  val string = match string_from_slice(view)
+    Ok(s) => s
+    Err(error) => return fail_free_vec(vec, error)
+  end
+
+  print(&string)
+  string_free(string)
+  vec_free(vec)
+  return Ok(Unit)
+end
+
+#! Prints one line "a/b=q r" for the Euclidean quotient and remainder.
+fun print_div_rem(a: Int, b: Int) Result(Unit, Collections.Error)
+  try print_int(a, false)
+  try print_byte_string(SLASH)
+  try print_int(b, false)
+  try print_byte_string(EQUALS)
+
+  val quotient = match a / b
+    Ok(qv) => qv
+    Err(DivByZero) => 0
+  end
+  try print_int(quotient, false)
+
+  try print_byte_string(SPACE)
+
+  val remainder = match a % b
+    Ok(rv) => rv
+    Err(DivByZero) => 0
+  end
+  try print_int(remainder, true)
+  return Ok(Unit)
+end
+
+fun run_all() Result(Unit, Collections.Error)
+  try print_div_rem(10, 3)
+  try print_div_rem(21, 3)
+  try print_div_rem(21, 5)
+  try print_div_rem(-10, 3)
+  try print_div_rem(10, -3)
+  try print_div_rem(-10, -3)
+  return Ok(Unit)
+end
+
+pub fun main() impure ExitCode
+  match run_all()
+    Ok(Unit) => return ExitSuccess
+    Err(error) => return ExitFailure
+  end
+end

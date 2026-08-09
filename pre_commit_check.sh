@@ -88,7 +88,8 @@ expect_failure "CLI with no arguments" cargo run --quiet
 run_check "Constructor fixture parses, resolves, and type-checks" cargo run --quiet -- tests/fixtures/constructor_parse.cnb
 run_check "pub use re-export parses, resolves, and type-checks" cargo run --quiet -- tests/fixtures/pub_use.cnb
 run_check "Multi-file external module import parses, loads, resolves, and type-checks" cargo run --quiet -- tests/fixtures/multi_file/main.cnb
-run_check "Reference specification (spec.cnb) parses, resolves, and type-checks cleanly" cargo run --quiet -- tests/fixtures/spec.cnb
+run_check "Reference specification (spec.cnb) compiles to a binary" cargo run --quiet -- tests/fixtures/spec.cnb
+run_check "Reference specification binary executes and passes every self-check (exit 0)" tests/fixtures/spec
 
 # AST Dump Verification (AST pattern checked, raw AST omitted from log)
 run_check_ast "AST dump for constructor_parse.cnb contains Const nodes" bash -c "cargo run --quiet -- tests/fixtures/constructor_parse.cnb --dump-ast | grep -q 'Const('"
@@ -111,6 +112,9 @@ expect_failure "Rejecting nested block comment (lexer)" cargo run --quiet -- tes
 expect_failure "Rejecting nested block comment (standalone)" cargo run --quiet -- tests/fixtures/invalid_nested_block_comment.cnb
 expect_failure "Rejecting comprehensive resolver & typechecker error suite" cargo run --quiet -- tests/fixtures/invalid_resolver_and_typechecker.cnb
 expect_failure "Rejecting missing input file" cargo run --quiet -- tests/fixtures/does_not_exist.cnb
+
+# 5. Cleanup: remove compiled fixture binaries (keep the cargo cache)
+rm -f tests/fixtures/spec tests/fixtures/constructor_parse tests/fixtures/pub_use tests/fixtures/multi_file/main
 
 echo ""
 echo -e "${GREEN}=================================================="

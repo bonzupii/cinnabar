@@ -5,3 +5,8 @@ pub mod Binary
 end
 
 pub use Binary.check_magic as verify_magic
+
+pub fun main() Int
+  verify_magic()
+  return 0
+end

@@ -1,3 +1,8 @@
 pub fun test_func() Unit
   val p = Memory.Block(x: 10)
 end
+
+pub fun main() Int
+  test_func()
+  return 0
+end

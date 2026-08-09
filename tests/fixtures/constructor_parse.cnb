@@ -1,14 +1,5 @@
 pub const DEFAULT_PORT: Int = 8080 # trailing ordinary comments are legal
 
-pub type Unit
-  pub Unit
-end
-
-pub type Option(T)
-  pub Some(T)
-  pub None
-end
-
 pub type Port
   pub Port(Int)
 end

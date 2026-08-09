@@ -1,0 +1,512 @@
+#!|
+  Cinnabar version one reference implementation.
+
+  This program exercises modules, traits, generics, fixed-size arrays,
+  slices, rest patterns, growable collections, bitwise math, opaque native
+  memory handles, explicit Result handling, explicit Option handling,
+  structs, visibility, imports, loop control, and compiler-enforced casing.
+
+  Casing:
+  - functions, val names, and var names: snake_case
+  - types, traits, modules, enum variants: PascalCase
+  - constants: SCREAMING_SNAKE_CASE
+
+  Bindings:
+  - const: compile-time constant
+  - val: immutable local binding
+  - var: mutable local binding
+
+  Borrowing:
+  - &T is a shared borrow
+  - &mut T is an exclusive mutable borrow
+  - borrow scopes are flow-sensitive and cannot outlive the owner
+  - no lifetime annotations exist
+  - ambiguous returned borrows are compiler errors
+  - linear handles must be consumed exactly once
+
+  Generics:
+  - type constructors use parentheses: Vec(T)
+  - function type parameters use angle brackets: fun f<T>
+  - explicit call-site instantiation uses square brackets: f[U8]()
+  - return-type-only type parameters are inferred from call context
+
+  Control flow:
+  - while supports break and continue
+  - try works for Result and Option
+  - use imports are explicit and may alias with as
+  - slice and array rest patterns must bind remaining elements
+  - trailing comments may appear after any line of code
+
+  Visibility:
+  - declarations are private by default
+  - pub exposes a declaration
+  - pub on local val/var is a compiler error
+  - pub inside a private mod is legal but not externally reachable until the mod is pub
+  - compiler diagnostics are errors only; no warning severity
+|#
+
+# This is an ordinary comment.
+#! This is a documentation comment.
+#|
+  This is a block comment.
+|#
+#!|
+  This is a block documentation comment.
+|#
+
+pub const SENTINEL_INT: Int = 999999 # Trailing comments may follow any line of code.
+pub const ZERO_INT: Int = 0
+
+pub const GOOD_RANGE_INPUT: Int = 21
+pub const SMALL_RANGE_INPUT: Int = -1
+pub const LARGE_RANGE_INPUT: Int = 101
+pub const GOOD_RANGE_OUTPUT: Int = 42
+pub const MAX_RANGE: Int = 100
+
+pub const GOOD_PORT: Int = 8080
+pub const BAD_PORT: Int = 0
+pub const MIN_PORT: Int = 1
+pub const MAX_PORT: Int = 65535
+
+pub const EVEN_TWO: Int = 2
+pub const EVEN_FOUR: Int = 4
+pub const HALF_TWO: Int = 1
+pub const HALF_FOUR: Int = 2
+
+pub const LOOP_LIMIT: Int = 5
+pub const LOOP_EXPECTED: Int = 10
+pub const BREAK_CONTINUE_EXPECTED: Int = 13
+pub const OPTION_TRY_EXPECTED: Int = 3
+
+pub const POINT_DX: Int = 3
+pub const POINT_DY: Int = 4
+
+pub const FLAG_ACTIVE: Int = 1
+pub const FLAG_ADMIN: Int = 2
+
+pub const MAGIC_U32: U32 = 0x0BADF00D
+pub const SENTINEL_U32: U32 = 0xFFFFFFFF
+
+pub const MAGIC_BYTE_0: U8 = 0x0D
+pub const MAGIC_BYTE_1: U8 = 0xF0
+pub const MAGIC_BYTE_2: U8 = 0xAD
+pub const MAGIC_BYTE_3: U8 = 0x0B
+
+pub const STRING_BYTE_0: U8 = 0x43 # UTF-8 'C'
+pub const STRING_BYTE_1: U8 = 0x69 # UTF-8 'i'
+pub const STRING_BYTE_2: U8 = 0x6E # UTF-8 'n'
+pub const STRING_BYTE_3: U8 = 0x21 # UTF-8 '!'
+
+pub const MEMORY_BYTE: U8 = 0xA5
+pub const MEMORY_SIZE: Usize = 1
+pub const ZERO_USIZE: Usize = 0
+pub const SENTINEL_USIZE: Usize = 999999
+
+pub const EXPECTED_REST_LEN: Usize = 3
+pub const EXPECTED_STRING_LEN: Usize = 4
+
+pub const HEADER_KIND: U32 = 7
+pub const HEADER_FLAGS: U32 = 3
+pub const TAG_VALUE: U32 = 0x5A
+pub const CHECKSUM_SALT: U32 = 0x0F
+
+#! Expected checksum for Header(kind: HEADER_KIND, flags: HEADER_FLAGS).
+pub const EXPECTED_HEADER_CHECKSUM: U32 = 0x00070304
+
+#! Expected checksum for Tag(value: TAG_VALUE).
+pub const EXPECTED_TAG_CHECKSUM: U32 = 0x00000055
+
+# Core algebraic types.
+pub type ExitCode
+  pub ExitSuccess
+  pub ExitFailure
+  pub ExitDiagnostic(Int)
+end
+
+pub type RangeError
+  pub TooSmall(Int)
+  pub TooLarge(Int)
+end
+
+pub type PortError
+  pub PortInvalid(Int)
+end
+
+pub type AppError
+  pub AppRange(RangeError)
+  pub AppPort(PortError)
+end
+
+pub type Port
+  pub Port(Int)
+end
+
+pub type Point
+  pub x: Int
+  pub y: Int
+end
+
+pub type Header
+  pub kind: U32
+  pub flags: U32
+end
+
+pub type Tag
+  pub value: U32
+end
+
+#! Groups binary magic data that is always passed together.
+pub type MagicHeader
+  pub bytes: [U8; 4]
+  pub expected: U32
+end
+
+#! Groups memory test parameters that are always used together.
+pub type MemoryPlan
+  pub size: Usize
+  pub byte: U8
+end
+
+#! Groups expected trait-check digests that are always compared together.
+pub type ChecksumExpectation
+  pub header: U32
+  pub tag: U32
+end
+
+#! Groups the first byte of a slice and the length of the remaining slice.
+pub type SplitFirst
+  pub first: U8
+  pub rest_len: Usize
+end
+
+#! Runtime is a public mod.
+pub mod Runtime
+  pub type Error
+    pub NotReady
+    pub ProbeFailed(Int)
+  end
+
+  pub native fun self_check() impure Result(Unit, Error)
+
+  #! Compiler error if a local inside probe_twice were marked pub:
+  #!   pub val probe_count: Int = 2
+  #! pub cannot appear on local val/var.
+  fun probe_twice() impure Result(Unit, Error)
+    try self_check()
+    try self_check()
+    return Ok(Unit)
+  end
+
+  #! Compiler errors:
+  #! - unhandled Result from Runtime.gate: propagate with try or match both variants
+  #! - missing Runtime.Error branch: match must be exhaustive
+  pub fun gate() impure Result(Unit, Error)
+    try probe_twice()
+    return Ok(Unit)
+  end
+end
+
+#! Memory is a public mod.
+#|
+  Raw memory quarantine.
+
+  Cinnabar code sees opaque Block handles.
+  It never sees pointers.
+|#
+pub mod Memory
+  #! Block is a linear handle.
+  #! Compiler errors:
+  #! - dropping Block without deallocate: linear value Memory.Block must be consumed
+  #! - using Block after deallocate: value used after move
+  #! - duplicating Block: linear value cannot be copied
+  pub native type Block
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub AccessOutOfBounds(Usize, Usize)
+  end
+
+  pub native fun allocate(size: Usize) impure Result(Block, Error)
+
+  pub native fun deallocate(block: Block) impure Unit
+
+  pub native fun write_u8(
+    block: &Block,
+    offset: Usize,
+    value: U8
+  ) impure Result(Unit, Error)
+
+  pub native fun read_u8(
+    block: &Block,
+    offset: Usize
+  ) impure Result(U8, Error)
+end
+
+#! Binary is a public mod.
+#|
+  Binary parsing helpers.
+|#
+pub mod Binary
+  pub type Error
+    pub MagicMismatch(U32)
+  end
+
+  # Private helper.
+  fun combine_le_bytes(b0: U8, b1: U8, b2: U8, b3: U8) U32
+    val v0 = U32.from_u8(b0)
+    val v1 = U32.from_u8(b1)
+    val v2 = U32.from_u8(b2)
+    val v3 = U32.from_u8(b3)
+
+    return (v3 << 24) | (v2 << 16) | (v1 << 8) | v0
+  end
+
+  # Private helper.
+  fun u32_from_le_bytes(bytes: [U8; 4]) U32
+    match bytes
+      [b0, b1, b2, b3] => return combine_le_bytes(b0, b1, b2, b3)
+    end
+  end
+
+  #! Compiler errors:
+  #! - unhandled Result: propagate with try or match MagicMismatch explicitly
+  pub fun check_magic(header: &MagicHeader) Result(Unit, Error)
+    val value = u32_from_le_bytes(header.bytes)
+
+    if value == header.expected
+      return Ok(Unit)
+    end
+
+    return Err(MagicMismatch(value))
+  end
+end
+
+#! Slice is a public mod.
+pub mod Slice
+  pub native fun len<T>(view: &[T]) Usize
+end
+
+#! Collections is a public mod.
+#! These are the standard growable collection surfaces required for self-hosting.
+pub mod Collections
+  pub native type Vec(T)
+
+  #! String is UTF-8 validated.
+  #! string_from_slice returns InvalidUtf8 for malformed input.
+  pub native type String
+
+  pub native type HashMap(K, V)
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+    pub KeyNotFound
+    pub EmptySlice
+    pub InvalidUtf8
+  end
+
+  pub native fun vec_new<T>() impure Result(Vec(T), Error)
+
+  pub native fun vec_push<T>(
+    vec: &mut Vec(T),
+    value: T
+  ) impure Result(Unit, Error)
+
+  pub native fun vec_view<T>(vec: &Vec(T)) &[T]
+
+  pub native fun vec_free<T>(vec: Vec(T)) impure Unit
+
+  pub native fun string_from_slice(view: &[U8]) impure Result(String, Error)
+
+  pub native fun string_len(value: &String) Usize
+
+  pub native fun string_free(value: String) impure Unit
+
+  pub native fun hash_map_new<K, V>() impure Result(HashMap(K, V), Error)
+
+  pub native fun hash_map_insert<K, V>(
+    map: &mut HashMap(K, V),
+    key: K,
+    value: V
+  ) impure Result(Unit, Error)
+
+  pub native fun hash_map_get<K, V>(
+    map: &HashMap(K, V),
+    key: K
+  ) impure Result(V, Error)
+
+  pub native fun hash_map_free<K, V>(map: HashMap(K, V)) impure Unit
+end
+
+#! Explicit imports.
+#! Unknown or unused imports are compiler errors.
+use Runtime.gate
+use Memory.allocate
+use Memory.deallocate
+use Memory.write_u8
+use Memory.read_u8
+use Binary.check_magic as verify_magic
+use Slice.len as slice_len
+use Collections.vec_new
+use Collections.vec_push
+use Collections.vec_view
+use Collections.vec_free
+use Collections.string_from_slice
+use Collections.string_len
+use Collections.string_free
+use Collections.hash_map_new
+use Collections.hash_map_insert
+use Collections.hash_map_get
+use Collections.hash_map_free
+
+# Trait-based polymorphism.
+pub trait Checksum
+  pub fun checksum(value: &Self) U32
+end
+
+pub impl Checksum for Header
+  pub fun checksum(value: &Header) U32
+    return ((value.kind << 16) ^ (value.flags << 8) ^ value.kind ^ value.flags)
+  end
+end
+
+pub impl Checksum for Tag
+  pub fun checksum(value: &Tag) U32
+    return value.value ^ CHECKSUM_SALT
+  end
+end
+
+#! Compiler error if T does not implement Checksum:
+#! implement Checksum for T.
+fun checksum_value<T: Checksum>(value: &T) U32
+  return Checksum.checksum(value)
+end
+
+#! Groups magic bytes and expected magic value.
+fun magic_header() MagicHeader
+  return MagicHeader(
+    bytes: [MAGIC_BYTE_0, MAGIC_BYTE_1, MAGIC_BYTE_2, MAGIC_BYTE_3],
+    expected: MAGIC_U32
+  )
+end
+
+#! Groups memory test parameters.
+fun memory_plan() MemoryPlan
+  return MemoryPlan(
+    size: MEMORY_SIZE,
+    byte: MEMORY_BYTE
+  )
+end
+
+#! Groups expected checksum digests.
+fun checksum_expectation() ChecksumExpectation
+  return ChecksumExpectation(
+    header: EXPECTED_HEADER_CHECKSUM,
+    tag: EXPECTED_TAG_CHECKSUM
+  )
+end
+
+#! Validates an Int and constructs a nominal Port.
+#! Compiler errors:
+#! - using Int where Port is expected: call port_from_int and handle Result
+#! - discarding this Result: use try or match both variants
+fun port_from_int(value: Int) Result(Port, PortError)
+  if value < MIN_PORT
+    return Err(PortInvalid(value))
+  end
+
+  if value > MAX_PORT
+    return Err(PortInvalid(value))
+  end
+
+  return Ok(Port(value))
+end
+
+fun port_value(port: Port) Int
+  match port
+    Port(value) => return value
+  end
+end
+
+fun normalize(value: Int) Result(Int, RangeError)
+  if value < ZERO_INT
+    return Err(TooSmall(value))
+  end
+
+  if value > MAX_RANGE
+    return Err(TooLarge(value))
+  end
+
+  return Ok(value)
+end
+
+fun double_positive(value: Int) Result(Int, RangeError)
+  if value < ZERO_INT
+    return Err(TooSmall(value))
+  end
+
+  return Ok(value + value)
+end
+
+#! Compiler error if normalize or double_positive Result is discarded:
+#! use try or match both variants.
+fun range_workflow(input: Int) Result(Int, RangeError)
+  val normalized = try normalize(input)
+  val doubled = try double_positive(normalized)
+  return Ok(doubled)
+end
+
+#! Explicit error conversion.
+#! Compiler error if a RangeError branch is missing: match must be exhaustive.
+fun range_to_app(error: RangeError) AppError
+  match error
+    TooSmall(value) => return AppRange(TooSmall(value))
+    TooLarge(value) => return AppRange(TooLarge(value))
+  end
+end
+
+#! Compiler error if RangeError is returned where AppError is expected:
+#! convert explicitly with range_to_app.
+fun app_workflow(input: Int) Result(Int, AppError)
+  val normalized = match normalize(input)
+    Ok(value) => value
+    Err(error) => return Err(range_to_app(error))
+  end
+
+  val doubled = match double_positive(normalized)
+    Ok(value) => value
+    Err(error) => return Err(range_to_app(error))
+  end
+
+  return Ok(doubled)
+end
+
+fun half_if_even(value: Int) Option(Int)
+  if value == EVEN_TWO
+    return Some(HALF_TWO)
+  end
+
+  if value == EVEN_FOUR
+    return Some(HALF_FOUR)
+  end
+
+  return None
+end
+
+#! Demonstrates var for mutable local state.
+#! Compiler error if total or i is val: assignment requires var.
+fun sum_to(limit: Int) Int
+  var total: Int = ZERO_INT
+  var i: Int = ZERO_INT
+
+  while i < limit
+    total = total + i
+    i = i + 1
+  end
+
+  return total
+end
+
+pub fun main() Int
+  return sum_to(LOOP_LIMIT)
+end

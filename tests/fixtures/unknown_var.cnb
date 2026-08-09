@@ -1,3 +1,7 @@
 pub fun test_func() Int
   return unknown_variable
 end
+
+pub fun main() Int
+  return test_func()
+end

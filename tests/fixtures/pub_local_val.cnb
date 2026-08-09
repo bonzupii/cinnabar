@@ -2,3 +2,7 @@ pub fun test_func() Int
   pub val local_var: Int = 10
   return local_var
 end
+
+pub fun main() Int
+  return test_func()
+end

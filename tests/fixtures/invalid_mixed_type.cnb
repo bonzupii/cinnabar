@@ -2,3 +2,7 @@ pub type BadMixedType
   pub x: Int
   pub BadVariant(U32)
 end
+
+pub fun main() Int
+  return 0
+end

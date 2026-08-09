@@ -1,0 +1,73 @@
+const OP_LOAD: Int = 0
+const OP_MOVC: Int = 1
+const OP_DECC: Int = 2
+const OP_ACCM: Int = 4
+const OP_JMP: Int = 5
+const OP_JZC: Int = 6
+const OP_HALT: Int = 7
+
+pub const PROG: Int = (0x01) | (0x12 << 8) | (0x40 << 16) | (0x30 << 24) | (0x40 << 32) | (0x30 << 40) | (0x70 << 48)
+
+fun fetch(prog: Int, pc: Int) Int
+  return (prog >> (pc * 8)) & 0xFF
+end
+
+pub fun main() Int
+  var acc: Int = 0
+  var cnt: Int = 0
+  var pc: Int = 0
+  var running: Bool = true
+
+  while running
+    val code = fetch(PROG, pc)
+    val op = code >> 4
+    val arg = code & 0xF
+
+    if op == OP_HALT
+      running = false
+      continue
+    end
+
+    if op == OP_LOAD
+      acc = arg
+      pc = pc + 1
+      continue
+    end
+
+    if op == OP_MOVC
+      cnt = arg
+      pc = pc + 1
+      continue
+    end
+
+    if op == OP_DECC
+      cnt = cnt - 1
+      pc = pc + 1
+      continue
+    end
+
+    if op == OP_ACCM
+      acc = acc * cnt
+      pc = pc + 1
+      continue
+    end
+
+    if op == OP_JMP
+      pc = arg
+      continue
+    end
+
+    if op == OP_JZC
+      if cnt == 0
+        pc = arg
+        continue
+      end
+      pc = pc + 1
+      continue
+    end
+
+    pc = pc + 1
+  end
+
+  return acc
+end
