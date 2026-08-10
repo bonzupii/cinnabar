@@ -29,6 +29,8 @@ const EXPECT_OK: &[(&str, i32)] = &[
     ("mini", 0),
     ("array_test", 0), // const in-range index arr[0]: proven at compile time, no Result wrapper
     ("borrow_index", 0), // &arr[i] and &mut arr[i] borrow elements; dynamic &rest[i] returns Result(&Pair, IndexError) with the borrowed element in the Ok payload
+    ("idx10d_mut_disjoint", 30), // bug-report 1e control: &mut pts[0] + &mut pts[1] are disjoint element borrows and must compile; both writes land
+    ("idx10e_same_expr_disjoint", 30), // same-expression disjoint element borrows passed to one call must compile
     ("rec_test", 120),
     ("tail_rec", 64), // 1M self-tail-recursive iterations: LLVM tail-call elimination keeps it O(1)-stack
     ("mem_probe", 70), // non-tail recursion depth 500000 (opaque heap read per level keeps the frames real) trips the stack guard, which exits 70 instead of SIGSEGV
@@ -86,6 +88,13 @@ const EXPECT_REJECTED: &[&str] = &[
     "duplicate_builtin_unit", // bug-report d3: declaring Unit is a builtin redeclaration, not a bare duplicate symbol
     "duplicate_builtin_int", // declaring Int must not silently replace the builtin scalar
     "duplicate_user_symbol", // control: user-user duplicates still report duplicate symbol
+    "idx10b_mut_alias_used", // bug-report 1a: two live &mut borrows of the same element alias; second exclusive borrow must be rejected
+    "idx10c_mut_shared_same", // bug-report 1b: shared read overlapping an exclusive write of the same element must be rejected
+    "idx10j2_dyn_dyn_match", // bug-report 1c: two &mut borrows through the same runtime index must be rejected (dynamic index is never provably disjoint)
+    "idx10f_element_move_while_borrowed", // bug-report 1e control: reassigning the whole array while an element borrow is live must be rejected
+    "idx10g_element_double_move", // bug-report 1e control: two element borrows then a double linear field move-out is still rejected by linearity
+    "b3_two_mut", // bug-report 1d control: two &mut of one variable, both used, must stay rejected
+    "b4_mut_shared", // bug-report 1d control: overlapping & and &mut of one variable must stay rejected
 ];
 
 /// Known-broken programs; observed status printed only.  Each entry names

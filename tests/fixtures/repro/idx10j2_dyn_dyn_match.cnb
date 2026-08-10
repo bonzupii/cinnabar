@@ -1,0 +1,24 @@
+# idx10j2_dyn_dyn_match (bug-report 1c): two `&mut` borrows through the
+# SAME runtime index, both mutated.  A non-constant index cannot be
+# proven disjoint from anything, so the second exclusive borrow must be
+# rejected.  (EXPECT_REJECTED.)
+pub type P
+  pub x: Int
+  pub y: Int
+end
+
+pub fun main() Int
+  var pts: [P; 2] = [P(x: 1, y: 2), P(x: 3, y: 4)]
+  var i: Usize = 0
+  val a = match &mut pts[i]
+    Ok(p) => p
+    Err(error) => return 0
+  end
+  val b = match &mut pts[i]
+    Ok(p) => p
+    Err(error) => return 0
+  end
+  a.x = 7
+  b.y = 8
+  return a.x + b.y
+end

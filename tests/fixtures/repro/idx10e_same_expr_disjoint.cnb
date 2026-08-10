@@ -1,0 +1,19 @@
+# idx10e_same_expr_disjoint: two `&mut` borrows of DISJOINT elements in
+# the SAME call must compile.  The same-expression pending check compares
+# element indices exactly like the cross-statement liveness check.
+# (EXPECT_OK 30.)
+pub type P
+  pub x: Int
+  pub y: Int
+end
+
+fun touch_both(a: &mut P, b: &mut P) Int
+  a.x = 10
+  b.y = 20
+  return a.x + b.y
+end
+
+pub fun main() Int
+  var pts: [P; 2] = [P(x: 1, y: 2), P(x: 3, y: 4)]
+  return touch_both(&mut pts[0], &mut pts[1])
+end

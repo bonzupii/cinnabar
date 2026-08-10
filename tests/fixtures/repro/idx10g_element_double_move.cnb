@@ -1,0 +1,19 @@
+# idx10g_element_double_move (bug-report 1e control): two `&mut hs[0]`
+# borrows of the same element, then moving the linear field out through
+# each alias.  The second extraction reads a moved field, so the program
+# is rejected by the linearity rules even if the borrow checker were to
+# accept the aliasing element borrows.  (EXPECT_REJECTED.)
+pub type Holder
+  pub vec: Collections.Vec(U8)
+end
+
+pub fun main() impure Int
+  val h = Holder(vec: try Collections.vec_new[U8]())
+  val hs: [Holder; 1] = [h]
+  val a = &mut hs[0]
+  val b = &mut hs[0]
+  val v1 = a.vec
+  val v2 = b.vec
+  Collections.vec_free(v1)
+  return 0
+end

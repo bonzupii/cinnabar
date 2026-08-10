@@ -1,0 +1,16 @@
+# idx10c_mut_shared_same (bug-report 1b): an exclusive `&mut` borrow of an
+# element and a shared `&` borrow of the SAME element, both live.  A
+# shared read overlapping an exclusive write of the same element must be
+# rejected.  (EXPECT_REJECTED.)
+pub type P
+  pub x: Int
+  pub y: Int
+end
+
+pub fun main() Int
+  var pts: [P; 2] = [P(x: 1, y: 2), P(x: 3, y: 4)]
+  val a = &mut pts[0]
+  val s = &pts[0]
+  a.x = 10
+  return s.y
+end

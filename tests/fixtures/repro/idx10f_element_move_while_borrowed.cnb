@@ -1,0 +1,16 @@
+# idx10f_element_move_while_borrowed (bug-report 1e control): reassigning
+# the WHOLE array while an element borrow is live would invalidate the
+# borrow, so it must be rejected.  The element borrow is still used after
+# the reassign, so its loan is live across it.  (EXPECT_REJECTED.)
+pub type P
+  pub x: Int
+  pub y: Int
+end
+
+pub fun main() Int
+  var pts: [P; 2] = [P(x: 1, y: 2), P(x: 3, y: 4)]
+  val a = &mut pts[0]
+  pts = [P(x: 9, y: 9), P(x: 9, y: 9)]
+  a.x = 10
+  return a.x
+end

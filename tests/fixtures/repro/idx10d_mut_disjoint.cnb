@@ -1,0 +1,17 @@
+# idx10d_mut_disjoint (bug-report 1e control): exclusive borrows of
+# DISJOINT elements must compile: `&mut pts[0]` and `&mut pts[1]` never
+# alias.  Both writes land (pts[0].x = 10, pts[1].y = 20) and the program
+# exits 30.  (EXPECT_OK 30.)
+pub type P
+  pub x: Int
+  pub y: Int
+end
+
+pub fun main() Int
+  var pts: [P; 2] = [P(x: 1, y: 2), P(x: 3, y: 4)]
+  val a = &mut pts[0]
+  val b = &mut pts[1]
+  a.x = 10
+  b.y = 20
+  return pts[0].x + pts[1].y
+end

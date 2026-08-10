@@ -75,6 +75,13 @@ const EX_TRY: i64 = 2;
 const L_SHARED: i64 = 0;
 const L_MUT: i64 = 1;
 
+/// Element-borrow index keys carried on loans (row slot 3) and borrow ops
+/// (aux slot 2): NONE means a whole-value loan (it overlaps every
+/// element), IDX_DYN means an element borrow through a non-constant index
+/// (never provably disjoint from anything), and a list id holds the
+/// constant index path, inner-most level first.
+const IDX_DYN: i64 = -2;
+
 /// Block kinds.
 const BLK_ENTRY: i64 = 0;
 const BLK_STMT: i64 = 1;
@@ -106,8 +113,14 @@ const MODE_MUT: i64 = 2;
 /// - bspans: `(file, start, end)` of each binding declaration.
 /// - paths: `(parent, field, root)` sub-node trie over a linear binding's
 ///   whole-value node; the root node has `parent` NONE and `root` itself.
-/// - loans: `(owner_binding, kind, synthetic)`; a synthetic loan is the
-///   standing borrow a reference parameter carries in from its caller.
+/// - loans: `(owner_binding, kind, synthetic, index_key)`; a synthetic
+///   loan is the standing borrow a reference parameter carries in from
+///   its caller.  `index_key` is NONE for a whole-value loan, IDX_DYN for
+///   an element borrow through a non-constant index, or a list id holding
+///   the constant first-level index (`a[i]` is `[i]`).  Only the first
+///   level is tracked: a nested `a[i][j]` keeps the inner `[i]`, which is
+///   conservative — same-first-level borrows conflict, disjoint first
+///   levels are allowed.
 /// - ops: `(kind, binding, path, aux1, aux2, aux3, file, start, end)`.
 /// - oloans: per-op origin-loan lists; entries are loan ids, or
 ///   `REF_ORIGIN(binding)` markers (a negative encoding) meaning "the
@@ -122,7 +135,7 @@ type F = (
     Vec<(i64, i64, i64, i64, i64, i64, i64)>,
     Vec<(i64, i64, i64)>,
     Vec<(i64, i64, i64)>,
-    Vec<(i64, i64, i64)>,
+    Vec<(i64, i64, i64, i64)>,
     Vec<(i64, i64, i64, i64, i64, i64, i64, i64, i64)>,
     Vec<Vec<i64>>,
     Vec<(i64, i64, i64, i64)>,
@@ -134,7 +147,7 @@ type F = (
 
 /// Transient build state for one function:
 /// (name_stack, loop_stack, scope_bindings, pending_loans, current,
-/// fn_exit).
+/// fn_exit, last_borrow_op, pending_index_key).
 ///
 /// - name_stack: `(name, binding)` pairs; shadowing pushes a new pair and
 ///   scope exit pops back to the saved length.
@@ -150,11 +163,20 @@ type F = (
 /// - current: the block the next op is emitted into (expression forks
 ///   move this cursor; it is never a lexical position).
 /// - fn_exit: the function's single exit block.
+/// - last_borrow_op: the op id of the most recent borrow op emitted
+///   during the current expression walk; an enclosing `arr[i]` arm reads
+///   it to stamp the element index onto the loan and the op (stale values
+///   are harmless: arms compare against the value saved at entry).
+/// - pending_index_key: the index key of the innermost enclosing `arr[i]`
+///   arm being built, read by `check_pending_conflict` so same-statement
+///   element borrows compare by index; NONE outside any index expression.
 type B = (
     Vec<(i64, i64)>,
     Vec<(i64, i64, i64)>,
     Vec<i64>,
     Vec<i64>,
+    i64,
+    i64,
     i64,
     i64,
 );
@@ -199,10 +221,10 @@ fn binding_at(f: &F, id: i64) -> (i64, i64, i64, i64, i64, i64, i64) {
     }
 }
 
-fn loan_at(f: &F, id: i64) -> (i64, i64, i64) {
+fn loan_at(f: &F, id: i64) -> (i64, i64, i64, i64) {
     match f.3.get(id as usize) {
         Some(row) => *row,
-        None => (NONE, NONE, 0),
+        None => (NONE, NONE, 0, NONE),
     }
 }
 
@@ -444,10 +466,13 @@ fn set_op_loans(f: &mut F, op: i64, loans: &[i64]) {
     }
 }
 
-/// Allocates a loan on `owner` with `kind` and returns its id.
-fn alloc_loan(f: &mut F, owner: i64, kind: i64, synthetic: i64) -> i64 {
+/// Allocates a loan on `owner` with `kind` and returns its id.  The
+/// element `index_key` starts NONE (a whole-value loan); an enclosing
+/// `arr[i]` arm stamps the element path onto it before any later borrow
+/// compares indices.
+fn alloc_loan(f: &mut F, owner: i64, kind: i64, synthetic: i64, index_key: i64) -> i64 {
     let id = f.3.len() as i64;
-    f.3.push((owner, kind, synthetic));
+    f.3.push((owner, kind, synthetic, index_key));
     id
 }
 
@@ -608,7 +633,7 @@ fn build_fn(f: &mut F, b: &mut B, ctx: &mut Ctx, fn_node: i64) -> bool {
         let binding = bind_var(f, b, ctx, name, key, flags, span);
         if flags.1 == 1 {
             let op = emit_op(f, OP_BIND, binding, NONE, (1, 1, 0), span);
-            let loan = alloc_loan(f, binding, if ty_kind_of(ctx.1, key) == TYD_REF_MUT { L_MUT } else { L_SHARED }, 1);
+            let loan = alloc_loan(f, binding, if ty_kind_of(ctx.1, key) == TYD_REF_MUT { L_MUT } else { L_SHARED }, 1, NONE);
             let loans = [loan];
             set_op_loans(f, op, &loans);
         } else {
@@ -696,7 +721,13 @@ fn build_list(f: &mut F, b: &mut B, ctx: &mut Ctx, list: i64, out: i64, ret: i64
     if fell && after != NONE {
         add_edge(f, after, out);
     }
-    append_list_unique(prod, &production);
+    // The list's final value can be a reference produced inside a nested
+    // construct (a match arm body ending in a reborrowed reference), so
+    // the production is aggregated with the marker-preserving append: a
+    // `REF_ORIGIN` marker dropped here would leave a reference bound from
+    // the list's value with an empty origin, and later borrows would never
+    // see the loan it actually carries.
+    append_prod_unique(prod, &production);
     while b.2.len() > scope_start {
         b.2.pop();
     }
@@ -921,11 +952,59 @@ fn expr_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, mode: i64, ret: 
         // value-position index of a linear-element array or slice is
         // rejected by the typechecker, so only reads and borrows reach
         // this arm.  A borrowed element issues its loan on the root
-        // binding through the base's borrow effect.
+        // binding through the base's borrow effect; this arm then stamps
+        // the element index onto the loan and the borrow op, so later
+        // element borrows compare by index (disjoint constant indices are
+        // allowed; an equal or nested index, or any dynamic index, is a
+        // conflict).
         let base = node_b(ctx.1, expr);
         let index = node_c(ctx.1, expr);
+        let base_kind = node_a(ctx.1, base);
+        let level_key = index_key_of_literal(ctx, index);
+        let level_list = if level_key == IDX_DYN {
+            IDX_DYN
+        } else {
+            let list = alloc_list(ctx.2);
+            list_push(ctx.2, list, level_key);
+            list
+        };
+        let saved_op = b.6;
+        let saved_idx = b.7;
+        b.7 = level_list;
         let cont = expr_effects(f, b, ctx, base, mode, ret, prod);
+        b.7 = saved_idx;
+        if b.6 != saved_op && !prod.is_empty() {
+            // The base issued a borrow for this element.  Extend the path
+            // on its loan(s) and stamp the borrow op with it.  REF_ORIGIN
+            // markers (a reborrow of a reference base) are skipped, so an
+            // element borrow through a reference keeps a whole-value loan
+            // on the reference variable; the typechecker gates the
+            // fixed-array path today (indexing a reference to an array is
+            // rejected), so no element-vs-element comparison is lost.
+            // Bases that are not a path, field access, or nested index (a
+            // call, match, or other expression) are left unstamped: their
+            // loans stay whole-value, which is conservative and sound.
+            if base_kind == EXPR_PATH || base_kind == EXPR_FIELD_ACCESS || base_kind == EXPR_INDEX {
+                let mut stamped: i64 = NONE;
+                let mut pi = 0usize;
+                while pi < prod.len() {
+                    match prod.get(pi) {
+                        Some(entry) => {
+                            if *entry >= 0 {
+                                stamped = extend_loan_index(f, ctx, *entry, level_key);
+                            }
+                        }
+                        None => break,
+                    }
+                    pi += 1;
+                }
+                if stamped != NONE {
+                    stamp_op_index(f, b.6, stamped);
+                }
+            }
+        }
         expr_effects(f, b, ctx, index, MODE_VALUE, ret, &mut Vec::new());
+        b.6 = saved_op;
         return cont;
     }
     if kind == EXPR_FIELD_ACCESS {
@@ -1010,16 +1089,18 @@ fn borrow_binding(f: &mut F, b: &mut B, ctx: &mut Ctx, binding: i64, mode: i64, 
         // A reference variable is reborrowed: the loan is on the
         // reference variable itself, and the value's origin is the
         // variable's own origin.
-        emit_op(f, op_kind, binding, NONE, (0, 0, 0), span);
+        let op = emit_op(f, op_kind, binding, NONE, (0, 0, NONE), span);
         check_pending_conflict(f, b, ctx, binding, mode, span);
-        let loan = alloc_loan(f, binding, loan_kind, 0);
+        b.6 = op;
+        let loan = alloc_loan(f, binding, loan_kind, 0, NONE);
         b.3.push(loan);
         prod.push(ref_origin(binding));
         return cur(b);
     }
     check_pending_conflict(f, b, ctx, binding, mode, span);
-    emit_op(f, op_kind, binding, row.6, (0, 0, 0), span);
-    let loan = alloc_loan(f, binding, loan_kind, 0);
+    let op = emit_op(f, op_kind, binding, row.6, (0, 0, NONE), span);
+    b.6 = op;
+    let loan = alloc_loan(f, binding, loan_kind, 0, NONE);
     b.3.push(loan);
     prod.push(loan);
     cur(b)
@@ -1027,10 +1108,16 @@ fn borrow_binding(f: &mut F, b: &mut B, ctx: &mut Ctx, binding: i64, mode: i64, 
 
 /// Emits the pending-conflict diagnostic for a new borrow of `binding`:
 /// a shared borrow conflicts with pending exclusive loans; an exclusive
-/// borrow conflicts with pending shared loans; a move conflicts with any
-/// pending loan.  Same-statement conflicts cannot be resolved by
-/// liveness, so they are hard errors at build time.
+/// borrow conflicts with pending loans of either kind; a move conflicts
+/// with any pending loan.  Same-statement conflicts cannot be resolved by
+/// liveness, so they are hard errors at build time.  Element borrows are
+/// compared by index: a pending loan on a provably-disjoint constant
+/// element does not conflict.
 fn check_pending_conflict(f: &mut F, b: &mut B, ctx: &mut Ctx, binding: i64, mode: i64, span: (i64, i64, i64)) {
+    // The new borrow's element key: the innermost enclosing `arr[i]`
+    // arm's index (NONE outside an index expression, IDX_DYN for a
+    // non-constant index, or the constant level path).
+    let new_key = b.7;
     let mut idx = 0usize;
     while idx < b.3.len() {
         let loan_id = match b.3.get(idx) {
@@ -1038,17 +1125,17 @@ fn check_pending_conflict(f: &mut F, b: &mut B, ctx: &mut Ctx, binding: i64, mod
             None => break,
         };
         let loan = loan_at(f, loan_id);
-        if loan.0 == binding {
-            let conflicting = if mode == MODE_VALUE {
-                true
-            } else if mode == MODE_MUT {
-                loan.1 == L_SHARED
-            } else {
+        if loan.0 == binding && index_keys_conflict(ctx, new_key, loan.3) {
+            // A move or an exclusive borrow conflicts with any pending
+            // loan; a shared borrow only with pending exclusive loans.
+            let conflicting = if mode == MODE_BORROW {
                 loan.1 == L_MUT
+            } else {
+                true
             };
             if conflicting {
                 let row = binding_at(f, binding);
-                let name = name_text(ctx.0, row.0);
+                let name = format!("{}{}", name_text(ctx.0, row.0), index_suffix(ctx, new_key));
                 if mode == MODE_VALUE {
                     push_error(ctx.3, &format!("cannot move '{}' while it is borrowed in the same expression", name), span.0, span.1, span.2);
                 } else if mode == MODE_MUT {
@@ -1063,6 +1150,114 @@ fn check_pending_conflict(f: &mut F, b: &mut B, ctx: &mut Ctx, binding: i64, mod
             }
         }
         idx += 1;
+    }
+}
+
+/// The element index key of an index expression: a constant integer
+/// literal is provably that element; any other expression (a variable,
+/// arithmetic, a call) is conservatively dynamic.
+fn index_key_of_literal(ctx: &Ctx, expr: i64) -> i64 {
+    if node_tag(ctx.1, expr) == NODE_EXPR && node_a(ctx.1, expr) == EXPR_LIT {
+        let kind = node_b(ctx.1, expr);
+        if kind == LIT_INT || kind == LIT_HEX {
+            return node_c(ctx.1, expr);
+        }
+    }
+    IDX_DYN
+}
+
+/// Whether two element-borrow index keys overlap: a whole-value loan
+/// (NONE) overlaps every element, a dynamic index (IDX_DYN) is never
+/// provably disjoint from anything, and two constant index paths overlap
+/// when one is a prefix of the other (`a[i]` contains `a[i][j]`).
+fn index_keys_conflict(ctx: &Ctx, a: i64, b: i64) -> bool {
+    if a == NONE || b == NONE {
+        return true;
+    }
+    if a == IDX_DYN || b == IDX_DYN {
+        return true;
+    }
+    let na = list_len(ctx.2, a);
+    let nb = list_len(ctx.2, b);
+    let (short, nshort, long) = if na <= nb { (a, na, b) } else { (b, nb, a) };
+    let mut idx = 0i64;
+    while idx < nshort {
+        if list_get(ctx.2, short, idx) != list_get(ctx.2, long, idx) {
+            return false;
+        }
+        idx += 1;
+    }
+    true
+}
+
+/// The display suffix of an index key: `[0][1]` for a constant path,
+/// `[?]` for a dynamic index, empty for a whole-value loan.
+fn index_suffix(ctx: &Ctx, key: i64) -> String {
+    if key == NONE {
+        return String::new();
+    }
+    if key == IDX_DYN {
+        return String::from("[?]");
+    }
+    let mut out = String::new();
+    let count = list_len(ctx.2, key);
+    let mut idx = 0i64;
+    while idx < count {
+        let value = list_get(ctx.2, key, idx);
+        if value == IDX_DYN {
+            out.push_str("[?]");
+        } else {
+            out.push('[');
+            out.push_str(&value.to_string());
+            out.push(']');
+        }
+        idx += 1;
+    }
+    out
+}
+
+/// Extends a loan's element index path with the current level and returns
+/// the new key: a non-constant level poisons the whole path to IDX_DYN
+/// and a fresh loan starts at `[level]`.  A nested `a[i][j]` never reaches
+/// the extension branch: the inner index arm restores the borrow-op cursor
+/// before the outer arm reads it, so a nested borrow keeps the inner
+/// `[i]` — conservative, see the loans-table note.
+fn extend_loan_index(f: &mut F, ctx: &mut Ctx, loan: i64, level_key: i64) -> i64 {
+    let cur = loan_at(f, loan).3;
+    let new_key = if level_key == IDX_DYN {
+        IDX_DYN
+    } else if cur == NONE {
+        let list = alloc_list(ctx.2);
+        list_push(ctx.2, list, level_key);
+        list
+    } else if cur == IDX_DYN {
+        IDX_DYN
+    } else {
+        let list = alloc_list(ctx.2);
+        let count = list_len(ctx.2, cur);
+        let mut idx = 0i64;
+        while idx < count {
+            let value = list_get(ctx.2, cur, idx);
+            list_push(ctx.2, list, value);
+            idx += 1;
+        }
+        list_push(ctx.2, list, level_key);
+        list
+    };
+    if let Some(row) = f.3.get_mut(loan as usize) {
+        row.3 = new_key;
+    }
+    new_key
+}
+
+/// Stamps the element index key onto a borrow op (op row aux slot 2), the
+/// fact `conflicts_at` reads for the new borrow's element.
+fn stamp_op_index(f: &mut F, op: i64, key: i64) {
+    if op < 0 {
+        return;
+    }
+    if let Some(row) = f.4.get_mut(op as usize) {
+        row.5 = key;
     }
 }
 
@@ -1131,8 +1326,9 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
         let op_kind = if mode == MODE_MUT { OP_BORROW_M } else { OP_BORROW };
         let loan_kind = if mode == MODE_MUT { L_MUT } else { L_SHARED };
         check_pending_conflict(f, b, ctx, binding, mode, span);
-        emit_op(f, op_kind, binding, NONE, (0, 0, 0), span);
-        let loan = alloc_loan(f, binding, loan_kind, 0);
+        let op = emit_op(f, op_kind, binding, NONE, (0, 0, NONE), span);
+        b.6 = op;
+        let loan = alloc_loan(f, binding, loan_kind, 0, NONE);
         b.3.push(loan);
         prod.clear();
         prod.push(loan);
@@ -1860,7 +2056,7 @@ fn bind_pattern_name(f: &mut F, b: &mut B, ctx: &mut Ctx, name: i64, key: i64, s
         if loans.is_empty() && scrut.1 != NONE {
             // A rest binder over a value scrutinee borrows the scrutinee
             // itself.
-            let loan = alloc_loan(f, scrut.1, L_SHARED, 0);
+            let loan = alloc_loan(f, scrut.1, L_SHARED, 0, NONE);
             loans.push(loan);
         }
         set_op_loans(f, op, &loans);
@@ -2002,7 +2198,7 @@ pub fn borrow_check(
                             Vec::new(),
                             Vec::new(),
                         );
-                        let mut b: B = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), NONE, NONE);
+                        let mut b: B = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), NONE, NONE, NONE, NONE);
                         let mut ctx: Ctx = (names, nodes, lists, &mut scratch, &mut summaries);
                         if build_fn(&mut f, &mut b, &mut ctx, *fn_node) {
                             compute_summary(&f, &mut ctx, 0)
@@ -2113,7 +2309,7 @@ fn check_fn(
         Vec::new(),
         Vec::new(),
     );
-    let mut b: B = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), NONE, NONE);
+    let mut b: B = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), NONE, NONE, NONE, NONE);
     let mut ctx: Ctx = (names, nodes, lists, errors, summaries);
     if !build_fn(&mut f, &mut b, &mut ctx, fn_node) {
         return;
@@ -2219,20 +2415,33 @@ fn block_op_range(f: &F, block: i64) -> (i64, i64) {
     (first, last)
 }
 
-/// The binding an op reads (a liveness use), or NONE.
+/// The binding an op reads (a liveness use), or NONE.  A write through a
+/// `&mut` reference (an OP_ASSIGN of target kind 1) reads the reference to
+/// locate its referent, so the reference — and the borrow it carries — is
+/// live up to that write.  It is also not killed by it (`op_defs` skips
+/// target-kind-1 assigns), so a reference used only by writing through it
+/// keeps its loan live across later borrows, which is exactly the
+/// aliasing the exclusivity rule must reject.
 fn op_uses(f: &F, op: i64) -> i64 {
     let row = op_at(f, op);
-    if row.0 == OP_READ || row.0 == OP_MOVE || row.0 == OP_BORROW || row.0 == OP_BORROW_M {
+    if row.0 == OP_READ
+        || row.0 == OP_MOVE
+        || row.0 == OP_BORROW
+        || row.0 == OP_BORROW_M
+        || (row.0 == OP_ASSIGN && row.4 == 1)
+    {
         row.1
     } else {
         NONE
     }
 }
 
-/// The binding an op writes (a liveness def), or NONE.
+/// The binding an op writes (a liveness def), or NONE.  A write through a
+/// `&mut` reference does not redefine the reference, so target-kind-1
+/// assigns are uses, not defs.
 fn op_defs(f: &F, op: i64) -> i64 {
     let row = op_at(f, op);
-    if row.0 == OP_BIND || row.0 == OP_ASSIGN {
+    if row.0 == OP_BIND || (row.0 == OP_ASSIGN && row.4 != 1) {
         row.1
     } else {
         NONE
@@ -2740,7 +2949,13 @@ fn origin_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> Vec<Vec<Vec<i64>>> {
                                 let mut bi = 0usize;
                                 while bi < nbind as usize {
                                     if let (Some(dst), Some(src)) = (inn.get_mut(bi), list.get(bi)) {
-                                        append_list_unique(dst, src);
+                                        // Origin sets legitimately contain negative `REF_ORIGIN`
+                                        // markers (a binding whose origin is another reference's
+                                        // origin); the marker-preserving append keeps them, so the
+                                        // fixpoint's facts match what the op table records and the
+                                        // report walk never has to re-derive an origin from the op
+                                        // table.
+                                        append_prod_unique(dst, src);
                                     }
                                     bi += 1;
                                 }
@@ -2886,6 +3101,76 @@ fn exit_check(f: &F, ctx: &mut Ctx, op: i64, state: &[i64]) {
     }
 }
 
+/// Appends the direct loan ids reachable from a reference binding's
+/// origin, resolving REF_ORIGIN markers (a reference produced by a match
+/// arm or a ref-returning call re-produces another reference's origin as
+/// a marker).  The primary source is the per-block origin table, which is
+/// exact where the binding is in scope; when that entry is empty — an
+/// arm-scoped pattern binding is not in scope past its arm — the
+/// binding's own bind/re-point op loans are used, a build-time fact that
+/// is block-independent.  The walk mirrors the returned-borrow trace so
+/// the two can never drift apart; conflicts compare the resolved loans'
+/// owners and element keys.
+fn collect_origin_loans(f: &F, origins: &[Vec<i64>], binding: i64, out: &mut Vec<i64>, visited: &mut Vec<i64>, current_op: i64) {
+    if binding < 0 || list_has(visited, binding) {
+        return;
+    }
+    visited.push(binding);
+    let mut fixed: Vec<i64> = Vec::new();
+    if let Some(list) = origins.get(binding as usize) {
+        let mut idx = 0usize;
+        while idx < list.len() {
+            match list.get(idx) {
+                Some(value) => fixed.push(*value),
+                None => break,
+            }
+            idx += 1;
+        }
+    }
+    if fixed.is_empty() {
+        // The fixpoint normally carries every origin; this fallback only
+        // fires when a binding's origin was never established on a path to
+        // this point and reconstructs it from the op table.  The scan is
+        // bounded by the current op so a reference rebound LATER in the
+        // function cannot leak its later origin into an earlier point.
+        let mut op = if current_op >= 0 && current_op < f.4.len() as i64 {
+            current_op
+        } else {
+            f.4.len() as i64 - 1
+        };
+        while op >= 0 {
+            let row = op_at(f, op);
+            if row.1 == binding && (row.0 == OP_BIND || row.0 == OP_ASSIGN) && row.3 == 1 {
+                let loans = op_loans_at(f, op);
+                let mut li = 0usize;
+                while li < loans.len() {
+                    match loans.get(li) {
+                        Some(value) => fixed.push(*value),
+                        None => break,
+                    }
+                    li += 1;
+                }
+                break;
+            }
+            op -= 1;
+        }
+    }
+    let mut idx = 0usize;
+    while idx < fixed.len() {
+        match fixed.get(idx) {
+            Some(entry) => {
+                if is_ref_origin(*entry) {
+                    collect_origin_loans(f, origins, -1 - entry, out, visited, current_op);
+                } else if *entry >= 0 {
+                    out.push(*entry);
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+}
+
 /// Emits a borrow-conflict diagnostic: a write, move, or new exclusive
 /// borrow of `binding` while a conflicting loan on it is still contained
 /// in a live reference's origin.
@@ -2904,11 +3189,14 @@ fn conflicts_at(f: &F, ctx: &mut Ctx, op: i64, origins: &[Vec<i64>], live_after:
         // is not a write through the borrow.
         return;
     }
+    // The new borrow's element key (NONE for the whole-value ops — a move
+    // or write of the whole binding overlaps every element loan).
+    let new_key = if kind == OP_BORROW || kind == OP_BORROW_M { row.5 } else { NONE };
     let live = match live_after.get(op as usize) {
         Some(list) => list,
         None => return,
     };
-    let name = name_text(ctx.0, binding_at(f, binding).0);
+    let name = format!("{}{}", name_text(ctx.0, binding_at(f, binding).0), index_suffix(ctx, new_key));
     let mut li = 0usize;
     while li < live.len() {
         let r = match live.get(li) {
@@ -2924,18 +3212,21 @@ fn conflicts_at(f: &F, ctx: &mut Ctx, op: i64, origins: &[Vec<i64>], live_after:
             continue;
         }
         if binding_at(f, r).3 == 1 {
-            let origin = match origins.get(r as usize) {
-                Some(list) => list,
-                None => continue,
-            };
+            // A live reference's origin may hold direct loans or
+            // REF_ORIGIN markers; resolve the markers through the origin
+            // table so every loan the reference actually borrows is
+            // compared.
+            let mut loans: Vec<i64> = Vec::new();
+            let mut visited: Vec<i64> = Vec::new();
+            collect_origin_loans(f, origins, r, &mut loans, &mut visited, op);
             let mut oi = 0usize;
-            while oi < origin.len() {
-                let loan = match origin.get(oi) {
+            while oi < loans.len() {
+                let loan = match loans.get(oi) {
                     Some(v) => *v,
                     None => break,
                 };
                 let lrow = loan_at(f, loan);
-                if lrow.0 == binding {
+                if lrow.0 == binding && index_keys_conflict(ctx, new_key, lrow.3) {
                     let conflict = if kind == OP_MOVE || kind == OP_ASSIGN || kind == OP_BORROW_M {
                         true
                     } else {
