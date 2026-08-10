@@ -447,19 +447,22 @@ fn report_casing(names: &[String], name: i64, casing: i64, errors: &mut Vec<Diag
 // Declarations (phase A).
 // ---------------------------------------------------------------------------
 
-/// Inserts a declaration into `scope`, reporting duplicate symbols.  A
+/// Inserts a declaration into `scope`, reporting duplicate symbols.
+/// Returns 1 when the declaration was inserted, 0 when a collision was
+/// reported (the caller then skips dependent collection, e.g. the
+/// variants of an enum whose own name was rejected).  A
 /// name that collides with a builtin (a seeded scalar with no declaration
 /// row, a synthesized primitive enum, or a user declaration that a
 /// synthesized seed later collides with) is a builtin redeclaration; any
 /// other collision is a duplicate symbol.  Declarations never shadow
 /// other declarations.  Casing violations are reported but the name is
 /// still declared so references do not cascade.
-fn insert_decl(state: &mut State, scope: i64, name: i64, sym: i64, ns: i64, casing: i64, span: (i64, i64, i64)) {
+fn insert_decl(state: &mut State, scope: i64, name: i64, sym: i64, ns: i64, casing: i64, span: (i64, i64, i64)) -> i64 {
     report_casing(state.0, name, casing, state.3, span.0, span.1, span.2);
     let existing = scope_lookup(state.4, scope, name, ns);
     if existing.0 == NONE {
         push_entry(state.4, scope, name, sym, ns, NONE);
-        return;
+        return 1;
     }
     let existing_decl = sym_decl_of(state.1, existing.0);
     let incoming_decl = sym_decl_of(state.1, sym);
@@ -495,6 +498,7 @@ fn insert_decl(state: &mut State, scope: i64, name: i64, sym: i64, ns: i64, casi
         span
     };
     push_error(state.3, &message, report_span.0, report_span.1, report_span.2);
+    0
 }
 
 fn collect_list(state: &mut State, scope: i64, list: i64) {
@@ -549,13 +553,20 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
         // enums carry PRIM_* here, so the typechecker and codegen identify
         // them by the stored integer, never by name.
         sym_set_prim_kind(state.1, sym, prim_kind_of(state.0, full));
-        insert_decl(state, scope, name, sym, NS_TYPE, 2, (file, start, end));
+        let declared = insert_decl(state, scope, name, sym, NS_TYPE, 2, (file, start, end));
         item_set_sym(state.1, item, sym);
         let sub = alloc_scope(state.4, state.5, state.6, state.7, scope, prefix, 1);
         node_set_e(state.1, sym, sub);
         state.8.push((item, sub));
         enter_type_params(state.1, state.2, state.4, sub, node_f(state.1, item));
-        collect_variants(state, scope, sub, full, item);
+        // An enum whose own name was rejected (a builtin redeclaration
+        // such as `pub type Result`) must not hoist its variants into the
+        // enclosing scope: its Ok/Err/Some/None would collide with the
+        // seeded builtin variants and cascade duplicate-symbol noise (or
+        // silently shadow them).  The name error is the whole story.
+        if declared == 1 {
+            collect_variants(state, scope, sub, full, item);
+        }
     } else if kind == ITEM_TRAIT {
         let name = node_d(state.1, item);
         let full = qualified_name(state.0, state.2, prefix, name);
@@ -654,8 +665,13 @@ fn collect_variants(state: &mut State, hoist_scope: i64, sub: i64, enum_full: i6
     }
 }
 
-/// Hoists a variant into the scope where its enum is declared, replacing
-/// a builtin of the same name when present.
+/// Hoists a variant into the scope where its enum is declared.  A
+/// collision with a builtin variant (a seeded primitive's variant such
+/// as Ok/Err/Some/None/Unit) is a builtin redeclaration: it is reported
+/// at the user's real declaration and the existing scope entry is never
+/// overwritten, so an invalid user enum cannot silently shadow the
+/// language's own variants.  A collision between two user variants is a
+/// duplicate symbol.
 fn insert_hoisted(state: &mut State, scope: i64, name: i64, sym: i64, decl: i64) {
     let existing = scope_lookup(state.4, scope, name, NS_VALUE);
     if existing.0 == NONE {
@@ -663,23 +679,31 @@ fn insert_hoisted(state: &mut State, scope: i64, name: i64, sym: i64, decl: i64)
         return;
     }
     let existing_decl = sym_decl_of(state.1, existing.0);
-    let is_builtin = existing_decl == NONE || node_file(state.1, existing_decl) == NO_FILE;
-    if existing.1 != NONE || !is_builtin {
+    let incoming_decl = sym_decl_of(state.1, sym);
+    let existing_builtin = existing_decl == NONE || node_file(state.1, existing_decl) == NO_FILE;
+    let incoming_builtin = incoming_decl == NONE || node_file(state.1, incoming_decl) == NO_FILE;
+    if existing.1 != NONE {
+        // The existing entry is an import; the hoisted variant collides
+        // with the imported name.
         push_error(state.3, &format!("duplicate symbol '{}'", name_text(state.0, name)), node_file(state.1, decl), node_start(state.1, decl), node_end(state.1, decl));
         return;
     }
-    let entries = match state.4.get_mut(scope as usize) {
-        Some(entries) => entries,
-        None => return,
-    };
-    let mut idx = 0i64;
-    while idx < entries.len() as i64 / 4 {
-        if entry_get(entries, idx, 0) == name && entry_get(entries, idx, 2) == NS_VALUE && entry_get(entries, idx, 3) == NONE {
-            entry_set(entries, idx, 1, sym);
-            return;
-        }
-        idx += 1;
+    if existing_builtin && incoming_builtin {
+        // Both entries are synthesized seeds (unreachable in one collect
+        // pass); the existing entry already holds a builtin symbol.
+        return;
     }
+    if existing_builtin || incoming_builtin {
+        // A user variant redeclares a builtin variant.  Point at the
+        // user's real declaration, which carries a Cinnabar source
+        // origin, and leave the builtin scope entry intact.
+        let user_decl = if !existing_builtin { existing_decl } else { incoming_decl };
+        push_error(state.3, &format!("cannot redeclare builtin '{}'", name_text(state.0, name)), node_file(state.1, user_decl), node_start(state.1, user_decl), node_end(state.1, user_decl));
+        return;
+    }
+    // Two user variants of the same name: the later declaration
+    // collides with the earlier one.
+    push_error(state.3, &format!("duplicate symbol '{}'", name_text(state.0, name)), node_file(state.1, decl), node_start(state.1, decl), node_end(state.1, decl));
 }
 
 fn collect_trait_methods(state: &mut State, sub: i64, trait_full: i64, item: i64) {

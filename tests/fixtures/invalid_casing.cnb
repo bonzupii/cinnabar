@@ -8,7 +8,7 @@ pub const Bad_Const_Name: Int = 2
 
 # PascalCase violation
 pub type bad_type_name
-  pub Unit
+  pub ValidVariant
 end
 
 pub fun main() Int

@@ -7,7 +7,7 @@ use Slice.len as slice_len
 fun slice_sum(view: &[U8]) Usize
   match view
     [] => return 0
-    [first, rest @ ..] => return first + slice_sum(rest)
+    [first, rest @ ..] => return Usize.from_u8(first) + slice_sum(rest)
   end
 end
 
@@ -16,11 +16,18 @@ pub const MAGIC_BYTE_1: U8 = 0xF0
 pub const MAGIC_BYTE_2: U8 = 0xAD
 pub const MAGIC_BYTE_3: U8 = 0x0B
 
+# 0x0D + 0xF0 + 0xAD + 0x0B = 13 + 240 + 173 + 11 = 437
+pub const EXPECTED_SUM: Usize = 437
+
 fun array_as_slice() Usize
   val bytes: [U8; 4] = [MAGIC_BYTE_0, MAGIC_BYTE_1, MAGIC_BYTE_2, MAGIC_BYTE_3]
   return slice_sum(&bytes)
 end
 
 pub fun main() Int
-  return 0
+  if array_as_slice() == EXPECTED_SUM
+    return 0
+  end
+
+  return 1
 end

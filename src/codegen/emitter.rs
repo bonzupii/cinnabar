@@ -1253,6 +1253,46 @@ fn emit_unary<'ctx, 'a>(
         // address directly would make the load read the referent's own
         // first bytes as if they were the pointer.
         let out = declare_local(sess, key, "ref")?;
+        // The sanctioned `&[T; N]` -> `&[T]` slice coercion: a shared
+        // borrow of a fixed array materializes a slice view `{data, len}`
+        // pointing at the array's storage, not a reference to the array
+        // aggregate.  Only the shared form coerces; `&mut` of a fixed
+        // array stays a reference to the array itself.
+        let ref_elem = em_key_elem(sess, key);
+        // The operand key is substituted through the instance's type
+        // arguments, exactly as the result key above: a generic
+        // function's `&arr` operand may be a declared parameter key,
+        // and the coercion test (and the length read) must see the
+        // instantiated array, never a raw param key — otherwise a
+        // concrete `&[T; N]` could silently fall through to the
+        // pointer-slot store below and emit a wrong-type value.
+        let inner_key = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, inner));
+        if op == UN_REF
+            && em_key_kind(sess, ref_elem) == TYD_SLICE
+            && em_key_kind(sess, inner_key) == TYD_ARRAY
+        {
+            let d = slice_gep(sess, out, 0, "")?;
+            store_key(sess, d, inner_ptr.into())?;
+            let l = slice_gep(sess, out, 1, "")?;
+            let len = sess.0.i64_type().const_int(key_len_of(sess, inner_key) as u64, false);
+            store_key(sess, l, len.into())?;
+            return Ok(out);
+        }
+        // A borrow typed as a slice view whose operand is neither an
+        // array (handled above) nor itself a slice would store a single
+        // pointer into a `{ptr, len}` slot — a wrong-value emission.  The
+        // typechecker only attaches a slice-view type to array or slice
+        // operands, so this is a drift-invariant check between the
+        // attached type and this lowering; it must error, never silently
+        // emit a malformed value.
+        if em_key_kind(sess, ref_elem) == TYD_SLICE && em_key_kind(sess, inner_key) != TYD_SLICE {
+            return Err(builder_error(
+                node_file(sess.5, expr),
+                node_start(sess.5, expr),
+                node_end(sess.5, expr),
+                "internal: slice-view borrow of a non-slice, non-array operand",
+            ));
+        }
         store_key(sess, out, inner_ptr.into())?;
         return Ok(out);
     }

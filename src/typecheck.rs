@@ -1350,8 +1350,15 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
         let binding_key = if declared != NONE {
             let dkey = canon_ty(state, declared, self_key, 1);
             let ikey = check_expr(state, init, dkey, ret, impure, self_key);
+            // Unification always runs: it may bind an inference
+            // variable, and that side effect must never be skipped even
+            // when the keys are unknown-typed.  Only the diagnostic is
+            // gated — an unknown-typed operand has already failed with
+            // its own primary error (an unknown symbol, a static zero
+            // divisor, a failed declared type), and a mismatch that
+            // would render '?' adds noise, not information.
             let ok = unify_key(state.1, state.2, state.6, ikey, dkey);
-            if !ok {
+            if !ok && key_kind(state.1, ikey) != TYD_UNKNOWN && key_kind(state.1, dkey) != TYD_UNKNOWN {
                 push_error(state.3, &format!("cannot assign '{}' to '{}'", render_key(state.0, state.1, state.2, ikey), render_key(state.0, state.1, state.2, dkey)), file, start, end);
             }
             dkey
@@ -1371,8 +1378,12 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
         // `&T` base is a hard error).
         let tkey = check_assign_target(state, target, ret, impure, self_key);
         let vkey = check_expr(state, value, tkey, ret, impure, self_key);
+        // As in STMT_LET, unification always runs (it may bind an
+        // inference variable); only the diagnostic is gated — an
+        // unknown-typed target or value already carries its own primary
+        // error, and a mismatch that would render '?' adds noise.
         let ok = unify_key(state.1, state.2, state.6, vkey, tkey);
-        if !ok {
+        if !ok && key_kind(state.1, vkey) != TYD_UNKNOWN && key_kind(state.1, tkey) != TYD_UNKNOWN {
             push_error(state.3, &format!("cannot assign '{}' to '{}'", render_key(state.0, state.1, state.2, vkey), render_key(state.0, state.1, state.2, tkey)), file, start, end);
         }
         stmt_set_ty(state.1, stmt, tkey);
@@ -1417,8 +1428,13 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
             key = unit_key_of(state);
         } else {
             key = check_expr(state, value, ret, ret, impure, self_key);
+            // Unification always runs (it may bind an inference
+            // variable); only the diagnostic is gated.  A value (or
+            // return type) that already failed its own check is
+            // TYD_UNKNOWN; the mismatch it would report renders as '?'
+            // and duplicates the primary error.
             let ok = unify_key(state.1, state.2, state.6, key, ret);
-            if !ok {
+            if !ok && key_kind(state.1, key) != TYD_UNKNOWN && key_kind(state.1, ret) != TYD_UNKNOWN {
                 push_error(state.3, &format!("return type mismatch: expected '{}', found '{}'", render_key(state.0, state.1, state.2, ret), render_key(state.0, state.1, state.2, key)), file, start, end);
             }
         }
@@ -1746,9 +1762,19 @@ fn check_unary(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i6
         key = check_index(state, operand, borrow, ret, impure, self_key);
     } else {
         let inner = check_expr(state, operand, NONE, ret, impure, self_key);
-        if op == UN_REF {
+    if op == UN_REF {
+        if key_kind(state.1, inner) == TYD_ARRAY {
+            // The single sanctioned coercion, `&[T; N]` -> `&[T]`: a
+            // shared borrow of a fixed array is a slice view over its
+            // storage (data = the array's address, len = N), never a
+            // reference to the array as an aggregate.
+            let elem = key_elem(state.1, inner);
+            let slice = canon_tyinfo(state.1, state.2, TYD_SLICE, NONE, NONE, elem, NONE);
+            key = canon_tyinfo(state.1, state.2, TYD_REF, NONE, NONE, slice, NONE);
+        } else {
             key = canon_tyinfo(state.1, state.2, TYD_REF, NONE, NONE, inner, NONE);
-        } else if op == UN_REF_MUT {
+        }
+    } else if op == UN_REF_MUT {
             key = canon_tyinfo(state.1, state.2, TYD_REF_MUT, NONE, NONE, inner, NONE);
         } else if op == UN_NEG {
             if !is_int_key(state.1, inner) {
@@ -1814,9 +1840,14 @@ fn op_text(op: i64) -> &'static str {
 /// folds the divisor with errors suppressed and only reports when the
 /// fold proves zero.  Everything else is a runtime `Result`, never a
 /// trap.
-fn check_static_zero_divisor(state: &mut State, op: i64, rhs: i64) {
+/// Reports a division/modulo by a statically-known-zero divisor and
+/// returns 1 when the primary error fired, else 0.  The caller types the
+/// expression as failed (unknown key) when it fires, so enclosing
+/// statements do not cascade a secondary type mismatch off an
+/// expression that already errored.
+fn check_static_zero_divisor(state: &mut State, op: i64, rhs: i64) -> i64 {
     if op != BIN_DIV && op != BIN_MOD {
-        return;
+        return 0;
     }
     let (value, key) = fold_const(state, rhs, NONE, 1);
     if key_kind(state.1, key) != TYD_UNKNOWN && value == 0 {
@@ -1826,6 +1857,9 @@ fn check_static_zero_divisor(state: &mut State, op: i64, rhs: i64) {
             "modulo by zero"
         };
         push_error(state.3, message, node_file(state.1, rhs), node_start(state.1, rhs), node_end(state.1, rhs));
+        1
+    } else {
+        0
     }
 }
 
@@ -1853,7 +1887,7 @@ fn check_binary(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i
     let op = node_b(state.1, expr);
     let lhs = node_c(state.1, expr);
     let rhs = node_d(state.1, expr);
-    check_static_zero_divisor(state, op, rhs);
+    let static_zero = check_static_zero_divisor(state, op, rhs);
     let file = node_file(state.1, expr);
     let start = node_start(state.1, expr);
     let end = node_end(state.1, expr);
@@ -1891,6 +1925,15 @@ fn check_binary(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i
         push_error(state.3, &format!("binary operator '{}' requires operands of the same type", op_text(op)), file, start, end);
     }
     if op == BIN_DIV || op == BIN_MOD {
+        if static_zero == 1 {
+            // The divisor is statically zero: the primary error already
+            // fired above.  Type the expression unknown so enclosing
+            // statements do not cascade a secondary mismatch (e.g. a
+            // return-type check) off a value that already failed.
+            let key = unknown_key(state.1, state.2);
+            expr_set_ty(state.1, expr, key);
+            return key;
+        }
         let key = division_result_key(state, l);
         expr_set_ty(state.1, expr, key);
         return key;

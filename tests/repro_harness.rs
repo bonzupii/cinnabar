@@ -65,13 +65,13 @@ const EXPECT_OK: &[(&str, i32)] = &[
     ("linear_ref_nonlinear_read", 14), // non-linear field reads through &mut are plain reads (no false positive)
     ("ret_borrow_shared_twice", 0), // bug-report d5 control: two shared borrows of one input coexist; free after the last use
     ("ret_borrow_single_origin", 0), // bug-report d7d: callee-origin summary — view_of_a's returned borrow traces to its first input only, so freeing the never-borrowed second input while the view is live compiles
+    ("slice_test", 0), // the sanctioned &[T; N] -> &[T] slice coercion: &bytes is a slice view, Usize.from_u8 widens first; recursive slice_sum over the view
 ];
 
 /// Programs the compiler must reject.
 const EXPECT_REJECTED: &[&str] = &[
     "index_oob_const",     // constant index out of bounds (5 >= 3): compile-time error
     "rt2",                 // linear value not consumed (correct rejection)
-    "slice_test",          // U8 + Usize arithmetic (strict same-type rule)
     "div_zero_const",      // division by constant zero is a compile-time error
     "mod_zero_const",      // modulo by constant zero is a compile-time error
     "assign_shared_ref",   // field write through a shared &T reference: assignment requires &mut

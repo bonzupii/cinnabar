@@ -59,6 +59,23 @@ fn is_sym(nodes: &[i64], names: &[String], pos: i64, text: &str) -> bool {
 /// True when the token at `pos` is a word (any identifier or keyword).
 fn is_word(nodes: &[i64], pos: i64) -> bool {
     node_tag(nodes, pos) == NODE_TOKEN && node_a(nodes, pos) == TOK_IDENT
+}
+
+/// True when the token at `pos` opens an `end`-terminated block in the
+/// error-recovery scan: `mod`, `trait`, `impl`, `type`, `fun`, `while`,
+/// `if`, or `match`.  `elif`/`else` are not counted (they are part of
+/// the enclosing `if`).  The `nat` prefix is handled by the caller, which
+/// skips `nat` plus its keyword so signatures (`nat fun`, `nat type`)
+/// never contribute a phantom `end`.
+fn is_block_open(nodes: &[i64], names: &[String], pos: i64) -> bool {
+    is_name(nodes, names, pos, "mod")
+        || is_name(nodes, names, pos, "trait")
+        || is_name(nodes, names, pos, "impl")
+        || is_name(nodes, names, pos, "type")
+        || is_name(nodes, names, pos, "fun")
+        || is_name(nodes, names, pos, "while")
+        || is_name(nodes, names, pos, "if")
+        || is_name(nodes, names, pos, "match")
 }fn skip_nl(nodes: &[i64], pos: &mut i64) {
     while node_a(nodes, *pos) == TOK_NL {
         *pos += 1;
@@ -238,6 +255,75 @@ fn parse_native_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, list
         let start = node_start(nodes, *pos);
         let end = node_end(nodes, *pos);
         push_error(errors, "native modifier is only allowed on fun and type", file, start, end);
+        // Error recovery: `nat` on a block item (`mod`, `trait`, `impl`)
+        // would leave the block's matching `end` stranded in the token
+        // stream, where the next item parse reports a secondary
+        // "expected an item declaration".  Consume the item keyword, its
+        // name, and the block's `end` so the single primary error stands
+        // alone.  The block body is skipped wholesale; this is a rejected
+        // construct, so no nested items survive it.
+        if is_name(nodes, names, *pos, "mod") || is_name(nodes, names, *pos, "trait") || is_name(nodes, names, *pos, "impl") {
+            *pos += 1;
+            if node_tag(nodes, *pos) == NODE_TOKEN && node_a(nodes, *pos) == TOK_IDENT {
+                *pos += 1;
+            }
+            skip_nl(nodes, pos);
+            // Depth-counted scan to the block's matching `end`: nested
+            // `end`-terminated constructs inside the block (mod/trait/
+            // impl/type/fun/while/if/match) each contribute their own
+            // `end`, so a flat scan to the first `end` would consume a
+            // method body's `end` and strand the outer one, producing a
+            // secondary "expected an item declaration".  The outer
+            // `end` is the first one seen at depth 0.  A `nat` token is
+            // skipped together with the keyword after it: `nat fun`/
+            // `nat type` signatures carry no `end` of their own, so
+            // counting them would over-count the depth and over-consume
+            // past the real block end.
+            let mut depth = 0i64;
+            let mut in_trait = 0i64;
+            while !at_eof(nodes, *pos) {
+                if is_name(nodes, names, *pos, "nat") {
+                    // Skip `nat` and its keyword, but never advance past
+                    // EOF: an out-of-range read returns NONE, which is
+                    // not TOK_EOF, so a jump over the EOF token would
+                    // loop forever.  A `nat trait` is still a trait (its
+                    // methods are signatures), so the trait depth is
+                    // tracked here, before the keyword is consumed.
+                    *pos += 1;
+                    if !at_eof(nodes, *pos) {
+                        if is_name(nodes, names, *pos, "trait") {
+                            depth += 1;
+                            in_trait += 1;
+                        }
+                        *pos += 1;
+                    }
+                } else if is_name(nodes, names, *pos, "trait") {
+                    // A trait's methods are signatures (no bodies, no
+                    // `end` of their own), so `fun` inside it must not
+                    // contribute depth.
+                    depth += 1;
+                    in_trait += 1;
+                    *pos += 1;
+                } else if is_block_open(nodes, names, *pos) {
+                    if in_trait == 0 || !is_name(nodes, names, *pos, "fun") {
+                        depth += 1;
+                    }
+                    *pos += 1;
+                } else if is_name(nodes, names, *pos, "end") {
+                    if depth == 0 {
+                        *pos += 1;
+                        break;
+                    }
+                    depth -= 1;
+                    if in_trait > 0 {
+                        in_trait -= 1;
+                    }
+                    *pos += 1;
+                } else {
+                    *pos += 1;
+                }
+            }
+        }
         None
     }
 }
@@ -723,7 +809,22 @@ fn at_terminator(nodes: &[i64], names: &[String], pos: i64, terminators: &[&str]
 }
 
 fn parse_stmt(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
-    if is_name(nodes, names, *pos, "val") {
+    if is_name(nodes, names, *pos, "pub") {
+        // `pub` on a local binding is a compile error: visibility is a
+        // top-level item concept.  Detect `pub val`/`pub var` here so a
+        // local `pub` reports the truthful diagnostic instead of falling
+        // through to expression parsing and failing with a misleading
+        // "unknown symbol 'pub'" from the resolver.
+        let file = node_file(nodes, *pos);
+        let start = node_start(nodes, *pos);
+        let end = node_end(nodes, *pos);
+        let next = *pos + 1;
+        if is_name(nodes, names, next, "val") || is_name(nodes, names, next, "var") {
+            push_error(errors, "'pub' modifier is not allowed on local variables", file, start, end);
+            return None;
+        }
+        parse_expr_or_assign(pos, names, nodes, lists, errors)
+    } else if is_name(nodes, names, *pos, "val") {
         parse_let(pos, names, nodes, lists, errors, 0)
     } else if is_name(nodes, names, *pos, "var") {
         parse_let(pos, names, nodes, lists, errors, 1)
