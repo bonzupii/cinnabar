@@ -15,18 +15,29 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// The embedded musl static archives, staged into OUT_DIR by build.rs at
+// compile time (never committed to the source tree).  Every emitted binary
+// is a standalone static executable with no host libc or dynamic linker
+// dependency.
+const MUSL_LIBC_A: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libc.a"));
+const MUSL_CRT1_O: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crt1.o"));
+const MUSL_CRTI_O: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crti.o"));
+const MUSL_CRTN_O: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crtn.o"));
+
 pub fn compile_and_link(
     names: &[String],
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
     impls_list: i64,
     out: &Path,
+    opt_level: &str,
+    entry_span: (i64, i64, i64),
 ) -> Result<(), CodegenError> {
-    let ir_text = emit_to_ir(names, nodes, lists, impls_list)?;
+    let ir_text = emit_to_ir(names, nodes, lists, impls_list, entry_span)?;
     let ir_path = temp_path(out, "ll");
     let obj_path = temp_path(out, "o");
     write_text(&ir_path, &ir_text)?;
-    assemble(&ir_path, &obj_path)?;
+    assemble(&ir_path, &obj_path, opt_level)?;
     link(&obj_path, out)
 }
 
@@ -35,6 +46,7 @@ fn emit_to_ir(
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
     impls_list: i64,
+    entry_span: (i64, i64, i64),
 ) -> Result<String, CodegenError> {
     let context = Context::create();
     let module = context.create_module("cinnabar");
@@ -54,6 +66,7 @@ fn emit_to_ir(
         &mut *lists,
         (key_types, enum_infos, payload_structs, inst_fns),
         impls_list,
+        entry_span,
     )?;
     verify_module(&module)?;
     Ok(module.print_to_string().to_string())
@@ -66,6 +79,7 @@ fn run_emitter<'ctx, 'm, 'a>(
     lists: &'a mut Vec<Vec<i64>>,
     caches: (KeyTypes<'ctx>, EnumInfos, PayloadStructs<'ctx>, InstFns<'ctx>),
     impls_list: i64,
+    entry_span: (i64, i64, i64),
 ) -> Result<(), CodegenError> {
     let (context, module, builder, target_data) = llvm;
     let (key_types, enum_infos, payload_structs, inst_fns) = caches;
@@ -85,7 +99,7 @@ fn run_emitter<'ctx, 'm, 'a>(
         impls_list,
         protocol,
     );
-    emit_program(&mut sess)
+    emit_program(&mut sess, entry_span)
 }
 
 fn host_target() -> Result<(TargetData, TargetTriple), CodegenError> {
@@ -129,12 +143,13 @@ fn write_text(path: &Path, text: &str) -> Result<(), CodegenError> {
     fs::write(path, text).map_err(|err| io_error(&format!("cannot write '{}': {}", path.display(), err)))
 }
 
-fn assemble(ir_path: &Path, obj_path: &Path) -> Result<(), CodegenError> {
+fn assemble(ir_path: &Path, obj_path: &Path, opt_level: &str) -> Result<(), CodegenError> {
     let opt_path = ir_path.with_extension("opt.ll");
+    let (passes, llc_level) = opt_flags(opt_level);
     run_tool(
         "opt",
         &[
-            "-passes=default<O2>",
+            &passes,
             "-o",
             &opt_path.to_string_lossy(),
             &ir_path.to_string_lossy(),
@@ -143,7 +158,7 @@ fn assemble(ir_path: &Path, obj_path: &Path) -> Result<(), CodegenError> {
     run_tool(
         "llc",
         &[
-            "-O2",
+            &llc_level,
             "-filetype=obj",
             "-o",
             &obj_path.to_string_lossy(),
@@ -152,18 +167,50 @@ fn assemble(ir_path: &Path, obj_path: &Path) -> Result<(), CodegenError> {
     )
 }
 
+fn opt_flags(level: &str) -> (String, String) {
+    if level == "0" {
+        ("-passes=default<O0>".to_string(), "-O0".to_string())
+    } else if level == "1" {
+        ("-passes=default<O1>".to_string(), "-O1".to_string())
+    } else if level == "3" {
+        ("-passes=default<O3>".to_string(), "-O3".to_string())
+    } else if level == "s" {
+        ("-passes=default<Os>".to_string(), "-Os".to_string())
+    } else if level == "z" {
+        ("-passes=default<Oz>".to_string(), "-Oz".to_string())
+    } else {
+        ("-passes=default<O2>".to_string(), "-O2".to_string())
+    }
+}
+
 fn link(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
+    let libc_path = temp_path(out, "libc.a");
+    let crt1_path = temp_path(out, "crt1.o");
+    let crti_path = temp_path(out, "crti.o");
+    let crtn_path = temp_path(out, "crtn.o");
+    write_bytes(&libc_path, MUSL_LIBC_A)?;
+    write_bytes(&crt1_path, MUSL_CRT1_O)?;
+    write_bytes(&crti_path, MUSL_CRTI_O)?;
+    write_bytes(&crtn_path, MUSL_CRTN_O)?;
     run_tool(
         "clang",
         &[
-            "-nostdinc",
-            "-nostdinc++",
+            "-static",
+            "-nostdlib",
             "-no-pie",
             "-o",
             &out.to_string_lossy(),
+            &crt1_path.to_string_lossy(),
+            &crti_path.to_string_lossy(),
             &obj_path.to_string_lossy(),
+            &libc_path.to_string_lossy(),
+            &crtn_path.to_string_lossy(),
         ],
     )
+}
+
+fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), CodegenError> {
+    fs::write(path, bytes).map_err(|err| io_error(&format!("cannot write '{}': {}", path.display(), err)))
 }
 
 fn run_tool(tool: &str, args: &[&str]) -> Result<(), CodegenError> {

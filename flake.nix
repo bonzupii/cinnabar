@@ -26,6 +26,8 @@
             semgrep
             valgrind
             gdb
+#            musl
+            coq
           ];
 
           shellHook = ''
@@ -34,6 +36,7 @@
             export NIX_CFLAGS_COMPILE=""
             export NIX_HARDENING_ENABLE=""
             export RUST_BACKTRACE=full
+            export MUSL_LIBC_A="${pkgs.musl}/lib/libc.a"
           '';
         };
       }

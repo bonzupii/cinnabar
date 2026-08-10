@@ -1,0 +1,27 @@
+# Fuzzer-found regression (seed 11788718405962413153): a constant index into
+# an array whose element type is itself an enum.  Codegen used to mistake the
+# infallible index for a fallible Result(T, IndexError) and then fail to find
+# the IndexOutOfBounds variant in the user enum.  (EXPECT_OK 0.)
+pub type Tag
+  pub T0
+  pub T1(Int)
+  pub T2(Int, Int)
+end
+
+pub fun main() Int
+  val tags = [T1(4), T2(3, 4), T0]
+  val score = match tags[1]
+    T0 => 1
+    T1(a) => a + 1
+    T2(a, b) => a + b
+  end
+  val direct = match tags[2]
+    T0 => 1
+    T1(a) => a + 1
+    T2(a, b) => a + b
+  end
+  if score == 7 && direct == 1
+    return 0
+  end
+  return 1
+end

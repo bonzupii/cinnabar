@@ -146,6 +146,10 @@ pub const SYM_CONST: i64 = 8;
 pub const SYM_IMPL_METHOD: i64 = 9;
 pub const SYM_TRAIT_METHOD: i64 = 10;
 
+// Slot-f flag on SYM_FUN rows: 1 marks the program entry point (`main`),
+// assigned by the resolver so codegen never re-derives it from the name.
+pub const SYM_FUN_MAIN: i64 = 1;
+
 pub fn intern(names: &mut Vec<String>, text: &str) -> i64 {
     let mut idx = 0i64;
     while idx < names.len() as i64 {
@@ -484,6 +488,12 @@ pub const NAT_SELF_CHECK: i64 = 18;
 pub const NAT_TERM_PRINT: i64 = 19;
 pub const NAT_TERM_PRINT_LINE: i64 = 20;
 pub const NAT_TERM_EPRINT: i64 = 21;
+pub const NAT_NET_SOCKET: i64 = 22;
+pub const NAT_NET_BIND: i64 = 23;
+pub const NAT_NET_LISTEN: i64 = 24;
+pub const NAT_NET_ACCEPT: i64 = 25;
+pub const NAT_NET_SEND: i64 = 26;
+pub const NAT_NET_CLOSE: i64 = 27;
 
 pub const PRIM_NONE: i64 = 0;
 pub const PRIM_UNIT: i64 = 1;

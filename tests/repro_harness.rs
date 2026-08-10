@@ -3,9 +3,12 @@ use std::process::Command;
 
 const EXPECT_OK: &[(&str, i32)] = &[
     ("hello", 0),
+    ("net_primitives", 0),
+    ("liveness_many_bindings", 100),
     ("mini", 0),
     ("array_test", 0),
     ("borrow_index", 0),
+    ("enum_array_index", 0),
     ("idx10d_mut_disjoint", 30),
     ("idx10e_same_expr_disjoint", 30),
     ("rec_test", 120),
@@ -82,12 +85,23 @@ const RECORD_ONLY: &[&str] = &[
     "vm10",
 ];
 
+// Compile-only fixtures: the binary must build, but is never executed.
+// http_server.cnb is a blocking network server loop, so running it would
+// hang the harness; compiling it proves the Net native surface lowers and
+// links (per the zero-execution rule for that fixture).
+const EXPECT_COMPILE: &[(&str, &str)] = &[("http_server", "tests/fixtures/http_server.cnb")];
+
 fn fixture_path(name: &str) -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     root.join("tests")
         .join("fixtures")
         .join("repro")
         .join(format!("{}.cnb", name))
+}
+
+fn fixture_rel_path(rel: &str) -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    root.join(rel)
 }
 
 fn exit_code(cmd: &mut Command) -> i32 {
@@ -222,6 +236,18 @@ fn repro_corpus_baseline() {
             println!("RECORD {}: compile=FAIL({})", name, compile_code);
         }
         oidx += 1;
+    }
+
+    let mut cidx = 0usize;
+    while cidx < EXPECT_COMPILE.len() {
+        let (name, rel) = match EXPECT_COMPILE.get(cidx) {
+            Some(pair) => *pair,
+            None => break,
+        };
+        let bin = dir.join(format!("{}_bin", name));
+        let compile_code = compile(cinnabar, &fixture_rel_path(rel), &bin);
+        assert_eq!(compile_code, 0, "{} failed to compile (code {})", name, compile_code);
+        cidx += 1;
     }
 
     match std::fs::remove_dir_all(&dir) {

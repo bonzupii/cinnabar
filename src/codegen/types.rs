@@ -33,24 +33,20 @@ fn round_up(size: i64, align: i64) -> i64 {
     }
 }
 
-fn sym_name(nodes: &[i64], sym: i64) -> i64 {
-    node_b(nodes, sym)
-}
-
-fn row_of(nodes: &[i64], key: i64) -> Result<i64, CodegenError> {
+fn row_of(nodes: &[i64], key: i64, span: (i64, i64, i64)) -> Result<i64, CodegenError> {
     let row = find_tyinfo(nodes, key);
     if row == NONE {
-        return Err(builder_error(-1, 0, 0, &format!("cannot lower type key {}", key)));
+        return Err(builder_error(span.0, span.1, span.2, &format!("cannot lower type key {}", key)));
     }
     Ok(row)
 }
 
-pub fn llvm_type<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+pub fn llvm_type<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     let index = key as usize;
     if let Some(Some(ty)) = env.5.get(index) {
         return Ok(*ty);
     }
-    let ty = build_type(env, key)?;
+    let ty = build_type(env, key, span)?;
     if env.5.len() <= index {
         env.5.resize(index + 1, None);
     }
@@ -60,28 +56,27 @@ pub fn llvm_type<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64) -> Result<BasicT
     Ok(ty)
 }
 
-fn build_type<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
-    let row = row_of(env.3, key)?;
+fn build_type<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+    let row = row_of(env.3, key, span)?;
     let kind = node_b(env.3, row);
     let sym = node_c(env.3, row);
     let args = node_d(env.3, row);
     let elem = node_e(env.3, row);
     let len = node_f(env.3, row);
     if kind == TYD_BUILTIN {
-        return builtin_llvm(env.0, node_f(env.3, row));
+        return builtin_llvm(env.0, node_f(env.3, row), span);
     }
     if kind == TYD_STRUCT {
         let item = node_c(env.3, sym);
-        return struct_llvm(env, item, args);
+        return struct_llvm(env, item, args, span);
     }
     if kind == TYD_ENUM {
         let item = node_c(env.3, sym);
-        let ty = enum_llvm(env, key, item, args)?;
+        let ty = enum_llvm(env, key, item, args, span)?;
         return Ok(ty);
     }
     if kind == TYD_NATIVE {
-        let name = name_text(env.2, sym_name(env.3, sym));
-        return native_llvm(env.0, &name);
+        return native_llvm(env.0);
     }
     if kind == TYD_REF || kind == TYD_REF_MUT {
         if key_kind_of(env.3, elem) == TYD_SLICE {
@@ -93,14 +88,14 @@ fn build_type<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64) -> Result<BasicType
         return slice_llvm(env.0);
     }
     if kind == TYD_ARRAY {
-        let elem_ty = llvm_type(env, elem)?;
+        let elem_ty = llvm_type(env, elem, span)?;
         let count = if len < 0 { 0 } else { len };
         return Ok(elem_ty.array_type(count as u32).into());
     }
     Err(builder_error(
-        -1,
-        0,
-        0,
+        span.0,
+        span.1,
+        span.2,
         "attempted to lower a non-runtime type key",
     ))
 }
@@ -114,7 +109,7 @@ fn key_kind_of(nodes: &[i64], key: i64) -> i64 {
     }
 }
 
-fn builtin_llvm<'ctx>(context: &'ctx Context, sub: i64) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+fn builtin_llvm<'ctx>(context: &'ctx Context, sub: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     if sub == BUILTIN_U8 {
         return Ok(context.i8_type().into());
     }
@@ -127,7 +122,7 @@ fn builtin_llvm<'ctx>(context: &'ctx Context, sub: i64) -> Result<BasicTypeEnum<
     if sub == BUILTIN_INT || sub == BUILTIN_USIZE {
         return Ok(context.i64_type().into());
     }
-    Err(builder_error(-1, 0, 0, "unsupported builtin type"))
+    Err(builder_error(span.0, span.1, span.2, "unsupported builtin type"))
 }
 
 pub fn slice_view_ty<'ctx>(context: &'ctx Context) -> BasicTypeEnum<'ctx> {
@@ -139,38 +134,13 @@ fn slice_llvm<'ctx>(context: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, Codeg
     Ok(slice_view_ty(context))
 }
 
-fn native_surface_name(name: &str) -> &str {
-    match name.rfind('.') {
-        Some(idx) => &name[idx + 1..],
-        None => name,
-    }
-}
-
-fn native_llvm<'ctx>(context: &'ctx Context, name: &str) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+fn native_llvm<'ctx>(context: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     let ptr = context.ptr_type(inkwell::AddressSpace::from(0u16));
     let i64_ty = context.i64_type();
-    let surface = native_surface_name(name);
-    if surface == "Block" {
-        return Ok(context.struct_type(&[ptr.into(), i64_ty.into()], false).into());
-    }
-    if surface == "Vec" {
-        return Ok(context.struct_type(&[ptr.into(), i64_ty.into(), i64_ty.into()], false).into());
-    }
-    if surface == "String" {
-        return Ok(context.struct_type(&[ptr.into(), i64_ty.into()], false).into());
-    }
-    if surface == "HashMap" {
-        return Ok(context.struct_type(&[ptr.into(), i64_ty.into(), i64_ty.into()], false).into());
-    }
-    Err(builder_error(
-        -1,
-        0,
-        0,
-        &format!("native type '{}' has no runtime representation", name),
-    ))
+    Ok(context.struct_type(&[ptr.into(), i64_ty.into(), i64_ty.into()], false).into())
 }
 
-fn struct_llvm<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, item: i64, args: i64) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+fn struct_llvm<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, item: i64, args: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     let from = declared_param_keys(env.3, env.4, item);
     let to = list_to_vec(env.4, args);
     let fields = node_e(env.3, item);
@@ -181,15 +151,15 @@ fn struct_llvm<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, item: i64, args: i64) -> Res
         let field = list_get(env.4, fields, idx);
         let declared = ty_key_of(env.3, node_b(env.3, field));
         let concrete = subst_key(env.3, env.4, declared, &from, &to);
-        let ty = llvm_type(env, concrete)?;
+        let ty = llvm_type(env, concrete, span)?;
         field_tys.push(ty);
         idx += 1;
     }
     Ok(env.0.struct_type(&field_tys, false).into())
 }
 
-fn enum_llvm<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64, item: i64, args: i64) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
-    let (size, align, count) = enum_payload_bounds(env, item, args)?;
+fn enum_llvm<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64, item: i64, args: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+    let (size, align, count) = enum_payload_bounds(env, item, args, span)?;
     let padded = round_up(size, align);
     let ty = if padded == 0 {
         env.0.struct_type(&[env.0.i64_type().into()], false).into()
@@ -219,7 +189,7 @@ fn push_enum_info(enum_infos: &mut EnumInfos, key: i64, size: i64, align: i64, c
     enum_infos.push((key, size, align, count));
 }
 
-fn enum_payload_bounds<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, item: i64, args: i64) -> Result<(i64, i64, i64), CodegenError> {
+fn enum_payload_bounds<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, item: i64, args: i64, span: (i64, i64, i64)) -> Result<(i64, i64, i64), CodegenError> {
     let from = declared_param_keys(env.3, env.4, item);
     let to = list_to_vec(env.4, args);
     let variants = node_e(env.3, item);
@@ -237,7 +207,7 @@ fn enum_payload_bounds<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, item: i64, args: i64
             while pidx < pcount {
                 let declared = ty_key_of(env.3, list_get(env.4, payload_decl, pidx));
                 let concrete = subst_key(env.3, env.4, declared, &from, &to);
-                let ty = llvm_type(env, concrete)?;
+                let ty = llvm_type(env, concrete, span)?;
                 field_tys.push(ty);
                 pidx += 1;
             }
@@ -256,7 +226,7 @@ fn enum_payload_bounds<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, item: i64, args: i64
     Ok((max_size, max_align, count))
 }
 
-pub fn payload_struct_of<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, enum_key: i64, variant_idx: i64) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+pub fn payload_struct_of<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, enum_key: i64, variant_idx: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     let mut idx = 0usize;
     while idx < env.7.len() {
         match env.7.get(idx) {
@@ -269,7 +239,7 @@ pub fn payload_struct_of<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, enum_key: i64, var
         }
         idx += 1;
     }
-    let row = row_of(env.3, enum_key)?;
+    let row = row_of(env.3, enum_key, span)?;
     let sym = node_c(env.3, row);
     let args = node_d(env.3, row);
     let item = node_c(env.3, sym);
@@ -284,7 +254,7 @@ pub fn payload_struct_of<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, enum_key: i64, var
     while pidx < pcount {
         let declared = ty_key_of(env.3, list_get(env.4, payload_decl, pidx));
         let concrete = subst_key(env.3, env.4, declared, &from, &to);
-        let ty = llvm_type(env, concrete)?;
+        let ty = llvm_type(env, concrete, span)?;
         field_tys.push(ty);
         pidx += 1;
     }

@@ -12,15 +12,29 @@ RED='\033[0;31m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Strips ANSI/CSI escape sequences (color, cursor movement, etc.) from
+# captured command output before it reaches the log file. This does not
+# touch the compiler or any tool's own color output on a real terminal —
+# it only cleans what gets written to disk.
+strip_ansi() {
+  sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b\][^\x07]*\x07//g'
+}
+
 run_check() {
   local description="$1"
   shift
   echo -e "${BLUE}[CHECK]${NC} ${description}..."
   echo -e "\n=== [CHECK] ${description} ===" >> "$LOG_FILE"
-  if "$@" >> "$LOG_FILE" 2>&1; then
+  local tmp_out
+  tmp_out=$(mktemp)
+  if "$@" > "$tmp_out" 2>&1; then
+    strip_ansi < "$tmp_out" >> "$LOG_FILE"
+    rm -f "$tmp_out"
     echo -e "${GREEN}[PASS]${NC} ${description}"
     echo "=== [PASS] ${description} ===" >> "$LOG_FILE"
   else
+    strip_ansi < "$tmp_out" >> "$LOG_FILE"
+    rm -f "$tmp_out"
     echo -e "${RED}[FAIL]${NC} ${description}" >&2
     echo "=== [FAIL] ${description} ===" >> "$LOG_FILE"
     exit 1
@@ -40,7 +54,7 @@ run_check_ast() {
     echo -e "${GREEN}[PASS]${NC} ${description}"
     echo "=== [PASS] ${description} ===" >> "$LOG_FILE"
   else
-    cat "$tmp_out" >> "$LOG_FILE"
+    strip_ansi < "$tmp_out" >> "$LOG_FILE"
     rm -f "$tmp_out"
     echo -e "${RED}[FAIL]${NC} ${description}" >&2
     echo "=== [FAIL] ${description} ===" >> "$LOG_FILE"
@@ -56,13 +70,13 @@ expect_failure() {
   local tmp_out
   tmp_out=$(mktemp)
   if "$@" > "$tmp_out" 2>&1; then
-    cat "$tmp_out" >> "$LOG_FILE"
+    strip_ansi < "$tmp_out" >> "$LOG_FILE"
     rm -f "$tmp_out"
     echo -e "${RED}[FAIL]${NC} ${description} was incorrectly accepted!" >&2
     echo "=== [FAIL] ${description} was incorrectly accepted! ===" >> "$LOG_FILE"
     exit 1
   else
-    cat "$tmp_out" >> "$LOG_FILE"
+    strip_ansi < "$tmp_out" >> "$LOG_FILE"
     rm -f "$tmp_out"
     echo -e "${GREEN}[PASS]${NC} ${description}"
     echo "=== [PASS] ${description} ===" >> "$LOG_FILE"
@@ -77,7 +91,7 @@ echo ""
 # 1. Code Quality & Lint Gates
 run_check "Cargo check" cargo check --quiet
 run_check "Cargo clippy (zero warnings policy)" cargo clippy --quiet -- -D warnings
-run_check "Semgrep (AGENTS.md policy: discard patterns, dummy spans, hardcoded registries)" semgrep --config .semgrep.yml --error --quiet src/
+run_check "Semgrep (AGENTS.md policy: discard patterns, dummy spans, hardcoded registries)" semgrep --config .semgrep.yml --error --quiet .
 run_check "Cargo unit test suite" cargo test --quiet
 
 # 2. CLI Invocation Checks

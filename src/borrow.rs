@@ -1791,7 +1791,7 @@ fn check_fn(
 }
 
 fn analyze_fn(f: &mut F, ctx: &mut Ctx, entry: i64) {
-    let live_after = compute_liveness(f);
+    let live_after = compute_liveness(f, ctx);
     let (entry_state, inconsistencies) = linear_fixpoint(f, ctx, entry);
     let entry_origins = origin_fixpoint(f, ctx, entry);
     report(f, ctx, &live_after, &entry_state, &inconsistencies, &entry_origins);
@@ -1911,8 +1911,9 @@ fn block_reborrows(f: &F, block: i64) -> Vec<i64> {
     out
 }
 
-fn compute_liveness(f: &F) -> Vec<Vec<i64>> {
+fn compute_liveness(f: &F, ctx: &mut Ctx) -> Vec<Vec<i64>> {
     let nblocks = f.6.len() as i64;
+    let nbind = f.0.len() as i64;
     let mut live_in: Vec<Vec<i64>> = Vec::new();
     let mut live_out: Vec<Vec<i64>> = Vec::new();
     let mut blk = 0i64;
@@ -1921,10 +1922,13 @@ fn compute_liveness(f: &F) -> Vec<Vec<i64>> {
         live_out.push(Vec::new());
         blk += 1;
     }
+    // Live sets hold binding indices: 2 sets per block (in/out), each growing at most nbind times.
+    let cap = nblocks * nbind * 2 + 1;
     let mut guard = 0usize;
     loop {
         guard += 1;
-        if guard > 64 {
+        if guard > cap as usize {
+            push_internal(ctx.3, "internal: liveness analysis did not converge");
             break;
         }
         let mut changed = false;
@@ -2059,6 +2063,9 @@ fn inc_has(inc: &[(i64, i64)], block: i64, path: i64) -> bool {
     false
 }
 
+// Lattice order: UNBOUND < LIVE < MOVED < PARTIAL.  The join is the least
+// upper bound: UNBOUND joins to the other side, LIVE joins MOVED to MOVED,
+// and any PARTIAL operand dominates, so entry states only ever rise.
 fn join_linear(inn: &mut [i64], pout: &[i64], block: i64, inc: &mut Vec<(i64, i64)>) {
     let mut idx = 0usize;
     while idx < inn.len() {
@@ -2136,6 +2143,10 @@ fn apply_move(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool, c
     }
 }
 
+// Re-initialization is block-local: the MOVED->LIVE reset happens only in the
+// block's exit copy, never in a join, and the LIVE/PARTIAL error paths leave
+// the state untouched, so the block transform is entry-monotone and inter-block
+// join states never regress downwards.
 fn apply_assign(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool, ctx: &mut Ctx, span: (i64, i64, i64)) {
     let root = root_path_of(f, binding);
     if root < 0 {
@@ -2221,6 +2232,7 @@ fn linear_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> (Vec<Vec<i64>>, Vec<(i64
         blk += 1;
     }
     let mut inconsistencies: Vec<(i64, i64)> = Vec::new();
+    // 2 state vectors per block (entry/exit) over npaths cells on a 4-state chain; each cell changes at most 4 times.
     let cap = nblocks * npaths * 8 + 1;
     let mut guard = 0usize;
     loop {
@@ -2314,6 +2326,7 @@ fn origin_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> Vec<Vec<Vec<i64>>> {
         exit_origins.push(empty_origins(nbind));
         blk += 1;
     }
+    // Entry sets grow at most nloans times per (block, binding); exit sets snap once to a fixed loan list.
     let cap = nblocks * nbind * (nloans + 1) + 1;
     let mut guard = 0usize;
     loop {
@@ -2708,6 +2721,9 @@ fn compute_summary(f: &F, ctx: &mut Ctx, entry: i64) -> Option<Vec<i64>> {
     }
 }
 
+// Summary sets only grow: each round unions the newly computed return-origin
+// parameter indices into the stored set, so the call-graph iteration is
+// monotone and converges without relying on the failure cap.
 fn refine_summary(table: &mut Vec<(i64, Vec<i64>)>, fn_node: i64, sources: Option<Vec<i64>>) -> bool {
     let sources = match sources {
         Some(sources) => sources,
@@ -2718,9 +2734,6 @@ fn refine_summary(table: &mut Vec<(i64, Vec<i64>)>, fn_node: i64, sources: Optio
         match table.get(idx) {
             Some(pair) => {
                 if pair.0 == fn_node {
-                    if same_set(&pair.1, &sources) {
-                        return false;
-                    }
                     break;
                 }
             }
@@ -2730,16 +2743,31 @@ fn refine_summary(table: &mut Vec<(i64, Vec<i64>)>, fn_node: i64, sources: Optio
     }
     if idx < table.len() {
         match table.get_mut(idx) {
-            Some(pair) => {
-                pair.1 = sources;
-                true
-            }
+            Some(pair) => union_values(&mut pair.1, &sources),
             None => false,
         }
     } else {
         table.push((fn_node, sources));
         true
     }
+}
+
+fn union_values(dst: &mut Vec<i64>, src: &[i64]) -> bool {
+    let mut grew = false;
+    let mut idx = 0usize;
+    while idx < src.len() {
+        match src.get(idx) {
+            Some(value) => {
+                if !list_has(dst, *value) {
+                    dst.push(*value);
+                    grew = true;
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    grew
 }
 
 fn summary_of(table: &[(i64, Vec<i64>)], fn_node: i64) -> Option<&Vec<i64>> {

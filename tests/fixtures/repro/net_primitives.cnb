@@ -1,0 +1,54 @@
+#!|
+  Non-blocking socket primitive fixture: exercises socket(), bind() on an
+  ephemeral port, listen(), and close().  The Net natives are implemented
+  directly in LLVM IR by the emitter (native_net_*) and linked statically
+  against musl.  Runs in milliseconds and exits 0 on success.
+|#
+
+pub const EPHEMERAL_PORT: Usize = 0
+pub const BACKLOG: Usize = 4
+
+pub mod Net
+  pub type Error
+    pub SystemFault(Int)
+  end
+
+  pub nat type Socket
+
+  pub nat fun socket() impure Result(Socket, Error)
+  pub nat fun bind(sock: &Socket, port: Usize) impure Result(Unit, Error)
+  pub nat fun listen(sock: &Socket, backlog: Usize) impure Result(Unit, Error)
+  pub nat fun close(sock: Socket) impure Unit
+end
+
+use Net.socket
+use Net.bind
+use Net.listen
+use Net.close
+
+fun fail_socket(sock: Net.Socket, code: Int) Int
+  close(sock)
+  return code
+end
+
+pub fun main() impure Int
+  val sock = match socket()
+    Ok(s) => s
+    Err(Net.SystemFault(code)) => return code
+  end
+
+  val bind_result = bind(&sock, EPHEMERAL_PORT)
+  match bind_result
+    Ok(Unit) => Unit
+    Err(Net.SystemFault(code)) => return fail_socket(sock, code)
+  end
+
+  val listen_result = listen(&sock, BACKLOG)
+  match listen_result
+    Ok(Unit) => Unit
+    Err(Net.SystemFault(code)) => return fail_socket(sock, code)
+  end
+
+  close(sock)
+  return 0
+end

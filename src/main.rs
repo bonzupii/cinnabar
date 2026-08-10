@@ -8,7 +8,7 @@ mod resolver;
 mod typecheck;
 
 use crate::ast::*;
-use ariadne::{Color, FnCache, Label, Report, ReportKind};
+use ariadne::{Color, FnCache, Label, Report, ReportKind, Source};
 use clap::builder::PathBufValueParser;
 use clap::{Arg, ArgAction, Command as ClapCommand};
 use codegen::compile_and_link;
@@ -16,7 +16,7 @@ use codegen::error::codegen_error_message;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-fn parse_args() -> Option<(PathBuf, Option<PathBuf>, bool, bool)> {
+fn parse_args() -> Option<(PathBuf, Option<PathBuf>, bool, bool, String)> {
     let matches = ClapCommand::new("cinnabar")
         .about("Cinnabar compiler")
         .arg(
@@ -46,17 +46,29 @@ fn parse_args() -> Option<(PathBuf, Option<PathBuf>, bool, bool)> {
                 .action(ArgAction::SetTrue)
                 .help("Execute the compiled binary after building"),
         )
+        .arg(
+            Arg::new("opt_level")
+                .short('O')
+                .long("opt-level")
+                .value_name("LEVEL")
+                .value_parser(clap::builder::PossibleValuesParser::new(["0", "1", "2", "3", "s", "z"]))
+                .help("Optimization level: 0, 1, 2, 3, s, z (default 2)"),
+        )
         .get_matches();
     let input = {
         let path = matches.get_one::<PathBuf>("input")?;
         path.clone()
     };
     let output = matches.get_one::<PathBuf>("output").cloned();
-    Some((input, output, matches.get_flag("dump_ast"), matches.get_flag("run")))
+    let opt_level = matches
+        .get_one::<String>("opt_level")
+        .cloned()
+        .unwrap_or_else(|| "2".to_string());
+    Some((input, output, matches.get_flag("dump_ast"), matches.get_flag("run"), opt_level))
 }
 
 fn main() -> ExitCode {
-    let (input, output, dump_ast, run) = match parse_args() {
+    let (input, output, dump_ast, run, opt_level) = match parse_args() {
         Some(args) => args,
         None => return ExitCode::FAILURE,
     };
@@ -88,7 +100,8 @@ fn main() -> ExitCode {
         Some(path) => path.clone(),
         None => default_out_path(&input),
     };
-    if let Err(codegen_err) = compile_and_link(&names, &mut nodes, &mut lists, impls_list, &out) {
+    let entry_span = entry_span_of(&files);
+    if let Err(codegen_err) = compile_and_link(&names, &mut nodes, &mut lists, impls_list, &out, &opt_level, entry_span) {
         return finish_with_codegen_error(&codegen_err, &files);
     }
     if run {
@@ -135,20 +148,26 @@ fn render_diagnostics(errors: &[Diag], files: &[(String, String)]) -> Result<(),
     Ok(())
 }
 
+fn render_source_less(message: &str) -> Result<(), String> {
+    Report::build(ReportKind::Error, 0..0)
+        .with_message(message)
+        .finish()
+        .print(Source::from(""))
+        .map_err(|render_err| format!("cannot render '{}': {}", message, render_err))
+}
+
 fn render_diag(
     cache: &mut FnCache<String, impl FnMut(&String) -> Result<String, String>, String>,
     files: &[(String, String)],
     diag: &Diag,
 ) -> Result<(), String> {
     if diag.1 == NO_FILE {
-        eprintln!("error: {}", diag.0);
-        return Ok(());
+        return render_source_less(&diag.0);
     }
     let path = match file_path_of(files, diag.1) {
         Some(path) => path,
         None => {
-            eprintln!("error: {} (unknown file {})", diag.0, diag.1);
-            return Ok(());
+            return render_source_less(&format!("{} (unknown source file {})", diag.0, diag.1));
         }
     };
     let span = diag.2 as usize..diag.3 as usize;
@@ -164,18 +183,16 @@ fn render_diag(
 fn render_codegen_error(codegen_err: &codegen::error::CodegenError, files: &[(String, String)]) -> Result<(), String> {
     let mut cache = make_cache(files);
     if codegen_err.span.0 == NO_FILE {
-        eprintln!("error: {}", codegen_error_message(codegen_err));
-        return Ok(());
+        return render_source_less(&codegen_error_message(codegen_err));
     }
     let path = match file_path_of(files, codegen_err.span.0) {
         Some(path) => path,
         None => {
-            eprintln!(
-                "error: {} (unknown file {})",
+            return render_source_less(&format!(
+                "{} (unknown source file {})",
                 codegen_error_message(codegen_err),
                 codegen_err.span.0
-            );
-            return Ok(());
+            ));
         }
     };
     let span = codegen_err.span.1 as usize..codegen_err.span.2 as usize;
@@ -192,6 +209,13 @@ fn render_codegen_error(codegen_err: &codegen::error::CodegenError, files: &[(St
         .map_err(|render_err| format!("cannot render codegen error: {}", render_err))
 }
 
+fn entry_span_of(files: &[(String, String)]) -> (i64, i64, i64) {
+    match files.first() {
+        Some((_, text)) => (0, 0, text.len() as i64),
+        None => (NO_FILE, 0, 0),
+    }
+}
+
 fn default_out_path(input: &Path) -> PathBuf {
     let text = input.to_string_lossy();
     match text.strip_suffix(".cnb") {
@@ -202,14 +226,20 @@ fn default_out_path(input: &Path) -> PathBuf {
 
 fn finish_with_diagnostics(errors: &[Diag], files: &[(String, String)]) -> ExitCode {
     if let Err(message) = render_diagnostics(errors, files) {
-        eprintln!("failed to render diagnostic: {}", message);
+        let detail = format!("failed to render diagnostic: {}", message);
+        if render_source_less(&detail).is_err() {
+            return ExitCode::FAILURE;
+        }
     }
     ExitCode::FAILURE
 }
 
 fn finish_with_codegen_error(codegen_err: &codegen::error::CodegenError, files: &[(String, String)]) -> ExitCode {
     if let Err(message) = render_codegen_error(codegen_err, files) {
-        eprintln!("failed to render diagnostic: {}", message);
+        let detail = format!("failed to render diagnostic: {}", message);
+        if render_source_less(&detail).is_err() {
+            return ExitCode::FAILURE;
+        }
     }
     ExitCode::FAILURE
 }

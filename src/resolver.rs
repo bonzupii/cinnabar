@@ -499,6 +499,8 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
         item_set_sym(state.1, item, sym);
         if kind == ITEM_NATIVE_FUN {
             sym_set_native_op(state.1, sym, native_opcode_of(state.0, full));
+        } else if full == intern(state.0, "main") {
+            node_set_f(state.1, sym, SYM_FUN_MAIN);
         }
     } else if kind == ITEM_CONST {
         let name = node_d(state.1, item);
@@ -755,6 +757,24 @@ fn native_opcode_of(names: &[String], full: i64) -> i64 {
     if name_is(names, full, "Terminal.eprint") {
         return NAT_TERM_EPRINT;
     }
+    if name_is(names, full, "Net.socket") {
+        return NAT_NET_SOCKET;
+    }
+    if name_is(names, full, "Net.bind") {
+        return NAT_NET_BIND;
+    }
+    if name_is(names, full, "Net.listen") {
+        return NAT_NET_LISTEN;
+    }
+    if name_is(names, full, "Net.accept") {
+        return NAT_NET_ACCEPT;
+    }
+    if name_is(names, full, "Net.send") {
+        return NAT_NET_SEND;
+    }
+    if name_is(names, full, "Net.close") {
+        return NAT_NET_CLOSE;
+    }
     NAT_NONE
 }
 
@@ -913,14 +933,17 @@ fn list_last(lists: &[Vec<i64>], list: i64) -> i64 {
 }
 
 fn join_segs(names: &[String], lists: &[Vec<i64>], segs: i64) -> String {
-    let mut parts: Vec<String> = Vec::new();
+    let mut text = String::new();
     let count = list_len(lists, segs);
     let mut idx = 0i64;
     while idx < count {
-        parts.push(name_text(names, list_get(lists, segs, idx)));
+        if !text.is_empty() {
+            text.push('.');
+        }
+        text.push_str(&name_text(names, list_get(lists, segs, idx)));
         idx += 1;
     }
-    parts.join(".")
+    text
 }
 
 fn single_name_list(lists: &mut Vec<Vec<i64>>, name: i64) -> i64 {

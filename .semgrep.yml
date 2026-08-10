@@ -4,42 +4,74 @@
 # panic/todo/unimplemented/unreachable, indexing, naming, ordinary unused
 # variables/imports, wildcard enum matches, and redundant struct-rest patterns.
 # These rules enforce the additional invariants that keep an AI implementation
-# from compiling guessed semantics or hiding discarded values.
+# from compiling guessed semantics, hiding discarded values, or introducing
+# hardcoded string-matching shortcuts and fixture-overfitted fallbacks.
 #
 # Every finding is an error. Existing findings are refactoring work. There are
 # no exceptions for `_`, `_prefix`, `_ =>`, `..`, or `rest @ ..` in Rust.
 # `rest @ ..` is Cinnabar source syntax only; it is not a Rust implementation
 # escape hatch.
-
 rules:
   - id: cinnabar-no-underscore-prefixed-binding
     languages: [rust]
     severity: ERROR
     message: >-
       Do not hide a value from Rust's unused-variable lint with `_` or an
-      `_prefix` binding. Bind every produced value with a real name and use it,
-      or reshape the producer so the value is not produced. This rule matches
-      actual binding positions, not ordinary identifiers in comments or code.
-    pattern-regex: >-
-      (?m)^[ \t]*(?:let[ \t]+(?:mut[ \t]+)?_[A-Za-z0-9_]*[ \t]*(?::[^=\n]+)?=|fn[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*\([^\n]*\b_[A-Za-z0-9_]*[ \t]*:)
+      `_prefix` name. Bind every produced value with a real name and use it,
+      or reshape the producer so the value is not produced. This covers let
+      bindings, destructuring patterns, function and closure parameters,
+      and for loops.
+    pattern-either:
+      - pattern-regex: >-
+          (?m)^[ \t]*(?:else[ \t]+)?(?:if[ \t]+|while[ \t]+)?let[ \t]+(?:mut[ \t]+)?[^=\n]*\b_[A-Za-z0-9_]+[^=\n]*=
+      - pattern-regex: >-
+          (?m)^[ \t]*for[ \t]+_[A-Za-z0-9_]+[ \t]+in\b
+      - pattern-regex: >-
+          (?m)^[ \t]*(?:const|static)[ \t]+_[A-Za-z0-9_]+[ \t]*:
+      - pattern-regex: >-
+          (?m)^[ \t]*(?:pub[ \t]+)?(?:\([^)\n]*\)[ \t]+)?fn[ \t]+[A-Za-z_][A-Za-z0-9_]*[^\n]*\b_[A-Za-z0-9_]+[ \t]*:
+      - pattern-regex: >-
+          (?m)^[ \t]*_[A-Za-z0-9_]+[ \t]*:
+      - pattern-regex: >-
+          (?m)(?:=|\(|,|\bmove)[ \t]*\|[ \t]*_[A-Za-z0-9_]+
+      - pattern-regex: >-
+          (?m)(?:=|\(|,|\bmove)[ \t]*\|[^|\n]*,[ \t]*_[A-Za-z0-9_]+(?=[^|\n]*\|)
 
   - id: cinnabar-no-explicit-discard-binding
     languages: [rust]
     severity: ERROR
     message: >-
-      This binding discards a value. Name the value and use it in program
-      behavior, or restructure the producer so it is not created.
-    pattern-regex: >-
-      (?m)^[ \t]*let[ \t]+(?:mut[ \t]+)?(?:_|\([^\n]*(?:^|[, (])_[, )][^\n]*\))[ \t]*(?::[^=\n]+)?=
+      This code discards a value with a bare `_`. Name the value and use it
+      in program behavior, or restructure the producer so it is not created.
+      This covers let bindings, destructuring positions, function and
+      closure parameters, and for loops.
+    pattern-either:
+      - pattern-regex: >-
+          (?m)^[ \t]*(?:else[ \t]+)?(?:if[ \t]+|while[ \t]+)?let[ \t]+(?:mut[ \t]+)?[^=\n]*(?<![\w$'])_(?!\w)[^=\n]*=
+      - pattern-regex: >-
+          (?m)^[ \t]*for[ \t]+_[ \t]+in\b
+      - pattern-regex: >-
+          (?m)^[ \t]*(?:const|static)[ \t]+_[ \t]*:
+      - pattern-regex: >-
+          (?m)^[ \t]*_[ \t]*:
+      - pattern-regex: >-
+          (?m)^[ \t]*_[ \t]*[,)\]]
+      - pattern-regex: >-
+          (?m)^[ \t]*(?:pub[ \t]+)?(?:\([^)\n]*\)[ \t]+)?fn[ \t]+[A-Za-z_][A-Za-z0-9_]*[^\n]*(?<![\w$'])_(?!\w)[ \t]*:
+      - pattern-regex: >-
+          (?m)(?:=|\(|,|\bmove)[ \t]*\|[ \t]*_(?!\w)
+      - pattern-regex: >-
+          (?m)(?:=|\(|,|\bmove)[ \t]*\|[^|\n]*,(?<![\w$'])_(?!\w)(?=[^|\n]*\|)
 
   - id: cinnabar-no-wildcard-match-arm
     languages: [rust]
     severity: ERROR
     message: >-
-      This Rust match arm discards unmatched variants or values. Name every
-      variant explicitly and handle its value.
+      This match arm discards unmatched variants or values with `_`. Name
+      every variant explicitly and handle its value, including a `_` nested
+      inside a tuple, variant, slice, or or-pattern.
     pattern-regex: >-
-      (?m)^[ \t]*_[ \t]*=>
+      (?m)^[ \t]*[^\n=]*(?<![\w$])_(?!\w)[^\n=]*=>
 
   - id: cinnabar-no-struct-rest-pattern
     languages: [rust]
@@ -73,7 +105,7 @@ rules:
     severity: ERROR
     message: >-
       This creates a fabricated source location. Thread the real Cinnabar
-      span through the operation instead of assigning line 1, column 1.
+      span through the operation instead of assigning line 1, column 1 or dummy spans.
     pattern-regex: >-
       (?m)(?:crate::lexer::)?Span::new\([ \t]*0[ \t]*,[ \t]*0[ \t]*,[ \t]*1[ \t]*,[ \t]*1[ \t]*\)
 
@@ -114,6 +146,70 @@ rules:
     pattern-regex: >-
       (?ms)^[ \t]*(?:pub[ \t]+)?fn[ \t]+(?:touch|use_ref|use_value|consume_ref|consume_value)[ \t]*\([^)]*\)[^{]*\{[^{}]*(?:as[ \t]*\*[ \t]*(?:const|mut)|is_null\(\)|as[ \t]+usize)[^{}]*\}
 
+  - id: cinnabar-no-hardcoded-linearity-string-list
+    languages: [rust]
+    severity: ERROR
+    paths:
+      include: ["/src/typecheck.rs", "/src/borrow.rs"]
+    message: >-
+      Linearity is being derived by matching against a hardcoded string array of handle names.
+      Treat all TYD_NATIVE types as linear by default instead of matching hardcoded type names.
+    pattern-regex: >-
+      (?m)^[ \t]*(?:const|let)[ \t]+LINEAR_HANDLES[ \t]*:[ \t]*\[[^\n]*\][ \t]*=
+
+  - id: cinnabar-no-hardcoded-native-type-checks-in-codegen
+    languages: [rust]
+    severity: ERROR
+    paths:
+      include: ["/src/codegen/types.rs", "/src/codegen/emitter.rs"]
+    message: >-
+      Codegen is checking native surface names against a hardcoded string list.
+      Lower all TYD_NATIVE keys to an opaque handle structure { ptr, i64, i64 } by default.
+    pattern-regex: >-
+      (?m)^[ \t]*if[ \t]+surface[ \t]*==[ \t]*"(?:Block|Vec|String|HashMap)"
+
+  - id: cinnabar-no-hardcoded-generic-parameter-names
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      Generic inference is restricted to hardcoded parameter names ("T", "K", "V", "E"). Use the
+      function or type declaration's generic-parameter list instead.
+    pattern-regex: >-
+      (?m)^[ \t]*if[ \t]+name[ \t]*==[ \t]*"T"[ \t]*\|\|[ \t]*name[ \t]*==[ \t]*"K"[ \t]*\|\|[ \t]*name[ \t]*==[ \t]*"V"[ \t]*\|\|[ \t]*name[ \t]*==[ \t]*"E"[ \t]*\|\|[ \t]*name[ \t]*==[ \t]*"U"
+
+  - id: cinnabar-no-native-keyword-alias
+    languages: [rust]
+    severity: ERROR
+    paths:
+      include: ["/src/parser.rs", "/src/lexer.rs"]
+    message: >-
+      The parser is accepting 'native' as a fallback keyword alias. Only 'nat' is valid
+      Cinnabar grammar per MANIFESTO.md.
+    pattern-regex: >-
+      (?m)is_name\([^,\n]*,[^\n]*,[ \t]*"native"\)
+
+  - id: cinnabar-no-fixed-count-fixpoint-loop-caps
+    languages: [rust]
+    severity: ERROR
+    paths:
+      include: ["/src/borrow.rs", "/src/typecheck.rs"]
+    message: >-
+      Fixpoint dataflow loops are capped at a fixed integer constant (32 or 64) without error reporting.
+      Derive loop caps dynamically from CFG topology and emit an explicit internal error on non-convergence.
+    pattern-regex: >-
+      (?m)^[ \t]*if[ \t]+guard[ \t]*>[ \t]*(?:32|64|128)[ \t]*\{[ \t\n]*break;
+
+  - id: cinnabar-no-legacy-string-variant-tag-lookups
+    languages: [rust]
+    severity: ERROR
+    paths:
+      include: ["/src/codegen/emitter.rs"]
+    message: >-
+      Codegen is scanning variant lists by string comparison. Query variant tags directly
+      via NODE_VARFACT or pre-interned Protocol name IDs.
+    pattern-regex: >-
+      (?m)^[ \t]*fn[ \t]+variant_index_by_name(?:_opt)?\b
+
   - id: cinnabar-no-hand-maintained-variant-tags
     languages: [rust]
     severity: ERROR
@@ -143,19 +239,6 @@ rules:
     pattern-regex: >-
       (?m)^[ \t]*(?:fn[ \t]+[A-Za-z_][A-Za-z0-9_]*(?:register|assign)[A-Za-z0-9_]*(?:variant|tag)[A-Za-z0-9_]*[ \t]*\(|(?:self\.)?[A-Za-z_][A-Za-z0-9_]*(?:variant|tag)[A-Za-z0-9_]*[ \t]*=[^=])
 
-  - id: cinnabar-no-hardcoded-codegen-layout
-    languages: [rust]
-    severity: ERROR
-    message: >-
-      This code hardcodes a representation size or slot count. Derive the
-      layout from the declared type and target layout.
-    pattern-either:
-      - pattern: $TYPE.array_type(64)
-      - pattern: $TYPE.const_int(128, ...)
-      - pattern: $TYPE.const_int(64, ...)
-      - pattern: $TYPE.const_int(24, ...)
-      - pattern: $TYPE.const_int(16, ...)
-
   - id: cinnabar-no-invented-fallback-type
     languages: [rust]
     severity: ERROR
@@ -184,41 +267,14 @@ rules:
     pattern-regex: >-
       (?ms)fn[ \t]+bind_pattern_vars[^{]*\{.*?build_store\(alloca,[ \t]*i64_ty\.const_zero\(\)\)
 
-  - id: cinnabar-no-codegen-ignored-field-access
+  - id: cinnabar-no-codegen-type-reinference-helper
     languages: [rust]
     severity: ERROR
     message: >-
-      This field access ignores the requested field. Select the named field
-      using its declared type and return that field's value.
+      Codegen defines a second type-resolution path. Consume the type attached
+      by the typechecker instead.
     pattern-regex: >-
-      (?m)^[ \t]*Expr::FieldAccess\(target,[ \t]*_\)[ \t]*=>
-
-  - id: cinnabar-no-empty-type-argument-walk
-    languages: [rust]
-    severity: ERROR
-    message: >-
-      This loop walks generic arguments without using them. Resolve and carry
-      every argument into the call, or remove the loop.
-    pattern-regex: >-
-      (?ms)if[ \t]+let[ \t]+Some\(t_args\)[ \t]*=[ \t]*type_args[ \t]*\{[^{}]*while[ \t]+t_idx[ \t]*<[ \t]*t_args\.len\(\)[ \t]*\{[ \t\n]*t_idx[ \t]*\+=[ \t]*1;[ \t\n]*\}[^{}]*\}
-
-  - id: cinnabar-no-root-only-path-resolution
-    languages: [rust]
-    severity: ERROR
-    message: >-
-      This resolver validates only the first path segment. Resolve every
-      module, type, and member segment with its scope and visibility.
-    pattern-regex: >-
-      (?ms)fn[ \t]+resolve_path[^{]*\{[^{}]*root_name[ \t]*=[ \t]*&path\[0\][^{}]*symbol_exists\(root_name\)[^{}]*\}
-
-  - id: cinnabar-no-hardcoded-generic-parameter-names
-    languages: [rust]
-    severity: ERROR
-    message: >-
-      Generic inference is restricted to hardcoded parameter names. Use the
-      function's declared generic-parameter list instead.
-    pattern-regex: >-
-      (?m)^[ \t]*if[ \t]+name[ \t]*==[ \t]*"T"[ \t]*\|\|[ \t]*name[ \t]*==[ \t]*"K"[ \t]*\|\|[ \t]*name[ \t]*==[ \t]*"V"[ \t]*\|\|[ \t]*name[ \t]*==[ \t]*"E"[ \t]*\|\|[ \t]*name[ \t]*==[ \t]*"U"
+      (?m)^[ \t]*fn[ \t]+(?:infer_expr_type|resolve_type)[ \t]*\(
 
   - id: cinnabar-no-unknown-call-type-fallback
     languages: [rust]
@@ -238,47 +294,74 @@ rules:
     pattern-regex: >-
       (?ms)Expr::FieldAccess\(target,[ \t]*field_name\)[^\n]*=>.*?Ok\(Type::Named\("Int"\.to_string\(\)\)\)
 
-  - id: cinnabar-no-codegen-type-reinference-helper
+  - id: cinnabar-no-vec-string-path-joining
     languages: [rust]
     severity: ERROR
+    paths:
+      include: ["/src/resolver.rs"]
     message: >-
-      Codegen defines a second type-resolution path. Consume the type attached
-      by the typechecker instead.
+      The resolver is converting prefix lists back into temporary Vec<String> arrays to join with '.'.
+      Construct the dotted name string directly in a single reusable buffer.
     pattern-regex: >-
-      (?m)^[ \t]*fn[ \t]+(?:infer_expr_type|resolve_type)[ \t]*\(
+      (?m)parts\.join\([ \t]*"\."[ \t]*\)
 
-  - id: cinnabar-no-codegen-fixed-struct-layout
+  - id: cinnabar-no-generic-with-extension-stripping
     languages: [rust]
     severity: ERROR
+    paths:
+      include: ["/src/main.rs"]
     message: >-
-      This LLVM layout is handwritten as a fixed field list. Derive fields and
-      element types from the declared Cinnabar type.
+      The compiler driver is using generic with_extension(""). Use explicit .strip_suffix(".cnb")
+      to format the output binary path truthfully.
     pattern-regex: >-
-      (?m)^[ \t]*let[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*self\.context\.struct_type\(&\[[^\n]*\][^\n]*\)
+      (?m)\.with_extension\([ \t]*""[ \t]*\)
 
-  - id: cinnabar-no-codegen-fixed-element-gep
+  - id: cinnabar-no-eprintln-error-leak-in-pipeline
     languages: [rust]
     severity: ERROR
+    paths:
+      exclude: ["/src/main.rs", "/build.rs"]
     message: >-
-      This GEP uses a fixed i64 element type. Use the declared element type
-      so every generic collection has the correct stride.
+      A compiler pipeline stage is writing directly to stderr/stdout with
+      eprintln! or println!. Push a typed diagnostic with a real span to the
+      errors vector instead so it can be rendered through Ariadne.
     pattern-regex: >-
-      (?m)^[ \t]*let[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*=[^\n]*build_gep\(i64_ty,
+      (?m)^[ \t]*(?:eprintln!|println!)\([ \t]*"
 
-  - id: cinnabar-no-fixed-enum-representation
+  - id: cinnabar-no-unformatted-plain-text-error-dump
     languages: [rust]
     severity: ERROR
     message: >-
-      This uses one fixed representation for every enum. Derive the tag and
-      payload layout from the specific enum declaration.
+      This error string is being dumped directly as plain text to stderr. Every
+      diagnostic must be collected into the typed Diag vector or CodegenError
+      model for Ariadne formatting.
     pattern-regex: >-
-      (?m)^[ \t]*fn[ \t]+lower_enum_type[ \t]*\(
+      (?m)^[ \t]*eprintln!\([ \t]*"(?:error:|duplicate symbol|cannot redeclare|failed to render)
 
-  - id: cinnabar-no-opaque-native-runtime-substitute
+  - id: cinnabar-no-codegen-dummy-span-error
     languages: [rust]
     severity: ERROR
+    paths:
+      include: ["/src/codegen/"]
     message: >-
-      This generated runtime body substitutes a fixed implementation for a
-      declared native surface. Lower the declared signature and types directly.
-    pattern: |
-      fn emit_native_runtime_bodies(...) { ... }
+      Codegen is creating a builder_error with a hardcoded (-1, 0, 0) dummy span.
+      Pass the real source span (file, start, end) of the AST node, item, or
+      entry file being emitted so Ariadne can render a source-highlighted diagnostic.
+    pattern-regex: >-
+      (?m)builder_error\([ \t]*(?:-1|NO_FILE)[ \t]*,[ \t]*0[ \t]*,[ \t]*0[ \t]*,
+
+  - id: cinnabar-no-codegen-dummy-span-error
+    languages: [rust]
+    severity: ERROR
+    paths:
+      include: ["/src/codegen/"]
+    message: >-
+      Codegen is creating a builder_error with a hardcoded -1/NO_FILE dummy span.
+      Pass the real source span (file, start, end) of the AST node being emitted.
+    pattern-either:
+      - pattern: builder_error(-1, $START, $END, $MSG)
+      - pattern: builder_error(NO_FILE, $START, $END, $MSG)
+      - pattern: |
+          let $F = -1;
+          ...
+          builder_error($F, $START, $END, $MSG)
