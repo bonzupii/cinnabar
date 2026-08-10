@@ -1,4 +1,3 @@
-
 pub enum CodegenErrorKind {
     Builder(String),
     Io(String),

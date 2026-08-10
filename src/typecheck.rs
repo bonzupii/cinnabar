@@ -1,4 +1,3 @@
-
 use crate::ast::*;
 
 const IMPL_STRIDE: i64 = 3;

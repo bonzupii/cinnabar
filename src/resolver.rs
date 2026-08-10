@@ -1,4 +1,3 @@
-
 use crate::ast::*;
 
 pub const NS_TYPE: i64 = 0;

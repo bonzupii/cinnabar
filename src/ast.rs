@@ -1,4 +1,3 @@
-
 pub type Diag = (String, i64, i64, i64);
 
 pub const NONE: i64 = -1;
