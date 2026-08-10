@@ -1,36 +1,11 @@
-//! Independent verification of the Cinnabar spec arithmetic
-//! (`tests/fixtures/spec.cnb`), written from scratch against the spec's
-//! *formulas* only, and run by `cargo test` as an integration test in the
-//! pre-commit gate.
-//!
-//! Nothing here reads expected answers back out of the compiler; each value
-//! is recomputed from the formula in the spec and compared against the
-//! constant the spec declares.  This breaks the self-consistency loop: the
-//! compiler can only be held to a spec whose constants are known to be
-//! right, and that knowledge comes from this independent oracle, not from
-//! the compiler's own emissions.
-//!
-//! Type mapping (Cinnabar -> Rust here):
-//!   Int   -> i64
-//!   U8    -> u8
-//!   U32   -> u32
-//!   Usize -> u64
-
-// ---------------------------------------------------------------------------
-// Spec formulas (from tests/fixtures/spec.cnb)
-// ---------------------------------------------------------------------------
-
-// Checksum for Header (spec: ((kind << 16) ^ (flags << 8) ^ kind ^ flags))
 fn header_checksum(kind: u32, flags: u32) -> u32 {
     (kind << 16) ^ (flags << 8) ^ kind ^ flags
 }
 
-// Checksum for Tag (spec: value ^ CHECKSUM_SALT)
 fn tag_checksum(value: u32, salt: u32) -> u32 {
     value ^ salt
 }
 
-// Byte combining (spec: (v3 << 24) | (v2 << 16) | (v1 << 8) | v0)
 fn combine_le_bytes(b0: u8, b1: u8, b2: u8, b3: u8) -> u32 {
     let v0 = b0 as u32;
     let v1 = b1 as u32;
@@ -39,12 +14,10 @@ fn combine_le_bytes(b0: u8, b1: u8, b2: u8, b3: u8) -> u32 {
     (v3 << 24) | (v2 << 16) | (v1 << 8) | v0
 }
 
-// The Austral port's multiply-based transcription of the same combine.
 fn combine_le_bytes_mult(v0: u32, v1: u32, v2: u32, v3: u32) -> u32 {
     (v3 * 16777216) + (v2 * 65536) + (v1 * 256) + v0
 }
 
-// normalize (spec): value < 0 -> TooSmall; value > MAX_RANGE -> TooLarge; else Ok
 #[derive(PartialEq, Debug)]
 enum RangeError {
     TooSmall(i64),
@@ -67,7 +40,6 @@ fn normalize(value: i64, max_range: i64) -> RangeResult {
     }
 }
 
-// double_positive (spec): value < 0 -> TooSmall; else Ok(value + value)
 fn double_positive(value: i64) -> RangeResult {
     if value < 0 {
         RangeResult::Err(RangeError::TooSmall(value))
@@ -76,7 +48,6 @@ fn double_positive(value: i64) -> RangeResult {
     }
 }
 
-// range_workflow (spec): normalize, then double_positive, propagate errors
 fn range_workflow(input: i64, max_range: i64) -> RangeResult {
     match normalize(input, max_range) {
         RangeResult::Ok(normalized) => double_positive(normalized),
@@ -84,11 +55,6 @@ fn range_workflow(input: i64, max_range: i64) -> RangeResult {
     }
 }
 
-// range_to_app (spec): TooSmall -> AppRange(TooSmall(value)); TooLarge -> AppRange(TooLarge(value))
-//
-// AppError has an AppPort(PortError) variant in the spec, but no executed
-// code path ever constructs it (app_workflow wraps only RangeError), so the
-// verifier models just the computed surface: AppRange(RangeError).
 #[derive(PartialEq, Debug)]
 enum AppError {
     AppRange(RangeError),
@@ -107,8 +73,6 @@ fn range_to_app(error: RangeError) -> AppError {
     }
 }
 
-// app_workflow (spec): normalize, then double_positive; RangeError is wrapped
-// into AppError via range_to_app, never returned raw.
 fn app_workflow(input: i64, max_range: i64) -> AppResult {
     let normalized = match normalize(input, max_range) {
         RangeResult::Ok(value) => value,
@@ -120,7 +84,6 @@ fn app_workflow(input: i64, max_range: i64) -> AppResult {
     }
 }
 
-// port_from_int (spec): value < MIN_PORT or > MAX_PORT -> PortInvalid; else Ok
 #[derive(PartialEq, Debug)]
 enum PortResult {
     Ok(i64),
@@ -135,7 +98,6 @@ fn port_from_int(value: i64, min_port: i64, max_port: i64) -> PortResult {
     }
 }
 
-// half_if_even (spec): == EVEN_TWO -> Some(HALF_TWO); == EVEN_FOUR -> Some(HALF_FOUR); else None
 #[derive(PartialEq, Debug)]
 enum OptionResult {
     Some(i64),
@@ -152,7 +114,6 @@ fn half_if_even(value: i64, even_two: i64, even_four: i64, half_two: i64, half_f
     }
 }
 
-// sum_to (spec): 0 + 1 + ... + (limit - 1)
 fn sum_to(limit: i64) -> i64 {
     let mut total: i64 = 0;
     let mut i: i64 = 0;
@@ -163,7 +124,6 @@ fn sum_to(limit: i64) -> i64 {
     total
 }
 
-// break_continue_demo (spec): exact trace of the break/continue loop
 fn break_continue_demo(loop_limit: i64, even_two: i64) -> i64 {
     let mut total: i64 = 0;
     let mut i: i64 = 0;
@@ -180,8 +140,6 @@ fn break_continue_demo(loop_limit: i64, even_two: i64) -> i64 {
     total
 }
 
-// Euclidean division (spec): the remainder is always non-negative,
-// 0 <= r < abs(divisor), regardless of operand signs.
 fn euclid_rem(a: i64, b: i64) -> i64 {
     let r = a % b;
     if r < 0 {
@@ -195,8 +153,6 @@ fn euclid_div(a: i64, b: i64) -> i64 {
     (a - euclid_rem(a, b)) / b
 }
 
-// Memory block (spec): allocate(size) yields bounds-checked storage. write_u8
-// succeeds iff offset < size; read_u8 returns the stored byte iff offset < size.
 struct MemoryBlock {
     bytes: Vec<Option<u8>>,
 }
@@ -211,7 +167,7 @@ impl MemoryBlock {
             self.bytes[offset as usize] = Some(value);
             true
         } else {
-            false // AccessOutOfBounds
+            false
         }
     }
 
@@ -219,15 +175,10 @@ impl MemoryBlock {
         if (offset as usize) < self.bytes.len() {
             self.bytes[offset as usize]
         } else {
-            None // AccessOutOfBounds
+            None
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests: one #[test] per spec check group.  Each assertion carries the name
-// of the check it replaced so a failure identifies the exact expectation.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn spec_constants_transcribe_to_decimal() {
@@ -370,8 +321,8 @@ fn euclidean_division_matches_spec_semantics() {
 
 #[test]
 fn memory_roundtrip_is_bounds_checked() {
-    let mut block = MemoryBlock::allocate(1); // MEMORY_SIZE = 1
-    let wrote = block.write_u8(0, 0xA5);      // ZERO_USIZE, MEMORY_BYTE
+    let mut block = MemoryBlock::allocate(1);
+    let wrote = block.write_u8(0, 0xA5);
     assert!(wrote, "write_u8(block, 0, 0xA5) succeeds (in-bounds)");
     let read_back = block.read_u8(0);
     assert_eq!(read_back, Some(0xA5), "memory roundtrip: read_u8(0) returns 0xA5");
@@ -399,7 +350,7 @@ fn string_construction_yields_declared_length() {
 #[test]
 fn hash_map_stores_and_retrieves() {
     let mut map: std::collections::HashMap<u8, u8> = std::collections::HashMap::new();
-    let inserted = map.insert(0xA5, 0x0D); // MEMORY_BYTE -> MAGIC_BYTE_0
+    let inserted = map.insert(0xA5, 0x0D);
     assert_eq!(inserted, None, "hash_map insert of a fresh key stores a new entry");
     let got = map.get(&0xA5).copied();
     assert_eq!(got, Some(0x0D), "hash_map get(MEMORY_BYTE) returns MAGIC_BYTE_0");
@@ -409,10 +360,10 @@ fn hash_map_stores_and_retrieves() {
 
 #[test]
 fn struct_move_matches_declared_constants() {
-    let origin_x = 0i64; // ZERO_INT
-    let origin_y = 0i64; // ZERO_INT
-    let moved_x = origin_x + 3; // POINT_DX
-    let moved_y = origin_y + 4; // POINT_DY
+    let origin_x = 0i64;
+    let origin_y = 0i64;
+    let moved_x = origin_x + 3;
+    let moved_y = origin_y + 4;
     assert_eq!(moved_x, 3, "Point moved x = POINT_DX");
     assert_eq!(moved_y, 4, "Point moved y = POINT_DY");
 }
@@ -434,16 +385,6 @@ fn app_workflow_wraps_errors_through_range_to_app() {
         "app_workflow(101) = AppRange(TooLarge(101))"
     );
 }
-
-// ---------------------------------------------------------------------------
-// End-to-end fixture gate: compile and run the Euclidean-division fixture
-// (`tests/fixtures/verify_math/euclid_div.cnb`) and compare its actual
-// stdout against the oracle above, line by line.  This is the check the
-// fixture's header promises: the compiled program's real runtime output,
-// not a re-statement of the oracle.  Every other fixture in the corpus is
-// gated by the repro harness or the pre-commit script; this is the sole
-// fixture under tests/fixtures/verify_math/.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn euclid_div_fixture_output_matches_oracle() {

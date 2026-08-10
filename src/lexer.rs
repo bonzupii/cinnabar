@@ -1,14 +1,6 @@
-//! Cinnabar lexer.
-//!
-//! Small functions that turn source text into tokens in the node arena.
-//! Comments: `#` and `#!` run to end of line; `#| ... |#` and
-//! `#!| ... |#` are block comments, and block comments may not nest.
-//! Literals are decimal integers and `0x` hexadecimals.
 
 use crate::ast::*;
 
-/// Scans `source` into the token arena.  Returns false when the source is
-/// not lexically well formed; every failure is reported in `errors`.
 pub fn lex(
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,
@@ -26,7 +18,6 @@ pub fn lex(
     errors.is_empty()
 }
 
-/// Scans one byte at `pos`, dispatching to the scanner for its class.
 fn lex_byte(
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,
@@ -53,8 +44,6 @@ fn lex_byte(
     }
 }
 
-/// Reads a byte at `pos`, or 0 past the end of the slice.  There is no
-/// indexing anywhere in this module.
 fn byte_at(bytes: &[u8], pos: usize) -> u8 {
     match bytes.get(pos) {
         Some(byte) => *byte,
@@ -114,26 +103,16 @@ fn push_newline(nodes: &mut Vec<i64>, pos: usize, file: i64) {
     push_token(nodes, TOK_NL, NONE, NONE, pos as i64, pos as i64 + 1, file);
 }
 
-/// Interning an operator symbol and emitting its token; returns the end
-/// position for the caller.
 fn push_symbol(names: &mut Vec<String>, nodes: &mut Vec<i64>, text: &str, start: usize, end: usize, file: i64) -> usize {
     let name = intern(names, text);
     push_token(nodes, TOK_SYM, name, NONE, start as i64, end as i64, file);
     end
 }
 
-// ---------------------------------------------------------------------------
-// Comments.
-// ---------------------------------------------------------------------------
-
 fn is_doc_comment(bytes: &[u8], pos: usize) -> bool {
     byte_at(bytes, pos + 1) == b'!'
 }
 
-/// True when the bytes at `pos` start a block comment: `#|` or `#!|`.
-/// The `#` must be at `pos` itself, so scanning inside a comment never
-/// mistakes the byte before a `|#` close (or any other `|`) for an
-/// opener.
 fn is_block_opener(bytes: &[u8], pos: usize) -> bool {
     if byte_at(bytes, pos) != b'#' {
         return false;
@@ -152,7 +131,6 @@ fn comment_body_start(bytes: &[u8], pos: usize) -> usize {
     }
 }
 
-/// Scans a comment starting at `pos` (which points at `#`).
 fn lex_comment(bytes: &[u8], pos: usize, file: i64, errors: &mut Vec<Diag>) -> usize {
     if is_block_opener(bytes, pos) {
         let body = comment_body_start(bytes, pos);
@@ -199,10 +177,6 @@ fn report_unterminated_comment(file: i64, start: usize, errors: &mut Vec<Diag>) 
     push_error(errors, "unterminated block comment", file, start as i64, start as i64 + 2);
 }
 
-// ---------------------------------------------------------------------------
-// Identifiers.
-// ---------------------------------------------------------------------------
-
 fn lex_ident(
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,
@@ -239,10 +213,6 @@ fn slice_text<'a>(source: &'a str, start: usize, end: usize, errors: &mut Vec<Di
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Numbers.
-// ---------------------------------------------------------------------------
 
 fn lex_number(nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, file: i64, errors: &mut Vec<Diag>) -> usize {
     if byte_at(bytes, pos) == b'0' && byte_at(bytes, pos + 1) == b'x' {
@@ -333,8 +303,6 @@ fn hex_value(bytes: &[u8], start: usize, end: usize, file: i64, errors: &mut Vec
     Some(value as i64)
 }
 
-/// Multiplies `value` by `radix` and adds `digit`, reporting an overflow
-/// as a diagnostic.
 fn accumulate_digit(
     value: u64,
     digit: u64,
@@ -352,10 +320,6 @@ fn accumulate_digit(
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Symbols.
-// ---------------------------------------------------------------------------
 
 fn lex_symbol(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, file: i64, errors: &mut Vec<Diag>) -> usize {
     let byte = byte_at(bytes, pos);
@@ -561,8 +525,6 @@ mod tests {
         (kinds, errors)
     }
 
-    /// Lexes `source` and returns only its diagnostics, for tests that
-    /// assert rejection behavior and never need the token stream.
     fn lex_errors(source: &str) -> Vec<Diag> {
         let mut names: Vec<String> = Vec::new();
         let mut nodes: Vec<i64> = Vec::new();
@@ -574,8 +536,6 @@ mod tests {
 
     #[test]
     fn lexes_comments_and_literals() {
-        // `=` is a symbol token, not an identifier; the block comment
-        // produces no tokens at all.
         let (kinds, errors) = lex_all("#| block |#\nval x = 0x1F\n");
         assert_eq!(errors.len(), 0);
         assert_eq!(

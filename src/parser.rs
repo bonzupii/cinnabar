@@ -1,17 +1,6 @@
-//! Cinnabar parser.
-//!
-//! Recursive descent over the token arena.  Every construct has its own
-//! small function; all parsing writes into the node arena and the list
-//! arena.  Statement boundaries are newline tokens.  `parse` returns
-//! false when the program is not well formed; every failure is reported
-//! in `errors`.
 
 use crate::ast::*;
 
-/// Parses items from the token arena into `root` (a list of item ids).
-/// `token_start` is the node id where this file's tokens begin; the
-/// tokens of each loaded file are appended to the same arena.
-/// Returns false when the program is not well formed.
 pub fn parse(
     names: &mut [String],
     nodes: &mut Vec<i64>,
@@ -40,10 +29,6 @@ pub fn parse(
     errors.is_empty()
 }
 
-// ---------------------------------------------------------------------------
-// Token cursor.
-// ---------------------------------------------------------------------------
-
 fn at_eof(nodes: &[i64], pos: i64) -> bool {
     node_a(nodes, pos) == TOK_EOF
 }
@@ -56,17 +41,10 @@ fn is_sym(nodes: &[i64], names: &[String], pos: i64, text: &str) -> bool {
     tok_is_sym(nodes, names, pos, text)
 }
 
-/// True when the token at `pos` is a word (any identifier or keyword).
 fn is_word(nodes: &[i64], pos: i64) -> bool {
     node_tag(nodes, pos) == NODE_TOKEN && node_a(nodes, pos) == TOK_IDENT
 }
 
-/// True when the token at `pos` opens an `end`-terminated block in the
-/// error-recovery scan: `mod`, `trait`, `impl`, `type`, `fun`, `while`,
-/// `if`, or `match`.  `elif`/`else` are not counted (they are part of
-/// the enclosing `if`).  The `nat` prefix is handled by the caller, which
-/// skips `nat` plus its keyword so signatures (`nat fun`, `nat type`)
-/// never contribute a phantom `end`.
 fn is_block_open(nodes: &[i64], names: &[String], pos: i64) -> bool {
     is_name(nodes, names, pos, "mod")
         || is_name(nodes, names, pos, "trait")
@@ -82,10 +60,6 @@ fn is_block_open(nodes: &[i64], names: &[String], pos: i64) -> bool {
     }
 }
 
-/// True when the token at `pos` carries the interned text `text`, whether
-/// it lexed as an identifier or a symbol.  Keywords, punctuation, and
-/// operators all live in the same name arena; `accept`/`expect` match
-/// either kind.
 fn tok_text_is(nodes: &[i64], names: &[String], pos: i64, text: &str) -> bool {
     node_tag(nodes, pos) == NODE_TOKEN
         && name_is(names, node_b(nodes, pos), text)
@@ -120,11 +94,6 @@ fn recover_line(nodes: &[i64], pos: &mut i64) {
         *pos += 1;
     }
 }
-
-// ---------------------------------------------------------------------------
-// Node allocators.  The operands slice fills the kind-specific slots; a
-// missing operand is NONE.
-// ---------------------------------------------------------------------------
 
 fn slot(operands: &[i64], idx: usize) -> i64 {
     match operands.get(idx) {
@@ -212,10 +181,6 @@ fn alloc_pat(nodes: &mut Vec<i64>, kind: i64, file: i64, start: i64, end: i64, o
     )
 }
 
-// ---------------------------------------------------------------------------
-// Items.
-// ---------------------------------------------------------------------------
-
 fn parse_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
     if is_name(nodes, names, *pos, "pub") {
         parse_pub_item(pos, names, nodes, lists, errors)
@@ -237,10 +202,6 @@ fn parse_pub_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: 
     }
 }
 
-/// True when the token at `pos` is the native-declaration keyword:
-/// `nat` introduces an opaque native type or function signature.  The
-/// legacy spelling `native` is not a keyword and is rejected as an
-/// ordinary identifier.
 fn is_native_keyword(nodes: &[i64], names: &[String], pos: i64) -> bool {
     is_name(nodes, names, pos, "nat")
 }
@@ -255,40 +216,16 @@ fn parse_native_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, list
         let start = node_start(nodes, *pos);
         let end = node_end(nodes, *pos);
         push_error(errors, "native modifier is only allowed on fun and type", file, start, end);
-        // Error recovery: `nat` on a block item (`mod`, `trait`, `impl`)
-        // would leave the block's matching `end` stranded in the token
-        // stream, where the next item parse reports a secondary
-        // "expected an item declaration".  Consume the item keyword, its
-        // name, and the block's `end` so the single primary error stands
-        // alone.  The block body is skipped wholesale; this is a rejected
-        // construct, so no nested items survive it.
         if is_name(nodes, names, *pos, "mod") || is_name(nodes, names, *pos, "trait") || is_name(nodes, names, *pos, "impl") {
             *pos += 1;
             if node_tag(nodes, *pos) == NODE_TOKEN && node_a(nodes, *pos) == TOK_IDENT {
                 *pos += 1;
             }
             skip_nl(nodes, pos);
-            // Depth-counted scan to the block's matching `end`: nested
-            // `end`-terminated constructs inside the block (mod/trait/
-            // impl/type/fun/while/if/match) each contribute their own
-            // `end`, so a flat scan to the first `end` would consume a
-            // method body's `end` and strand the outer one, producing a
-            // secondary "expected an item declaration".  The outer
-            // `end` is the first one seen at depth 0.  A `nat` token is
-            // skipped together with the keyword after it: `nat fun`/
-            // `nat type` signatures carry no `end` of their own, so
-            // counting them would over-count the depth and over-consume
-            // past the real block end.
             let mut depth = 0i64;
             let mut in_trait = 0i64;
             while !at_eof(nodes, *pos) {
                 if is_name(nodes, names, *pos, "nat") {
-                    // Skip `nat` and its keyword, but never advance past
-                    // EOF: an out-of-range read returns NONE, which is
-                    // not TOK_EOF, so a jump over the EOF token would
-                    // loop forever.  A `nat trait` is still a trait (its
-                    // methods are signatures), so the trait depth is
-                    // tracked here, before the keyword is consumed.
                     *pos += 1;
                     if !at_eof(nodes, *pos) {
                         if is_name(nodes, names, *pos, "trait") {
@@ -298,9 +235,6 @@ fn parse_native_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, list
                         *pos += 1;
                     }
                 } else if is_name(nodes, names, *pos, "trait") {
-                    // A trait's methods are signatures (no bodies, no
-                    // `end` of their own), so `fun` inside it must not
-                    // contribute depth.
                     depth += 1;
                     in_trait += 1;
                     *pos += 1;
@@ -509,8 +443,6 @@ fn parse_fun_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: 
     let file = node_file(nodes, *pos);
     let start = node_start(nodes, *pos);
     *pos += 1;
-    // Native functions are opaque signatures: they declare the name and
-    // type, never a body, so they parse like trait methods.
     let body_required = 1 - is_native;
     let fn_id = parse_fun_body_or_sig(pos, names, nodes, lists, errors, body_required)?;
     let end = node_end(nodes, fn_id);
@@ -596,7 +528,6 @@ fn parse_param(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mu
     Some(alloc_param(nodes, name, file, start, end, ty))
 }
 
-/// Parses `(T, U)` type parameters after a type or native-type name.
 fn parse_type_params(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
     let params = alloc_list(lists);
     if !is_sym(nodes, names, *pos, "(") {
@@ -620,7 +551,6 @@ fn parse_type_params(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, list
     Some(params)
 }
 
-/// Parses `<T: Bound, U>` type parameters after a function name.
 fn parse_angle_params(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
     let params = alloc_list(lists);
     if !is_sym(nodes, names, *pos, "<") {
@@ -646,7 +576,6 @@ fn parse_angle_params(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lis
     Some(params)
 }
 
-/// Parses `word(.word)*` and returns the segments list.
 fn parse_path(pos: &mut i64, names: &[String], nodes: &mut [i64], lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
     let segs = alloc_list(lists);
     let mut seg = expect_word(pos, nodes, errors)?;
@@ -658,7 +587,6 @@ fn parse_path(pos: &mut i64, names: &[String], nodes: &mut [i64], lists: &mut Ve
     Some(segs)
 }
 
-/// Consumes a word token and returns its interned name id.
 fn expect_word(pos: &mut i64, nodes: &mut [i64], errors: &mut Vec<Diag>) -> Option<i64> {
     if node_tag(nodes, *pos) == NODE_TOKEN && node_a(nodes, *pos) == TOK_IDENT {
         let name = node_b(nodes, *pos);
@@ -681,10 +609,6 @@ fn expect_end(pos: &mut i64, names: &[String], nodes: &mut [i64], errors: &mut V
         None
     }
 }
-
-// ---------------------------------------------------------------------------
-// Types.
-// ---------------------------------------------------------------------------
 
 fn parse_type(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
     let file = node_file(nodes, *pos);
@@ -768,10 +692,6 @@ fn parse_named_type(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists
     }
 }
 
-// ---------------------------------------------------------------------------
-// Statements.
-// ---------------------------------------------------------------------------
-
 fn parse_block(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, terminators: &[&str]) -> Option<i64> {
     let list = alloc_list(lists);
     skip_nl(nodes, pos);
@@ -810,11 +730,6 @@ fn at_terminator(nodes: &[i64], names: &[String], pos: i64, terminators: &[&str]
 
 fn parse_stmt(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
     if is_name(nodes, names, *pos, "pub") {
-        // `pub` on a local binding is a compile error: visibility is a
-        // top-level item concept.  Detect `pub val`/`pub var` here so a
-        // local `pub` reports the truthful diagnostic instead of falling
-        // through to expression parsing and failing with a misleading
-        // "unknown symbol 'pub'" from the resolver.
         let file = node_file(nodes, *pos);
         let start = node_start(nodes, *pos);
         let end = node_end(nodes, *pos);
@@ -843,13 +758,6 @@ fn parse_stmt(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut
     }
 }
 
-/// Parses a statement that begins with an expression.  When the
-/// expression is followed by `=` the statement is an assignment whose
-/// target is kept as the expression (a place: a plain name, a field
-/// chain like `pt.x`, or a field through a reference like
-/// `(try &mut arr[i]).x`); otherwise it is a bare expression statement.
-/// `=` is not a binary operator, so the expression parser always stops
-/// before it.
 fn parse_expr_or_assign(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
     let file = node_file(nodes, *pos);
     let start = node_start(nodes, *pos);
@@ -912,19 +820,12 @@ fn parse_if(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut V
     Some(alloc_stmt(nodes, STMT_IF, file, start, end, &[cond, then_body, else_body, NONE]))
 }
 
-/// Wraps one statement id in a fresh single-element statement list.  The
-/// STMT_IF else slot is a list id, so a desugared elif chain (a single
-/// nested STMT_IF) must be wrapped before it can live there.
 fn single_stmt_list(lists: &mut Vec<Vec<i64>>, stmt: i64) -> i64 {
     let list = alloc_list(lists);
     list_push(lists, list, stmt);
     list
 }
 
-/// Parses the rest of an if-chain after the `elif` keyword at
-/// `elif_pos`: the condition, the then-block, and (recursively) the next
-/// `elif` or the `else` block.  Each `elif` becomes the else-branch of
-/// the previous if, so the chain desugars to nested STMT_IF nodes.
 fn parse_elif_chain(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, elif_pos: i64) -> Option<i64> {
     let file = node_file(nodes, elif_pos);
     let start = node_start(nodes, elif_pos);
@@ -973,14 +874,6 @@ fn parse_continue(nodes: &mut Vec<i64>, pos: &mut i64) -> Option<i64> {
     Some(alloc_stmt(nodes, STMT_CONTINUE, file, start, end, &[NONE, NONE, NONE, NONE]))
 }
 
-// ---------------------------------------------------------------------------
-// Expressions.
-// ---------------------------------------------------------------------------
-
-/// `multi` is 1 inside a delimiter (parens, call args, array literals,
-/// struct-literal fields): newlines there separate sub-expressions, not
-/// statements, so the binary loop skips them.  At statement level it is
-/// 0 and a newline always ends the expression.
 fn parse_expr(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, multi: i64) -> Option<i64> {
     parse_binary(pos, names, nodes, lists, errors, 0, multi)
 }
@@ -1038,13 +931,6 @@ fn parse_postfix(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &
         if is_sym(nodes, names, *pos, "(") {
             expr = parse_call_tail(pos, names, nodes, lists, errors, expr, NONE)?;
         } else if is_sym(nodes, names, *pos, "[") {
-            // `expr[...]` is either a generic call's explicit type
-            // arguments (`f[T]()`) or an array/slice index (`arr[i]`).
-            // Both begin with a bracketed list; the call's `(` after the
-            // closing `]` disambiguates them.  Scan to the matching `]`
-            // and peek: a following `(` is a generic call, anything else
-            // is an index.  The scan stops just past the matching `]`, so
-            // the `(` (if present) sits at `scan` itself.
             let mut scan = *pos + 1;
             let mut depth = 1i64;
             while depth > 0 && !at_eof(nodes, scan) {
@@ -1057,17 +943,11 @@ fn parse_postfix(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &
             }
             if is_sym(nodes, names, scan, "(") {
                 let targs = parse_type_args_tail(pos, names, nodes, lists, errors)?;
-                // parse_call_tail consumes the `(` itself, exactly as the
-                // plain-call branch above; never consume it here as well.
                 expr = parse_call_tail(pos, names, nodes, lists, errors, expr, targs)?;
             } else {
                 expr = parse_index_tail(pos, names, nodes, lists, errors, expr)?;
             }
         } else if is_sym(nodes, names, *pos, ".") {
-            // Field access on a non-path base (`(expr).field`, `arr[i].field`,
-            // `(try &mut x).field`): a bare name chain already carries its
-            // fields as path segments, so a postfix dot here means the base
-            // is a parenthesized expression, an index, or a call result.
             let file = node_file(nodes, expr);
             let start = node_start(nodes, expr);
             *pos += 1;
@@ -1081,7 +961,6 @@ fn parse_postfix(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &
     Some(expr)
 }
 
-/// Parses a postfix index `base[index]` into an EXPR_INDEX node.
 fn parse_index_tail(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, base: i64) -> Option<i64> {
     let file = node_file(nodes, *pos);
     let start = node_start(nodes, *pos);
@@ -1285,10 +1164,6 @@ fn parse_match_arms(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists
     Some(arms)
 }
 
-// ---------------------------------------------------------------------------
-// Patterns.
-// ---------------------------------------------------------------------------
-
 fn parse_pattern(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {
     if is_sym(nodes, names, *pos, "[") {
         parse_array_pattern(pos, names, nodes, lists, errors)
@@ -1385,10 +1260,6 @@ fn parse_array_pattern(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, li
     Some(alloc_pat(nodes, PAT_ARRAY, file, start, end, &[elements, rest]))
 }
 
-// ---------------------------------------------------------------------------
-// Binary operators.
-// ---------------------------------------------------------------------------
-
 fn bin_op_at(nodes: &[i64], names: &[String], pos: i64) -> Option<(i64, i64)> {
     logical_op_at(nodes, names, pos)
         .or(comparison_op_at(nodes, names, pos))
@@ -1463,10 +1334,6 @@ fn arith_op_at(nodes: &[i64], names: &[String], pos: i64) -> Option<(i64, i64)> 
     }
 }
 
-// ---------------------------------------------------------------------------
-// List helpers.
-// ---------------------------------------------------------------------------
-
 fn list_first(lists: &[Vec<i64>], id: i64) -> i64 {
     match lists.get(id as usize) {
         Some(items) => match items.first() {
@@ -1531,8 +1398,6 @@ mod tests {
 
     #[test]
     fn parses_multiline_lists() {
-        // Multi-line parameters, payload types, struct-literal fields, and
-        // call arguments each end with a newline before the close delimiter.
         let errors = parse_all(
             "pub nat fun write_u8(\n  block: &Block,\n  offset: Usize,\n  value: U8\n) impure Result(Unit, Error)\n\nfun make() MagicHeader\n  return MagicHeader(\n    bytes: [MAGIC_BYTE_0, MAGIC_BYTE_1],\n    expected: MAGIC_U32\n  )\nend\n",
         );
@@ -1541,8 +1406,6 @@ mod tests {
 
     #[test]
     fn parses_try_typed_call_then_ref_mut_call() {
-        // `try vec_new[U8]()` on its own line, then a `val` whose init
-        // passes `&mut vec` to a call: both forms must parse cleanly.
         let errors = parse_all(
             "fun vec_demo() impure Result(Unit, Error)\n  val vec = try vec_new[U8]()\n  val push_result = push_all_magic(&mut vec)\n  return Ok(Unit)\nend\n",
         );

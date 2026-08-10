@@ -1,17 +1,3 @@
-//! Codegen driver.
-//!
-//! Creates the LLVM context, module, builder, and host target machine;
-//! runs the emitter over the typed arena; verifies the module; writes
-//! the IR to a temp file; and drives `llc` and `clang` to produce the
-//! final binary.  Every target fact (triple, data layout, sizes) comes
-//! from the host target machine, and the module carries the same triple
-//! and data layout that sized every aggregate, so the emitted object
-//! matches the memory model the emitter assumed.
-//!
-//! The driver owns the LLVM handles and the codegen caches for the whole
-//! codegen phase.  The emitter is a separate function that consumes the
-//! caches by value and reborrows the arenas for its own duration, so no
-//! borrow outlives its owner.
 
 pub mod emitter;
 pub mod error;
@@ -30,9 +16,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Compiles the typed arena into a linked binary at `out`.  The impls
-/// list carries the typechecker's trait-dispatch table, read by the
-/// emitter for deferred trait calls.
 pub fn compile_and_link(
     names: &[String],
     nodes: &mut Vec<i64>,
@@ -41,8 +24,6 @@ pub fn compile_and_link(
     out: &Path,
 ) -> Result<(), CodegenError> {
     let ir_text = emit_to_ir(names, nodes, lists, impls_list)?;
-    // The IR and object live in the OS temp dir (unique per pid);
-    // the OS owns their lifecycle.
     let ir_path = temp_path(out, "ll");
     let obj_path = temp_path(out, "o");
     write_text(&ir_path, &ir_text)?;
@@ -50,10 +31,6 @@ pub fn compile_and_link(
     link(&obj_path, out)
 }
 
-/// The full codegen phase: creates the LLVM handles and the codegen
-/// caches, runs the emitter, verifies the module, and returns the IR
-/// text.  Every handle and cache the session borrows is a local of this
-/// function, so the borrows end when this body ends.
 fn emit_to_ir(
     names: &[String],
     nodes: &mut Vec<i64>,
@@ -67,8 +44,6 @@ fn emit_to_ir(
     module.set_triple(&triple);
     let layout = target_data.get_data_layout();
     module.set_data_layout(&layout);
-    // The caches live here for the whole phase; the emitter consumes
-    // them by value, and the arenas are reborrowed for the call only.
     let key_types: KeyTypes = Vec::new();
     let enum_infos: EnumInfos = Vec::new();
     let payload_structs: PayloadStructs = Vec::new();
@@ -85,13 +60,6 @@ fn emit_to_ir(
     Ok(module.print_to_string().to_string())
 }
 
-/// Runs the emitter over the arena.
-///
-/// `'ctx` names the context, which outlives this call; the LLVM types
-/// the emitter caches carry it.  The module, builder, and target data
-/// are borrowed for their own short regions — locals of the driver that
-/// outlive the call — and the arenas are reborrowed for `'a`, the
-/// duration of this call.  The four caches are owned and consumed.
 fn run_emitter<'ctx, 'm, 'a>(
     llvm: (&'ctx Context, &'m Module<'ctx>, &'m inkwell::builder::Builder<'ctx>, &'m TargetData),
     names: &'a [String],
@@ -102,8 +70,6 @@ fn run_emitter<'ctx, 'm, 'a>(
 ) -> Result<(), CodegenError> {
     let (context, module, builder, target_data) = llvm;
     let (key_types, enum_infos, payload_structs, inst_fns) = caches;
-    // The protocol ids are interned once from the program's own names
-    // table; every variant-tag lookup reads them from the session.
     let protocol = protocol_of(names);
     let mut sess: Session<'ctx, 'm, 'a> = (
         context,
@@ -123,11 +89,6 @@ fn run_emitter<'ctx, 'm, 'a>(
     emit_program(&mut sess)
 }
 
-/// Creates the host target machine, its data layout, and the host triple.
-///
-/// `get_target_data()` creates a new `TargetData` independent of the
-/// machine, so the machine's lifetime ends here; only the owned data
-/// layout and the triple are returned.
 fn host_target() -> Result<(TargetData, TargetTriple), CodegenError> {
     Target::initialize_native(&InitializationConfig::default())
         .map_err(|message| tool_error("llvm", None, &message))?;
@@ -150,8 +111,6 @@ fn host_target() -> Result<(TargetData, TargetTriple), CodegenError> {
     Ok((target_data, triple))
 }
 
-/// Verifies the module, rendering LLVM's message through the typed error
-/// model (a toolchain failure with no source origin).
 fn verify_module(module: &Module) -> Result<(), CodegenError> {
     match module.verify() {
         Ok(()) => Ok(()),
@@ -159,7 +118,6 @@ fn verify_module(module: &Module) -> Result<(), CodegenError> {
     }
 }
 
-/// A temp file path next to the output name: `<dir>/cinnabar_<pid>_<base>.<ext>`.
 fn temp_path(out: &Path, ext: &str) -> PathBuf {
     let base = match out.file_name() {
         Some(name) => name.to_string_lossy().to_string(),
@@ -168,21 +126,10 @@ fn temp_path(out: &Path, ext: &str) -> PathBuf {
     std::env::temp_dir().join(format!("cinnabar_{}_{}.{}", std::process::id(), base, ext))
 }
 
-/// Writes the IR text to `path`.
 fn write_text(path: &Path, text: &str) -> Result<(), CodegenError> {
     fs::write(path, text).map_err(|err| io_error(&format!("cannot write '{}': {}", path.display(), err)))
 }
 
-/// Optimizes the IR with `opt -passes=default<O2>` and assembles it with
-/// `llc -O2 -filetype=obj`.
-///
-/// llc's `-O2` drives the *backend's* codegen optimizations but does not
-/// run LLVM's module-level IR optimization pipeline, so the emitter's
-/// `tail` markers never reach `tailcallelim` and `mem2reg` never
-/// promotes its entry-block allocas under llc alone.  The explicit `opt`
-/// step runs the full default pipeline — the one the emitter is written
-/// against ("mem2reg at -O2 promotes the scalar cases") and the one
-/// that turns self-tail-recursion into O(1)-stack loops.
 fn assemble(ir_path: &Path, obj_path: &Path) -> Result<(), CodegenError> {
     let opt_path = ir_path.with_extension("opt.ll");
     run_tool(
@@ -206,15 +153,6 @@ fn assemble(ir_path: &Path, obj_path: &Path) -> Result<(), CodegenError> {
     )
 }
 
-/// Links the object with clang into the final binary.
-///
-/// `-no-pie`: the emitted module carries defined globals for the
-/// recursion guard, and the IR is non-PIC, so a PIE link would reject
-/// the absolute `.data` relocations (`R_X86_64_32 against .data can not
-/// be used when making a PIE object`).  A fixed load base is the
-/// deliberate, systems-language-consistent choice here — it matches the
-/// manifesto's static-only posture and changes nothing about the
-/// program's behavior.
 fn link(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
     run_tool(
         "clang",
@@ -229,8 +167,6 @@ fn link(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
     )
 }
 
-/// Runs `tool` with `args`, mapping a nonzero exit to a typed error whose
-/// detail is the tool's standard error tail.
 fn run_tool(tool: &str, args: &[&str]) -> Result<(), CodegenError> {
     let output = match Command::new(tool).args(args).output() {
         Ok(output) => output,

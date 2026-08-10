@@ -1,41 +1,8 @@
-//! Cinnabar typechecker.
-//!
-//! Consumes the resolver's symbol attachments, canonicalizes every type
-//! into the type-descriptor table (one row per canonical key), infers the
-//! type of every expression, statement, and pattern and attaches it to
-//! the tree, monomorphizes generic functions into instance rows, resolves
-//! trait dispatch per instance, folds constants, checks match
-//! exhaustiveness, and rejects unhandled Result/Option values.  Facts
-//! computed here are consumed, never recomputed, by the borrow checker
-//! and codegen.
-//!
-//! Inference variables are negative keys; a table maps each variable to
-//! the key it was unified with.  After the whole program is checked, one
-//! pass substitutes every variable in every attached type, so downstream
-//! stages only ever see concrete keys (or a generic function's own
-//! declared parameter keys).
 
 use crate::ast::*;
 
-/// (key, key, key) triples of `(trait_sym, for_key, methods_list)` for
-/// every `impl` in the program.
 const IMPL_STRIDE: i64 = 3;
 
-// ---------------------------------------------------------------------------
-// Entry point.
-// ---------------------------------------------------------------------------
-
-/// Typechecks the whole program.  Returns whether no error was reported
-/// and the impl table (a flat `(trait_sym, for_key, methods)` triple
-/// list) that codegen reads for deferred trait dispatch.  The entry root
-/// and every external module root are checked.
-/// The typechecker's shared tables, threaded through every check as one
-/// explicit tuple (the same shape as the emitter's session): source
-/// arenas, diagnostics, the scope stack, the impl table, the inference
-/// constraint tables, and the five seeded primitive-enum symbols
-/// (Unit/Result/Option/DivError/IndexError) found once at setup.
-/// `(names, nodes, lists, errors, env, impls, vars, origins, unit_sym,
-/// result_sym, option_sym, div_err_sym, index_err_sym)`.
 type State<'a> = (
     &'a mut Vec<String>,
     &'a mut Vec<i64>,
@@ -61,9 +28,6 @@ pub fn typecheck(
     ext_mods: &[(i64, i64)],
 ) -> (bool, i64) {
     seed_builtins(names, nodes, lists);
-    // The seeded primitive-enum symbols, found once at setup and stored on
-    // the state so unit_key_of and division_result_key never scan the
-    // arena for them again.
     let unit_sym = find_type_sym_by_name(nodes, intern(names, "Unit"));
     let result_sym = find_type_sym_by_name(nodes, intern(names, "Result"));
     let option_sym = find_type_sym_by_name(nodes, intern(names, "Option"));
@@ -100,9 +64,6 @@ pub fn typecheck(
         idx += 1;
     }
 
-    // Canonicalize every function signature (all roots) before any body
-    // is checked, so a call in one file reads the callee's attached
-    // parameter and return keys no matter which file is checked first.
     check_fn_sigs_list(&mut state, root);
     idx = 0;
     while idx < ext_mods.len() {
@@ -113,9 +74,6 @@ pub fn typecheck(
         idx += 1;
     }
 
-    // Constants before impls: impl method bodies may reference consts
-    // (e.g. `value.value ^ CHECKSUM_SALT`), and their type and value must
-    // already be attached when those bodies are checked.
     collect_consts(&mut state, root);
     idx = 0;
     while idx < ext_mods.len() {
@@ -153,12 +111,6 @@ pub fn typecheck(
     (state.3.is_empty(), impls_list)
 }
 
-/// Stores the impl table into the list arena as flat triples so codegen
-/// can resolve deferred trait dispatch from the same facts the
-/// typechecker used.
-/// Bounds-checked read of one impl-table slot.  The table is a flat
-/// sequence of rows pushed three slots at a time, so every row is
-/// complete; the NONE arm guards reads past the table's end.
 fn impl_at(impls: &[i64], idx: usize) -> i64 {
     match impls.get(idx) {
         Some(value) => *value,
@@ -178,11 +130,6 @@ fn store_impls(lists: &mut Vec<Vec<i64>>, impls: &[i64]) -> i64 {
     list
 }
 
-// ---------------------------------------------------------------------------
-// Symbols.  The resolver's symbol rows are public arena data; these are
-// structural reads, not recomputation.
-// ---------------------------------------------------------------------------
-
 fn sym_kind(nodes: &[i64], sym: i64) -> i64 {
     node_a(nodes, sym)
 }
@@ -199,8 +146,6 @@ fn sym_home(nodes: &[i64], sym: i64) -> i64 {
     node_d(nodes, sym)
 }
 
-/// The key of the builtin whose sub-kind is `sub`, or NONE.  The sub-kind
-/// was stored in the descriptor row at seed time.
 fn builtin_key_of(nodes: &[i64], sub: i64) -> i64 {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
@@ -212,7 +157,6 @@ fn builtin_key_of(nodes: &[i64], sub: i64) -> i64 {
     NONE
 }
 
-/// The key of the builtin symbol `sym` (which has no declaration).
 fn builtin_key_of_sym(nodes: &[i64], sym: i64) -> i64 {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
@@ -224,14 +168,6 @@ fn builtin_key_of_sym(nodes: &[i64], sym: i64) -> i64 {
     NONE
 }
 
-/// Allocates canonical builtin keys for Int, U8, U32, Usize, and Bool,
-/// each carrying its scalar sub-kind in the descriptor's slot `f` so that
-/// every later stage classifies scalars from the stored integer, never
-/// from the symbol's name.  Unit, Result, and Option are declared enums
-/// synthesized by the resolver; the typechecker reads them through the
-/// same declaration path a user enum uses.  The scalar keys mirror the
-/// resolver's builtin seeding exactly: the resolver enters the type
-/// symbol into its scopes and the typechecker allocates the matching key.
 fn seed_builtins(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut [Vec<i64>]) {
     let ints = [
         (intern(names, "Int"), BUILTIN_INT),
@@ -252,8 +188,6 @@ fn seed_builtins(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut [Vec
     seed_builtin(nodes, lists, bool_name, BUILTIN_BOOL);
 }
 
-/// Allocates one builtin key with its scalar sub-kind, looking up the
-/// symbol the resolver seeded.
 fn seed_builtin(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], name: i64, sub: i64) {
     let sym = find_type_sym_by_name(nodes, name);
     if sym != NONE {
@@ -261,8 +195,6 @@ fn seed_builtin(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], name: i64, sub: i6
     }
 }
 
-/// Finds a type symbol (struct, enum, trait, native, or builtin) whose
-/// fully qualified name is `name`.
 fn find_type_sym_by_name(nodes: &[i64], name: i64) -> i64 {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
@@ -278,11 +210,6 @@ fn find_type_sym_by_name(nodes: &[i64], name: i64) -> i64 {
     }
     NONE
 }
-
-// ---------------------------------------------------------------------------
-// Local environment.  A stack of scopes; each scope is a flat array of
-// (name, key, is_mut) entries.  The current scope is always the top.
-// ---------------------------------------------------------------------------
 
 fn push_scope(env: &mut Vec<Vec<i64>>) {
     env.push(Vec::new());
@@ -307,8 +234,6 @@ fn bind(env: &mut [Vec<i64>], name: i64, key: i64, is_mut: i64) {
     }
 }
 
-/// Looks up `name` from the innermost scope outwards.  Returns
-/// `(key, is_mut)` or `(NONE, 0)`.
 fn lookup(env: &[Vec<i64>], name: i64) -> (i64, i64) {
     let mut depth = env.len();
     while depth > 0 {
@@ -329,17 +254,10 @@ fn lookup(env: &[Vec<i64>], name: i64) -> (i64, i64) {
     (NONE, 0)
 }
 
-// ---------------------------------------------------------------------------
-// Type keys.
-// ---------------------------------------------------------------------------
-
-/// True when `key` is an inference variable (a negative key).
 fn is_var(key: i64) -> bool {
     key < NONE
 }
 
-/// The key a variable resolves to, following chains.  An unbound variable
-/// resolves to itself.
 fn resolve_var(vars: &[(i64, i64)], var: i64) -> i64 {
     let mut current = var;
     let mut guard = 0usize;
@@ -390,8 +308,6 @@ fn bind_var(vars: &mut [(i64, i64)], var: i64, key: i64) {
     }
 }
 
-/// Allocates a fresh inference variable recorded with its origin (the
-/// expression it was created for and the type parameter it stands for).
 fn fresh_var(vars: &mut Vec<(i64, i64)>, origins: &mut Vec<(i64, i64, i64)>, expr: i64, name: i64) -> i64 {
     let var = -(vars.len() as i64) - 2;
     vars.push((var, var));
@@ -399,15 +315,10 @@ fn fresh_var(vars: &mut Vec<(i64, i64)>, origins: &mut Vec<(i64, i64, i64)>, exp
     var
 }
 
-/// The declared-parameter key for `(owner, name)` with `bound` (a trait
-/// symbol or NONE).  Deduplicated so every reference to the same
-/// parameter is the same key.
 fn param_decl_key(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], owner: i64, name: i64, bound: i64) -> i64 {
     canon_tyinfo(nodes, lists, TYD_PARAM, name, NONE, owner, bound)
 }
 
-/// Binds a declaration's type parameters (TY_PARAM nodes) into `env`,
-/// attaching each parameter's key to its node.
 fn bind_type_params(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], env: &mut [Vec<i64>], owner: i64, params: i64) {
     let count = list_len(lists, params);
     let mut idx = 0i64;
@@ -424,7 +335,6 @@ fn bind_type_params(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], env: &mut [Vec
     }
 }
 
-/// The declared type-parameter count of a type declaration item.
 fn declared_param_count(nodes: &[i64], lists: &[Vec<i64>], item: i64) -> i64 {
     if node_a(nodes, item) == ITEM_NATIVE_TYPE {
         list_len(lists, node_e(nodes, item))
@@ -433,7 +343,6 @@ fn declared_param_count(nodes: &[i64], lists: &[Vec<i64>], item: i64) -> i64 {
     }
 }
 
-/// The declared-parameter keys of a type declaration item, in order.
 fn declared_param_keys(nodes: &[i64], lists: &[Vec<i64>], item: i64) -> Vec<i64> {
     let params = if node_a(nodes, item) == ITEM_NATIVE_TYPE {
         node_e(nodes, item)
@@ -453,8 +362,6 @@ fn declared_param_keys(nodes: &[i64], lists: &[Vec<i64>], item: i64) -> Vec<i64>
     keys
 }
 
-/// The key of a named type symbol with no type arguments.  Generic types
-/// referenced without arguments are an error.
 fn named_key(names: &[String], nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], errors: &mut Vec<Diag>, sym: i64, span: (i64, i64, i64)) -> i64 {
     let (file, start, end) = span;
     let kind = sym_kind(nodes, sym);
@@ -478,14 +385,10 @@ fn named_key(names: &[String], nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], err
     canon_tyinfo(nodes, lists, kind_of, sym, NONE, NONE, NONE)
 }
 
-/// The single shared unknown key, for expressions that already failed.
 fn unknown_key(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>]) -> i64 {
     canon_tyinfo(nodes, lists, TYD_UNKNOWN, NONE, NONE, NONE, NONE)
 }
 
-/// Canonicalizes a type node under `env` and `self_key`, attaching the
-/// key to the node when `write` is 1.  Call sites that must not disturb
-/// an already-attached key pass `write` 0.
 fn canon_ty(state: &mut State, ty: i64, self_key: i64, write: i64) -> i64 {
     if node_tag(state.1, ty) != NODE_TY {
         return unknown_key(state.1, state.2);
@@ -583,18 +486,11 @@ fn canon_ty_list(state: &mut State, list: i64, self_key: i64, write: i64) -> i64
     fresh
 }
 
-/// A fresh inference variable that is not recorded with an origin; used
-/// inside signature verification where the variable only needs to unify
-/// with a concrete key within one call.
 fn fresh_var_local(vars: &mut Vec<(i64, i64)>) -> i64 {
     let var = -(vars.len() as i64) - 2;
     vars.push((var, var));
     var
 }
-
-// ---------------------------------------------------------------------------
-// Kind predicates over keys.
-// ---------------------------------------------------------------------------
 
 fn key_kind(nodes: &[i64], key: i64) -> i64 {
     if is_var(key) {
@@ -644,9 +540,6 @@ fn key_len(nodes: &[i64], key: i64) -> i64 {
     }
 }
 
-/// Whether the key is one of the four integer builtins (Int, U8, U32,
-/// Usize).  Classification reads the sub-kind the typechecker stored in
-/// the builtin descriptor at seed time; no name matching.
 fn is_int_key(nodes: &[i64], key: i64) -> bool {
     if key_kind(nodes, key) != TYD_BUILTIN {
         return false;
@@ -655,37 +548,18 @@ fn is_int_key(nodes: &[i64], key: i64) -> bool {
     sub == BUILTIN_INT || sub == BUILTIN_U8 || sub == BUILTIN_U32 || sub == BUILTIN_USIZE
 }
 
-/// Whether the key is the Bool builtin, from its stored sub-kind.
 fn is_bool_key(nodes: &[i64], key: i64) -> bool {
     key_kind(nodes, key) == TYD_BUILTIN && tyinfo_builtin_kind(nodes, key) == BUILTIN_BOOL
 }
 
-/// Whether `key` is the seeded Result enum, read from the primitive
-/// sub-kind the resolver stored on the enum's symbol — never by name.
 fn is_result_key(nodes: &[i64], key: i64) -> bool {
     key_kind(nodes, key) == TYD_ENUM && sym_prim_kind(nodes, key_sym(nodes, key)) == PRIM_RESULT
 }
 
-/// Whether `key` is the seeded Option enum, read from the primitive
-/// sub-kind the resolver stored on the enum's symbol — never by name.
 fn is_option_key(nodes: &[i64], key: i64) -> bool {
     key_kind(nodes, key) == TYD_ENUM && sym_prim_kind(nodes, key_sym(nodes, key)) == PRIM_OPTION
 }
 
-// ---------------------------------------------------------------------------
-// Type-fact attachment (after all checking): variant facts and linearity.
-//
-// Both facts are computed once here, stored on arena rows, and only read
-// downstream: codegen resolves variant tags from the recorded variant
-// symbols (never by re-searching an enum's variant list by name), and the
-// borrow checker reads the is_linear flag (never by re-matching handle
-// names).
-// ---------------------------------------------------------------------------
-
-/// Fills the variant-fact rows codegen reads.  For every canonical enum
-/// key, each variant's symbol (attached to its declaration by the
-/// resolver) is recorded under (key, variant name id), so codegen
-/// resolves a variant's declared-order tag from the symbol.
 fn attach_variant_facts(nodes: &mut Vec<i64>, lists: &[Vec<i64>]) {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
@@ -713,9 +587,6 @@ fn attach_variant_facts(nodes: &mut Vec<i64>, lists: &[Vec<i64>]) {
     }
 }
 
-/// The four native linear handles: the single definition of the
-/// language's linear surfaces.  Their interned ids are matched at
-/// collection time only; every later stage reads the stored flag.
 const LINEAR_HANDLES: [&str; 4] = [
     "Memory.Block",
     "Collections.Vec",
@@ -723,14 +594,6 @@ const LINEAR_HANDLES: [&str; 4] = [
     "Collections.HashMap",
 ];
 
-/// Computes the is_linear flag of every canonical key and stores it in
-/// the descriptor row, once, after all checking (so every key the borrow
-/// checker and codegen will query already exists).  Native handles are
-/// linear by definition; structs and enums are linear when any declared
-/// member (substituted against the key's own type arguments) is; arrays
-/// follow their element.  A cycle (a recursive type) is not linear.  The
-/// computation is memoized in the row's flag slot, so a key created on
-/// the fly by substitution is computed recursively and never twice.
 fn attach_linearity(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) {
     let handles: Vec<i64> = LINEAR_HANDLES.iter().map(|text| intern(names, text)).collect();
     let mut seen: Vec<i64> = Vec::new();
@@ -760,10 +623,6 @@ fn has_value(list: &[i64], value: i64) -> bool {
     false
 }
 
-/// The linearity of one canonical key, memoized in the row's file slot
-/// (-1 uncomputed, 0 not linear, 1 linear).  Dependencies are older keys
-/// (arguments and elements are canonicalized before the containing key),
-/// so the flag is well-founded; `seen` guards recursive type graphs.
 fn linear_of(
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
@@ -805,10 +664,6 @@ fn linear_of(
     flag
 }
 
-/// Whether a struct or enum declaration transitively contains a linear
-/// member.  Each declared member type is substituted against the key's
-/// own type arguments before the recursion, so a `T`-typed member counts
-/// as linear exactly when its instantiated type is linear.
 fn linear_members_of(
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
@@ -861,8 +716,6 @@ fn linear_members_of(
     0
 }
 
-/// Substitutes a declared member type against the concrete type arguments
-/// of `key`, matching the declaration's type parameters by key.
 fn subst_declared_key(
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
@@ -896,22 +749,11 @@ fn subst_declared_key(
     subst_key(nodes, lists, declared, &from, &to)
 }
 
-/// Attaches the post-check type facts downstream stages consume: the
-/// variant facts codegen needs and the is_linear flag the borrow checker
-/// reads.  Runs after all checking and after inference variables are
-/// substituted, so every canonical key that will be queried exists.
 fn attach_type_facts(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) {
     attach_variant_facts(nodes, lists);
     attach_linearity(names, nodes, lists);
 }
 
-// ---------------------------------------------------------------------------
-// Unification.
-// ---------------------------------------------------------------------------
-
-/// Unifies two keys, binding any variables.  Returns whether the
-/// unification succeeded; callers report mismatches with context.  The
-/// merged key is never consumed anywhere, so it is not produced.
 fn unify_key(nodes: &[i64], lists: &[Vec<i64>], vars: &mut Vec<(i64, i64)>, a: i64, b: i64) -> bool {
     let ra = resolve_var(vars, a);
     let rb = resolve_var(vars, b);
@@ -967,8 +809,6 @@ fn unify_key(nodes: &[i64], lists: &[Vec<i64>], vars: &mut Vec<(i64, i64)>, a: i
     true
 }
 
-/// Renders a key for diagnostics: `Int`, `Result(Int, RangeError)`,
-/// `&[U8]`, `Vec(U8)`.
 fn render_key(names: &[String], nodes: &[i64], lists: &[Vec<i64>], key: i64) -> String {
     if is_var(key) {
         return "?".to_string();
@@ -1012,10 +852,6 @@ fn render_key(names: &[String], nodes: &[i64], lists: &[Vec<i64>], key: i64) -> 
     }
     text
 }
-
-// ---------------------------------------------------------------------------
-// Declaration collection (phase A): canonicalize every declared type.
-// ---------------------------------------------------------------------------
 
 fn collect_types(state: &mut State, list: i64) {
     let count = list_len(state.2, list);
@@ -1064,10 +900,6 @@ fn collect_type_item(state: &mut State, item: i64) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Impls (phase B): record every impl and check its method bodies.
-// ---------------------------------------------------------------------------
-
 fn collect_impls(state: &mut State, list: i64) {
     let count = list_len(state.2, list);
     let mut idx = 0i64;
@@ -1109,8 +941,6 @@ fn collect_impl_item(state: &mut State, item: i64) {
     state.5.push(methods);
 }
 
-/// Checks an impl method's signature against the trait declaration
-/// (with Self replaced by the impl's for-type).
 fn verify_impl_method(state: &mut State, trait_sym: i64, for_key: i64, method: i64) {
     let trait_item = sym_decl(state.1, trait_sym);
     if trait_item == NONE {
@@ -1177,7 +1007,6 @@ fn verify_impl_method(state: &mut State, trait_sym: i64, for_key: i64, method: i
     pop_scope(state.4);
 }
 
-/// Finds a method function by name inside a method list.
 fn find_method_by_name(nodes: &[i64], lists: &[Vec<i64>], methods: i64, name: i64) -> i64 {
     let count = list_len(lists, methods);
     let mut idx = 0i64;
@@ -1191,7 +1020,6 @@ fn find_method_by_name(nodes: &[i64], lists: &[Vec<i64>], methods: i64, name: i6
     NONE
 }
 
-/// Finds the impl row for `(trait_sym, for_key)`, or NONE.
 fn impl_find(impls: &[i64], trait_sym: i64, for_key: i64) -> i64 {
     let mut idx = 0i64;
     while idx < impls.len() as i64 / IMPL_STRIDE {
@@ -1209,14 +1037,10 @@ fn impl_methods(impls: &[i64], idx: i64) -> i64 {
     impl_at(impls, (idx * IMPL_STRIDE + 2) as usize)
 }
 
-/// Whether `key` is the seeded Unit enum, read from the primitive
-/// sub-kind the resolver stored on the enum's symbol — never by name.
 fn is_unit_key(nodes: &[i64], key: i64) -> bool {
     key_kind(nodes, key) == TYD_ENUM && sym_prim_kind(nodes, key_sym(nodes, key)) == PRIM_UNIT
 }
 
-/// The Unit key: the seeded Unit enum's canonical key, built from the
-/// symbol id the checker stored on the state at setup.
 fn unit_key_of(state: &mut State) -> i64 {
     let sym = state.8;
     if sym == NONE {
@@ -1225,10 +1049,6 @@ fn unit_key_of(state: &mut State) -> i64 {
         canon_tyinfo(state.1, state.2, TYD_ENUM, sym, NONE, NONE, NONE)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Function bodies (phase D).
-// ---------------------------------------------------------------------------
 
 fn check_fn_list(state: &mut State, list: i64) {
     let count = list_len(state.2, list);
@@ -1251,7 +1071,6 @@ fn check_fn_item(state: &mut State, item: i64) {
     }
 }
 
-/// Walks an item list, canonicalizing every function signature inside.
 fn check_fn_sigs_list(state: &mut State, list: i64) {
     let count = list_len(state.2, list);
     let mut idx = 0i64;
@@ -1273,10 +1092,6 @@ fn check_fn_sigs_item(state: &mut State, item: i64) {
     }
 }
 
-/// Canonicalizes one function's parameter and return type nodes under
-/// its own type parameters, attaching the keys to the nodes.  Signature
-/// facts are computed here once, before any call site or body reads
-/// them; `check_fn` re-reads the attached keys instead of recomputing.
 fn check_fn_sigs(state: &mut State, fn_node: i64) {
     if node_tag(state.1, fn_node) != NODE_FN {
         return;
@@ -1295,9 +1110,6 @@ fn check_fn_sigs(state: &mut State, fn_node: i64) {
     pop_scope(state.4);
 }
 
-/// Checks one function: binds its type parameters and parameters, infers
-/// every body expression (a NONE body means a signature-only check, as
-/// for native functions), and attaches every key.
 fn check_fn(state: &mut State, fn_node: i64, self_key: i64) {
     if node_tag(state.1, fn_node) != NODE_FN {
         return;
@@ -1333,7 +1145,6 @@ fn check_stmt_list(state: &mut State, list: i64, ret: i64, impure: i64, self_key
     }
 }
 
-/// Checks one statement, returning its value key.
 fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64, loop_depth: i64) -> i64 {
     if node_tag(state.1, stmt) != NODE_STMT {
         return unit_key_of(state);
@@ -1350,13 +1161,6 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
         let binding_key = if declared != NONE {
             let dkey = canon_ty(state, declared, self_key, 1);
             let ikey = check_expr(state, init, dkey, ret, impure, self_key);
-            // Unification always runs: it may bind an inference
-            // variable, and that side effect must never be skipped even
-            // when the keys are unknown-typed.  Only the diagnostic is
-            // gated — an unknown-typed operand has already failed with
-            // its own primary error (an unknown symbol, a static zero
-            // divisor, a failed declared type), and a mismatch that
-            // would render '?' adds noise, not information.
             let ok = unify_key(state.1, state.2, state.6, ikey, dkey);
             if !ok && key_kind(state.1, ikey) != TYD_UNKNOWN && key_kind(state.1, dkey) != TYD_UNKNOWN {
                 push_error(state.3, &format!("cannot assign '{}' to '{}'", render_key(state.0, state.1, state.2, ikey), render_key(state.0, state.1, state.2, dkey)), file, start, end);
@@ -1372,16 +1176,8 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
     if kind == STMT_ASSIGN {
         let target = node_b(state.1, stmt);
         let value = node_c(state.1, stmt);
-        // The target is a place expression; its type is the type the
-        // value must have.  `check_assign_target` types it and enforces
-        // the assignment rules (mutable local or `&mut` base; a shared
-        // `&T` base is a hard error).
         let tkey = check_assign_target(state, target, ret, impure, self_key);
         let vkey = check_expr(state, value, tkey, ret, impure, self_key);
-        // As in STMT_LET, unification always runs (it may bind an
-        // inference variable); only the diagnostic is gated — an
-        // unknown-typed target or value already carries its own primary
-        // error, and a mismatch that would render '?' adds noise.
         let ok = unify_key(state.1, state.2, state.6, vkey, tkey);
         if !ok && key_kind(state.1, vkey) != TYD_UNKNOWN && key_kind(state.1, tkey) != TYD_UNKNOWN {
             push_error(state.3, &format!("cannot assign '{}' to '{}'", render_key(state.0, state.1, state.2, vkey), render_key(state.0, state.1, state.2, tkey)), file, start, end);
@@ -1428,11 +1224,6 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
             key = unit_key_of(state);
         } else {
             key = check_expr(state, value, ret, ret, impure, self_key);
-            // Unification always runs (it may bind an inference
-            // variable); only the diagnostic is gated.  A value (or
-            // return type) that already failed its own check is
-            // TYD_UNKNOWN; the mismatch it would report renders as '?'
-            // and duplicates the primary error.
             let ok = unify_key(state.1, state.2, state.6, key, ret);
             if !ok && key_kind(state.1, key) != TYD_UNKNOWN && key_kind(state.1, ret) != TYD_UNKNOWN {
                 push_error(state.3, &format!("return type mismatch: expected '{}', found '{}'", render_key(state.0, state.1, state.2, ret), render_key(state.0, state.1, state.2, key)), file, start, end);
@@ -1460,10 +1251,6 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
     stmt_set_ty(state.1, stmt, key);
     key
 }
-
-// ---------------------------------------------------------------------------
-// Constant folding (phase C).
-// ---------------------------------------------------------------------------
 
 fn collect_consts(state: &mut State, list: i64) {
     let count = list_len(state.2, list);
@@ -1502,10 +1289,6 @@ fn collect_const_item(state: &mut State, item: i64) {
     expr_set_ty(state.1, value_expr, key);
 }
 
-/// Folds a constant expression, returning `(value, key)`.  On failure an
-/// error is reported and the unknown key is returned.  With `quiet` set
-/// (the statically-known-zero-divisor probe) failures are silent: the
-/// unknown key means "not statically known".
 fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, i64) {
     if node_tag(state.1, expr) != NODE_EXPR {
         if quiet == 0 {
@@ -1580,10 +1363,6 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
     (0, unknown_key(state.1, state.2))
 }
 
-/// Euclidean division on i64, computed in wrapping arithmetic so no input
-/// can panic (matching the emitted runtime IR; the spec defines both `/`
-/// and `%` to keep the remainder in `[0, |divisor|)` regardless of the
-/// operands' signs).
 fn euclid_div_i64(lv: i64, rv: i64) -> i64 {
     let rem = lv.wrapping_rem(rv);
     let euclid_rem = if rem < 0 {
@@ -1594,7 +1373,6 @@ fn euclid_div_i64(lv: i64, rv: i64) -> i64 {
     lv.wrapping_sub(euclid_rem).wrapping_div(rv)
 }
 
-/// The Euclidean remainder of `lv mod rv`, in wrapping arithmetic.
 fn euclid_rem_i64(lv: i64, rv: i64) -> i64 {
     let rem = lv.wrapping_rem(rv);
     if rem < 0 {
@@ -1679,12 +1457,6 @@ fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, 
     (0, unknown_key(state.1, state.2))
 }
 
-// ---------------------------------------------------------------------------
-// Expressions.
-// ---------------------------------------------------------------------------
-
-/// Checks an expression against an expected type (NONE when none is
-/// known), returning its key.
 fn check_expr(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     if node_tag(state.1, expr) != NODE_EXPR {
         return unknown_key(state.1, state.2);
@@ -1753,21 +1525,12 @@ fn check_unary(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i6
     let end = node_end(state.1, expr);
     let key;
     if (op == UN_REF || op == UN_REF_MUT) && node_tag(state.1, operand) == NODE_EXPR && node_a(state.1, operand) == EXPR_INDEX {
-        // A borrow of an indexed element is checked inside the index
-        // expression itself: its type is the borrowed element type
-        // (`&T`, or `Result(&T, IndexError)` when the access is
-        // dynamically checked), never a reference to the Result.  The
-        // borrow applies to the element, not to the bounds check.
         let borrow = if op == UN_REF { 1 } else { 2 };
         key = check_index(state, operand, borrow, ret, impure, self_key);
     } else {
         let inner = check_expr(state, operand, NONE, ret, impure, self_key);
     if op == UN_REF {
         if key_kind(state.1, inner) == TYD_ARRAY {
-            // The single sanctioned coercion, `&[T; N]` -> `&[T]`: a
-            // shared borrow of a fixed array is a slice view over its
-            // storage (data = the array's address, len = N), never a
-            // reference to the array as an aggregate.
             let elem = key_elem(state.1, inner);
             let slice = canon_tyinfo(state.1, state.2, TYD_SLICE, NONE, NONE, elem, NONE);
             key = canon_tyinfo(state.1, state.2, TYD_REF, NONE, NONE, slice, NONE);
@@ -1832,19 +1595,6 @@ fn op_text(op: i64) -> &'static str {
     }
 }
 
-/// Reports a division or modulo whose divisor is statically known to be
-/// zero — a literal, a folded const reference, or any arithmetic
-/// combination of them — wherever the expression appears.  The numerator
-/// is irrelevant: `N / 0`, `5 / 0`, and `x / (3 - 3)` are all compile
-/// errors.  The constant fold is the single source of truth: this probe
-/// folds the divisor with errors suppressed and only reports when the
-/// fold proves zero.  Everything else is a runtime `Result`, never a
-/// trap.
-/// Reports a division/modulo by a statically-known-zero divisor and
-/// returns 1 when the primary error fired, else 0.  The caller types the
-/// expression as failed (unknown key) when it fires, so enclosing
-/// statements do not cascade a secondary type mismatch off an
-/// expression that already errored.
 fn check_static_zero_divisor(state: &mut State, op: i64, rhs: i64) -> i64 {
     if op != BIN_DIV && op != BIN_MOD {
         return 0;
@@ -1863,10 +1613,6 @@ fn check_static_zero_divisor(state: &mut State, op: i64, rhs: i64) -> i64 {
     }
 }
 
-/// The result key of a division or modulo expression: `Result(T,
-/// DivError)` where T is the operand type.  Both enums are synthesized
-/// builtins read through the same declaration path as any user enum, so
-/// the variant order and layout are derived, never hardcoded.
 fn division_result_key(state: &mut State, payload: i64) -> i64 {
     let err_sym = state.11;
     if err_sym == NONE {
@@ -1926,10 +1672,6 @@ fn check_binary(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i
     }
     if op == BIN_DIV || op == BIN_MOD {
         if static_zero == 1 {
-            // The divisor is statically zero: the primary error already
-            // fired above.  Type the expression unknown so enclosing
-            // statements do not cascade a secondary mismatch (e.g. a
-            // return-type check) off a value that already failed.
             let key = unknown_key(state.1, state.2);
             expr_set_ty(state.1, expr, key);
             return key;
@@ -1973,10 +1715,6 @@ fn check_array(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
     key
 }
 
-/// Whether `key` is (or transitively contains) a linear handle, computed
-/// on demand during checking.  The full linearity pass runs after all
-/// checking; a key queried here is memoized into its descriptor row the
-/// same way, so the pass reads the stored flag and never recomputes it.
 fn key_is_linear_now(state: &mut State, key: i64) -> bool {
     if key == NONE {
         return false;
@@ -1994,10 +1732,6 @@ fn key_is_linear_now(state: &mut State, key: i64) -> bool {
     linear_of(state.1, state.2, key, &handles, &mut seen) == 1
 }
 
-/// The result key of an index expression: `Result(T, IndexError)` where
-/// T is the element (or borrowed element) type.  IndexError is the
-/// seeded primitive enum carrying `IndexOutOfBounds(Usize, Usize)`, read
-/// through the same declaration path as any user enum.
 fn index_result_key(state: &mut State, payload: i64) -> i64 {
     let err_sym = state.12;
     if err_sym == NONE {
@@ -2014,15 +1748,6 @@ fn index_result_key(state: &mut State, payload: i64) -> i64 {
     canon_tyinfo(state.1, state.2, TYD_ENUM, result_sym, args, NONE, NONE)
 }
 
-/// Checks an array/slice index expression `base[index]`.  `borrow` is 0
-/// for a value position, 1 under `&`, 2 under `&mut`.  A fixed-size
-/// array with a statically-known constant index is proven in range (or
-/// rejected) at compile time and evaluates directly to the element type
-/// `T` (or `&T`/`&mut T` when borrowed), with no `Result` wrapper.
-/// Every dynamic index, and every index into a slice, evaluates to
-/// `Result(T, IndexError)` (or the borrowed-element variant when under a
-/// borrow).  A value-position index of a linear-element array or slice
-/// is a compile error: an indexed element is never moved out.
 fn check_index(state: &mut State, expr: i64, borrow: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     let base = node_b(state.1, expr);
     let index = node_c(state.1, expr);
@@ -2079,9 +1804,6 @@ fn check_index(state: &mut State, expr: i64, borrow: i64, ret: i64, impure: i64,
     key
 }
 
-/// Checks a field access on a non-path base (`(expr).field`): the base
-/// is typed (references dereferenced) and the substituted field key is
-/// returned.
 fn check_field_access(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     let base = node_b(state.1, expr);
     let field = node_c(state.1, expr);
@@ -2091,12 +1813,6 @@ fn check_field_access(state: &mut State, expr: i64, ret: i64, impure: i64, self_
     key
 }
 
-/// Checks an assignment target expression (a place) and returns the key
-/// of the value it accepts.  The rules: a plain name target must be a
-/// mutable local (`var`); a field chain may be rooted at a mutable local
-/// or at a `&mut T` reference (writing through it); writing through a
-/// shared `&T` reference is a hard error, as is any target that is not a
-/// place.
 fn check_assign_target(state: &mut State, target: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     if node_tag(state.1, target) != NODE_EXPR {
         return unknown_key(state.1, state.2);
@@ -2141,7 +1857,7 @@ fn check_assign_target(state: &mut State, target: i64, ret: i64, impure: i64, se
         if bkind == TYD_REF {
             push_error(state.3, &format!("cannot assign to field '{}' through shared reference '{}': assignment requires &mut", name_text(state.0, field), render_key(state.0, state.1, state.2, base_key)), file, start, end);
         } else if bkind == TYD_REF_MUT {
-            // Writable through the exclusive reference.
+
         } else if node_tag(state.1, base) == NODE_EXPR && node_a(state.1, base) == EXPR_PATH {
             let segs = node_b(state.1, base);
             let first = list_get(state.2, segs, 0);
@@ -2164,10 +1880,6 @@ fn check_assign_target(state: &mut State, target: i64, ret: i64, impure: i64, se
     key
 }
 
-/// The assignability of a field-chain target rooted at the local binding
-/// `found` (`(key, is_mut)` with name `name`): a mutable local is
-/// writable, a `&mut T` reference is writable through, and a `&T` shared
-/// reference is the hard error.
 fn check_field_target_base(state: &mut State, found: (i64, i64), name: i64, file: i64, start: i64, end: i64) {
     let bkind = key_kind(state.1, found.0);
     if bkind == TYD_REF {
@@ -2215,12 +1927,6 @@ fn check_try(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i64)
     result
 }
 
-// ---------------------------------------------------------------------------
-// Paths.  A path either names a declaration (a symbol the resolver
-// attached) or is a local-variable chain (`self.field`): the first segment
-// is a local binding and every further segment is a struct field.
-// ---------------------------------------------------------------------------
-
 fn check_path(state: &mut State, expr: i64) -> i64 {
     let sym = expr_sym_of(state.1, expr);
     if sym != NONE {
@@ -2253,9 +1959,6 @@ fn check_path_sym(state: &mut State, expr: i64, expected: i64, sym: i64) -> i64 
     key
 }
 
-/// The key of a unit-variant value expression (`None`, `Unit`).  The
-/// enum's type parameters are fresh inference variables unified with the
-/// expected type when one is known.
 fn variant_value_key(state: &mut State, expr: i64, expected: i64, sym: i64) -> i64 {
     let file = node_file(state.1, expr);
     let start = node_start(state.1, expr);
@@ -2308,8 +2011,6 @@ fn check_local_chain(names: &mut [String], nodes: &mut Vec<i64>, lists: &mut Vec
     current
 }
 
-/// The key of `base.field`, dereferencing shared/mutable references and
-/// substituting the struct's type arguments into the declared field key.
 fn field_access_key(names: &mut [String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, expr: i64, base: i64, field: i64) -> i64 {
     let file = node_file(nodes, expr);
     let start = node_start(nodes, expr);
@@ -2333,7 +2034,6 @@ fn field_access_key(names: &mut [String], nodes: &mut Vec<i64>, lists: &mut Vec<
     subst_key(nodes, lists, declared_key, &from, &to)
 }
 
-/// Returns `(index, declared-key)` of the named field, or (NONE, NONE).
 fn struct_field_of(nodes: &[i64], lists: &[Vec<i64>], item: i64, name: i64) -> (i64, i64) {
     let fields = node_e(nodes, item);
     let count = list_len(lists, fields);
@@ -2348,7 +2048,6 @@ fn struct_field_of(nodes: &[i64], lists: &[Vec<i64>], item: i64, name: i64) -> (
     (NONE, NONE)
 }
 
-/// The symbol of the enum that declares `variant_sym`, or NONE.
 fn enum_sym_of_variant(nodes: &[i64], variant_sym: i64) -> i64 {
     let home = sym_home(nodes, variant_sym);
     let mut idx = 0i64;
@@ -2361,7 +2060,6 @@ fn enum_sym_of_variant(nodes: &[i64], variant_sym: i64) -> i64 {
     NONE
 }
 
-/// The symbol of the trait that declares `method_sym`, or NONE.
 fn trait_sym_of_method(nodes: &[i64], method_sym: i64) -> i64 {
     let home = sym_home(nodes, method_sym);
     let mut idx = 0i64;
@@ -2374,21 +2072,16 @@ fn trait_sym_of_method(nodes: &[i64], method_sym: i64) -> i64 {
     NONE
 }
 
-/// The enum key of `enum_sym` with one fresh inference variable per
-/// declared type parameter.
 fn enum_key_with_fresh(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, vars: &mut Vec<(i64, i64)>, origins: &mut Vec<(i64, i64, i64)>, expr: i64, enum_sym: i64, item: i64) -> i64 {
     let args = fresh_args_for(nodes, lists, vars, origins, expr, item);
     canon_tyinfo(nodes, lists, TYD_ENUM, enum_sym, args, NONE, NONE)
 }
 
-/// The struct key of `sym` with one fresh inference variable per declared
-/// type parameter.
 fn struct_key_with_fresh(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, vars: &mut Vec<(i64, i64)>, origins: &mut Vec<(i64, i64, i64)>, expr: i64, sym: i64, item: i64) -> i64 {
     let args = fresh_args_for(nodes, lists, vars, origins, expr, item);
     canon_tyinfo(nodes, lists, TYD_STRUCT, sym, args, NONE, NONE)
 }
 
-/// A fresh list with one inference variable per declared type parameter.
 fn fresh_args_for(nodes: &mut [i64], lists: &mut Vec<Vec<i64>>, vars: &mut Vec<(i64, i64)>, origins: &mut Vec<(i64, i64, i64)>, expr: i64, item: i64) -> i64 {
     let count = declared_param_count(nodes, lists, item);
     if count == 0 {
@@ -2423,10 +2116,6 @@ fn list_to_vec(lists: &[Vec<i64>], id: i64) -> Vec<i64> {
     }
     out
 }
-
-// ---------------------------------------------------------------------------
-// Calls.
-// ---------------------------------------------------------------------------
 
 fn check_call(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     let callee = node_b(state.1, expr);
@@ -2466,7 +2155,6 @@ fn check_call(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64
     result
 }
 
-/// Reports why a callee path resolved to no symbol.
 fn check_unresolved_callee(state: &mut State, expr: i64) -> i64 {
     let callee = node_b(state.1, expr);
     let segs = node_b(state.1, callee);
@@ -2489,8 +2177,6 @@ fn check_unresolved_callee(state: &mut State, expr: i64) -> i64 {
     unknown_key(state.1, state.2)
 }
 
-/// Checks a call to a declared function (or native function), creating
-/// the monomorphized instance row.
 fn check_direct_call(state: &mut State, expr: i64, sym: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     let decl = sym_decl(state.1, sym);
     if decl == NONE {
@@ -2525,19 +2211,12 @@ fn check_direct_call(state: &mut State, expr: i64, sym: i64, ret: i64, impure: i
     let declared_ret = ty_key_of(state.1, node_d(state.1, fn_node));
     let result = subst_key(state.1, state.2, declared_ret, &from, &to);
     let mono = canon_tyinfo(state.1, state.2, TYD_MONO, fn_node, args_list, NONE, NONE);
-    // Native functions have no body to emit: the instance carries the
-    // symbol so codegen routes the call to the runtime surface, exactly
-    // as the builtin `from_u8` methods already do.
     let slot = if kind == SYM_NATIVE_FUN { sym } else { fn_node };
     let inst = instance_of(state.1, mono, slot, args_list, result, param_keys, kind);
     expr_set_sym(state.1, expr, inst);
     result
 }
 
-/// Finds or creates the instance row for a monomorphization and returns
-/// its id.  The row is created once per mono key; every call site with
-/// the same mono reads the same row, so the attached result and param
-/// keys are the first creation's (deterministic for a given mono).
 fn instance_of(nodes: &mut Vec<i64>, mono: i64, fn_slot: i64, args_list: i64, result: i64, param_keys: i64, kind: i64) -> i64 {
     let existing = find_instance(nodes, mono);
     if existing != NONE {
@@ -2546,8 +2225,6 @@ fn instance_of(nodes: &mut Vec<i64>, mono: i64, fn_slot: i64, args_list: i64, re
     alloc_node(nodes, &[NODE_INST, NO_FILE, NO_FILE, NO_FILE, fn_slot, args_list, result, param_keys, mono, kind])
 }
 
-/// The fn node behind a symbol declaration (a fn node directly, or the
-/// fn slot of an item).
 fn fn_node_of(nodes: &[i64], decl: i64) -> i64 {
     if node_tag(nodes, decl) == NODE_FN {
         decl
@@ -2556,7 +2233,6 @@ fn fn_node_of(nodes: &[i64], decl: i64) -> i64 {
     }
 }
 
-/// The declared-parameter keys of a function node, in declared order.
 fn fn_declared_param_keys(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], fn_node: i64) -> Vec<i64> {
     let tparams = node_b(nodes, fn_node);
     let count = list_len(lists, tparams);
@@ -2574,9 +2250,6 @@ fn fn_declared_param_keys(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], fn_node:
     keys
 }
 
-/// The concrete type arguments of a call: explicit `f[T]()` arguments,
-/// or one fresh inference variable per declared parameter.  Returns the
-/// argument list id and its contents as a vector.
 fn call_type_args(state: &mut State, expr: i64, fn_node: i64, from: &[i64]) -> (i64, Vec<i64>) {
     let tcount = from.len() as i64;
     if tcount == 0 {
@@ -2618,9 +2291,6 @@ fn call_type_args(state: &mut State, expr: i64, fn_node: i64, from: &[i64]) -> (
     (args, to)
 }
 
-/// The builtin `from_u8` conversion: the receiver type is the builtin
-/// type whose scope owns the method, the argument is U8, the result is
-/// the receiver type.
 fn check_from_u8(state: &mut State, expr: i64, sym: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     let home = sym_home(state.1, sym);
     let receiver_sym = builtin_type_of_scope(state.1, home);
@@ -2656,8 +2326,6 @@ fn check_from_u8(state: &mut State, expr: i64, sym: i64, ret: i64, impure: i64, 
     receiver_key
 }
 
-/// The builtin type symbol whose scope is `scope` (the receiver of a
-/// builtin method such as `from_u8`).
 fn builtin_type_of_scope(nodes: &[i64], scope: i64) -> i64 {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
@@ -2669,10 +2337,6 @@ fn builtin_type_of_scope(nodes: &[i64], scope: i64) -> i64 {
     NONE
 }
 
-/// A trait method call (`Checksum.checksum(value)`).  When the receiver
-/// type is concrete the impl method is resolved here; when it is a type
-/// parameter the dispatch is deferred for codegen, which reads the impl
-/// table with the substituted receiver type.
 fn check_trait_call(state: &mut State, expr: i64, sym: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     let trait_sym = trait_sym_of_method(state.1, sym);
     let file = node_file(state.1, expr);
@@ -2710,8 +2374,6 @@ fn check_trait_call(state: &mut State, expr: i64, sym: i64, ret: i64, impure: i6
     result
 }
 
-/// Resolves a trait call whose receiver type is concrete: finds the impl,
-/// creates the impl-method instance, and records the dispatch row.
 fn trait_call_concrete(state: &mut State, expr: i64, trait_sym: i64, trait_method: i64, recv: i64, arg_exprs: i64, fctx: (i64, i64, i64)) -> i64 {
     let (ret, impure, self_key) = fctx;
     let file = node_file(state.1, expr);
@@ -2754,8 +2416,6 @@ fn trait_call_concrete(state: &mut State, expr: i64, trait_sym: i64, trait_metho
     result
 }
 
-/// Verifies a trait call whose receiver is a type parameter (the bound
-/// must name the trait) and records a deferred dispatch row.
 fn trait_call_deferred(state: &mut State, expr: i64, trait_sym: i64, trait_method: i64, recv: i64, arg_exprs: i64, fctx: (i64, i64, i64)) -> i64 {
     let (ret, impure, self_key) = fctx;
     let file = node_file(state.1, expr);
@@ -2790,7 +2450,6 @@ fn trait_call_deferred(state: &mut State, expr: i64, trait_sym: i64, trait_metho
     result
 }
 
-/// True when a type parameter's bound names `trait_sym`.
 fn param_has_bound(nodes: &[i64], key: i64, trait_sym: i64) -> bool {
     if key_kind(nodes, key) != TYD_PARAM {
         return false;
@@ -2802,7 +2461,6 @@ fn param_has_bound(nodes: &[i64], key: i64, trait_sym: i64) -> bool {
     node_f(nodes, row) == trait_sym
 }
 
-/// The dereferenced key of a reference key, unchanged otherwise.
 fn deref_key(nodes: &[i64], key: i64) -> i64 {
     let kind = key_kind(nodes, key);
     if kind == TYD_REF || kind == TYD_REF_MUT {
@@ -2812,12 +2470,6 @@ fn deref_key(nodes: &[i64], key: i64) -> i64 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Struct literals and variant construction.
-// ---------------------------------------------------------------------------
-
-/// Checks `Name(field: value, ...)` struct literals and `Variant(args)`
-/// constructions (the resolver rewrites variant calls into this shape).
 fn check_struct_lit(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     let sym = expr_sym_of(state.1, expr);
     let file = node_file(state.1, expr);
@@ -2848,7 +2500,6 @@ fn check_struct_lit(state: &mut State, expr: i64, expected: i64, ret: i64, impur
     result
 }
 
-/// Checks a named-field struct literal against the struct declaration.
 fn check_struct_construct(state: &mut State, expr: i64, sym: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     let file = node_file(state.1, expr);
     let start = node_start(state.1, expr);
@@ -2885,9 +2536,6 @@ fn check_struct_construct(state: &mut State, expr: i64, sym: i64, ret: i64, impu
     key
 }
 
-/// Checks a variant construction against the enum declaration.  The enum
-/// type parameters are fresh inference variables unified with the payload
-/// values and the expected type.
 fn check_variant_construct(state: &mut State, expr: i64, sym: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     let file = node_file(state.1, expr);
     let start = node_start(state.1, expr);
@@ -2929,10 +2577,6 @@ fn check_variant_construct(state: &mut State, expr: i64, sym: i64, ret: i64, imp
     key
 }
 
-// ---------------------------------------------------------------------------
-// Match expressions.
-// ---------------------------------------------------------------------------
-
 fn check_match(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     let scrutinee = node_b(state.1, expr);
     let arms = node_c(state.1, expr);
@@ -2969,12 +2613,6 @@ fn check_match(state: &mut State, expr: i64, ret: i64, impure: i64, self_key: i6
     merged
 }
 
-/// Checks one match arm: binds its pattern variables and checks the body,
-/// returning the body's value key.  A body that is a bare expression
-/// statement is checked in expression position — its value is the arm's
-/// value, so the unhandled-Result/Option check (which guards discarded
-/// statement values) never applies to it.  Compound bodies (let, if,
-/// return) are checked as statements.
 fn check_arm(state: &mut State, arm: i64, s_key: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     push_scope(state.4);
     check_pattern(state, node_a(state.1, arm), s_key);
@@ -2988,9 +2626,6 @@ fn check_arm(state: &mut State, arm: i64, s_key: i64, ret: i64, impure: i64, sel
     key
 }
 
-/// Checks a pattern against the scrutinee key, binding any names.  Facts
-/// (payload keys, element keys) are read from the keys the earlier stages
-/// attached to the declarations.
 fn check_pattern(state: &mut State, pat: i64, s_key: i64) -> i64 {
     if node_tag(state.1, pat) != NODE_PAT {
         return unknown_key(state.1, state.2);
@@ -3081,13 +2716,6 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64) -> i64 {
     s_key
 }
 
-/// The key of the rest binder: always a reference to the remaining
-/// elements.  The emitter materializes the rest as a `{data, len}` slice
-/// view pointing into the scrutinee's storage — for array and slice
-/// scrutinees alike — so the binder is `&[T]` (or `&mut [T]` for a
-/// `&mut` scrutinee), never a bare value or array.  A rest over a value
-/// array borrows that array for the arm's duration, which the borrow
-/// checker models as a shared loan on the scrutinee binding.
 fn rest_type_of(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], s_key: i64, inner: i64) -> i64 {
     let is_mut = key_kind(nodes, s_key) == TYD_REF_MUT;
     let rest = canon_tyinfo(nodes, lists, TYD_SLICE, NONE, NONE, key_elem(nodes, inner), NONE);
@@ -3095,7 +2723,6 @@ fn rest_type_of(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], s_key: i64, inner:
     canon_tyinfo(nodes, lists, kind_of, NONE, NONE, rest, NONE)
 }
 
-/// True when `variant_sym` is a variant of the enum `s_key` denotes.
 fn variant_matches(nodes: &[i64], s_key: i64, variant_sym: i64) -> bool {
     let s_kind = key_kind(nodes, s_key);
     if s_kind == TYD_BUILTIN {
@@ -3108,10 +2735,6 @@ fn variant_matches(nodes: &[i64], s_key: i64, variant_sym: i64) -> bool {
     node_e(nodes, enum_sym) == sym_home(nodes, variant_sym)
 }
 
-/// Reports non-exhaustive matches.  A binding arm covers everything; an
-/// enum match must name every variant; a fixed array must be covered at
-/// its length; a slice must have a rest arm covering every length from
-/// the smallest rest arm downwards.
 fn check_exhaustive(state: &mut State, s_key: i64, arms: i64, file: i64, start: i64, end: i64) {
     let count = list_len(state.2, arms);
     let mut has_bind = false;
@@ -3155,7 +2778,6 @@ fn check_exhaustive(state: &mut State, s_key: i64, arms: i64, file: i64, start: 
     }
 }
 
-/// True when some arm pattern names `variant` (the NODE_VARIANT row).
 fn variant_covered(nodes: &[i64], lists: &[Vec<i64>], arms: i64, variant: i64) -> bool {
     let count = list_len(lists, arms);
     let mut idx = 0i64;
@@ -3175,8 +2797,6 @@ fn variant_covered(nodes: &[i64], lists: &[Vec<i64>], arms: i64, variant: i64) -
     false
 }
 
-/// True when an exact-length or rest arm covers a fixed array of length
-/// `n` (the only length a `[T; n]` value can have).
 fn array_covers_len(nodes: &[i64], lists: &[Vec<i64>], arms: i64, n: i64) -> bool {
     let count = list_len(lists, arms);
     let mut idx = 0i64;
@@ -3198,9 +2818,6 @@ fn array_covers_len(nodes: &[i64], lists: &[Vec<i64>], arms: i64, n: i64) -> boo
     false
 }
 
-/// True when a slice match covers every length: a rest arm bounds the
-/// lengths above its fixed count, and every shorter length is exactly
-/// covered.
 fn slice_exhaustive(nodes: &[i64], lists: &[Vec<i64>], arms: i64) -> bool {
     let count = list_len(lists, arms);
     let mut min_rest: i64 = NONE;
@@ -3234,13 +2851,6 @@ fn slice_exhaustive(nodes: &[i64], lists: &[Vec<i64>], arms: i64) -> bool {
     true
 }
 
-// ---------------------------------------------------------------------------
-// Final variable resolution.
-// ---------------------------------------------------------------------------
-
-/// Substitutes every inference variable in every attached key, reports
-/// variables that never unified, and re-canonicalizes instance rows so
-/// codegen only ever sees concrete keys.
 fn resolve_all_vars(names: &mut [String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, vars: &[(i64, i64)], origins: &[(i64, i64, i64)]) {
     report_unbound(names, nodes, errors, vars, origins);
     let mut idx = 0i64;
@@ -3265,8 +2875,6 @@ fn resolve_all_vars(names: &mut [String], nodes: &mut Vec<i64>, lists: &mut Vec<
     }
 }
 
-/// Fully resolves one key: variables are followed to their bindings and
-/// descriptor children are resolved and re-canonicalized when changed.
 fn resolve_key(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, vars: &[(i64, i64)], key: i64) -> i64 {
     if key == NONE {
         return NONE;
@@ -3319,7 +2927,6 @@ fn resolve_list_keys(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, vars: &[(i
     }
 }
 
-/// Re-canonicalizes one instance row after variable resolution.
 fn resolve_instance_row(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, vars: &[(i64, i64)], inst: i64) {
     let fn_node = inst_fn_of(nodes, inst);
     let args = inst_args_of(nodes, inst);
@@ -3333,8 +2940,6 @@ fn resolve_instance_row(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, vars: &
     inst_set_mono(nodes, inst, mono);
 }
 
-/// Reports every inference variable that never unified, at the origin
-/// expression that created it.
 fn report_unbound(names: &[String], nodes: &mut [i64], errors: &mut Vec<Diag>, vars: &[(i64, i64)], origins: &[(i64, i64, i64)]) {
     let mut idx = 0usize;
     while idx < vars.len() {

@@ -1,27 +1,9 @@
-//! Cinnabar module loader.
-//!
-//! Loads the entry file and every external module referenced by `use`
-//! statements whose first segment is not a declared module: a `use
-//! Math.add` with no in-file `mod Math` loads `Math.cnb` from the
-//! importing file's directory and exposes its items under the module name
-//! `Math`.  Loading is recursive and each file is recorded with its real
-//! path and source text so diagnostics render at the true origin.  Every
-//! file's tokens are lexed into the shared arenas and parsed from its own
-//! `token_start`; a file's tokens end with their own `TOK_EOF`, so parsing
-//! one file never runs into the next file's tokens.
 
 use crate::ast::*;
 use std::path::Path;
 
-/// The loaded program: the entry item-list id and the external modules
-/// `(name id, root list)`.  The module name is carried as its interned
-/// id so every later comparison is an integer equality, never a string
-/// compare.  The files table travels separately so failures during
-/// loading still render diagnostics at their real origin.
 type Loaded = (i64, Vec<(i64, i64)>);
 
-/// The loader's own tables: loaded `(path, source)` files, external
-/// modules `(name id, root list)`, and the work queue `(path, root list)`.
 type Loader = (Vec<(String, String)>, Vec<(i64, i64)>, Vec<(String, i64)>);
 
 pub fn load(
@@ -50,8 +32,6 @@ pub fn load(
     (Some((root, ext_mods)), files)
 }
 
-/// Lexes and parses one file's tokens (starting after every previously
-/// loaded file's tokens) into `root`.
 fn parse_file(
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,
@@ -68,10 +48,6 @@ fn parse_file(
     crate::parser::parse(names, nodes, lists, errors, root, token_start)
 }
 
-/// Loads the sibling modules the file at `path` imports.  Files whose
-/// first segment is a declared module or an already-loaded module are
-/// skipped; a missing sibling file is left for the resolver to report as
-/// an unknown module.
 fn process_imports(
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,
@@ -96,15 +72,11 @@ fn process_imports(
     }
 }
 
-/// Resolves one external module to `(path, module name id)`, or None
-/// when no sibling file exists.
 fn sibling_module(dir: &str, names: &[String], seg: i64) -> Option<(String, i64)> {
     let mod_path = sibling_path(dir, names, seg)?;
     Some((mod_path, seg))
 }
 
-/// Loads one external module file: reads it, parses it into its own item
-/// list, and queues it for its own imports to be processed.
 fn load_sibling(
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,
@@ -130,13 +102,6 @@ fn load_sibling(
     loader.2.push((mod_path, child_list));
 }
 
-// ---------------------------------------------------------------------------
-// File helpers.
-// ---------------------------------------------------------------------------
-
-/// Reads `path`, binding the I/O failure into the diagnostic.  A missing
-/// input file has no Cinnabar source origin, so that diagnostic is
-/// source-less.
 fn read_source(path: &str, errors: &mut Vec<Diag>) -> Option<String> {
     match std::fs::read_to_string(path) {
         Ok(text) => Some(text),
@@ -147,8 +112,6 @@ fn read_source(path: &str, errors: &mut Vec<Diag>) -> Option<String> {
     }
 }
 
-/// Reads a module file, reporting any failure at the `use` statement that
-/// referenced it.
 fn read_source_at(path: &str, errors: &mut Vec<Diag>, file: i64, start: i64, end: i64) -> Option<String> {
     match std::fs::read_to_string(path) {
         Ok(text) => Some(text),
@@ -159,7 +122,6 @@ fn read_source_at(path: &str, errors: &mut Vec<Diag>, file: i64, start: i64, end
     }
 }
 
-/// The directory containing `path`, or "." when there is none.
 fn parent_dir(path: &str) -> String {
     match Path::new(path).parent() {
         Some(dir) => dir.to_string_lossy().to_string(),
@@ -167,7 +129,6 @@ fn parent_dir(path: &str) -> String {
     }
 }
 
-/// `<dir>/<name>.cnb` when that file exists.
 fn sibling_path(dir: &str, names: &[String], seg: i64) -> Option<String> {
     let name = name_text(names, seg);
     let candidate = Path::new(dir).join(format!("{}.cnb", name));
@@ -179,8 +140,6 @@ fn sibling_path(dir: &str, names: &[String], seg: i64) -> Option<String> {
     }
 }
 
-/// True when `seg` names a module that is already loaded (or queued).
-/// The module names are interned ids, so this is an integer equality.
 fn loaded_name(ext_mods: &[(i64, i64)], seg: i64) -> bool {
     let mut idx = 0usize;
     loop {
@@ -196,7 +155,6 @@ fn loaded_name(ext_mods: &[(i64, i64)], seg: i64) -> bool {
     }
 }
 
-/// True when `name` appears in `list`.
 fn name_in(list: &[i64], name: i64) -> bool {
     let mut idx = 0usize;
     loop {
@@ -212,12 +170,6 @@ fn name_in(list: &[i64], name: i64) -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Item scanning.
-// ---------------------------------------------------------------------------
-
-/// The declared module name ids in `list` (recursively, since a `use`
-/// inside a module resolves against modules declared anywhere in the file).
 fn declared_module_names(nodes: &[i64], lists: &[Vec<i64>], list: i64) -> Vec<i64> {
     let mut found: Vec<i64> = Vec::new();
     let count = list_len(lists, list);
@@ -243,7 +195,6 @@ fn collect_module_names(nodes: &[i64], lists: &[Vec<i64>], item: i64, found: &mu
     }
 }
 
-/// The `(first_segment_name, use_item)` pairs for every `use` in `list`.
 fn use_targets(nodes: &[i64], lists: &[Vec<i64>], list: i64) -> Vec<(i64, i64)> {
     let mut found: Vec<(i64, i64)> = Vec::new();
     let count = list_len(lists, list);

@@ -1,10 +1,3 @@
-//! Cinnabar compiler driver.
-//!
-//! Runs the fixed pipeline — lexer, parser, module loader, resolver,
-//! typechecker, borrow checker, codegen — over the shared arenas and
-//! renders every diagnostic at its real source origin.  `--dump-ast`
-//! prints the parsed tree of the entry file; `--run` executes the
-//! compiled binary after linking.
 
 mod ast;
 mod borrow;
@@ -24,10 +17,6 @@ use codegen::error::codegen_error_message;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-/// Parses the command line.  A missing required argument is a usage
-/// error: clap prints the usage and exits with failure.
-///
-/// Returns `(input, output, dump_ast, run)`.
 fn parse_args() -> Option<(PathBuf, Option<PathBuf>, bool, bool)> {
     let matches = ClapCommand::new("cinnabar")
         .about("Cinnabar compiler")
@@ -110,13 +99,6 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-// ---------------------------------------------------------------------------
-// Diagnostics.
-// ---------------------------------------------------------------------------
-
-/// The ariadne cache for the loaded files: ids are file paths, backed
-/// by ariadne's closure-driven `FnCache`.  The fetch closure resolves a
-/// path to its in-memory source text; `display` shows the path itself.
 fn make_cache(
     files: &[(String, String)],
 ) -> FnCache<String, impl FnMut(&String) -> Result<String, String>, String> {
@@ -137,14 +119,10 @@ fn make_cache(
     })
 }
 
-/// The path of file id `file_id`, or `None` when the id is out of range.
 fn file_path_of(files: &[(String, String)], file_id: i64) -> Option<String> {
     files.get(file_id as usize).map(|entry| entry.0.clone())
 }
 
-/// Renders every diagnostic, each at its own source origin.  Internal
-/// diagnostics (no source) are printed plainly.  A rendering failure is
-/// returned to the driver instead of being swallowed.
 fn render_diagnostics(errors: &[Diag], files: &[(String, String)]) -> Result<(), String> {
     let mut cache = make_cache(files);
     let mut idx = 0usize;
@@ -158,8 +136,6 @@ fn render_diagnostics(errors: &[Diag], files: &[(String, String)]) -> Result<(),
     Ok(())
 }
 
-/// Renders one diagnostic.  A `NO_FILE` span means the failure has no
-/// Cinnabar source origin; it is printed as plain text.
 fn render_diag(
     cache: &mut FnCache<String, impl FnMut(&String) -> Result<String, String>, String>,
     files: &[(String, String)],
@@ -186,8 +162,6 @@ fn render_diag(
         .map_err(|render_err| format!("cannot render '{}': {}", diag.0, render_err))
 }
 
-/// Renders a codegen failure.  The span carries the failing construct's
-/// origin, or `(-1, 0, 0)` for toolchain failures with no source.
 fn render_codegen_error(codegen_err: &codegen::error::CodegenError, files: &[(String, String)]) -> Result<(), String> {
     let mut cache = make_cache(files);
     if codegen_err.span.0 == NO_FILE {
@@ -219,9 +193,6 @@ fn render_codegen_error(codegen_err: &codegen::error::CodegenError, files: &[(St
         .map_err(|render_err| format!("cannot render codegen error: {}", render_err))
 }
 
-/// The default output path: the input path with a trailing `.cnb`
-/// stripped.  Only the exact `.cnb` suffix is removed, so a source file
-/// with any other extension keeps its name as the output.
 fn default_out_path(input: &Path) -> PathBuf {
     let text = input.to_string_lossy();
     match text.strip_suffix(".cnb") {
@@ -230,9 +201,6 @@ fn default_out_path(input: &Path) -> PathBuf {
     }
 }
 
-/// Renders the accumulated diagnostics and exits with failure.  A
-/// rendering failure is printed, but compilation already failed, so the
-/// driver still exits with failure.
 fn finish_with_diagnostics(errors: &[Diag], files: &[(String, String)]) -> ExitCode {
     if let Err(message) = render_diagnostics(errors, files) {
         eprintln!("failed to render diagnostic: {}", message);
@@ -240,8 +208,6 @@ fn finish_with_diagnostics(errors: &[Diag], files: &[(String, String)]) -> ExitC
     ExitCode::FAILURE
 }
 
-/// Renders a codegen failure and exits with failure, propagating a
-/// rendering failure the same way `finish_with_diagnostics` does.
 fn finish_with_codegen_error(codegen_err: &codegen::error::CodegenError, files: &[(String, String)]) -> ExitCode {
     if let Err(message) = render_codegen_error(codegen_err, files) {
         eprintln!("failed to render diagnostic: {}", message);
@@ -249,11 +215,6 @@ fn finish_with_codegen_error(codegen_err: &codegen::error::CodegenError, files: 
     ExitCode::FAILURE
 }
 
-// ---------------------------------------------------------------------------
-// AST dump.
-// ---------------------------------------------------------------------------
-
-/// Two-space indent for `depth` levels.
 fn pad_str(depth: i64) -> String {
     let mut out = String::new();
     let mut idx = 0i64;
@@ -264,7 +225,6 @@ fn pad_str(depth: i64) -> String {
     out
 }
 
-/// Prints the entry file's top-level items.
 fn dump_program(names: &[String], nodes: &[i64], lists: &[Vec<i64>], root: i64) {
     dump_item_list(names, nodes, lists, root, 0);
 }
@@ -278,7 +238,6 @@ fn dump_item_list(names: &[String], nodes: &[i64], lists: &[Vec<i64>], list: i64
     }
 }
 
-/// The dotted text of a path-segments list.
 fn path_text(names: &[String], lists: &[Vec<i64>], list: i64) -> String {
     let mut parts: Vec<i64> = Vec::new();
     let count = list_len(lists, list);
@@ -735,11 +694,6 @@ fn bin_name(op: i64) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Running the compiled binary.
-// ---------------------------------------------------------------------------
-
-/// Executes `path` and maps its exit status to the driver's exit code.
 fn run_binary(path: &Path) -> ExitCode {
     match Command::new(path).status() {
         Ok(status) => match status.code() {

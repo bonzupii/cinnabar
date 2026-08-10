@@ -1,13 +1,3 @@
-//! LLVM type lowering.
-//!
-//! Every layout is derived from the program's declarations: a struct key
-//! lowers to a struct of its declared fields (with the typechecker's
-//! argument substitution), an enum key lowers to a `{i64 tag, [N x i8]
-//! payload}` whose payload byte count is the largest declared variant
-//! payload sized through the target data layout, and native keys lower to
-//! the runtime representations of the declared native surfaces.  The
-//! lowering is cached per canonical key so each layout fact is computed
-//! once and reused by every construction, extraction, and match.
 
 use crate::ast::*;
 use crate::codegen::error::*;
@@ -17,15 +7,10 @@ use inkwell::types::{BasicType, BasicTypeEnum};
 
 pub type KeyTypes<'ctx> = Vec<Option<BasicTypeEnum<'ctx>>>;
 
-/// `(enum key, payload size, payload align, variant count)`.
 pub type EnumInfos = Vec<(i64, i64, i64, i64)>;
 
-/// `(enum key, variant index, payload struct type)`.
 pub type PayloadStructs<'ctx> = Vec<(i64, i64, BasicTypeEnum<'ctx>)>;
 
-/// The type-lowering environment: the LLVM context, the host target
-/// data, the arenas, and the lowering caches.  Threaded as one argument,
-/// the same shape as the emitter's `Session`.
 pub type TyEnv<'ctx, 'a> = (
     &'ctx Context,
     &'a TargetData,
@@ -49,14 +34,10 @@ fn round_up(size: i64, align: i64) -> i64 {
     }
 }
 
-/// The interned name of a symbol row.
 fn sym_name(nodes: &[i64], sym: i64) -> i64 {
     node_b(nodes, sym)
 }
 
-/// The cached descriptor row for `key`, or an error when a key was never
-/// built (an internal invariant failure: codegen only lowers keys the
-/// typechecker attached).
 fn row_of(nodes: &[i64], key: i64) -> Result<i64, CodegenError> {
     let row = find_tyinfo(nodes, key);
     if row == NONE {
@@ -65,7 +46,6 @@ fn row_of(nodes: &[i64], key: i64) -> Result<i64, CodegenError> {
     Ok(row)
 }
 
-/// The LLVM type of a canonical key, cached per key.
 pub fn llvm_type<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     let index = key as usize;
     if let Some(Some(ty)) = env.5.get(index) {
@@ -135,8 +115,6 @@ fn key_kind_of(nodes: &[i64], key: i64) -> i64 {
     }
 }
 
-/// The scalar representation of a builtin type, keyed by its sub-kind
-/// (stored in the descriptor at seed time).
 fn builtin_llvm<'ctx>(context: &'ctx Context, sub: i64) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     if sub == BUILTIN_U8 {
         return Ok(context.i8_type().into());
@@ -153,21 +131,15 @@ fn builtin_llvm<'ctx>(context: &'ctx Context, sub: i64) -> Result<BasicTypeEnum<
     Err(builder_error(-1, 0, 0, "unsupported builtin type"))
 }
 
-/// The slice view type `{data, len}` shared by `[T]` and `&[T]`.
 pub fn slice_view_ty<'ctx>(context: &'ctx Context) -> BasicTypeEnum<'ctx> {
     let ptr = context.ptr_type(inkwell::AddressSpace::from(0u16));
     context.struct_type(&[ptr.into(), context.i64_type().into()], false).into()
 }
 
-/// The slice view `{data, len}` shared by `[T]` and `&[T]`.
 fn slice_llvm<'ctx>(context: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     Ok(slice_view_ty(context))
 }
 
-/// The declared name of a native surface: the segment after the last
-/// `.` of its qualified symbol name (`Memory.Block` -> `Block`).  The
-/// runtime representations are keyed by the declared surface name, not
-/// the module path.
 fn native_surface_name(name: &str) -> &str {
     match name.rfind('.') {
         Some(idx) => &name[idx + 1..],
@@ -175,7 +147,6 @@ fn native_surface_name(name: &str) -> &str {
     }
 }
 
-/// The runtime representation of a declared native surface.
 fn native_llvm<'ctx>(context: &'ctx Context, name: &str) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     let ptr = context.ptr_type(inkwell::AddressSpace::from(0u16));
     let i64_ty = context.i64_type();
@@ -184,9 +155,6 @@ fn native_llvm<'ctx>(context: &'ctx Context, name: &str) -> Result<BasicTypeEnum
         return Ok(context.struct_type(&[ptr.into(), i64_ty.into()], false).into());
     }
     if surface == "Vec" {
-        // { data, len, cap }; the element type drives allocation size,
-        // which the runtime bodies compute from the argument
-        // substitution.
         return Ok(context.struct_type(&[ptr.into(), i64_ty.into(), i64_ty.into()], false).into());
     }
     if surface == "String" {
@@ -203,8 +171,6 @@ fn native_llvm<'ctx>(context: &'ctx Context, name: &str) -> Result<BasicTypeEnum
     ))
 }
 
-/// The struct type of a declared struct, with the typechecker's argument
-/// substitution applied to every field.
 fn struct_llvm<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, item: i64, args: i64) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     let from = declared_param_keys(env.3, env.4, item);
     let to = list_to_vec(env.4, args);
@@ -223,8 +189,6 @@ fn struct_llvm<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, item: i64, args: i64) -> Res
     Ok(env.0.struct_type(&field_tys, false).into())
 }
 
-/// The enum type `{i64 tag, [N x i8] payload}` (or `{i64 tag}` when every
-/// variant is a unit variant), derived from the declared variant payloads.
 fn enum_llvm<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64, item: i64, args: i64) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     let (size, align, count) = enum_payload_bounds(env, item, args)?;
     let padded = round_up(size, align);
@@ -256,8 +220,6 @@ fn push_enum_info(enum_infos: &mut EnumInfos, key: i64, size: i64, align: i64, c
     enum_infos.push((key, size, align, count));
 }
 
-/// The largest payload size and alignment across the declared variants,
-/// and the variant count.
 fn enum_payload_bounds<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, item: i64, args: i64) -> Result<(i64, i64, i64), CodegenError> {
     let from = declared_param_keys(env.3, env.4, item);
     let to = list_to_vec(env.4, args);
@@ -295,9 +257,6 @@ fn enum_payload_bounds<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, item: i64, args: i64
     Ok((max_size, max_align, count))
 }
 
-/// The payload struct type of `(enum key, variant index)` — a struct of
-/// the variant's declared payload types with the enum's argument
-/// substitution applied.  Cached per pair.
 pub fn payload_struct_of<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, enum_key: i64, variant_idx: i64) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     let mut idx = 0usize;
     while idx < env.7.len() {
@@ -339,7 +298,6 @@ pub fn payload_struct_of<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, enum_key: i64, var
     Ok(ty)
 }
 
-/// The declared-parameter keys of a type declaration, in order.
 fn declared_param_keys(nodes: &[i64], lists: &[Vec<i64>], item: i64) -> Vec<i64> {
     let params = if node_a(nodes, item) == ITEM_NATIVE_TYPE {
         node_e(nodes, item)

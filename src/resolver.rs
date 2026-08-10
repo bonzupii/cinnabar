@@ -1,29 +1,9 @@
-//! Cinnabar resolver.
-//!
-//! Builds the symbol table for the whole program (entry file plus every
-//! loaded external module), qualifies every name, enforces casing and
-//! visibility, resolves `use` imports (including aliases and re-exports),
-//! rewrites constructor calls into struct/variant literals, and attaches a
-//! resolved symbol id to every type node, expression path, and pattern
-//! that names a declaration.  Facts computed here are consumed, never
-//! recomputed, by the typechecker and codegen.
-//!
-//! Namespaces: each scope holds two kinds of names — type/qualifier names
-//! (modules, types, traits; `NS_TYPE`) and value names (functions,
-//! constants, variants, imports; `NS_VALUE`).  Enum variants are entered
-//! both in the enum's own scope (for qualified paths such as
-//! `Memory.Error.AllocationFailed`) and hoisted into the scope where the
-//! enum is declared (for unqualified uses such as `Ok(Unit)`).
 
 use crate::ast::*;
 
 pub const NS_TYPE: i64 = 0;
 pub const NS_VALUE: i64 = 1;
 
-/// The resolver's shared tables, threaded through every phase as one
-/// explicit tuple: source arenas, diagnostics, the scope stack (entries,
-/// parents, pub flags, name prefixes), the item-to-scope map, and the
-/// used-import set.
 type State<'a> = (
     &'a mut Vec<String>,
     &'a mut Vec<i64>,
@@ -37,7 +17,6 @@ type State<'a> = (
     &'a mut Vec<i64>,
 );
 
-/// Resolves the whole program.  Returns true when no error was reported.
 pub fn resolve(
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,
@@ -79,9 +58,6 @@ pub fn resolve(
                 let prefix = alloc_list(state.2);
                 list_push(state.2, prefix, mod_name);
                 let ext_scope = alloc_scope(state.4, state.5, state.6, state.7, root_scope, prefix, 1);
-                // Register the external module in the root scope exactly
-                // like a declared module, so `use Math.add` resolves the
-                // `Math` segment to the module's scope.
                 let ext_sym = alloc_sym(state.1, SYM_MODULE, mod_name, NONE, root_scope, ext_scope);
                 push_entry(state.4, root_scope, mod_name, ext_sym, NS_TYPE, NONE);
                 ext_scopes.push((pair.0, ext_scope));
@@ -130,10 +106,6 @@ pub fn resolve(
 
     state.3.is_empty()
 }
-
-// ---------------------------------------------------------------------------
-// Scopes.
-// ---------------------------------------------------------------------------
 
 fn alloc_scope(scopes: &mut Vec<Vec<i64>>, parents: &mut Vec<i64>, pubs: &mut Vec<i64>, prefixes: &mut Vec<i64>, parent: i64, prefix: i64, is_pub: i64) -> i64 {
     scopes.push(Vec::new());
@@ -190,7 +162,6 @@ fn push_entry(scopes: &mut [Vec<i64>], scope: i64, name: i64, sym: i64, ns: i64,
     }
 }
 
-/// Looks up `name` in the namespace `ns` inside exactly one scope.
 fn scope_lookup(scopes: &[Vec<i64>], scope: i64, name: i64, ns: i64) -> (i64, i64) {
     let entries = match scopes.get(scope as usize) {
         Some(entries) => entries,
@@ -206,7 +177,6 @@ fn scope_lookup(scopes: &[Vec<i64>], scope: i64, name: i64, ns: i64) -> (i64, i6
     (NONE, NONE)
 }
 
-/// Looks up `name` walking from `scope` up through its ancestors.
 fn lookup_walk(scopes: &[Vec<i64>], parents: &[i64], scope: i64, name: i64, ns: i64) -> (i64, i64) {
     let mut current = scope;
     loop {
@@ -222,7 +192,6 @@ fn lookup_walk(scopes: &[Vec<i64>], parents: &[i64], scope: i64, name: i64, ns: 
     }
 }
 
-/// True when `needle` appears in `list`.
 fn contains_i64(list: &[i64], needle: i64) -> bool {
     let mut idx = 0usize;
     loop {
@@ -237,10 +206,6 @@ fn contains_i64(list: &[i64], needle: i64) -> bool {
         idx += 1;
     }
 }
-
-// ---------------------------------------------------------------------------
-// Symbols.
-// ---------------------------------------------------------------------------
 
 fn alloc_sym(nodes: &mut Vec<i64>, kind: i64, name: i64, decl: i64, home: i64, sub: i64) -> i64 {
     alloc_node(nodes, &[NODE_SYM, NO_FILE, NO_FILE, NO_FILE, kind, name, decl, home, sub, NONE])
@@ -266,9 +231,6 @@ fn sym_sub_of(nodes: &[i64], sym: i64) -> i64 {
     node_e(nodes, sym)
 }
 
-/// 1 when the declared item (or builtin, which has no declaration) is
-/// public.  Trait and impl method functions are gated by their trait, so
-/// they count as public.
 fn sym_is_pub(nodes: &[i64], sym: i64) -> i64 {
     let decl = sym_decl_of(nodes, sym);
     if decl == NONE {
@@ -283,10 +245,6 @@ fn sym_is_pub(nodes: &[i64], sym: i64) -> i64 {
     1
 }
 
-/// The fully qualified dotted name of an item declared as `name` inside
-/// the scope with prefix `prefix`.  The dotted text is assembled in a
-/// single reusable buffer and interned once; no intermediate string
-/// list is allocated.
 fn qualified_name(names: &mut Vec<String>, lists: &[Vec<i64>], prefix: i64, name: i64) -> i64 {
     let mut text = String::new();
     let count = list_len(lists, prefix);
@@ -305,9 +263,6 @@ fn qualified_name(names: &mut Vec<String>, lists: &[Vec<i64>], prefix: i64, name
     intern(names, &text)
 }
 
-/// True when `sym` is visible from `scope`: either it lives in the scope's
-/// own ancestor chain, or every module boundary crossed to reach it is
-/// public and the item itself is public.
 fn is_visible(parents: &[i64], pubs: &[i64], nodes: &[i64], scope: i64, sym: i64) -> bool {
     let home = sym_home_of(nodes, sym);
     let mut ancestors: Vec<i64> = Vec::new();
@@ -346,10 +301,6 @@ fn is_visible(parents: &[i64], pubs: &[i64], nodes: &[i64], scope: i64, sym: i64
     sym_is_pub(nodes, sym) == 1
 }
 
-// ---------------------------------------------------------------------------
-// Casing.
-// ---------------------------------------------------------------------------
-
 fn first_char_lower(text: &str) -> bool {
     match text.chars().next() {
         Some(ch) => ch.is_ascii_lowercase(),
@@ -364,9 +315,6 @@ fn first_char_upper(text: &str) -> bool {
     }
 }
 
-/// True when every character after the first is a lowercase letter, a
-/// digit, or an underscore.  The caller has already checked the first
-/// character (and therefore that the text is non-empty).
 fn all_lower_rest(text: &str) -> bool {
     let mut first = true;
     for ch in text.chars() {
@@ -381,7 +329,6 @@ fn all_lower_rest(text: &str) -> bool {
     true
 }
 
-/// True when every character after the first is a letter or a digit.
 fn all_pascal_rest(text: &str) -> bool {
     let mut first = true;
     for ch in text.chars() {
@@ -396,8 +343,6 @@ fn all_pascal_rest(text: &str) -> bool {
     true
 }
 
-/// True when every character after the first is an uppercase letter, a
-/// digit, or an underscore.
 fn all_screaming_rest(text: &str) -> bool {
     let mut first = true;
     for ch in text.chars() {
@@ -412,7 +357,6 @@ fn all_screaming_rest(text: &str) -> bool {
     true
 }
 
-/// 1 when `name` follows `casing`: 1 snake, 2 pascal, 3 screaming.
 fn casing_ok(names: &[String], name: i64, casing: i64) -> i64 {
     let text = name_text(names, name);
     if casing == 1 {
@@ -443,20 +387,6 @@ fn report_casing(names: &[String], name: i64, casing: i64, errors: &mut Vec<Diag
     }
 }
 
-// ---------------------------------------------------------------------------
-// Declarations (phase A).
-// ---------------------------------------------------------------------------
-
-/// Inserts a declaration into `scope`, reporting duplicate symbols.
-/// Returns 1 when the declaration was inserted, 0 when a collision was
-/// reported (the caller then skips dependent collection, e.g. the
-/// variants of an enum whose own name was rejected).  A
-/// name that collides with a builtin (a seeded scalar with no declaration
-/// row, a synthesized primitive enum, or a user declaration that a
-/// synthesized seed later collides with) is a builtin redeclaration; any
-/// other collision is a duplicate symbol.  Declarations never shadow
-/// other declarations.  Casing violations are reported but the name is
-/// still declared so references do not cascade.
 fn insert_decl(state: &mut State, scope: i64, name: i64, sym: i64, ns: i64, casing: i64, span: (i64, i64, i64)) -> i64 {
     report_casing(state.0, name, casing, state.3, span.0, span.1, span.2);
     let existing = scope_lookup(state.4, scope, name, ns);
@@ -466,13 +396,6 @@ fn insert_decl(state: &mut State, scope: i64, name: i64, sym: i64, ns: i64, casi
     }
     let existing_decl = sym_decl_of(state.1, existing.0);
     let incoming_decl = sym_decl_of(state.1, sym);
-    // A name colliding with a builtin: the existing entry is a seeded
-    // scalar (no declaration row) or a synthesized primitive item (a
-    // NO_FILE span), or the incoming symbol is itself a synthesized seed
-    // colliding with a user declaration (the seeded items are collected
-    // after the user's, so the user's declaration is what the seed finds
-    // in the scope).  Either way the program redeclared a builtin the
-    // language reserves, and that is what the diagnostic must name.
     let builtin_collision = existing_decl == NONE
         || (existing_decl != NONE && node_file(state.1, existing_decl) == NO_FILE)
         || (incoming_decl != NONE && node_file(state.1, incoming_decl) == NO_FILE);
@@ -481,9 +404,6 @@ fn insert_decl(state: &mut State, scope: i64, name: i64, sym: i64, ns: i64, casi
     } else {
         format!("duplicate symbol '{}'", name_text(state.0, name))
     };
-    // When the collision is reported for a synthesized seed, which has
-    // no Cinnabar source origin, point at the user's declaration that
-    // collides with it instead of fabricating a location.
     let report_span = if incoming_decl != NONE
         && node_file(state.1, incoming_decl) == NO_FILE
         && existing_decl != NONE
@@ -548,10 +468,6 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
         let name = node_d(state.1, item);
         let full = qualified_name(state.0, state.2, prefix, name);
         let sym = alloc_sym(state.1, SYM_ENUM, full, item, scope, NONE);
-        // The primitive-enum sub-kind is a fact about the symbol, assigned
-        // once at declaration: the seeded Unit/Result/Option/DivError
-        // enums carry PRIM_* here, so the typechecker and codegen identify
-        // them by the stored integer, never by name.
         sym_set_prim_kind(state.1, sym, prim_kind_of(state.0, full));
         let declared = insert_decl(state, scope, name, sym, NS_TYPE, 2, (file, start, end));
         item_set_sym(state.1, item, sym);
@@ -559,11 +475,6 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
         node_set_e(state.1, sym, sub);
         state.8.push((item, sub));
         enter_type_params(state.1, state.2, state.4, sub, node_f(state.1, item));
-        // An enum whose own name was rejected (a builtin redeclaration
-        // such as `pub type Result`) must not hoist its variants into the
-        // enclosing scope: its Ok/Err/Some/None would collide with the
-        // seeded builtin variants and cascade duplicate-symbol noise (or
-        // silently shadow them).  The name error is the whole story.
         if declared == 1 {
             collect_variants(state, scope, sub, full, item);
         }
@@ -588,8 +499,6 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
         insert_decl(state, scope, name, sym, NS_VALUE, 1, (file, start, end));
         item_set_sym(state.1, item, sym);
         if kind == ITEM_NATIVE_FUN {
-            // The runtime ABI opcode is a fact about the symbol, assigned
-            // once at declaration; codegen dispatches on the integer.
             sym_set_native_op(state.1, sym, native_opcode_of(state.0, full));
         }
     } else if kind == ITEM_CONST {
@@ -628,9 +537,6 @@ fn collect_fields_casing(names: &[String], nodes: &[i64], lists: &[Vec<i64>], er
     }
 }
 
-/// Enters a declaration's type parameters into its own scope so that
-/// references to them (for example `T` in `Result(T, E)`) resolve.  The
-/// symbols are placeholders; the typechecker attaches the real keys.
 fn enter_type_params(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], scopes: &mut [Vec<i64>], scope: i64, params: i64) {
     let count = list_len(lists, params);
     let mut idx = 0i64;
@@ -656,8 +562,6 @@ fn collect_variants(state: &mut State, hoist_scope: i64, sub: i64, enum_full: i6
         let single = single_name_list(state.2, enum_full);
         let full = qualified_name(state.0, state.2, single, var_name);
         let sym = alloc_sym(state.1, SYM_VARIANT, full, variant, sub, NONE);
-        // Attach the symbol to its variant declaration so the typechecker
-        // can record the (enum key, variant) facts codegen reads.
         variant_set_sym(state.1, variant, sym);
         push_entry(state.4, sub, var_name, sym, NS_VALUE, NONE);
         insert_hoisted(state, hoist_scope, var_name, sym, variant);
@@ -665,13 +569,6 @@ fn collect_variants(state: &mut State, hoist_scope: i64, sub: i64, enum_full: i6
     }
 }
 
-/// Hoists a variant into the scope where its enum is declared.  A
-/// collision with a builtin variant (a seeded primitive's variant such
-/// as Ok/Err/Some/None/Unit) is a builtin redeclaration: it is reported
-/// at the user's real declaration and the existing scope entry is never
-/// overwritten, so an invalid user enum cannot silently shadow the
-/// language's own variants.  A collision between two user variants is a
-/// duplicate symbol.
 fn insert_hoisted(state: &mut State, scope: i64, name: i64, sym: i64, decl: i64) {
     let existing = scope_lookup(state.4, scope, name, NS_VALUE);
     if existing.0 == NONE {
@@ -683,26 +580,17 @@ fn insert_hoisted(state: &mut State, scope: i64, name: i64, sym: i64, decl: i64)
     let existing_builtin = existing_decl == NONE || node_file(state.1, existing_decl) == NO_FILE;
     let incoming_builtin = incoming_decl == NONE || node_file(state.1, incoming_decl) == NO_FILE;
     if existing.1 != NONE {
-        // The existing entry is an import; the hoisted variant collides
-        // with the imported name.
         push_error(state.3, &format!("duplicate symbol '{}'", name_text(state.0, name)), node_file(state.1, decl), node_start(state.1, decl), node_end(state.1, decl));
         return;
     }
     if existing_builtin && incoming_builtin {
-        // Both entries are synthesized seeds (unreachable in one collect
-        // pass); the existing entry already holds a builtin symbol.
         return;
     }
     if existing_builtin || incoming_builtin {
-        // A user variant redeclares a builtin variant.  Point at the
-        // user's real declaration, which carries a Cinnabar source
-        // origin, and leave the builtin scope entry intact.
         let user_decl = if !existing_builtin { existing_decl } else { incoming_decl };
         push_error(state.3, &format!("cannot redeclare builtin '{}'", name_text(state.0, name)), node_file(state.1, user_decl), node_start(state.1, user_decl), node_end(state.1, user_decl));
         return;
     }
-    // Two user variants of the same name: the later declaration
-    // collides with the earlier one.
     push_error(state.3, &format!("duplicate symbol '{}'", name_text(state.0, name)), node_file(state.1, decl), node_start(state.1, decl), node_end(state.1, decl));
 }
 
@@ -722,18 +610,6 @@ fn collect_trait_methods(state: &mut State, sub: i64, trait_full: i64, item: i64
     }
 }
 
-// ---------------------------------------------------------------------------
-// Builtins.
-// ---------------------------------------------------------------------------
-
-/// Seeds the builtin integer types, Bool, and the primitive enums
-/// (Unit, Result(T, E), Option(T), DivError), plus the `from_u8` conversion methods
-/// on every integer type.  The primitives are synthesized as real enum
-/// declarations pushed into the root item list: the collect phase then
-/// declares their symbols exactly like a user enum, so the typechecker
-/// and codegen read their variants, payloads, and layouts through the
-/// same declaration path as any other enum.  The synthesized items carry
-/// NO_FILE spans — they have no Cinnabar source origin.
 fn seed_builtins(state: &mut State, root_scope: i64, root: i64) {
     let ints = builtin_int_names(state.0);
     let mut idx = 0usize;
@@ -755,9 +631,6 @@ fn seed_builtins(state: &mut State, root_scope: i64, root: i64) {
     seed_primitive(state, root, "IndexError", &[], &[("IndexOutOfBounds", &["Usize", "Usize"])]);
 }
 
-/// Synthesizes one primitive enum declaration and pushes it into the root
-/// item list.  `params` names the type parameters and `variants` the
-/// variant names with their payload type-parameter names.
 fn seed_primitive(state: &mut State, root: i64, name: &str, params: &[&str], variants: &[(&str, &[&str])]) {
     let params_list = alloc_list(state.2);
     let mut p_idx = 0usize;
@@ -801,14 +674,10 @@ fn seed_primitive(state: &mut State, root: i64, name: &str, params: &[&str], var
     list_push(state.2, root, item);
 }
 
-/// Allocates a bare type node (a type parameter or a payload reference)
-/// with a source-less span.
 fn seed_ty_node(nodes: &mut Vec<i64>, kind: i64, name: i64) -> i64 {
     alloc_node(nodes, &[NODE_TY, NO_FILE, 0, 0, kind, name, NONE])
 }
 
-/// Adds the `from_u8` conversion method to one builtin integer type's
-/// scope.
 fn seed_from_u8(state: &mut State, sub: i64, name: i64) {
     let prefix = alloc_list(state.2);
     list_push(state.2, prefix, name);
@@ -819,12 +688,6 @@ fn seed_from_u8(state: &mut State, sub: i64, name: i64) {
     push_entry(state.4, sub, from_u8_name, from_u8, NS_VALUE, NONE);
 }
 
-/// The native-surface opcode of a native function symbol's fully
-/// qualified name.  This is the single definition of the runtime ABI
-/// surface set: it runs once per native symbol, at declaration or
-/// seeding, and codegen dispatches on the stored integer opcode, never
-/// re-matching names.  An unrecognized native (a surface the runtime
-/// does not implement) gets NAT_NONE and is rejected by codegen.
 fn native_opcode_of(names: &[String], full: i64) -> i64 {
     if name_is(names, full, "U8.from_u8")
         || name_is(names, full, "U32.from_u8")
@@ -896,12 +759,6 @@ fn native_opcode_of(names: &[String], full: i64) -> i64 {
     NAT_NONE
 }
 
-/// The primitive-enum sub-kind of a seeded enum's fully qualified name.
-/// The four primitives (Unit, Result, Option, DivError) are interned once
-/// at seeding; every other enum gets PRIM_NONE.  This is the single place
-/// the prim names are known — the same single-definition pattern as
-/// `native_opcode_of` — and the result is stored on the symbol at
-/// declaration time, so later stages read the integer, never the name.
 fn prim_kind_of(names: &mut Vec<String>, full: i64) -> i64 {
     if full == intern(names, "Unit") {
         PRIM_UNIT
@@ -927,7 +784,6 @@ fn builtin_int_names(names: &mut Vec<String>) -> Vec<i64> {
     ]
 }
 
-/// Seeds one builtin type (scope + root entry + `from_u8` method).
 fn seed_builtin_type(state: &mut State, root_scope: i64, name: i64) -> i64 {
     let prefix = alloc_list(state.2);
     list_push(state.2, prefix, name);
@@ -936,10 +792,6 @@ fn seed_builtin_type(state: &mut State, root_scope: i64, name: i64) -> i64 {
     push_entry(state.4, root_scope, name, sym, NS_TYPE, NONE);
     sub
 }
-
-// ---------------------------------------------------------------------------
-// Imports (phase B).
-// ---------------------------------------------------------------------------
 
 fn resolve_imports(state: &mut State, scope: i64, list: i64) {
     let count = list_len(state.2, list);
@@ -973,8 +825,6 @@ fn resolve_import(state: &mut State, scope: i64, item: i64) {
     finish_import(state, scope, item, type_sym, NS_TYPE, (file, start, end));
 }
 
-/// Validates visibility and name conflicts for a resolved import, then
-/// rewrites its scope entry.
 fn finish_import(state: &mut State, scope: i64, item: i64, sym: i64, target_ns: i64, span: (i64, i64, i64)) {
     if !is_visible(state.5, state.6, state.1, scope, sym) {
         push_error(state.3, &format!("cannot import private item '{}'", name_text(state.0, sym_name_of(state.1, sym))), span.0, span.1, span.2);
@@ -1003,8 +853,6 @@ fn sym_ns(nodes: &[i64], sym: i64) -> i64 {
     }
 }
 
-/// Rewrites the import entry created for `use_item` with its resolved
-/// symbol and namespace.
 fn rewrite_import(scopes: &mut [Vec<i64>], scope: i64, use_item: i64, sym: i64, ns: i64) {
     let entries = match scopes.get_mut(scope as usize) {
         Some(entries) => entries,
@@ -1021,13 +869,6 @@ fn rewrite_import(scopes: &mut [Vec<i64>], scope: i64, use_item: i64, sym: i64, 
     }
 }
 
-// ---------------------------------------------------------------------------
-// Path resolution.
-// ---------------------------------------------------------------------------
-
-/// Resolves `segs` from `scope` with the final segment in `final_ns` and
-/// every intermediate segment in the type namespace.  Import use is
-/// recorded here; returns NONE when the path does not resolve.
 fn resolve_path(state: &mut State, scope: i64, segs: i64, final_ns: i64) -> i64 {
     let count = list_len(state.2, segs);
     if count == 0 {
@@ -1083,8 +924,6 @@ fn join_segs(names: &[String], lists: &[Vec<i64>], segs: i64) -> String {
     parts.join(".")
 }
 
-/// A one-element list holding `name` (used to turn an interned full name
-/// into a prefix list).
 fn single_name_list(lists: &mut Vec<Vec<i64>>, name: i64) -> i64 {
     let list = alloc_list(lists);
     list_push(lists, list, name);
@@ -1100,10 +939,6 @@ fn copy_list(lists: &mut [Vec<i64>], from: i64, to: i64) {
         idx += 1;
     }
 }
-
-// ---------------------------------------------------------------------------
-// Reference walking (phase C).
-// ---------------------------------------------------------------------------
 
 fn ext_scope_of(ext_scopes: &[(i64, i64)], name: i64) -> i64 {
     let mut idx = 0usize;
@@ -1207,8 +1042,6 @@ fn walk_type_params(state: &mut State, scope: i64, params: i64) {
     }
 }
 
-/// Resolves a type parameter's trait bound (`<T: Checksum>`) and rewrites
-/// the bound slot from a path-segment list to the resolved trait symbol.
 fn resolve_param_bound(state: &mut State, scope: i64, param: i64) {
     let segs = node_c(state.1, param);
     let sym = resolve_path(state, scope, segs, NS_TYPE);
@@ -1298,8 +1131,6 @@ fn walk_stmt(state: &mut State, scope: i64, stmt: i64) {
         }
         walk_expr(state, scope, node_e(state.1, stmt));
     } else if kind == STMT_ASSIGN {
-        // The target is an expression (a place), not a bare name: its
-        // paths resolve like any other expression's.
         walk_expr(state, scope, node_b(state.1, stmt));
         walk_expr(state, scope, node_c(state.1, stmt));
     } else if kind == STMT_WHILE {
@@ -1371,9 +1202,6 @@ fn walk_arms(state: &mut State, scope: i64, list: i64) {
     }
 }
 
-/// Resolves an expression path.  Paths that name declarations get their
-/// symbol attached; paths whose first segment is not a declaration are
-/// local-variable chains and are left for the typechecker.
 fn resolve_expr_path(state: &mut State, scope: i64, expr: i64) {
     let segs = node_b(state.1, expr);
     let sym = resolve_path(state, scope, segs, NS_VALUE);
@@ -1539,10 +1367,6 @@ fn resolve_type_path(state: &mut State, scope: i64, ty: i64) {
     ty_set_sym(state.1, ty, sym);
 }
 
-// ---------------------------------------------------------------------------
-// Unused imports (phase D).
-// ---------------------------------------------------------------------------
-
 fn check_unused_imports(names: &[String], nodes: &[i64], lists: &[Vec<i64>], errors: &mut Vec<Diag>, used: &[i64], list: i64) {
     let count = list_len(lists, list);
     let mut idx = 0i64;
@@ -1565,17 +1389,13 @@ fn check_unused(names: &[String], nodes: &[i64], lists: &[Vec<i64>], errors: &mu
     if kind != ITEM_USE {
         return;
     }
-    // Public re-exports (`pub use`) are not checked for local usage
     if item_is_pub(nodes, item) == 1 {
         return;
     }
-    // Honest check: if the import failed to resolve in Phase B, `item_sym_of` is NONE.
-    // The resolution error was already reported; skip usage checking.
     let sym = item_sym_of(nodes, item);
     if sym == NONE {
         return;
     }
-    // If the resolved symbol was referenced during Phase C, it is used.
     if contains_i64(used, item) {
         return;
     }

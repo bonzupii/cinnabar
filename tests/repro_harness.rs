@@ -1,39 +1,16 @@
-//! Repro-corpus harness.
-//!
-//! Locks the Phase-0 triage baseline.  Every program in
-//! `tests/fixtures/repro/` is classified as one of:
-//!
-//! - `EXPECT_OK(n)`: must compile, and the binary must exit with code n;
-//! - `EXPECT_REJECTED`: must be rejected by the compiler;
-//! - `RECORD_ONLY`: known-broken until its fix phase lands; the observed
-//!   status is printed but not asserted.
-//!
-//! Compilation goes through the real CLI (Cargo builds the binary for
-//! integration tests, exposed as `CARGO_BIN_EXE_cinnabar`), so the full
-//! pipeline including llc/clang is exercised.  Binaries are written to a
-//! unique temp directory; the repo is never littered.
-//!
-//! Every compiled repro is killed after `RUN_TIMEOUT_SECS` if it has not
-//! exited, so a legitimately non-terminating program (an infinite VM
-//! loop) costs the suite one bounded wait instead of hanging it.
-//!
-//! As phases land, entries move from `RECORD_ONLY` into `EXPECT_OK` (or,
-//! for error-quality work, `EXPECT_REJECTED` gains message assertions).
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Programs that must compile and exit with the given code.
 const EXPECT_OK: &[(&str, i32)] = &[
     ("hello", 0),
     ("mini", 0),
-    ("array_test", 0), // const in-range index arr[0]: proven at compile time, no Result wrapper
-    ("borrow_index", 0), // &arr[i] and &mut arr[i] borrow elements; dynamic &rest[i] returns Result(&Pair, IndexError) with the borrowed element in the Ok payload
-    ("idx10d_mut_disjoint", 30), // bug-report 1e control: &mut pts[0] + &mut pts[1] are disjoint element borrows and must compile; both writes land
-    ("idx10e_same_expr_disjoint", 30), // same-expression disjoint element borrows passed to one call must compile
+    ("array_test", 0),
+    ("borrow_index", 0),
+    ("idx10d_mut_disjoint", 30),
+    ("idx10e_same_expr_disjoint", 30),
     ("rec_test", 120),
-    ("tail_rec", 64), // 1M self-tail-recursive iterations: LLVM tail-call elimination keeps it O(1)-stack
-    ("mem_probe", 70), // non-tail recursion depth 500000 (opaque heap read per level keeps the frames real) trips the stack guard, which exits 70 instead of SIGSEGV
+    ("tail_rec", 64),
+    ("mem_probe", 70),
     ("hanoi", 255),
     ("head", 10),
     ("enum_test", 0),
@@ -46,66 +23,63 @@ const EXPECT_OK: &[(&str, i32)] = &[
     ("vm8", 1),
     ("vm9", 5),
     ("vm11", 4),
-    ("vm", 120), // factorial VM with backward jumps; PROG bytes reconciled to the documented 5! program
+    ("vm", 120),
     ("continue_test", 9),
     ("jump_test", 3),
     ("jump2", 3),
     ("jump3", 3),
     ("jump4", 1),
     ("nested_continue_test", 109),
-    ("elif_test", 1), // elif keyword (was: rejected, missing feature)
-    ("elif_chain", 3), // elif chain with else
-    ("modulo", 42), // % returns Result(Int, DivError), non-zero divisor
-    ("div_runtime", 7), // runtime zero divisor -> Err(DivByZero), no trap
-    ("multiline_const", 30), // const initializer spanning lines in parens
-    ("fib", 155), // while loops without a user-declared Unit (builtin Unit)
-    ("linear_field_reinit", 0), // linear field sub-node cycle on a local: consume -> reinit -> consume -> exit
-    ("linear_ref_swap", 0), // design-doc cycle through &mut: deallocate(ref.block) then ref.block = replacement
-    ("linear_field_consume", 0), // bug-report 2a fixed shape: linear-in-struct is consumable end-to-end
-    ("linear_ref_nonlinear_read", 14), // non-linear field reads through &mut are plain reads (no false positive)
-    ("ret_borrow_shared_twice", 0), // bug-report d5 control: two shared borrows of one input coexist; free after the last use
-    ("ret_borrow_single_origin", 0), // bug-report d7d: callee-origin summary — view_of_a's returned borrow traces to its first input only, so freeing the never-borrowed second input while the view is live compiles
-    ("slice_test", 0), // the sanctioned &[T; N] -> &[T] slice coercion: &bytes is a slice view, Usize.from_u8 widens first; recursive slice_sum over the view
+    ("elif_test", 1),
+    ("elif_chain", 3),
+    ("modulo", 42),
+    ("div_runtime", 7),
+    ("multiline_const", 30),
+    ("fib", 155),
+    ("linear_field_reinit", 0),
+    ("linear_ref_swap", 0),
+    ("linear_field_consume", 0),
+    ("linear_ref_nonlinear_read", 14),
+    ("ret_borrow_shared_twice", 0),
+    ("ret_borrow_single_origin", 0),
+    ("slice_test", 0),
 ];
 
-/// Programs the compiler must reject.
 const EXPECT_REJECTED: &[&str] = &[
-    "index_oob_const",     // constant index out of bounds (5 >= 3): compile-time error
-    "rt2",                 // linear value not consumed (correct rejection)
-    "div_zero_const",      // division by constant zero is a compile-time error
-    "mod_zero_const",      // modulo by constant zero is a compile-time error
-    "assign_shared_ref",   // field write through a shared &T reference: assignment requires &mut
-    "linear_field_reassign", // reassigning a Live linear field without consuming it is a compile error
-    "linear_field_dup",    // copying a linear field out of a shared &T reference duplicates the handle
-    "linear_struct_dead_end", // bug-report 2a dead end: a moved-out linear handle left unconsumed is rejected
-    "linear_field_dup_extract", // bug-report 2b: extracting the same linear field twice is a use of moved value
-    "linear_ref_no_restore", // UAF shape: consuming through a &mut param without restoring is rejected
-    "linear_ref_no_restore_falloff", // same, on the reachable fall-off-end exit (no return statement)
-    "linear_ref_untracked", // consuming through a &mut to an untracked temporary is rejected
-    "ret_borrow_ambiguous", // bug-report d6: returned borrow derives from two different input params on different paths -> ambiguity error
-    "ret_borrow_sole_input", // bug-report d4 control: freeing the sole input while its returned borrow is live is rejected
-    "ret_borrow_uaf", // bug-report d7b: ambiguous ref-returning callee (and freeing a possibly-aliased input) is rejected
-    "duplicate_builtin_unit", // bug-report d3: declaring Unit is a builtin redeclaration, not a bare duplicate symbol
-    "duplicate_builtin_int", // declaring Int must not silently replace the builtin scalar
-    "duplicate_user_symbol", // control: user-user duplicates still report duplicate symbol
-    "idx10b_mut_alias_used", // bug-report 1a: two live &mut borrows of the same element alias; second exclusive borrow must be rejected
-    "idx10c_mut_shared_same", // bug-report 1b: shared read overlapping an exclusive write of the same element must be rejected
-    "idx10j2_dyn_dyn_match", // bug-report 1c: two &mut borrows through the same runtime index must be rejected (dynamic index is never provably disjoint)
-    "idx10f_element_move_while_borrowed", // bug-report 1e control: reassigning the whole array while an element borrow is live must be rejected
-    "idx10g_element_double_move", // bug-report 1e control: two element borrows then a double linear field move-out is still rejected by linearity
-    "b3_two_mut", // bug-report 1d control: two &mut of one variable, both used, must stay rejected
-    "b4_mut_shared", // bug-report 1d control: overlapping & and &mut of one variable must stay rejected
+    "index_oob_const",
+    "rt2",
+    "div_zero_const",
+    "mod_zero_const",
+    "assign_shared_ref",
+    "linear_field_reassign",
+    "linear_field_dup",
+    "linear_struct_dead_end",
+    "linear_field_dup_extract",
+    "linear_ref_no_restore",
+    "linear_ref_no_restore_falloff",
+    "linear_ref_untracked",
+    "ret_borrow_ambiguous",
+    "ret_borrow_sole_input",
+    "ret_borrow_uaf",
+    "duplicate_builtin_unit",
+    "duplicate_builtin_int",
+    "duplicate_user_symbol",
+    "idx10b_mut_alias_used",
+    "idx10c_mut_shared_same",
+    "idx10j2_dyn_dyn_match",
+    "idx10f_element_move_while_borrowed",
+    "idx10g_element_double_move",
+    "b3_two_mut",
+    "b4_mut_shared",
 ];
 
-/// Known-broken programs; observed status printed only.  Each entry names
-/// its fix target.
 const RECORD_ONLY: &[&str] = &[
-    "full_rt",   // Vec native by-value handle double-deref
-    "mem_test",  // write_u8 Err + deallocate UB
-    "rt1",       // vec_free NULL-deref
-    "vec_test",  // Vec native
-    "vm5",       // infinite interpreter loop (backward jumps); runs forever without crashing, killed by the 10s harness timeout
-    "vm10",      // infinite interpreter loop (backward jumps); runs forever without crashing, killed by the 10s harness timeout
+    "full_rt",
+    "mem_test",
+    "rt1",
+    "vec_test",
+    "vm5",
+    "vm10",
 ];
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -116,8 +90,6 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(format!("{}.cnb", name))
 }
 
-/// Runs `cmd`, returning the process exit code (139 for a signal crash or
-/// a spawn failure).
 fn exit_code(cmd: &mut Command) -> i32 {
     match cmd.status() {
         Ok(status) => match status.code() {
@@ -131,25 +103,14 @@ fn exit_code(cmd: &mut Command) -> i32 {
     }
 }
 
-/// Compiles the fixture to `bin`; returns the compiler's exit code.
 fn compile(cinnabar: &str, fixture: &Path, bin: &Path) -> i32 {
     exit_code(Command::new(cinnabar).arg(fixture).arg("-o").arg(bin))
 }
 
-/// Seconds a compiled repro may run before the harness kills it.  A
-/// correct program may legitimately loop forever (the VM interpreters
-/// in RECORD_ONLY), so every execution is bounded: an infinite loop
-/// must cost the harness its timeout, never hang the test suite.
 const RUN_TIMEOUT_SECS: u64 = 10;
 
-/// Code reported when a repro is killed for exceeding the time limit;
-/// mirrors GNU coreutils `timeout` (124), so a hang reads distinctly
-/// from a real exit code or a signal crash.
 const TIMEOUT_CODE: i32 = 124;
 
-/// Runs a compiled binary with stdio nulled, killing it after
-/// `RUN_TIMEOUT_SECS` if it has not exited; returns its exit code, or
-/// `TIMEOUT_CODE` when the time limit was hit.
 fn run_binary(bin: &Path) -> i32 {
     let mut child = match Command::new(bin)
         .stdout(std::process::Stdio::null())
@@ -173,18 +134,9 @@ fn run_binary(bin: &Path) -> i32 {
             }
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
-                    // Deadline hit: terminate the repro and reap it.  A
-                    // signal death (the kill landed) reports the
-                    // timeout; a child that raced past the deadline and
-                    // exited on its own just before the kill reports its
-                    // real code.
                     match child.kill() {
                         Ok(()) => {}
                         Err(err) => {
-                            // InvalidInput means the child had already
-                            // exited on its own just as the deadline
-                            // hit — the expected race, not a failure;
-                            // the real code is reported below.
                             if err.kind() != std::io::ErrorKind::InvalidInput {
                                 eprintln!("kill after deadline failed: {}", err);
                             }

@@ -1,33 +1,8 @@
-//! Cinnabar compiler — single flat arena.
-//!
-//! The whole compiler is written as small functions over one flat node
-//! arena: a `Vec<i64>` of fixed-width records, each of `NODE_STRIDE`
-//! slots.  Trees are stored as integer ids; there are no pointers, no
-//! boxes, no per-node allocation.  This is exactly the shape a Cinnabar
-//! program would use to hold a tree: a `Vec(Int)` arena with stride and
-//! tag constants.
-//!
-//! A node row is `(tag, file, start, end, a, b, c, d, e, f)`.  The tag
-//! selects the node kind; the meaning of `a`..`f` depends on the kind.
-//! `file`, `start`, `end` are the node's real source span.
-//!
-//! Facts are attached once by the stage that owns them (resolved symbol
-//! ids by the resolver, inferred type ids by the typechecker) and
-//! consumed, never recomputed, downstream.
-//!
-//! This module defines only constants and functions.
 
-/// (message, file, start, end).  A file id below zero means the fact has
-/// no Cinnabar source origin (an internal invariant failure or a
-/// toolchain failure) and is rendered without a source label.
 pub type Diag = (String, i64, i64, i64);
 
 pub const NONE: i64 = -1;
 pub const NO_FILE: i64 = -1;
-
-// ---------------------------------------------------------------------------
-// Node arena.
-// ---------------------------------------------------------------------------
 
 pub const NODE_STRIDE: i64 = 10;
 pub const NODE_TAG: i64 = 0;
@@ -41,7 +16,6 @@ pub const NODE_D: i64 = 7;
 pub const NODE_E: i64 = 8;
 pub const NODE_F: i64 = 9;
 
-// Node tags.
 pub const NODE_TOKEN: i64 = 0;
 pub const NODE_ITEM: i64 = 1;
 pub const NODE_FN: i64 = 2;
@@ -58,9 +32,7 @@ pub const NODE_TYINFO: i64 = 12;
 pub const NODE_INST: i64 = 13;
 pub const NODE_CONSTVAL: i64 = 14;
 
-// ---------------------------------------------------------------------------
 // Token rows.  (tag=NODE_TOKEN, a=kind, b=name, c=value).
-// ---------------------------------------------------------------------------
 
 pub const TOK_IDENT: i64 = 0; // identifier or keyword, by interned name
 pub const TOK_INT: i64 = 1; // decimal integer literal
@@ -69,9 +41,7 @@ pub const TOK_EOF: i64 = 3;
 pub const TOK_NL: i64 = 4; // newline (statement boundary)
 pub const TOK_SYM: i64 = 5; // operator or punctuation symbol, by interned name
 
-// ---------------------------------------------------------------------------
 // Item rows.  (tag=NODE_ITEM, a=kind, b=is_pub, c=sym, d..f kind-specific).
-// ---------------------------------------------------------------------------
 
 pub const ITEM_MODULE: i64 = 0; // d: name, e: child item id list
 pub const ITEM_USE: i64 = 1; // d: path segments name-id list, e: alias name (NONE)
@@ -84,31 +54,12 @@ pub const ITEM_NATIVE_FUN: i64 = 7; // d: fn id
 pub const ITEM_CONST: i64 = 8; // d: name, e: type id, f: value expr id
 pub const ITEM_NATIVE_TYPE: i64 = 9; // d: name, e: type param name-id list
 
-// ---------------------------------------------------------------------------
-// Function rows.  (tag=NODE_FN, a=name, b=type_param_list, c=param_list,
-// d=ret_ty, e=is_impure, f=body_stmt_list).  Trait method signatures have
-// a NONE body list.  Native-ness comes from the wrapping item kind.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
+// Function rows.  (tag=NODE_FN, a=name, b=type_param_list, c=param_list, d=ret_ty, e=is_impure, f=body_stmt_list).
 // Parameter rows.  (tag=NODE_PARAM, a=name, b=ty).
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Struct-field rows.  (tag=NODE_FIELD, a=name, b=ty, c=is_pub).
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Enum-variant rows.  (tag=NODE_VARIANT, a=name, b=payload_type_list, c=is_pub).
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Match-arm rows.  (tag=NODE_ARM, a=pattern, b=body_stmt_list).
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Type rows.  (tag=NODE_TY, a=kind, b..c kind-specific).
-// ---------------------------------------------------------------------------
 
 pub const TY_NAMED: i64 = 0; // b: name id
 pub const TY_PATH: i64 = 1; // b: segments name-id list
@@ -120,12 +71,7 @@ pub const TY_ARRAY: i64 = 6; // b: element type id, c: length; `[T; N]`
 pub const TY_SELF: i64 = 7; // `Self` inside a trait signature
 pub const TY_PARAM: i64 = 8; // b: name id, c: trait-bound path segments list (NONE)
 
-// ---------------------------------------------------------------------------
 // Expression rows.  (tag=NODE_EXPR, a=kind, b..d kind-specific, e=ty, f=sym).
-// `e` is the inferred type id attached by the typechecker; `f` is the
-// resolved symbol id attached by the resolver.  Both are NONE until their
-// owning stage runs.
-// ---------------------------------------------------------------------------
 
 pub const EXPR_LIT: i64 = 0; // b: literal kind, c: value
 pub const EXPR_PATH: i64 = 1; // b: segments name-id list; name references, callees, field chains
@@ -139,19 +85,16 @@ pub const EXPR_TRY: i64 = 8; // b: inner expr id
 pub const EXPR_INDEX: i64 = 9; // b: base expr id, c: index expr id
 pub const EXPR_FIELD_ACCESS: i64 = 10; // b: base expr id, c: field name id; `expr.field` on a non-path base
 
-// Literal kinds.
 pub const LIT_INT: i64 = 0;
 pub const LIT_HEX: i64 = 1;
 pub const LIT_TRUE: i64 = 2;
 pub const LIT_FALSE: i64 = 3;
 
-// Unary operators.
 pub const UN_NEG: i64 = 0;
 pub const UN_NOT: i64 = 1;
 pub const UN_REF: i64 = 2;
 pub const UN_REF_MUT: i64 = 3;
 
-// Binary operators.
 pub const BIN_ADD: i64 = 0;
 pub const BIN_SUB: i64 = 1;
 pub const BIN_MUL: i64 = 2;
@@ -171,9 +114,7 @@ pub const BIN_AND: i64 = 15;
 pub const BIN_OR: i64 = 16;
 pub const BIN_MOD: i64 = 17;
 
-// ---------------------------------------------------------------------------
 // Statement rows.  (tag=NODE_STMT, a=kind, b..e kind-specific, f=ty).
-// ---------------------------------------------------------------------------
 
 pub const STMT_LET: i64 = 0; // b: is_mut, c: name id, d: type id (NONE), e: init expr id
 pub const STMT_ASSIGN: i64 = 1; // b: target expr id (a place: name, field chain, or field through a &mut reference), c: value expr id
@@ -184,9 +125,7 @@ pub const STMT_BREAK: i64 = 5;
 pub const STMT_CONTINUE: i64 = 6;
 pub const STMT_EXPR: i64 = 7; // b: expr id; includes `match`, `try`, and bare calls as statements
 
-// ---------------------------------------------------------------------------
 // Pattern rows.  (tag=NODE_PAT, a=kind, b..c kind-specific, d=ty).
-// ---------------------------------------------------------------------------
 
 pub const PAT_BIND: i64 = 0; // b: bound name id
 pub const PAT_PATH: i64 = 1; // b: segments name-id list; unit variant such as `None`
@@ -194,13 +133,7 @@ pub const PAT_VARIANT: i64 = 2; // b: segments name-id list, c: payload pattern-
 pub const PAT_ARRAY: i64 = 3; // b: element pattern-id list, c: rest binder name id (NONE)
 pub const PAT_LIT: i64 = 4; // b: literal kind, c: value
 
-// ---------------------------------------------------------------------------
-// Symbol rows.  (tag=NODE_SYM, a=kind, b=name, c=decl).  `name` is the
-// fully qualified path interned as a single name (for example
-// "Collections.vec_new").  `decl` is the id of the declaration the symbol
-// names: a fn id for functions and impl methods, an item id for
-// types/consts/modules, a variant id for variants.
-// ---------------------------------------------------------------------------
+// Symbol rows.  (tag=NODE_SYM, a=kind, b=name, c=decl).
 
 pub const SYM_MODULE: i64 = 0;
 pub const SYM_STRUCT: i64 = 1;
@@ -214,12 +147,6 @@ pub const SYM_CONST: i64 = 8;
 pub const SYM_IMPL_METHOD: i64 = 9;
 pub const SYM_TRAIT_METHOD: i64 = 10;
 
-// ---------------------------------------------------------------------------
-// Name arena.  Identifiers, paths, operators, and qualified symbol names
-// are interned here.  This is the only String storage in the compiler.
-// ---------------------------------------------------------------------------
-
-/// Interning returns the id of the name, pushing it when new.
 pub fn intern(names: &mut Vec<String>, text: &str) -> i64 {
     let mut idx = 0i64;
     while idx < names.len() as i64 {
@@ -237,7 +164,6 @@ pub fn intern(names: &mut Vec<String>, text: &str) -> i64 {
     names.len() as i64 - 1
 }
 
-/// True when the interned name id names the given text.
 pub fn name_is(names: &[String], id: i64, text: &str) -> bool {
     match names.get(id as usize) {
         Some(existing) => *existing == text,
@@ -245,8 +171,6 @@ pub fn name_is(names: &[String], id: i64, text: &str) -> bool {
     }
 }
 
-/// Returns the text of an interned name, or an empty string for an
-/// invalid id.  Used only for diagnostics and the AST dump.
 pub fn name_text(names: &[String], id: i64) -> String {
     match names.get(id as usize) {
         Some(text) => text.clone(),
@@ -254,9 +178,6 @@ pub fn name_text(names: &[String], id: i64) -> String {
     }
 }
 
-/// The interned id of `text`, or NONE when the name is not interned.
-/// A read-only interning lookup: turns a compiler-known literal into its
-/// stable integer id before integer-keyed table lookups.
 pub fn find_name(names: &[String], text: &str) -> i64 {
     let mut idx = 0i64;
     while idx < names.len() as i64 {
@@ -273,7 +194,6 @@ pub fn find_name(names: &[String], text: &str) -> i64 {
     NONE
 }
 
-/// Joins interned name ids into a dotted path.
 pub fn join_path(names: &[String], ids: &[i64]) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut idx = 0i64;
@@ -287,17 +207,11 @@ pub fn join_path(names: &[String], ids: &[i64]) -> String {
     parts.join(".")
 }
 
-// ---------------------------------------------------------------------------
-// List arena.  Variable-length child lists.  A list id indexes this table.
-// ---------------------------------------------------------------------------
-
-/// Allocates an empty list and returns its id.
 pub fn alloc_list(lists: &mut Vec<Vec<i64>>) -> i64 {
     lists.push(Vec::new());
     lists.len() as i64 - 1
 }
 
-/// Appends a value to a list.  Returns false when the list id is invalid.
 pub fn list_push(lists: &mut [Vec<i64>], list_id: i64, value: i64) -> bool {
     match lists.get_mut(list_id as usize) {
         Some(list) => {
@@ -307,12 +221,6 @@ pub fn list_push(lists: &mut [Vec<i64>], list_id: i64, value: i64) -> bool {
         None => false,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Checked arena access.  Every access goes through these functions so no
-// node id can index out of bounds.  An invalid id yields NONE, and callers
-// report an internal-invariant diagnostic rather than fabricating a value.
-// ---------------------------------------------------------------------------
 
 pub fn node_get(nodes: &[i64], id: i64, offset: i64) -> i64 {
     let slot = match id.checked_mul(NODE_STRIDE).and_then(|base| base.checked_add(offset)) {
@@ -345,8 +253,6 @@ pub fn node_set(nodes: &mut [i64], id: i64, offset: i64, value: i64) -> bool {
     }
 }
 
-/// Allocates a node row and returns its id.  The fields slice may hold
-/// fewer than NODE_STRIDE values; missing slots are filled with NONE.
 pub fn alloc_node(nodes: &mut Vec<i64>, fields: &[i64]) -> i64 {
     let id = nodes.len() as i64 / NODE_STRIDE;
     let mut idx = 0i64;
@@ -360,10 +266,6 @@ pub fn alloc_node(nodes: &mut Vec<i64>, fields: &[i64]) -> i64 {
     }
     id
 }
-
-// ---------------------------------------------------------------------------
-// Uniform accessors.
-// ---------------------------------------------------------------------------
 
 pub fn node_tag(nodes: &[i64], id: i64) -> i64 {
     node_get(nodes, id, NODE_TAG)
@@ -429,27 +331,17 @@ pub fn node_set_f(nodes: &mut [i64], id: i64, value: i64) -> bool {
     node_set(nodes, id, NODE_F, value)
 }
 
-// ---------------------------------------------------------------------------
-// Token helpers.
-// ---------------------------------------------------------------------------
-
-/// True when the token at `id` is the word (identifier or keyword) `text`.
 pub fn tok_is_name(nodes: &[i64], names: &[String], id: i64, text: &str) -> bool {
     node_tag(nodes, id) == NODE_TOKEN
         && node_a(nodes, id) == TOK_IDENT
         && name_is(names, node_b(nodes, id), text)
 }
 
-/// True when the token at `id` is the symbol `text`.
 pub fn tok_is_sym(nodes: &[i64], names: &[String], id: i64, text: &str) -> bool {
     node_tag(nodes, id) == NODE_TOKEN
         && node_a(nodes, id) == TOK_SYM
         && name_is(names, node_b(nodes, id), text)
 }
-
-// ---------------------------------------------------------------------------
-// Kind-specific helpers.
-// ---------------------------------------------------------------------------
 
 pub fn item_is_pub(nodes: &[i64], id: i64) -> i64 {
     node_b(nodes, id)
@@ -503,8 +395,6 @@ pub fn pat_set_sym(nodes: &mut [i64], id: i64, sym: i64) -> bool {
     node_set_e(nodes, id, sym)
 }
 
-/// The rest binder's key on an array pattern (slot f), attached by the
-/// typechecker so codegen never re-derives it.
 pub fn pat_rest_key_of(nodes: &[i64], id: i64) -> i64 {
     node_f(nodes, id)
 }
@@ -513,9 +403,6 @@ pub fn pat_set_rest_key(nodes: &mut [i64], id: i64, key: i64) -> bool {
     node_set_f(nodes, id, key)
 }
 
-/// The variant symbol attached to a variant declaration node by the
-/// resolver (slot d; slots a-c hold the name, payload list, and pub
-/// flag).
 pub fn variant_sym_of(nodes: &[i64], id: i64) -> i64 {
     node_d(nodes, id)
 }
@@ -524,8 +411,6 @@ pub fn variant_set_sym(nodes: &mut [i64], id: i64, sym: i64) -> bool {
     node_set_d(nodes, id, sym)
 }
 
-/// The native opcode stored on a SYM_NATIVE_FUN symbol (slot f), assigned
-/// by the resolver at declaration/seeding time.
 pub fn sym_native_op(nodes: &[i64], sym: i64) -> i64 {
     node_f(nodes, sym)
 }
@@ -534,10 +419,6 @@ pub fn sym_set_native_op(nodes: &mut [i64], sym: i64, op: i64) -> bool {
     node_set_f(nodes, sym, op)
 }
 
-/// The primitive-enum sub-kind stored on a SYM_ENUM symbol (slot f),
-/// assigned by the resolver at declaration time for the seeded
-/// Unit/Result/Option/DivError enums.  The typechecker and codegen read
-/// the flag instead of matching enum names.
 pub fn sym_prim_kind(nodes: &[i64], sym: i64) -> i64 {
     node_f(nodes, sym)
 }
@@ -545,12 +426,6 @@ pub fn sym_prim_kind(nodes: &[i64], sym: i64) -> i64 {
 pub fn sym_set_prim_kind(nodes: &mut [i64], sym: i64, kind: i64) -> bool {
     node_set_f(nodes, sym, kind)
 }
-
-// ---------------------------------------------------------------------------
-// Type-node helpers.  The resolver attaches the resolved symbol id in slot
-// e; the typechecker attaches the canonical type key in slot d.  Both are
-// NONE until their owning stage runs.
-// ---------------------------------------------------------------------------
 
 pub fn ty_key_of(nodes: &[i64], id: i64) -> i64 {
     node_d(nodes, id)
@@ -568,17 +443,7 @@ pub fn ty_set_sym(nodes: &mut [i64], id: i64, sym: i64) -> bool {
     node_set_e(nodes, id, sym)
 }
 
-// ---------------------------------------------------------------------------
-// Type-descriptor rows.  (tag=NODE_TYINFO, a=key, b=kind, c=sym, d=args
-// list, e=element key, f=len/bound/sub-kind).  One row per canonical type
-// key, built by the typechecker from the program's declarations; consumed
-// by the typechecker and codegen.  Slot `f` is the array length for
-// TYD_ARRAY, the builtin sub-kind for TYD_BUILTIN, and the bound for
-// TYD_PARAM; for every other kind it is NONE.  The row's file slot
-// (otherwise NO_FILE: compiler-internal facts have no source origin)
-// stores the is_linear flag: -1 uncomputed, 0 not linear, 1 linear, set
-// once by the typechecker's linearity pass and only read downstream.
-// ---------------------------------------------------------------------------
+// Type-descriptor rows.  (tag=NODE_TYINFO, a=key, b=kind, c=sym, d=args list, e=element key, f=len/bound/sub-kind).
 
 pub const TYD_UNKNOWN: i64 = 0;
 pub const TYD_BUILTIN: i64 = 1;
@@ -592,23 +457,11 @@ pub const TYD_ARRAY: i64 = 8;
 pub const TYD_PARAM: i64 = 9;
 pub const TYD_MONO: i64 = 10; // (fn node, type-arg keys): one key per monomorphized function
 
-// ---------------------------------------------------------------------------
-// Builtin scalar sub-kinds.  Stored in slot `f` of TYD_BUILTIN descriptor
-// rows at seed time; every later stage classifies scalars from this
-// integer, never from the symbol's name.
-// ---------------------------------------------------------------------------
-
 pub const BUILTIN_INT: i64 = 0;
 pub const BUILTIN_U8: i64 = 1;
 pub const BUILTIN_U32: i64 = 2;
 pub const BUILTIN_USIZE: i64 = 3;
 pub const BUILTIN_BOOL: i64 = 4;
-
-// ---------------------------------------------------------------------------
-// Native-surface opcodes.  Stored in slot `f` of SYM_NATIVE_FUN symbols
-// by the resolver at declaration/seeding time; codegen dispatches the
-// runtime body on the integer opcode, never on the qualified name.
-// ---------------------------------------------------------------------------
 
 pub const NAT_NONE: i64 = 0;
 pub const NAT_FROM_U8: i64 = 1;
@@ -633,11 +486,6 @@ pub const NAT_TERM_PRINT: i64 = 19;
 pub const NAT_TERM_PRINT_LINE: i64 = 20;
 pub const NAT_TERM_EPRINT: i64 = 21;
 
-/// Primitive-enum sub-kinds stored on SYM_ENUM symbols (slot f).  The
-/// resolver assigns one of these at declaration time to exactly the four
-/// seeded enums (Unit, Result, Option, DivError); every user enum stays
-/// PRIM_NONE.  A non-zero kind means the enum is a language primitive,
-/// so the typechecker and codegen never identify them by name.
 pub const PRIM_NONE: i64 = 0;
 pub const PRIM_UNIT: i64 = 1;
 pub const PRIM_RESULT: i64 = 2;
@@ -649,7 +497,6 @@ pub fn alloc_tyinfo(nodes: &mut Vec<i64>, key: i64, kind: i64, sym: i64, args: i
     alloc_node(nodes, &[NODE_TYINFO, NO_FILE, NO_FILE, NO_FILE, key, kind, sym, args, elem, len])
 }
 
-/// Returns the descriptor row id for `key`, or NONE.
 pub fn find_tyinfo(nodes: &[i64], key: i64) -> i64 {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
@@ -661,11 +508,6 @@ pub fn find_tyinfo(nodes: &[i64], key: i64) -> i64 {
     NONE
 }
 
-/// The is_linear flag of the canonical key's descriptor row: NONE when
-/// the row does not exist, -1 when not yet computed, 0 not linear, 1
-/// linear.  Stored in the row's file slot, which tyinfo rows otherwise
-/// leave as NO_FILE.  Computed once by the typechecker's linearity pass;
-/// the borrow checker and codegen only read it.
 pub fn tyinfo_is_linear(nodes: &[i64], key: i64) -> i64 {
     let row = find_tyinfo(nodes, key);
     if row == NONE {
@@ -675,7 +517,6 @@ pub fn tyinfo_is_linear(nodes: &[i64], key: i64) -> i64 {
     }
 }
 
-/// The builtin sub-kind of a builtin key (slot `f`), stored at seed time.
 pub fn tyinfo_builtin_kind(nodes: &[i64], key: i64) -> i64 {
     let row = find_tyinfo(nodes, key);
     if row == NONE {
@@ -685,12 +526,7 @@ pub fn tyinfo_builtin_kind(nodes: &[i64], key: i64) -> i64 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Instance rows.  (tag=NODE_INST, a=fn node, b=type-arg key list,
-// c=return key, d=param key list, e=mono key, f=sym kind).  One row per
-// monomorphized function body; call expressions carry the row id in their
-// symbol slot.  Compiler-internal facts: NO_FILE spans.
-// ---------------------------------------------------------------------------
+// Instance rows.  (tag=NODE_INST, a=fn node, b=type-arg key list, c=return key, d=param key list, e=mono key, f=sym kind).
 
 pub fn inst_fn_of(nodes: &[i64], id: i64) -> i64 {
     node_a(nodes, id)
@@ -728,7 +564,6 @@ pub fn inst_set_mono(nodes: &mut [i64], id: i64, key: i64) -> bool {
     node_set_e(nodes, id, key)
 }
 
-/// Returns the instance row whose mono key matches, or NONE.
 pub fn find_instance(nodes: &[i64], mono: i64) -> i64 {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
@@ -740,14 +575,8 @@ pub fn find_instance(nodes: &[i64], mono: i64) -> i64 {
     NONE
 }
 
-// ---------------------------------------------------------------------------
-// Constant-value rows.  (tag=NODE_CONSTVAL, a=sym, b=value).  One row per
-// folded constant, built by the typechecker.  NO_FILE spans.
-// ---------------------------------------------------------------------------
+// Constant-value rows.  (tag=NODE_CONSTVAL, a=sym, b=value).
 
-/// Whether the constant symbol `sym` has a folded-value row.  The row's
-/// existence is the source of truth for "is folded": a folded value of
-/// `-1` is indistinguishable from the `NONE` sentinel otherwise.
 pub fn has_const_value(nodes: &[i64], sym: i64) -> bool {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
@@ -759,9 +588,6 @@ pub fn has_const_value(nodes: &[i64], sym: i64) -> bool {
     false
 }
 
-/// The folded value of the constant symbol `sym`.  Callers must check
-/// `has_const_value` first; a folded value of `-1` is a legal value, not
-/// an absence marker.
 pub fn find_const_value(nodes: &[i64], sym: i64) -> i64 {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
@@ -773,15 +599,7 @@ pub fn find_const_value(nodes: &[i64], sym: i64) -> i64 {
     NONE
 }
 
-// ---------------------------------------------------------------------------
-// Trait-dispatch rows.  (tag=NODE_TRAIT, a=call expr, b=method instance id,
-// c=trait symbol, d=method name id).  One row per trait method call,
-// created by the typechecker.  When the receiver type is concrete the
-// method instance is resolved here and stored in `b`; when the receiver
-// is a type parameter (a generic body), the row is deferred (`b` NONE)
-// and codegen reads the impl table (a fact the typechecker stored) with
-// the substituted receiver type.  NO_FILE spans: compiler-internal facts.
-// ---------------------------------------------------------------------------
+// Trait-dispatch rows.  (tag=NODE_TRAIT, a=call expr, b=method instance id, c=trait symbol, d=method name id).
 
 pub const NODE_TRAIT: i64 = 15;
 
@@ -801,7 +619,6 @@ pub fn alloc_trait_call(nodes: &mut Vec<i64>, expr: i64, inst: i64, trait_sym: i
     alloc_node(nodes, &[NODE_TRAIT, NO_FILE, NO_FILE, NO_FILE, expr, inst, trait_sym, method, NONE, NONE])
 }
 
-/// The trait-dispatch row for `expr`, or NONE.
 pub fn find_trait_call(nodes: &[i64], expr: i64) -> i64 {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
@@ -813,14 +630,7 @@ pub fn find_trait_call(nodes: &[i64], expr: i64) -> i64 {
     NONE
 }
 
-// ---------------------------------------------------------------------------
-// Variant-fact rows.  (tag=NODE_VARFACT, a=enum key, b=variant name id,
-// c=variant symbol).  One row per (enum key, variant) pair, filled by the
-// typechecker after checking from the variant symbols the resolver
-// attached to the variant declarations; codegen resolves a variant's
-// declared-order tag from the symbol, never by re-searching the enum's
-// variant list by name.
-// ---------------------------------------------------------------------------
+// Variant-fact rows.  (tag=NODE_VARFACT, a=enum key, b=variant name id, c=variant symbol).
 
 pub const NODE_VARFACT: i64 = 16;
 
@@ -828,8 +638,6 @@ pub fn alloc_varfact(nodes: &mut Vec<i64>, key: i64, name: i64, sym: i64) -> i64
     alloc_node(nodes, &[NODE_VARFACT, NO_FILE, NO_FILE, NO_FILE, key, name, sym, NONE, NONE, NONE])
 }
 
-/// The variant symbol of the variant named `name` in the enum at `key`,
-/// or NONE.
 pub fn find_varfact(nodes: &[i64], key: i64, name: i64) -> i64 {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
@@ -840,10 +648,6 @@ pub fn find_varfact(nodes: &[i64], key: i64, name: i64) -> i64 {
     }
     NONE
 }
-
-// ---------------------------------------------------------------------------
-// Canonical type construction and substitution.
-// ---------------------------------------------------------------------------
 
 fn list_eq(lists: &[Vec<i64>], a: i64, b: i64) -> bool {
     let na = list_len(lists, a);
@@ -873,7 +677,6 @@ fn count_tyinfo(nodes: &[i64]) -> i64 {
     count
 }
 
-/// Finds the descriptor row whose structure matches, or NONE.
 pub fn find_tyinfo_by(nodes: &[i64], lists: &[Vec<i64>], kind: i64, sym: i64, args: i64, elem: i64, len: i64) -> i64 {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
@@ -891,9 +694,6 @@ pub fn find_tyinfo_by(nodes: &[i64], lists: &[Vec<i64>], kind: i64, sym: i64, ar
     NONE
 }
 
-/// The key of the descriptor with the given structure, allocating a fresh
-/// key when the structure is new.  Every layout fact is derived from
-/// these descriptors; nothing is hardcoded.
 pub fn canon_tyinfo(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], kind: i64, sym: i64, args: i64, elem: i64, len: i64) -> i64 {
     let existing = find_tyinfo_by(nodes, lists, kind, sym, args, elem, len);
     if existing != NONE {
@@ -928,11 +728,6 @@ fn subst_list(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, list: i64, from: 
     }
 }
 
-/// Substitutes type keys: any descriptor equal to a key in `from` is
-/// replaced by the corresponding key in `to`.  Used by the typechecker to
-/// instantiate declared types and by codegen to lower monomorphized
-/// bodies.  Both maps are facts the typechecker computed; this is a
-/// mechanical rewrite shared by the two consumers.
 pub fn subst_key(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, key: i64, from: &[i64], to: &[i64]) -> i64 {
     if key < 0 {
         return key;
@@ -970,14 +765,6 @@ pub fn subst_key(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, key: i64, from
     }
     canon_tyinfo(nodes, lists, kind, sym, new_args, new_elem, len)
 }
-
-// ---------------------------------------------------------------------------
-// Divergence.  A statement or expression diverges when control flow never
-// falls through (a return, break, continue, or a match every arm of
-// which diverges).  Purely syntactic; read by the typechecker (arm type
-// merging), the borrow checker (branch state merging), and codegen
-// (match lowering).
-// ---------------------------------------------------------------------------
 
 pub fn expr_diverges(nodes: &[i64], lists: &[Vec<i64>], expr: i64) -> i64 {
     if node_tag(nodes, expr) != NODE_EXPR || node_a(nodes, expr) != EXPR_MATCH {
@@ -1030,10 +817,6 @@ fn stmt_list_diverges(nodes: &[i64], lists: &[Vec<i64>], list: i64) -> i64 {
     stmt_diverges(nodes, lists, list_get(lists, list, count - 1))
 }
 
-// ---------------------------------------------------------------------------
-// List helpers (shared by every later stage).
-// ---------------------------------------------------------------------------
-
 pub fn list_len(lists: &[Vec<i64>], id: i64) -> i64 {
     match lists.get(id as usize) {
         Some(items) => items.len() as i64,
@@ -1061,18 +844,10 @@ pub fn list_get(lists: &[Vec<i64>], id: i64, idx: i64) -> i64 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Diagnostics helpers.
-// ---------------------------------------------------------------------------
-
-/// Pushes a source-less diagnostic (an internal invariant failure or a
-/// toolchain failure).  The absence of a Cinnabar source origin is
-/// represented by NO_FILE; no fabricated span is ever invented.
 pub fn push_internal(errors: &mut Vec<Diag>, message: &str) {
     errors.push((message.to_string(), NO_FILE, 0, 0));
 }
 
-/// Pushes a diagnostic with a real span.
 pub fn push_error(errors: &mut Vec<Diag>, message: &str, file: i64, start: i64, end: i64) {
     errors.push((message.to_string(), file, start, end));
 }
@@ -1099,9 +874,6 @@ mod tests {
             &mut nodes,
             &[NODE_EXPR, 0, 10, 20, EXPR_LIT, LIT_INT, 42, NONE, NONE, NONE],
         );
-        // Row layout is (tag, file, start, end, a, b, c, d, e, f): the
-        // literal kind sits in `b` and the literal value in `c`, and the
-        // type slot `e` starts unset.
         assert_eq!(node_tag(&nodes, id), NODE_EXPR);
         assert_eq!(node_a(&nodes, id), EXPR_LIT);
         assert_eq!(node_b(&nodes, id), LIT_INT);

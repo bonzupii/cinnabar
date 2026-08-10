@@ -1,136 +1,38 @@
-//! Cinnabar borrow checker.
-//!
-//! Two independent static analyses, both real fixpoint computations over
-//! each function's control-flow graph of basic blocks (computed here,
-//! before codegen):
-//!
-//! 1. **Linear-handle consumption.** Every binding whose type transitively
-//!    contains a linear handle (`Memory.Block`, `Collections.Vec`,
-//!    `Collections.String`, `Collections.HashMap`, or a struct/enum/array
-//!    whose fields, variant payloads, or elements do) tracks a state per
-//!    CFG point drawn from the lattice `Unbound < Live < Moved` (plus a
-//!    Partial state for values whose fields were moved individually).
-//!    Reassigning a Live linear binding is an error; assigning to a Moved
-//!    binding relives it; every scope-diverging exit (`return`, `break`,
-//!    `try` error propagation, falling off the end) requires every linear
-//!    binding in scope to be Moved; merges join incoming states and report
-//!    inconsistent consumption.  Field projections are tracked as their
-//!    own sub-nodes: moving a parent moves every child path, and moving a
-//!    child makes the parent partial.
-//!
-//! 2. **Flow-sensitive borrows.** A Polonius-style fact set over CFG
-//!    points: `borrow_issued(loan, owner, point)`,
-//!    `origin_contains(ref_var, loan, point)`,
-//!    `var_live_at(var, point)` (standard backward liveness), and
-//!    `invalidates(point, loan)`.  A write, move, or new `&mut` borrow of
-//!    a variable is an error when a conflicting loan is still contained in
-//!    a live reference's origin, which yields the exclusive-XOR-shared
-//!    rule.  A function returning a borrow must trace the returned
-//!    reference's origin to exactly one input reference parameter; an
-//!    origin touching a local or more than one parameter is an error.
-//!
-//! Both analyses are intraprocedural: references cannot be stored in
-//! struct/enum fields and closures cannot capture references, so borrow
-//! lifetimes never escape the function they are created in.  Access is
-//! binary (shared or exclusive); no fractional accounting is modelled.
-//!
-//! The checker consumes the typechecker's attached facts (expression
-//! types, statement binding types, pattern types, instance rows, and the
-//! per-key linearity flag) and the resolver's resolved symbols.  It never
-//! re-derives a fact an earlier stage established; the only facts it
-//! computes are the two dataflow analyses above.  Linearity is read from
-//! the flag the typechecker stored on every canonical descriptor row.
 
 use crate::ast::*;
 
-// ---------------------------------------------------------------------------
-// Analysis constants.
-// ---------------------------------------------------------------------------
-
-/// Linear-state lattice: Unbound < Live < Moved.  Partial marks a linear
-/// struct or enum whose value was partially moved field by field; it can
-/// never be consumed whole (the language has no field re-initialization),
-/// so it behaves as an absorbing error state.
 const ST_UNBOUND: i64 = 0;
 const ST_LIVE: i64 = 1;
 const ST_MOVED: i64 = 2;
 const ST_PARTIAL: i64 = 3;
 
-/// Effect op kinds recorded per statement block.
-const OP_READ: i64 = 0; // binding read (liveness use)
-const OP_MOVE: i64 = 1; // linear value consumed (root or sub-node path)
-const OP_BORROW: i64 = 2; // shared borrow of the binding
-const OP_BORROW_M: i64 = 3; // exclusive borrow of the binding
-const OP_ASSIGN: i64 = 4; // write to the target binding
-const OP_BIND: i64 = 5; // definition of a binding (let, param, pattern)
-const OP_EXIT: i64 = 6; // scope-diverging exit (return/break/try)
-const OP_RET_REF: i64 = 7; // returned-borrow origin check
+const OP_READ: i64 = 0;
+const OP_MOVE: i64 = 1;
+const OP_BORROW: i64 = 2;
+const OP_BORROW_M: i64 = 3;
+const OP_ASSIGN: i64 = 4;
+const OP_BIND: i64 = 5;
+const OP_EXIT: i64 = 6;
+const OP_RET_REF: i64 = 7;
 
-/// The exit kind carried by OP_EXIT (aux slot 2).
 const EX_RETURN: i64 = 0;
 const EX_BREAK: i64 = 1;
 const EX_TRY: i64 = 2;
 
-/// Loan kinds.
 const L_SHARED: i64 = 0;
 const L_MUT: i64 = 1;
 
-/// Element-borrow index keys carried on loans (row slot 3) and borrow ops
-/// (aux slot 2): NONE means a whole-value loan (it overlaps every
-/// element), IDX_DYN means an element borrow through a non-constant index
-/// (never provably disjoint from anything), and a list id holds the
-/// constant index path, inner-most level first.
 const IDX_DYN: i64 = -2;
 
-/// Block kinds.
 const BLK_ENTRY: i64 = 0;
 const BLK_STMT: i64 = 1;
 const BLK_JOIN: i64 = 2;
 const BLK_EXIT: i64 = 3;
 
-/// Expression consumption modes: a value position (a linear path is
-/// moved), a shared-borrow position, or an exclusive-borrow position.
 const MODE_VALUE: i64 = 0;
 const MODE_BORROW: i64 = 1;
 const MODE_MUT: i64 = 2;
 
-// ---------------------------------------------------------------------------
-// Per-function tables.
-//
-// All state is stored as flat tuples of parallel arrays (no structs, no
-// enums), mirroring the arena style of the rest of the compiler.  Index
-// access goes through `.get` everywhere; an invalid index yields NONE
-// rather than panicking.
-// ---------------------------------------------------------------------------
-
-/// The mutable build/analysis state for one function:
-/// (bindings, bspans, paths, loans, ops, oloans, blocks, bscopes, bsuccs,
-/// bpreds, bspans).
-///
-/// - bindings: `(name, key, is_linear, is_ref, is_param, is_mut,
-///   root_path)`; `root_path` is the path-table index of the binding's
-///   whole-value node (NONE when the binding is not linear).
-/// - bspans: `(file, start, end)` of each binding declaration.
-/// - paths: `(parent, field, root)` sub-node trie over a linear binding's
-///   whole-value node; the root node has `parent` NONE and `root` itself.
-/// - loans: `(owner_binding, kind, synthetic, index_key)`; a synthetic
-///   loan is the standing borrow a reference parameter carries in from
-///   its caller.  `index_key` is NONE for a whole-value loan, IDX_DYN for
-///   an element borrow through a non-constant index, or a list id holding
-///   the constant first-level index (`a[i]` is `[i]`).  Only the first
-///   level is tracked: a nested `a[i][j]` keeps the inner `[i]`, which is
-///   conservative — same-first-level borrows conflict, disjoint first
-///   levels are allowed.
-/// - ops: `(kind, binding, path, aux1, aux2, aux3, file, start, end)`.
-/// - oloans: per-op origin-loan lists; entries are loan ids, or
-///   `REF_ORIGIN(binding)` markers (a negative encoding) meaning "the
-///   binding's own origin".
-/// - blocks: `(kind, stmt, first_op, last_op)`; the block's ops run from
-///   `first_op` to `last_op` inclusive of the lower bound.
-/// - bscopes: per-block snapshot of the binding indices in scope entering
-///   the block; joins filter state through it.
-/// - bsuccs/bpreds: the CFG edge lists.
-/// - bspans: `(file, start, end)` of each block's originating construct.
 type F = (
     Vec<(i64, i64, i64, i64, i64, i64, i64)>,
     Vec<(i64, i64, i64)>,
@@ -145,31 +47,6 @@ type F = (
     Vec<(i64, i64, i64)>,
 );
 
-/// Transient build state for one function:
-/// (name_stack, loop_stack, scope_bindings, pending_loans, current,
-/// fn_exit, last_borrow_op, pending_index_key).
-///
-/// - name_stack: `(name, binding)` pairs; shadowing pushes a new pair and
-///   scope exit pops back to the saved length.
-/// - loop_stack: `(while_block, join_block, scope_start)` for resolving
-///   `break` (exit check from `scope_start`) and `continue` (back-edge to
-///   the while block).
-/// - scope_bindings: the binding indices in scope at the current build
-///   position; snapshotted into `bscopes` at every block.
-/// - pending_loans: loans issued within the current statement that have
-///   not yet been captured into a reference binding's origin; they die at
-///   the statement boundary and are used for same-statement conflict
-///   checks.
-/// - current: the block the next op is emitted into (expression forks
-///   move this cursor; it is never a lexical position).
-/// - fn_exit: the function's single exit block.
-/// - last_borrow_op: the op id of the most recent borrow op emitted
-///   during the current expression walk; an enclosing `arr[i]` arm reads
-///   it to stamp the element index onto the loan and the op (stale values
-///   are harmless: arms compare against the value saved at entry).
-/// - pending_index_key: the index key of the innermost enclosing `arr[i]`
-///   arm being built, read by `check_pending_conflict` so same-statement
-///   element borrows compare by index; NONE outside any index expression.
 type B = (
     Vec<(i64, i64)>,
     Vec<(i64, i64, i64)>,
@@ -181,25 +58,15 @@ type B = (
     i64,
 );
 
-/// The shared arena context: (names, nodes, lists, errors).
 type Ctx<'a> = (
     &'a mut Vec<String>,
     &'a mut Vec<i64>,
     &'a mut Vec<Vec<i64>>,
     &'a mut Vec<Diag>,
-    // Slot 4: callee-origin summaries — function node -> the
-    // input-parameter positions its returned borrow can trace to.
-    // Populated to a fixpoint before the authoritative walk; call sites
-    // read it so a returned borrow's origin seeds from only the
-    // parameters the callee can actually return a borrow of (bug-report
-    // d7d), falling back to the conservative union of every reference
-    // argument when a callee has no summary.
+
     &'a mut Vec<(i64, Vec<i64>)>,
 );
 
-/// A `REF_ORIGIN(binding)` production marker: the value's origin is the
-/// named binding's origin, resolved against the converged origin facts.
-/// Negative so it can never collide with a loan id.
 fn ref_origin(binding: i64) -> i64 {
     -1 - binding
 }
@@ -207,12 +74,6 @@ fn ref_origin(binding: i64) -> i64 {
 fn is_ref_origin(entry: i64) -> bool {
     entry < 0
 }
-
-// ---------------------------------------------------------------------------
-// Safe table access.  Every table read goes through these so no index can
-// escape the table; an invalid index yields NONE (or an empty tuple), and
-// callers treat NONE as "no fact" rather than fabricating a value.
-// ---------------------------------------------------------------------------
 
 fn binding_at(f: &F, id: i64) -> (i64, i64, i64, i64, i64, i64, i64) {
     match f.0.get(id as usize) {
@@ -309,12 +170,6 @@ fn state_set(state: &mut [i64], path: i64, value: i64) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Type facts.  The typechecker canonicalized every type into descriptor
-// rows and stored a per-key linearity flag; these reads consume that
-// table.  Nothing here re-derives a fact an earlier stage established.
-// ---------------------------------------------------------------------------
-
 fn ty_kind_of(nodes: &[i64], key: i64) -> i64 {
     if key < 0 {
         return TYD_UNKNOWN;
@@ -345,17 +200,11 @@ fn ty_elem_of(nodes: &[i64], key: i64) -> i64 {
     }
 }
 
-/// A reference-like key: shared, exclusive, or a bare slice.  Reference
-/// values are tracked for borrow-origin analysis; they are never linear.
 fn is_ref_key(nodes: &[i64], key: i64) -> bool {
     let kind = ty_kind_of(nodes, key);
     kind == TYD_REF || kind == TYD_REF_MUT || kind == TYD_SLICE
 }
 
-/// Whether `key` is (or transitively contains) a linear handle.  The
-/// typechecker computed the flag once over every canonical descriptor
-/// row at the end of checking; this is a plain read of that stored fact,
-/// never a re-derivation from names or declarations.
 fn is_linear_key(ctx: &mut Ctx, key: i64) -> i64 {
     if key == NONE {
         return 0;
@@ -367,17 +216,10 @@ fn is_linear_key(ctx: &mut Ctx, key: i64) -> i64 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Table builders.
-// ---------------------------------------------------------------------------
-
-/// The block the next op is emitted into.
 fn cur(b: &B) -> i64 {
     b.4
 }
 
-/// Closes the current block: its op range ends at the current op-table
-/// length.
 fn close_current(f: &mut F, b: &mut B) {
     let id = b.4;
     if id < 0 {
@@ -388,9 +230,6 @@ fn close_current(f: &mut F, b: &mut B) {
     }
 }
 
-/// Creates a fresh block with `kind` and `stmt`, closing the current
-/// block, snapshotting the current scope bindings, and making the new
-/// block the emission cursor.
 fn new_block(f: &mut F, b: &mut B, kind: i64, stmt: i64, span: (i64, i64, i64)) -> i64 {
     close_current(f, b);
     let id = f.6.len() as i64;
@@ -404,16 +243,8 @@ fn new_block(f: &mut F, b: &mut B, kind: i64, stmt: i64, span: (i64, i64, i64)) 
     id
 }
 
-/// Resumes emission into `block` (an existing block), closing whatever
-/// block the cursor was on.  Used when an expression fork (a match) joins
-/// back into its continuation.
 fn resume(f: &mut F, b: &mut B, block: i64) {
     close_current(f, b);
-    // A resumed block opens a fresh emission phase: its op range starts at
-    // the current op-table length.  Without this, a block created before
-    // nested sub-CFGs were built (a match's join) records a stale first-op
-    // and sweeps the nested blocks' ops into its own range, replaying
-    // foreign effects in the analysis.
     if let Some(row) = f.6.get_mut(block as usize) {
         row.2 = f.4.len() as i64;
     }
@@ -432,7 +263,6 @@ fn add_edge(f: &mut F, from: i64, to: i64) {
     }
 }
 
-/// The index one past the block's last op.
 fn block_op_end(f: &F, block: i64) -> i64 {
     let row = block_at(f, block);
     let mut end = row.3;
@@ -442,16 +272,12 @@ fn block_op_end(f: &F, block: i64) -> i64 {
     end
 }
 
-/// Appends an op to the current emission cursor.  Returns the op index
-/// (used to attach origin-loan lists).
 fn emit_op(f: &mut F, kind: i64, binding: i64, path: i64, aux: (i64, i64, i64), span: (i64, i64, i64)) -> i64 {
     f.4.push((kind, binding, path, aux.0, aux.1, aux.2, span.0, span.1, span.2));
     f.5.push(Vec::new());
     f.4.len() as i64 - 1
 }
 
-/// Records the origin-loan list of a just-emitted op (used for OP_BIND of
-/// a reference binding, OP_ASSIGN of a reference target, and OP_RET_REF).
 fn set_op_loans(f: &mut F, op: i64, loans: &[i64]) {
     if let Some(list) = f.5.get_mut(op as usize) {
         list.clear();
@@ -466,22 +292,16 @@ fn set_op_loans(f: &mut F, op: i64, loans: &[i64]) {
     }
 }
 
-/// Allocates a loan on `owner` with `kind` and returns its id.  The
-/// element `index_key` starts NONE (a whole-value loan); an enclosing
-/// `arr[i]` arm stamps the element path onto it before any later borrow
-/// compares indices.
 fn alloc_loan(f: &mut F, owner: i64, kind: i64, synthetic: i64, index_key: i64) -> i64 {
     let id = f.3.len() as i64;
     f.3.push((owner, kind, synthetic, index_key));
     id
 }
 
-/// The path-table node for a linear binding's whole value.
 fn root_path_of(f: &F, binding: i64) -> i64 {
     binding_at(f, binding).6
 }
 
-/// Returns the existing sub-node of `path` for `field`, or NONE.
 fn find_child(f: &F, path: i64, field: i64) -> i64 {
     let mut idx = 0usize;
     while idx < f.2.len() {
@@ -494,8 +314,6 @@ fn find_child(f: &F, path: i64, field: i64) -> i64 {
     NONE
 }
 
-/// The sub-node for `field` under `path`, allocating it on first use.  The
-/// node shares the root of its parent.
 fn child_path(f: &mut F, path: i64, field: i64) -> i64 {
     let existing = find_child(f, path, field);
     if existing != NONE {
@@ -507,13 +325,6 @@ fn child_path(f: &mut F, path: i64, field: i64) -> i64 {
     id
 }
 
-/// Eagerly creates the sub-node trie for a linear binding: every struct
-/// field that is itself linear gets a child path, recursing into nested
-/// structs.  A struct literal initializes every field, so each materialized
-/// sub-node is Live from the binding's OP_BIND onward; without this, an
-/// untracked sub-node would stay Unbound and a field move would silently
-/// no-op instead of marking the field Moved and its ancestors Partial.
-/// Linearity is read from the typechecker's per-key flag, never re-derived.
 fn materialize_linear_subpaths(f: &mut F, ctx: &mut Ctx, key: i64, path: i64) {
     if key == NONE || path < 0 {
         return;
@@ -541,9 +352,6 @@ fn materialize_linear_subpaths(f: &mut F, ctx: &mut Ctx, key: i64, path: i64) {
     }
 }
 
-/// Marks a freshly bound linear binding's root and every materialized
-/// sub-node Live: a struct literal initializes all fields, so the whole
-/// trie is live from the binding's definition.
 fn bind_state_live(f: &F, state: &mut [i64], binding: i64) {
     let root = root_path_of(f, binding);
     if root < 0 {
@@ -559,14 +367,10 @@ fn bind_state_live(f: &F, state: &mut [i64], binding: i64) {
     }
 }
 
-/// True when `path` is a whole-value node.
 fn is_root_path(f: &F, path: i64) -> bool {
     path_at(f, path).0 == NONE
 }
 
-/// Binds a new local with the given type key and span.  `flags` carries
-/// the precomputed `(is_linear, is_ref, is_param, is_mut)` facts (derived
-/// from the key by the caller).  Returns the binding id.
 fn bind_var(f: &mut F, b: &mut B, ctx: &mut Ctx, name: i64, key: i64, flags: (i64, i64, i64, i64), span: (i64, i64, i64)) -> i64 {
     let id = f.0.len() as i64;
     let root = if flags.0 == 1 {
@@ -575,11 +379,6 @@ fn bind_var(f: &mut F, b: &mut B, ctx: &mut Ctx, name: i64, key: i64, flags: (i6
         materialize_linear_subpaths(f, ctx, key, r);
         r
     } else if flags.1 == 1 && flags.2 == 1 && ty_kind_of(ctx.1, key) == TYD_REF_MUT && is_linear_key(ctx, ty_elem_of(ctx.1, key)) == 1 {
-        // A `&mut` parameter whose referent is linear: the callee borrows
-        // the caller's handles, so its referent fields get their own
-        // tracked trie (entered Live), letting the linear rules -- consume,
-        // reassign-over-Live, restore-before-return -- apply inside the
-        // callee as well.
         let r = f.2.len() as i64;
         f.2.push((NONE, NONE, r));
         materialize_linear_subpaths(f, ctx, ty_elem_of(ctx.1, key), r);
@@ -602,13 +401,6 @@ fn expr_span(nodes: &[i64], expr: i64) -> (i64, i64, i64) {
     (node_file(nodes, expr), node_start(nodes, expr), node_end(nodes, expr))
 }
 
-// ---------------------------------------------------------------------------
-// Build: one function's CFG.
-// ---------------------------------------------------------------------------
-
-/// Builds the CFG and op table for one function body.  Returns true when
-/// the body built (a NONE body means a signature-only declaration, e.g. a
-/// native function or a trait method, which has nothing to check).
 fn build_fn(f: &mut F, b: &mut B, ctx: &mut Ctx, fn_node: i64) -> bool {
     let body = node_f(ctx.1, fn_node);
     if body == NONE {
@@ -619,9 +411,6 @@ fn build_fn(f: &mut F, b: &mut B, ctx: &mut Ctx, fn_node: i64) -> bool {
     let count = list_len(ctx.2, params);
     let fn_span = (node_file(ctx.1, fn_node), node_start(ctx.1, fn_node), node_end(ctx.1, fn_node));
 
-    // Entry block: bind every parameter.  Linear parameters are Live on
-    // entry; reference parameters carry a synthetic loan on themselves so
-    // a returned borrow can trace back to them.
     let entry = new_block(f, b, BLK_ENTRY, NONE, fn_span);
     let mut idx = 0i64;
     while idx < count {
@@ -642,7 +431,6 @@ fn build_fn(f: &mut F, b: &mut B, ctx: &mut Ctx, fn_node: i64) -> bool {
         idx += 1;
     }
 
-    // The exit block carries the falling-off-the-end consumption check.
     let exit = new_block(f, b, BLK_EXIT, NONE, fn_span);
     b.5 = exit;
     emit_op(f, OP_EXIT, NONE, NONE, (0, EX_RETURN, 0), fn_span);
@@ -650,9 +438,6 @@ fn build_fn(f: &mut F, b: &mut B, ctx: &mut Ctx, fn_node: i64) -> bool {
     let entry_of_body = build_list(f, b, ctx, body, exit, ret, &mut Vec::new());
     add_edge(f, entry, entry_of_body);
 
-    // The exit is the end of every body scope: it must see every binding
-    // ever declared in the function so the fall-off-end check catches any
-    // linear value that was never consumed.
     close_current(f, b);
     let mut all: Vec<i64> = Vec::new();
     let mut bidx = 0usize;
@@ -674,20 +459,12 @@ fn build_fn(f: &mut F, b: &mut B, ctx: &mut Ctx, fn_node: i64) -> bool {
     true
 }
 
-/// Builds a statement list, threading `out` as the fall-through target of
-/// the last reachable statement and appending the origin-loan list of the
-/// list's final value into `prod` (used for match arms).  Returns the
-/// list's entry block.  The fall-through chaining is internal; callers
-/// only connect the incoming edge to the entry.
 fn build_list(f: &mut F, b: &mut B, ctx: &mut Ctx, list: i64, out: i64, ret: i64, prod: &mut Vec<i64>) -> i64 {
     let scope_start = b.2.len();
     let name_start = b.0.len();
     let count = list_len(ctx.2, list);
     if count == 0 {
         let stub = new_block(f, b, BLK_JOIN, NONE, block_span_at(f, out));
-        // Close the stub immediately: no statement ever emits into it, so
-        // leaving it open would let its range sweep the following
-        // statements' ops.
         if let Some(row) = f.6.get_mut(stub as usize) {
             row.3 = f.4.len() as i64;
         }
@@ -721,12 +498,6 @@ fn build_list(f: &mut F, b: &mut B, ctx: &mut Ctx, list: i64, out: i64, ret: i64
     if fell && after != NONE {
         add_edge(f, after, out);
     }
-    // The list's final value can be a reference produced inside a nested
-    // construct (a match arm body ending in a reborrowed reference), so
-    // the production is aggregated with the marker-preserving append: a
-    // `REF_ORIGIN` marker dropped here would leave a reference bound from
-    // the list's value with an empty origin, and later borrows would never
-    // see the loan it actually carries.
     append_prod_unique(prod, &production);
     while b.2.len() > scope_start {
         b.2.pop();
@@ -737,9 +508,6 @@ fn build_list(f: &mut F, b: &mut B, ctx: &mut Ctx, list: i64, out: i64, ret: i64
     entry
 }
 
-/// Builds one statement.  Returns `(entry, after, production)`: `after`
-/// is the block where control continues (NONE when the statement
-/// diverges), `production` is the final value's origin loans.
 fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64) -> (i64, i64, Vec<i64>) {
     let kind = node_a(ctx.1, stmt);
     let span = stmt_span(ctx.1, stmt);
@@ -770,17 +538,7 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         let value = node_c(ctx.1, stmt);
         let mut prod: Vec<i64> = Vec::new();
         let cont = expr_effects(f, b, ctx, value, MODE_VALUE, ret, &mut prod);
-        // Decompose the target into (binding, path, kind, owner): a
-        // whole-value assign of a name, a field assign on a mutable
-        // local, or a field write through a `&mut` reference.  The op's
-        // aux slots carry the kind and the referent binding; the path
-        // slot carries the referent's sub-node for the linear rule.
         let (binding, path, tkind, owner) = assign_target_of(f, b, ctx, target);
-        // The is_ref flag is only meaningful for a whole-value re-point
-        // (kind 0): it makes the origin fixpoint overwrite the variable's
-        // origin with the value's loans.  A write through a reference
-        // (kind 1) and a field assign on a local (kind 2) must not touch
-        // origins, so they carry the flag clear.
         let is_ref = if tkind == 0 && binding >= 0 { binding_at(f, binding).3 } else { 0 };
         let op = emit_op(f, OP_ASSIGN, binding, path, (is_ref, tkind, owner), span);
         if tkind == 0 && is_ref == 1 {
@@ -796,9 +554,6 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         let scope_start = b.2.len() as i64;
         b.1.push((block, join, scope_start));
         let cont = expr_effects(f, b, ctx, cond, MODE_VALUE, ret, &mut Vec::new());
-        // The loop header feeds the condition block; without this edge the
-        // condition's effects (and the state from the loop back-edge) are
-        // unreachable in the CFG.
         add_edge(f, block, cont);
         let body_entry = build_list(f, b, ctx, body, block, ret, &mut Vec::new());
         b.1.pop();
@@ -814,9 +569,6 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         let else_list = node_d(ctx.1, stmt);
         let join = new_block(f, b, BLK_JOIN, NONE, span);
         let cont = expr_effects(f, b, ctx, cond, MODE_VALUE, ret, &mut Vec::new());
-        // The statement's entry block feeds the condition block; without
-        // this edge the condition's effects (and the state entering the
-        // branches) are unreachable in the CFG.
         add_edge(f, block, cont);
         let then_entry = build_list(f, b, ctx, then_list, join, ret, &mut Vec::new());
         add_edge(f, cont, then_entry);
@@ -832,20 +584,11 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
     if kind == STMT_RETURN {
         let block = new_block(f, b, BLK_STMT, stmt, span);
         let value = node_b(ctx.1, stmt);
-        // A return is a dead end in the CFG: it carries its own
-        // consumption check and must not feed the falling-off-the-end
-        // exit block (which would double-report on the same leak).
         if value == NONE {
             emit_op(f, OP_EXIT, NONE, NONE, (0, EX_RETURN, 0), span);
             return (block, NONE, Vec::new());
         }
         let mut prod: Vec<i64> = Vec::new();
-        // The value's effects end on the current block: a forking value
-        // already resumed into its join, and a straight-line value leaves
-        // the cursor on the block its ops were emitted into.  Re-resuming
-        // here would reset the block's op range and orphan the value's
-        // moves and reads from every block's range, so the exit check
-        // would run against a state the moves never reached.
         expr_effects(f, b, ctx, value, MODE_VALUE, ret, &mut prod);
         let ret_kind = ty_kind_of(ctx.1, ret);
         if ret_kind == TYD_REF || ret_kind == TYD_REF_MUT || ret_kind == TYD_SLICE {
@@ -878,7 +621,6 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         add_edge(f, block, header);
         return (block, NONE, Vec::new());
     }
-    // STMT_EXPR: a bare expression statement.
     let block = new_block(f, b, BLK_STMT, stmt, span);
     let expr = node_b(ctx.1, stmt);
     let mut prod: Vec<i64> = Vec::new();
@@ -886,7 +628,6 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
     (block, cont, prod)
 }
 
-/// Resolves a name to its current binding, or NONE.
 fn lookup_name(b: &B, name: i64) -> i64 {
     let mut depth = b.0.len();
     while depth > 0 {
@@ -903,16 +644,6 @@ fn lookup_name(b: &B, name: i64) -> i64 {
     NONE
 }
 
-// ---------------------------------------------------------------------------
-// Build: expressions.
-// ---------------------------------------------------------------------------
-
-/// Records the effects of `expr` at the current build position, writing
-/// the origin-loan list of the expression's value into `prod` (empty for
-/// a fresh or non-reference value) and returning the block where the
-/// enclosing statement continues (expressions with control flow fork
-/// here).  `mode` is MODE_VALUE, MODE_BORROW, or MODE_MUT.  Callers that
-/// do not consume the production pass an empty list and leave it unread.
 fn expr_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, mode: i64, ret: i64, prod: &mut Vec<i64>) -> i64 {
     if node_tag(ctx.1, expr) != NODE_EXPR {
         return cur(b);
@@ -946,17 +677,6 @@ fn expr_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, mode: i64, ret: 
         return try_effects(f, b, ctx, expr, ret, prod);
     }
     if kind == EXPR_INDEX {
-        // An index reads its base in the enclosing mode (a value read, a
-        // shared borrow, or an exclusive borrow of the element) and its
-        // index in a value position.  The index never moves the base: a
-        // value-position index of a linear-element array or slice is
-        // rejected by the typechecker, so only reads and borrows reach
-        // this arm.  A borrowed element issues its loan on the root
-        // binding through the base's borrow effect; this arm then stamps
-        // the element index onto the loan and the borrow op, so later
-        // element borrows compare by index (disjoint constant indices are
-        // allowed; an equal or nested index, or any dynamic index, is a
-        // conflict).
         let base = node_b(ctx.1, expr);
         let index = node_c(ctx.1, expr);
         let base_kind = node_a(ctx.1, base);
@@ -973,34 +693,25 @@ fn expr_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, mode: i64, ret: 
         b.7 = level_list;
         let cont = expr_effects(f, b, ctx, base, mode, ret, prod);
         b.7 = saved_idx;
-        if b.6 != saved_op && !prod.is_empty() {
-            // The base issued a borrow for this element.  Extend the path
-            // on its loan(s) and stamp the borrow op with it.  REF_ORIGIN
-            // markers (a reborrow of a reference base) are skipped, so an
-            // element borrow through a reference keeps a whole-value loan
-            // on the reference variable; the typechecker gates the
-            // fixed-array path today (indexing a reference to an array is
-            // rejected), so no element-vs-element comparison is lost.
-            // Bases that are not a path, field access, or nested index (a
-            // call, match, or other expression) are left unstamped: their
-            // loans stay whole-value, which is conservative and sound.
-            if base_kind == EXPR_PATH || base_kind == EXPR_FIELD_ACCESS || base_kind == EXPR_INDEX {
-                let mut stamped: i64 = NONE;
-                let mut pi = 0usize;
-                while pi < prod.len() {
-                    match prod.get(pi) {
-                        Some(entry) => {
-                            if *entry >= 0 {
-                                stamped = extend_loan_index(f, ctx, *entry, level_key);
-                            }
+        if b.6 != saved_op
+            && !prod.is_empty()
+            && (base_kind == EXPR_PATH || base_kind == EXPR_FIELD_ACCESS || base_kind == EXPR_INDEX)
+        {
+            let mut stamped: i64 = NONE;
+            let mut pi = 0usize;
+            while pi < prod.len() {
+                match prod.get(pi) {
+                    Some(entry) => {
+                        if *entry >= 0 {
+                            stamped = extend_loan_index(f, ctx, *entry, level_key);
                         }
-                        None => break,
                     }
-                    pi += 1;
+                    None => break,
                 }
-                if stamped != NONE {
-                    stamp_op_index(f, b.6, stamped);
-                }
+                pi += 1;
+            }
+            if stamped != NONE {
+                stamp_op_index(f, b.6, stamped);
             }
         }
         expr_effects(f, b, ctx, index, MODE_VALUE, ret, &mut Vec::new());
@@ -1008,11 +719,6 @@ fn expr_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, mode: i64, ret: 
         return cont;
     }
     if kind == EXPR_FIELD_ACCESS {
-        // Field access on a non-path base.  Reading a field through a
-        // reference borrows the base and derives the value's origin from
-        // the reference; reading a field of a value reads the base in the
-        // enclosing mode; a borrow-position access puts the base in the
-        // same mode so the loan lands on the root binding.
         let base = node_b(ctx.1, expr);
         let base_key = expr_ty_of(ctx.1, base);
         let base_kind = ty_kind_of(ctx.1, base_key);
@@ -1036,18 +742,11 @@ fn expr_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, mode: i64, ret: 
     cur(b)
 }
 
-/// Effects of a name/path expression.  A single-segment path names a
-/// local binding; a longer path walks fields.  Reading through a
-/// reference never moves; a value-position access of a linear value moves
-/// it (a whole binding or a field sub-node); a borrow-position access
-/// issues a loan on the root binding.
 fn path_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, mode: i64, prod: &mut Vec<i64>) -> i64 {
     let segs = node_b(ctx.1, expr);
     let first = list_first(ctx.2, segs);
     let binding = lookup_name(b, first);
     if binding == NONE {
-        // A path to a declaration (const, unit variant, module member):
-        // it has no local effects and produces a fresh value.
         return cur(b);
     }
     let row = binding_at(f, binding);
@@ -1072,23 +771,16 @@ fn path_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, mode: i64, prod:
         return cur(b);
     }
 
-    // Field chain: walk the base type to classify each access.
     walk_field_chain(f, b, ctx, expr, binding, mode, prod);
     cur(b)
 }
 
-/// Issues a borrow of `binding` (or a temporary loan on it when the
-/// binding is a reference being reborrowed), checking pending conflicts
-/// and writing the loan set for the value's origin into `prod`.
 fn borrow_binding(f: &mut F, b: &mut B, ctx: &mut Ctx, binding: i64, mode: i64, span: (i64, i64, i64), prod: &mut Vec<i64>) -> i64 {
     let row = binding_at(f, binding);
     let op_kind = if mode == MODE_MUT { OP_BORROW_M } else { OP_BORROW };
     let loan_kind = if mode == MODE_MUT { L_MUT } else { L_SHARED };
     prod.clear();
     if row.3 == 1 {
-        // A reference variable is reborrowed: the loan is on the
-        // reference variable itself, and the value's origin is the
-        // variable's own origin.
         let op = emit_op(f, op_kind, binding, NONE, (0, 0, NONE), span);
         check_pending_conflict(f, b, ctx, binding, mode, span);
         b.6 = op;
@@ -1106,17 +798,7 @@ fn borrow_binding(f: &mut F, b: &mut B, ctx: &mut Ctx, binding: i64, mode: i64, 
     cur(b)
 }
 
-/// Emits the pending-conflict diagnostic for a new borrow of `binding`:
-/// a shared borrow conflicts with pending exclusive loans; an exclusive
-/// borrow conflicts with pending loans of either kind; a move conflicts
-/// with any pending loan.  Same-statement conflicts cannot be resolved by
-/// liveness, so they are hard errors at build time.  Element borrows are
-/// compared by index: a pending loan on a provably-disjoint constant
-/// element does not conflict.
 fn check_pending_conflict(f: &mut F, b: &mut B, ctx: &mut Ctx, binding: i64, mode: i64, span: (i64, i64, i64)) {
-    // The new borrow's element key: the innermost enclosing `arr[i]`
-    // arm's index (NONE outside an index expression, IDX_DYN for a
-    // non-constant index, or the constant level path).
     let new_key = b.7;
     let mut idx = 0usize;
     while idx < b.3.len() {
@@ -1126,8 +808,6 @@ fn check_pending_conflict(f: &mut F, b: &mut B, ctx: &mut Ctx, binding: i64, mod
         };
         let loan = loan_at(f, loan_id);
         if loan.0 == binding && index_keys_conflict(ctx, new_key, loan.3) {
-            // A move or an exclusive borrow conflicts with any pending
-            // loan; a shared borrow only with pending exclusive loans.
             let conflicting = if mode == MODE_BORROW {
                 loan.1 == L_MUT
             } else {
@@ -1153,9 +833,6 @@ fn check_pending_conflict(f: &mut F, b: &mut B, ctx: &mut Ctx, binding: i64, mod
     }
 }
 
-/// The element index key of an index expression: a constant integer
-/// literal is provably that element; any other expression (a variable,
-/// arithmetic, a call) is conservatively dynamic.
 fn index_key_of_literal(ctx: &Ctx, expr: i64) -> i64 {
     if node_tag(ctx.1, expr) == NODE_EXPR && node_a(ctx.1, expr) == EXPR_LIT {
         let kind = node_b(ctx.1, expr);
@@ -1166,10 +843,6 @@ fn index_key_of_literal(ctx: &Ctx, expr: i64) -> i64 {
     IDX_DYN
 }
 
-/// Whether two element-borrow index keys overlap: a whole-value loan
-/// (NONE) overlaps every element, a dynamic index (IDX_DYN) is never
-/// provably disjoint from anything, and two constant index paths overlap
-/// when one is a prefix of the other (`a[i]` contains `a[i][j]`).
 fn index_keys_conflict(ctx: &Ctx, a: i64, b: i64) -> bool {
     if a == NONE || b == NONE {
         return true;
@@ -1190,8 +863,6 @@ fn index_keys_conflict(ctx: &Ctx, a: i64, b: i64) -> bool {
     true
 }
 
-/// The display suffix of an index key: `[0][1]` for a constant path,
-/// `[?]` for a dynamic index, empty for a whole-value loan.
 fn index_suffix(ctx: &Ctx, key: i64) -> String {
     if key == NONE {
         return String::new();
@@ -1216,12 +887,6 @@ fn index_suffix(ctx: &Ctx, key: i64) -> String {
     out
 }
 
-/// Extends a loan's element index path with the current level and returns
-/// the new key: a non-constant level poisons the whole path to IDX_DYN
-/// and a fresh loan starts at `[level]`.  A nested `a[i][j]` never reaches
-/// the extension branch: the inner index arm restores the borrow-op cursor
-/// before the outer arm reads it, so a nested borrow keeps the inner
-/// `[i]` — conservative, see the loans-table note.
 fn extend_loan_index(f: &mut F, ctx: &mut Ctx, loan: i64, level_key: i64) -> i64 {
     let cur = loan_at(f, loan).3;
     let new_key = if level_key == IDX_DYN {
@@ -1250,8 +915,6 @@ fn extend_loan_index(f: &mut F, ctx: &mut Ctx, loan: i64, level_key: i64) -> i64
     new_key
 }
 
-/// Stamps the element index key onto a borrow op (op row aux slot 2), the
-/// fact `conflicts_at` reads for the new borrow's element.
 fn stamp_op_index(f: &mut F, op: i64, key: i64) {
     if op < 0 {
         return;
@@ -1261,8 +924,6 @@ fn stamp_op_index(f: &mut F, op: i64, key: i64) {
     }
 }
 
-/// Walks the field segments of a path starting at `from`, advancing `path`
-/// through every linear struct field.  Returns the final key and path.
 fn walk_field_segments(f: &mut F, ctx: &mut Ctx, segs: i64, from: i64, mut cur_key: i64, mut cur_path: i64) -> (i64, i64) {
     let count = list_len(ctx.2, segs);
     let mut idx = from;
@@ -1281,9 +942,6 @@ fn walk_field_segments(f: &mut F, ctx: &mut Ctx, segs: i64, from: i64, mut cur_k
     (cur_key, cur_path)
 }
 
-/// The dotted display name of a path: `base.seg1.seg2...` built from the
-/// binding's name and the path's field segments (the binding itself is
-/// segment 0).  Used by diagnostics that have no tracked path node.
 fn dotted_seg_name(ctx: &mut Ctx, base: i64, segs: i64, count: i64) -> String {
     let mut text = name_text(ctx.0, base);
     let mut si = 1i64;
@@ -1294,10 +952,6 @@ fn dotted_seg_name(ctx: &mut Ctx, base: i64, segs: i64, count: i64) -> String {
     text
 }
 
-/// Walks a multi-segment path starting at `binding`, deciding for each
-/// field whether the access moves a linear sub-node, reads through a
-/// reference, or copies a non-linear field.  A borrow of the final value
-/// writes its loan into `prod`.
 fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64, mode: i64, prod: &mut Vec<i64>) {
     let row = binding_at(f, binding);
     let segs = node_b(ctx.1, expr);
@@ -1308,11 +962,6 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
     let through_shared = bkind == TYD_REF;
     let mut cur_key = row.1;
     let cur_path = row.6;
-    // References cannot be stored inside structs, so a reference only ever
-    // appears at the root of a path.  Strip the binding's own reference
-    // levels from the key WITHOUT consuming path segments (`r.tag` is the
-    // binding plus one field segment): the linearity guard must key on the
-    // accessed field's type, not on the referent struct's type.
     let start = 1i64;
     while ty_kind_of(ctx.1, cur_key) == TYD_REF || ty_kind_of(ctx.1, cur_key) == TYD_REF_MUT {
         cur_key = ty_elem_of(ctx.1, cur_key);
@@ -1320,9 +969,6 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
     let (final_key, final_path) = walk_field_segments(f, ctx, segs, start, cur_key, cur_path);
     let final_is_lin = is_linear_key(ctx, final_key);
     if mode == MODE_BORROW || mode == MODE_MUT {
-        // Borrow of the final accessed value: the loan is on the root
-        // binding (conservative but sound — moving the root would
-        // invalidate the borrowed field).
         let op_kind = if mode == MODE_MUT { OP_BORROW_M } else { OP_BORROW };
         let loan_kind = if mode == MODE_MUT { L_MUT } else { L_SHARED };
         check_pending_conflict(f, b, ctx, binding, mode, span);
@@ -1336,11 +982,6 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
     }
     if final_is_lin == 1 {
         if through_mut {
-            // A value-position access of a linear field through a `&mut`
-            // reference consumes the referent's handle: move the referent
-            // sub-node (a local owner, or a `&mut` parameter's tracked
-            // referent) instead of copying it.  This is the sanctioned
-            // `deallocate(ref.field)` form.
             let owner = referent_binding_of(f, binding);
             let rroot = if owner != NONE {
                 root_path_of(f, owner)
@@ -1348,10 +989,6 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
                 root_path_of(f, binding)
             };
             if rroot < 0 {
-                // The referent is not a tracked local (e.g. a `&mut` of a
-                // temporary such as `&mut make_holder()`): consuming the
-                // handle out of it would silently duplicate the linear
-                // value.  Inconclusive consumption is a compile error.
                 let text = dotted_seg_name(ctx, row.0, segs, count);
                 push_error(ctx.3, &format!("cannot consume linear value '{}' through a mutable reference to an untracked temporary; bind the referent to a local first", text), span.0, span.1, span.2);
                 return;
@@ -1359,9 +996,6 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
             let elem_key = ty_elem_of(ctx.1, row.1);
             let (_, rpath) = walk_field_segments(f, ctx, segs, 1, elem_key, rroot);
             if rpath == NONE || rpath == rroot {
-                // Consuming the whole referent (or an unresolvable field
-                // chain) through a `&mut` would move the caller's storage
-                // out from under the borrow; reject rather than guess.
                 let text = dotted_seg_name(ctx, row.0, segs, count);
                 push_error(ctx.3, &format!("cannot consume the whole value '{}' through a mutable reference; move the referent into a local and consume that instead", text), span.0, span.1, span.2);
                 return;
@@ -1371,9 +1005,6 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
             emit_op(f, OP_MOVE, target, rpath, (0, 0, 0), span);
             return;
         } else if through_shared {
-            // Copying a linear value out of a shared reference duplicates
-            // the handle; the only sanctioned consumption goes through
-            // `&mut`, never `&`.
             let text = dotted_seg_name(ctx, row.0, segs, count);
             push_error(ctx.3, &format!("cannot copy linear value '{}' out of a shared reference", text), span.0, span.1, span.2);
             return;
@@ -1387,7 +1018,6 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
     emit_op(f, OP_READ, binding, NONE, (0, 0, 0), span);
 }
 
-/// The substituted key of a struct field named `field` on the type `key`.
 fn field_key_of(ctx: &mut Ctx, key: i64, field: i64) -> i64 {
     let sym = ty_sym_of(ctx.1, key);
     if sym == NONE {
@@ -1411,9 +1041,6 @@ fn field_key_of(ctx: &mut Ctx, key: i64, field: i64) -> i64 {
     NONE
 }
 
-/// Substitutes a declared member type against the concrete type arguments
-/// of `key` (the struct or enum instantiation), matching the declaration's
-/// type parameters by key.
 fn subst_declared(ctx: &mut Ctx, decl: i64, key: i64, declared: i64) -> i64 {
     if declared == NONE {
         return declared;
@@ -1451,22 +1078,6 @@ fn ty_args_of(nodes: &[i64], key: i64) -> i64 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Assignment targets.
-//
-// An assignment target is a place: a plain name (whole-value assign), a
-// field chain on a mutable local (a sub-node assign), or a field write
-// through a `&mut` reference.  Each decomposes to `(binding, path, kind,
-// owner)`; the op carries `(kind, owner)` in its aux slots and the
-// referent's sub-node in its path slot.
-// ---------------------------------------------------------------------------
-
-/// Decomposes an assignment target expression.  `kind` is 0 (whole-value
-/// assign of `binding`), 1 (field write through a `&mut` reference;
-/// `binding` is the reference variable, `owner` the referent's local
-/// value binding when statically a single one, else NONE), or 2 (field
-/// assign on a non-reference base; `binding` is the root local and
-/// `path` its sub-node).
 fn assign_target_of(f: &mut F, b: &mut B, ctx: &mut Ctx, target: i64) -> (i64, i64, i64, i64) {
     if node_tag(ctx.1, target) != NODE_EXPR {
         return (NONE, NONE, 0, NONE);
@@ -1527,20 +1138,12 @@ fn assign_target_of(f: &mut F, b: &mut B, ctx: &mut Ctx, target: i64) -> (i64, i
             }
             return field_assign_target(f, ctx, binding, segs);
         }
-        // An ephemeral base (`(try &mut arr[i]).field`): its borrow
-        // effects are recorded in exclusive mode and the write has no
-        // statically-known referent to track linearly.
         expr_effects(f, b, ctx, base, MODE_MUT, NONE, &mut Vec::new());
         return (NONE, NONE, 1, NONE);
     }
     (NONE, NONE, 0, NONE)
 }
 
-/// The target form of a field chain rooted at `binding` (the chain
-/// excludes the first segment).  When the root is a `&mut` reference the
-/// write goes through it: the conflict checks key on the reference
-/// binding, and the linear rule keys on the referent's sub-node when the
-/// referent is statically a single local value binding.
 fn field_assign_target(f: &mut F, ctx: &mut Ctx, binding: i64, segs: i64) -> (i64, i64, i64, i64) {
     let row = binding_at(f, binding);
     let bkind = ty_kind_of(ctx.1, row.1);
@@ -1584,11 +1187,6 @@ fn field_assign_target(f: &mut F, ctx: &mut Ctx, binding: i64, segs: i64) -> (i6
     (binding, cur_path, 2, NONE)
 }
 
-/// The local value binding a reference binding's origin ultimately
-/// borrows, when that is statically a single local value (NONE when the
-/// referent is caller-owned or ambiguous).  Read from the op that set
-/// the reference's origin, following reborrow chains; the origin loans
-/// are facts already on the op table.
 fn referent_binding_of(f: &F, binding: i64) -> i64 {
     let mut owner = NONE;
     let mut ok = true;
@@ -1601,10 +1199,6 @@ fn referent_binding_of(f: &F, binding: i64) -> i64 {
     }
 }
 
-/// Collects the local value bindings a reference binding's origin
-/// ultimately borrows into `owner` (NONE until the first is found).
-/// `ok` turns false when the origin touches a caller-owned referent (a
-/// reference parameter) or more than one local value.
 fn origin_owners_of(f: &F, binding: i64, owner: &mut i64, ok: &mut bool, visited: &mut Vec<i64>) {
     if !*ok || list_has(visited, binding) {
         return;
@@ -1633,8 +1227,6 @@ fn origin_owners_of(f: &F, binding: i64, owner: &mut i64, ok: &mut bool, visited
                     let orow = binding_at(f, o);
                     if orow.3 == 1 {
                         if orow.4 == 1 {
-                            // A reference parameter: its referent is
-                            // caller-owned, not a local here.
                             *ok = false;
                         } else {
                             origin_owners_of(f, o, owner, ok, visited);
@@ -1653,8 +1245,6 @@ fn origin_owners_of(f: &F, binding: i64, owner: &mut i64, ok: &mut bool, visited
     }
 }
 
-/// The diagnostic name of an assignment target: `binding.field` for a
-/// sub-node (walking the trie upward), or the bare binding name.
 fn dotted_name_of(f: &F, ctx: &mut Ctx, binding: i64, path: i64) -> String {
     let base = name_text(ctx.0, binding_at(f, binding).0);
     if path == NONE || is_root_path(f, path) {
@@ -1678,8 +1268,6 @@ fn dotted_name_of(f: &F, ctx: &mut Ctx, binding: i64, path: i64) -> String {
     text
 }
 
-/// True when every directly-tracked child of `parent` is live (Moved or
-/// Partial children block their parent's restoration).
 fn all_children_live(f: &F, state: &[i64], parent: i64) -> bool {
     let mut idx = 0usize;
     while idx < f.2.len() {
@@ -1694,10 +1282,6 @@ fn all_children_live(f: &F, state: &[i64], parent: i64) -> bool {
     true
 }
 
-/// Effects of unary expressions.  `&x` and `&mut x` put the operand in
-/// borrow position; the operand's loans flow into `prod`.  The unary
-/// operator decides the operand's mode (a `&` borrows, negation reads),
-/// so the mode of the unary expression itself is never consulted.
 fn unary_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: &mut Vec<i64>) -> i64 {
     let op = node_b(ctx.1, expr);
     let operand = node_c(ctx.1, expr);
@@ -1710,9 +1294,6 @@ fn unary_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod:
     expr_effects(f, b, ctx, operand, MODE_VALUE, ret, prod)
 }
 
-/// Effects of binary expressions: both operands are value positions.
-/// The result's loans are the operands' loans (empty for the arithmetic
-/// and logical operators the typechecker admits here).
 fn binary_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: &mut Vec<i64>) -> i64 {
     let lhs = node_c(ctx.1, expr);
     let rhs = node_d(ctx.1, expr);
@@ -1720,10 +1301,6 @@ fn binary_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod
     expr_effects(f, b, ctx, rhs, MODE_VALUE, ret, prod)
 }
 
-/// The trait method declaration behind a call, or NONE.  A deferred trait
-/// call (generic receiver) carries no concrete instance row; its argument
-/// shapes come from the trait method's declared signature, the same
-/// source fact the typechecker's deferred path canonicalized.
 fn trait_method_of(ctx: &mut Ctx, expr: i64) -> i64 {
     let trow = find_trait_call(ctx.1, expr);
     if trow == NONE {
@@ -1751,9 +1328,6 @@ fn trait_method_of(ctx: &mut Ctx, expr: i64) -> i64 {
     NONE
 }
 
-/// The consumption mode of a declared parameter, read from its declared
-/// type node: `&T` and `&mut T` are borrow positions, everything else is
-/// a value position.
 fn param_mode_of(nodes: &[i64], ty_node: i64) -> i64 {
     if node_tag(nodes, ty_node) != NODE_TY {
         return MODE_VALUE;
@@ -1768,8 +1342,6 @@ fn param_mode_of(nodes: &[i64], ty_node: i64) -> i64 {
     }
 }
 
-/// Whether a declared return type is a reference (shared, exclusive, or a
-/// slice), read from the return type node.
 fn ret_is_ref_node(nodes: &[i64], ty_node: i64) -> i64 {
     if node_tag(nodes, ty_node) != NODE_TY {
         return 0;
@@ -1782,22 +1354,6 @@ fn ret_is_ref_node(nodes: &[i64], ty_node: i64) -> i64 {
     }
 }
 
-/// Effects of a call.  Reference parameters borrow their arguments
-/// (temporary loans, or reborrows when the argument is a reference
-/// variable); by-value parameters consume theirs (a linear argument is
-/// moved).  Only a call returning a reference forwards the union of its
-/// reference arguments' loans into `prod`; a non-reference-returning call
-/// clears it (its borrows are temporary and die at the statement).  A
-/// deferred trait call (no concrete instance) is classified from the
-/// trait method's declared signature.
-/// Seeds `prod` with the productions of the arguments whose parameter
-/// positions the callee's returned borrow can trace to (its callee-origin
-/// summary).  A callee without a summary — a signature-only or native
-/// declaration, one whose returned-borrow trace could not be resolved, or
-/// a `None` key (the deferred trait path, whose default-body summary
-/// cannot cover impl overrides) — falls back to the conservative union of
-/// every argument's production: sound, and as precise as the available
-/// facts allow.
 fn call_origin_of(ctx: &mut Ctx, summary_key: Option<i64>, arg_prods: &[Vec<i64>], prod: &mut Vec<i64>) {
     let positions = match summary_key {
         Some(fn_node) => summary_of(ctx.4, fn_node),
@@ -1854,13 +1410,6 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
             let arg = list_get(ctx.2, args, idx);
             let pty = node_b(ctx.1, list_get(ctx.2, params, idx));
             let mode = param_mode_of(ctx.1, pty);
-            // Each argument borrows into its own fresh production so no
-            // argument's `borrow_binding` clear can wipe an earlier
-            // argument's loans.  When the call returns a reference, only
-            // the summarized parameters' productions seed the returned
-            // borrow's origin (see `call_origin_of`); the productions are
-            // buffered so the selection happens after every argument has
-            // been evaluated.
             let mut arg_prod: Vec<i64> = Vec::new();
             expr_effects(f, b, ctx, arg, mode, ret, &mut arg_prod);
             arg_prods.push(arg_prod);
@@ -1869,11 +1418,6 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
         if ret_is_ref_node(ctx.1, node_d(ctx.1, method)) == 0 {
             prod.clear();
         } else {
-            // The deferred trait path is deliberately conservative (`None`
-            // key): the trait declaration's default-body summary cannot
-            // cover an impl override whose returned borrow traces to a
-            // different parameter, so the returned borrow's origin is the
-            // union of every argument's production.
             call_origin_of(ctx, None, &arg_prods, prod);
         }
         return cur(b);
@@ -1892,12 +1436,6 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
         } else {
             MODE_VALUE
         };
-        // Each argument borrows into its own fresh production so no
-        // argument's `borrow_binding` clear can wipe an earlier
-        // argument's loans.  When the call returns a reference, only the
-        // summarized parameters' productions seed the returned borrow's
-        // origin (see `call_origin_of`); the productions are buffered so
-        // the selection happens after every argument has been evaluated.
         let mut arg_prod: Vec<i64> = Vec::new();
         expr_effects(f, b, ctx, arg, mode, ret, &mut arg_prod);
         arg_prods.push(arg_prod);
@@ -1905,9 +1443,6 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
     }
     let ret_key = inst_ret_of(ctx.1, inst);
     if is_ref_key(ctx.1, ret_key) {
-        // Slot a of the instance row is the callee's function node (the
-        // declaration for user functions, the symbol for natives, which
-        // has no summary and falls back to the conservative union).
         call_origin_of(ctx, Some(inst_fn_of(ctx.1, inst)), &arg_prods, prod);
     } else {
         prod.clear();
@@ -1915,9 +1450,6 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
     cur(b)
 }
 
-/// Effects of a struct or variant literal: each field value is a value
-/// position (a linear field's value is moved; the attached expression
-/// types decide).  The field values' loans flow into `prod`.
 fn struct_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: &mut Vec<i64>) -> i64 {
     let values = node_d(ctx.1, expr);
     let count = list_len(ctx.2, values);
@@ -1929,8 +1461,6 @@ fn struct_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod
     cur(b)
 }
 
-/// Effects of an array literal: elements are value positions; their
-/// loans flow into `prod`.
 fn array_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: &mut Vec<i64>) -> i64 {
     let elems = node_b(ctx.1, expr);
     let count = list_len(ctx.2, elems);
@@ -1942,8 +1472,6 @@ fn array_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod:
     cur(b)
 }
 
-/// The root binding of a path expression, or NONE when the path does not
-/// name a local (a declaration reference or a multi-segment type path).
 fn path_root_binding_of(ctx: &mut Ctx, b: &B, expr: i64) -> i64 {
     if node_tag(ctx.1, expr) != NODE_EXPR || node_a(ctx.1, expr) != EXPR_PATH {
         return NONE;
@@ -1953,20 +1481,12 @@ fn path_root_binding_of(ctx: &mut Ctx, b: &B, expr: i64) -> i64 {
     lookup_name(b, first)
 }
 
-/// Wraps a single statement in a fresh one-element statement list.  The
-/// parser stores each match arm body as one statement (not a list), and
-/// `build_list` operates on statement lists, so an arm body must be
-/// wrapped before building.
 fn wrap_stmt_list(lists: &mut Vec<Vec<i64>>, stmt: i64) -> i64 {
     let list = alloc_list(lists);
     list_push(lists, list, stmt);
     list
 }
 
-/// Effects of a match.  The scrutinee is a value position (a linear
-/// scrutinee is moved into the match); each arm's pattern binds names
-/// scoped to the arm, and the arm body is a sub-CFG merging at a join.
-/// The match's production is the union of the arms' productions.
 fn match_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: &mut Vec<i64>) -> i64 {
     let scrutinee = node_b(ctx.1, expr);
     let arms = node_c(ctx.1, expr);
@@ -1984,9 +1504,6 @@ fn match_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod:
         let arm_entry = new_block(f, b, BLK_STMT, arm, span);
         let scrut = (&scrut_prod[..], scrut_root);
         pattern_effects(f, b, ctx, pat, scrut);
-        // The parser stores each arm body as a single statement, not a
-        // statement list; wrap it before building so the arm's effects
-        // (moves, borrows, returns) are actually checked.
         let body = wrap_stmt_list(ctx.2, body_stmt);
         let body_entry = build_list(f, b, ctx, body, join, ret, prod);
         add_edge(f, arm_entry, body_entry);
@@ -1997,10 +1514,6 @@ fn match_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod:
     join
 }
 
-/// Binds the names a pattern introduces, scoped to the current build
-/// position.  `scrut` carries the scrutinee's origin loans and root
-/// binding: reference-typed binders (rest patterns) inherit the
-/// scrutinee's loans, or borrow the scrutinee itself when it is a value.
 fn pattern_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, pat: i64, scrut: (&[i64], i64)) {
     if node_tag(ctx.1, pat) != NODE_PAT {
         return;
@@ -2054,8 +1567,6 @@ fn bind_pattern_name(f: &mut F, b: &mut B, ctx: &mut Ctx, name: i64, key: i64, s
             idx += 1;
         }
         if loans.is_empty() && scrut.1 != NONE {
-            // A rest binder over a value scrutinee borrows the scrutinee
-            // itself.
             let loan = alloc_loan(f, scrut.1, L_SHARED, 0, NONE);
             loans.push(loan);
         }
@@ -2063,8 +1574,6 @@ fn bind_pattern_name(f: &mut F, b: &mut B, ctx: &mut Ctx, name: i64, key: i64, s
     }
 }
 
-/// Effects of a `try`: the operand is consumed, and the error path is a
-/// scope-diverging exit of the enclosing function.
 fn try_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: &mut Vec<i64>) -> i64 {
     let inner = node_b(ctx.1, expr);
     let span = expr_span(ctx.1, expr);
@@ -2073,18 +1582,6 @@ fn try_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: &
     cont
 }
 
-// ---------------------------------------------------------------------------
-// Entry: walk every function in the program (entry file plus every
-// external module) and check it.
-// ---------------------------------------------------------------------------
-
-/// The pipeline entry point.  Returns true when no borrow or consumption
-/// diagnostic was produced.
-/// Collects every function node reachable from an item list (free
-/// functions, native declarations, impl methods, trait method bodies) in
-/// declaration order, descending into modules.  The summary fixpoint
-/// visits every body before any call site reads a summary, so a function
-/// defined after its caller is still summarized.
 fn collect_fn_nodes(nodes: &[i64], lists: &[Vec<i64>], list: i64, out: &mut Vec<i64>) {
     let count = list_len(lists, list);
     let mut idx = 0i64;
@@ -2106,9 +1603,6 @@ fn collect_fn_nodes(nodes: &[i64], lists: &[Vec<i64>], list: i64, out: &mut Vec<
     }
 }
 
-/// The fn-node variant of `collect_fn_nodes` for method lists (impl and
-/// trait method lists hold NODE_FN rows directly, matching the walk in
-/// `check_fn_list`).
 fn collect_fn_list_nodes(nodes: &[i64], lists: &[Vec<i64>], list: i64, out: &mut Vec<i64>) {
     let count = list_len(lists, list);
     let mut idx = 0i64;
@@ -2121,8 +1615,6 @@ fn collect_fn_list_nodes(nodes: &[i64], lists: &[Vec<i64>], list: i64, out: &mut
     }
 }
 
-/// The largest parameter count across the given function nodes (0 when
-/// there are none); it sizes the summary-fixpoint iteration cap.
 fn max_fn_params(nodes: &[i64], lists: &[Vec<i64>], fns: &[i64]) -> i64 {
     let mut max = 0i64;
     let mut idx = 0usize;
@@ -2151,19 +1643,6 @@ pub fn borrow_check(
 ) -> bool {
     let before = errors.len();
 
-    // Phase 1: callee-origin summaries, refined to a fixpoint.
-    //
-    // Every function that returns a reference records which input
-    // parameter positions its returned borrow can trace to.  Callers read
-    // that summary instead of conservatively unioning every reference
-    // argument, so freeing an argument the callee provably never borrows
-    // is legal (bug-report d7d).  A function starts with no summary,
-    // which callers treat as the conservative top (every reference
-    // parameter), and each round refines it to the traced subset, so the
-    // table is monotone-decreasing and converges; the data-derived cap is
-    // a non-convergence compile error, never a silent stop.  Phase-1
-    // builds report into a scratch buffer that is discarded — the
-    // authoritative diagnostics come from the phase-2 walk.
     let mut summaries: Vec<(i64, Vec<i64>)> = Vec::new();
     let mut scratch: Vec<Diag> = Vec::new();
     let mut fns: Vec<i64> = Vec::new();
@@ -2223,8 +1702,6 @@ pub fn borrow_check(
         }
     }
 
-    // Phase 2: the authoritative per-function analysis with the converged
-    // summaries and real diagnostics.
     check_item_list(names, nodes, lists, errors, &mut summaries, root);
     let mut idx = 0usize;
     while idx < ext_mods.len() {
@@ -2237,8 +1714,6 @@ pub fn borrow_check(
     errors.len() == before
 }
 
-/// Walks an item list, descending into modules and checking every
-/// function body (free functions, impl methods, trait method bodies).
 fn check_item_list(
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,
@@ -2283,8 +1758,6 @@ fn check_fn_list(
     }
 }
 
-/// Builds and checks one function body.  Signature-only declarations
-/// (native functions, trait method signatures) have nothing to check.
 fn check_fn(
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,
@@ -2318,18 +1791,12 @@ fn check_fn(
     analyze_fn(&mut f, &mut ctx, entry);
 }
 
-/// Runs the two dataflow analyses to fixpoint and then a single
-/// authoritative reporting walk over the converged facts.
 fn analyze_fn(f: &mut F, ctx: &mut Ctx, entry: i64) {
     let live_after = compute_liveness(f);
     let (entry_state, inconsistencies) = linear_fixpoint(f, ctx, entry);
     let entry_origins = origin_fixpoint(f, ctx, entry);
     report(f, ctx, &live_after, &entry_state, &inconsistencies, &entry_origins);
 }
-
-// ---------------------------------------------------------------------------
-// Set helpers for the dataflow state.
-// ---------------------------------------------------------------------------
 
 fn same_set(a: &[i64], b: &[i64]) -> bool {
     if a.len() != b.len() {
@@ -2383,11 +1850,6 @@ fn append_list_unique(set: &mut Vec<i64>, other: &[i64]) {
     }
 }
 
-/// Appends the entries of `other` to `set`, deduplicating.  Unlike
-/// `append_list_unique`, negative `REF_ORIGIN` markers are preserved: a
-/// returned borrow's production can be a marker (the reborrow of a
-/// reference variable), and dropping it would leave the returned
-/// reference's origin untraceable.
 fn append_prod_unique(set: &mut Vec<i64>, other: &[i64]) {
     let mut idx = 0usize;
     while idx < other.len() {
@@ -2403,8 +1865,6 @@ fn append_prod_unique(set: &mut Vec<i64>, other: &[i64]) {
     }
 }
 
-/// The op range of a block: `(first, last)` inclusive; `last < first` for
-/// an empty block.
 fn block_op_range(f: &F, block: i64) -> (i64, i64) {
     let row = block_at(f, block);
     let first = row.2;
@@ -2415,13 +1875,6 @@ fn block_op_range(f: &F, block: i64) -> (i64, i64) {
     (first, last)
 }
 
-/// The binding an op reads (a liveness use), or NONE.  A write through a
-/// `&mut` reference (an OP_ASSIGN of target kind 1) reads the reference to
-/// locate its referent, so the reference — and the borrow it carries — is
-/// live up to that write.  It is also not killed by it (`op_defs` skips
-/// target-kind-1 assigns), so a reference used only by writing through it
-/// keeps its loan live across later borrows, which is exactly the
-/// aliasing the exclusivity rule must reject.
 fn op_uses(f: &F, op: i64) -> i64 {
     let row = op_at(f, op);
     if row.0 == OP_READ
@@ -2436,9 +1889,6 @@ fn op_uses(f: &F, op: i64) -> i64 {
     }
 }
 
-/// The binding an op writes (a liveness def), or NONE.  A write through a
-/// `&mut` reference does not redefine the reference, so target-kind-1
-/// assigns are uses, not defs.
 fn op_defs(f: &F, op: i64) -> i64 {
     let row = op_at(f, op);
     if row.0 == OP_BIND || (row.0 == OP_ASSIGN && row.4 != 1) {
@@ -2448,9 +1898,6 @@ fn op_defs(f: &F, op: i64) -> i64 {
     }
 }
 
-/// The reference variables reborrowed inside a block.  A reborrow keeps
-/// its reference variable live to the end of the block (the call it
-/// feeds), so a by-value move of the referent in the same call conflicts.
 fn block_reborrows(f: &F, block: i64) -> Vec<i64> {
     let mut out: Vec<i64> = Vec::new();
     let (first, last) = block_op_range(f, block);
@@ -2465,13 +1912,6 @@ fn block_reborrows(f: &F, block: i64) -> Vec<i64> {
     out
 }
 
-// ---------------------------------------------------------------------------
-// Backward liveness: var_live_at facts.
-// ---------------------------------------------------------------------------
-
-/// Computes, for every op, the set of bindings live immediately after it
-/// (the `var_live_at` facts).  A standard backward dataflow over the CFG
-/// with per-block gen/kill, plus the reborrow extension.
 fn compute_liveness(f: &F) -> Vec<Vec<i64>> {
     let nblocks = f.6.len() as i64;
     let mut live_in: Vec<Vec<i64>> = Vec::new();
@@ -2572,10 +2012,6 @@ fn compute_liveness(f: &F) -> Vec<Vec<i64>> {
     live_after
 }
 
-// ---------------------------------------------------------------------------
-// Analysis 1: linear-handle consumption.
-// ---------------------------------------------------------------------------
-
 fn unbound_state(npaths: i64) -> Vec<i64> {
     let mut out: Vec<i64> = Vec::new();
     let mut idx = 0i64;
@@ -2624,10 +2060,6 @@ fn inc_has(inc: &[(i64, i64)], block: i64, path: i64) -> bool {
     false
 }
 
-/// Joins one predecessor's exit state into the running entry state.  The
-/// lattice is Unbound < Live < Moved with Partial absorbing; a Live/Moved
-/// disagreement is recorded as an inconsistency (reported once) and the
-/// join continues as Moved so downstream paths do not cascade.
 fn join_linear(inn: &mut [i64], pout: &[i64], block: i64, inc: &mut Vec<(i64, i64)>) {
     let mut idx = 0usize;
     while idx < inn.len() {
@@ -2651,7 +2083,6 @@ fn join_linear(inn: &mut [i64], pout: &[i64], block: i64, inc: &mut Vec<(i64, i6
     }
 }
 
-/// Whether `path` is a descendant (transitively) of `ancestor`.
 fn path_descends(f: &F, path: i64, ancestor: i64) -> bool {
     let mut cur = path_at(f, path).0;
     while cur != NONE {
@@ -2663,8 +2094,6 @@ fn path_descends(f: &F, path: i64, ancestor: i64) -> bool {
     false
 }
 
-/// Marks every descendant of `path` with `value` (a root move moves every
-/// field; a root re-initialization relives every field).
 fn mark_descendants(f: &F, state: &mut [i64], path: i64, value: i64) {
     let mut idx = 0usize;
     while idx < f.2.len() {
@@ -2675,9 +2104,6 @@ fn mark_descendants(f: &F, state: &mut [i64], path: i64, value: i64) {
     }
 }
 
-/// Applies a move of `path` on `binding`.  Moves a whole value (root) or
-/// a single field sub-node; a moved root moves every descendant, and a
-/// moved child marks its ancestors partial.
 fn apply_move(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool, ctx: &mut Ctx, span: (i64, i64, i64)) {
     if path < 0 {
         return;
@@ -2711,13 +2137,6 @@ fn apply_move(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool, c
     }
 }
 
-/// Applies an assignment to `binding` (the whole value when `path` is
-/// NONE, a field sub-node otherwise).  Reassigning an effectively-Live
-/// linear value is an error; assigning to a Moved value re-initializes
-/// it (a whole value relives every descendant; a re-filled field
-/// restores its moved-out ancestors once every tracked child is live
-/// again).  Writing a field of a whole-consumed value is a use of moved
-/// value.
 fn apply_assign(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool, ctx: &mut Ctx, span: (i64, i64, i64)) {
     let root = root_path_of(f, binding);
     if root < 0 {
@@ -2725,7 +2144,6 @@ fn apply_assign(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool,
     }
     let target = if path == NONE { root } else { path };
     let name = dotted_name_of(f, ctx, binding, path);
-    // A sub-node not separately tracked yet inherits its root's state.
     let st = state_at(state, target);
     let eff = if st == ST_UNBOUND && !is_root_path(f, target) {
         state_at(state, root)
@@ -2743,8 +2161,6 @@ fn apply_assign(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool,
         return;
     }
     if !is_root_path(f, target) && state_at(state, root) == ST_MOVED {
-        // The whole value was consumed; writing one of its fields is a
-        // use of moved value.
         if report {
             push_error(ctx.3, &format!("use of moved value '{}'", name), span.0, span.1, span.2);
         }
@@ -2753,7 +2169,6 @@ fn apply_assign(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool,
     state_set(state, target, ST_LIVE);
     mark_descendants(f, state, target, ST_LIVE);
     if !is_root_path(f, target) {
-        // Restore moved-out ancestors once every tracked child is live.
         let mut p = path_at(f, target).0;
         while p != NONE {
             if state_at(state, p) != ST_PARTIAL {
@@ -2769,9 +2184,6 @@ fn apply_assign(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool,
     }
 }
 
-/// Applies every op of a block to a linear state.  `report` selects the
-/// silent fixpoint pass or the authoritative reporting pass; the state
-/// transformation is identical either way.
 fn apply_block_linear(f: &F, block: i64, state: &mut [i64], report: bool, ctx: &mut Ctx) {
     let (first, last) = block_op_range(f, block);
     let mut op = first;
@@ -2788,9 +2200,6 @@ fn apply_block_linear(f: &F, block: i64, state: &mut [i64], report: bool, ctx: &
         } else if kind == OP_ASSIGN {
             let tkind = row.4;
             if tkind == 1 && row.5 >= 0 && root_path_of(f, row.5) != NONE {
-                // A field write through a reference: the linear rule
-                // applies to the referent's sub-node (a local owner, or a
-                // `&mut` parameter's tracked referent).
                 apply_assign(f, state, row.5, row.2, report, ctx, (row.6, row.7, row.8));
             } else if tkind != 1 && binding >= 0 && root_path_of(f, binding) != NONE {
                 let path = if tkind == 2 { row.2 } else { NONE };
@@ -2801,8 +2210,6 @@ fn apply_block_linear(f: &F, block: i64, state: &mut [i64], report: bool, ctx: &
     }
 }
 
-/// The linear-consumption fixpoint.  Returns the converged per-block
-/// entry states and the join-inconsistency list `(block, path)`.
 fn linear_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> (Vec<Vec<i64>>, Vec<(i64, i64)>) {
     let nblocks = f.6.len() as i64;
     let npaths = f.2.len() as i64;
@@ -2815,10 +2222,6 @@ fn linear_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> (Vec<Vec<i64>>, Vec<(i64
         blk += 1;
     }
     let mut inconsistencies: Vec<(i64, i64)> = Vec::new();
-    // Four lattice states per path, so each (block, path) entry and exit
-    // can change at most three times; the cap is derived from the data.
-    // Hitting it with changes still pending is a non-convergence compile
-    // error, never silent acceptance of un-converged facts.
     let cap = nblocks * npaths * 8 + 1;
     let mut guard = 0usize;
     loop {
@@ -2865,10 +2268,6 @@ fn linear_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> (Vec<Vec<i64>>, Vec<(i64
     (entry_state, inconsistencies)
 }
 
-// ---------------------------------------------------------------------------
-// Analysis 2: borrow origins (Polonius-style facts).
-// ---------------------------------------------------------------------------
-
 fn empty_origins(nbind: i64) -> Vec<Vec<i64>> {
     let mut out: Vec<Vec<i64>> = Vec::new();
     let mut idx = 0i64;
@@ -2879,8 +2278,6 @@ fn empty_origins(nbind: i64) -> Vec<Vec<i64>> {
     out
 }
 
-/// Whether a block's ops (a bind or assign of a reference binding) change
-/// any origin set, recording the result into `origins`.
 fn apply_block_origins(f: &F, block: i64, origins: &mut [Vec<i64>]) {
     let (first, last) = block_op_range(f, block);
     let mut op = first;
@@ -2906,9 +2303,6 @@ fn apply_block_origins(f: &F, block: i64, origins: &mut [Vec<i64>]) {
     }
 }
 
-/// The origin fixpoint.  A reference binding's origin is set exactly once
-/// (at its bind or re-assign), so the union join converges quickly; the
-/// result is the per-block entry origin set for every binding.
 fn origin_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> Vec<Vec<Vec<i64>>> {
     let nblocks = f.6.len() as i64;
     let nbind = f.0.len() as i64;
@@ -2921,12 +2315,6 @@ fn origin_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> Vec<Vec<Vec<i64>>> {
         exit_origins.push(empty_origins(nbind));
         blk += 1;
     }
-    // Each binding's origin set can gain at most `nloans` elements, and
-    // a block's exit origin is either its entry (bindings it never
-    // re-points) or a fixed constant (re-pointed bindings), so only the
-    // entry unions grow; the cap is derived from the data.  Hitting it
-    // with changes still pending is a non-convergence compile error,
-    // never silent acceptance of un-converged facts.
     let cap = nblocks * nbind * (nloans + 1) + 1;
     let mut guard = 0usize;
     loop {
@@ -2949,12 +2337,6 @@ fn origin_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> Vec<Vec<Vec<i64>>> {
                                 let mut bi = 0usize;
                                 while bi < nbind as usize {
                                     if let (Some(dst), Some(src)) = (inn.get_mut(bi), list.get(bi)) {
-                                        // Origin sets legitimately contain negative `REF_ORIGIN`
-                                        // markers (a binding whose origin is another reference's
-                                        // origin); the marker-preserving append keeps them, so the
-                                        // fixpoint's facts match what the op table records and the
-                                        // report walk never has to re-derive an origin from the op
-                                        // table.
                                         append_prod_unique(dst, src);
                                     }
                                     bi += 1;
@@ -2997,11 +2379,6 @@ fn origin_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> Vec<Vec<Vec<i64>>> {
     entry_origins
 }
 
-// ---------------------------------------------------------------------------
-// Enforcement: the authoritative reporting walk over converged facts.
-// ---------------------------------------------------------------------------
-
-/// The text describing the scope-diverging exit an OP_EXIT checks.
 fn exit_where(kind: i64) -> &'static str {
     if kind == EX_BREAK {
         "before this break"
@@ -3012,10 +2389,6 @@ fn exit_where(kind: i64) -> &'static str {
     }
 }
 
-/// The first materialized linear sub-node of `root` that is not fully
-/// consumed (not Moved), or NONE when every linear sub-node was consumed.
-/// A partially moved parent's resources are its children, so only a
-/// still-live child (or a child that is itself partial) blocks the exit.
 fn first_live_subnode(f: &F, state: &[i64], root: i64) -> i64 {
     let mut idx = 0usize;
     while idx < f.2.len() {
@@ -3031,14 +2404,6 @@ fn first_live_subnode(f: &F, state: &[i64], root: i64) -> i64 {
     NONE
 }
 
-/// The first materialized linear sub-node of `root` that was consumed
-/// (Moved or Partial) but not restored, or NONE when every sub-node is
-/// still Live (or was never touched).  Used for `&mut` parameter
-/// referents, which must be left exactly as the caller handed them over.
-/// `ST_UNBOUND` is deliberately ignored: a reachable block's sub-nodes are
-/// Live from their OP_BIND onward, while the fall-off-end exit of a
-/// function that ends in `return` has no predecessors and is seeded
-/// all-Unbound -- the dead exit must not report a phantom consume.
 fn first_not_live_subnode(f: &F, state: &[i64], root: i64) -> i64 {
     let mut idx = 0usize;
     while idx < f.2.len() {
@@ -3054,9 +2419,6 @@ fn first_not_live_subnode(f: &F, state: &[i64], root: i64) -> i64 {
     NONE
 }
 
-/// Checks every linear binding the exit requires to be consumed.  The
-/// op's aux slot carries the scope start (the binding index from which
-/// the exit owns every in-scope binding).
 fn exit_check(f: &F, ctx: &mut Ctx, op: i64, state: &[i64]) {
     let row = op_at(f, op);
     let mut scope_start = row.3;
@@ -3074,11 +2436,6 @@ fn exit_check(f: &F, ctx: &mut Ctx, op: i64, state: &[i64]) {
             if st == ST_LIVE {
                 push_error(ctx.3, &format!("linear value '{}' must be consumed {}", name, exit_where(kind)), row.6, row.7, row.8);
             } else if st == ST_PARTIAL {
-                // A partially moved parent can be left behind exactly when
-                // every linear sub-node was consumed: the parent's linear
-                // resources are its children, and a consumed child is what
-                // makes the parent partial.  A still-live sub-node means an
-                // unconsumed handle remains inside the parent.
                 let live = first_live_subnode(f, state, root);
                 if live != NONE {
                     let field_name = dotted_name_of(f, ctx, bidx, live);
@@ -3086,11 +2443,6 @@ fn exit_check(f: &F, ctx: &mut Ctx, op: i64, state: &[i64]) {
                 }
             }
         } else if root >= 0 && ty_kind_of(ctx.1, brow.1) == TYD_REF_MUT {
-            // A `&mut` parameter's linear referent is borrowed from the
-            // caller: the callee must leave every tracked field exactly
-            // as it found it (Live).  A consumed (Moved or Partial)
-            // sub-node means a handle was taken without being restored,
-            // which would leave the caller's bookkeeping dangling.
             let not_live = first_not_live_subnode(f, state, root);
             if not_live != NONE {
                 let field_name = dotted_name_of(f, ctx, bidx, not_live);
@@ -3101,16 +2453,6 @@ fn exit_check(f: &F, ctx: &mut Ctx, op: i64, state: &[i64]) {
     }
 }
 
-/// Appends the direct loan ids reachable from a reference binding's
-/// origin, resolving REF_ORIGIN markers (a reference produced by a match
-/// arm or a ref-returning call re-produces another reference's origin as
-/// a marker).  The primary source is the per-block origin table, which is
-/// exact where the binding is in scope; when that entry is empty — an
-/// arm-scoped pattern binding is not in scope past its arm — the
-/// binding's own bind/re-point op loans are used, a build-time fact that
-/// is block-independent.  The walk mirrors the returned-borrow trace so
-/// the two can never drift apart; conflicts compare the resolved loans'
-/// owners and element keys.
 fn collect_origin_loans(f: &F, origins: &[Vec<i64>], binding: i64, out: &mut Vec<i64>, visited: &mut Vec<i64>, current_op: i64) {
     if binding < 0 || list_has(visited, binding) {
         return;
@@ -3128,11 +2470,6 @@ fn collect_origin_loans(f: &F, origins: &[Vec<i64>], binding: i64, out: &mut Vec
         }
     }
     if fixed.is_empty() {
-        // The fixpoint normally carries every origin; this fallback only
-        // fires when a binding's origin was never established on a path to
-        // this point and reconstructs it from the op table.  The scan is
-        // bounded by the current op so a reference rebound LATER in the
-        // function cannot leak its later origin into an earlier point.
         let mut op = if current_op >= 0 && current_op < f.4.len() as i64 {
             current_op
         } else {
@@ -3171,9 +2508,6 @@ fn collect_origin_loans(f: &F, origins: &[Vec<i64>], binding: i64, out: &mut Vec
     }
 }
 
-/// Emits a borrow-conflict diagnostic: a write, move, or new exclusive
-/// borrow of `binding` while a conflicting loan on it is still contained
-/// in a live reference's origin.
 fn conflicts_at(f: &F, ctx: &mut Ctx, op: i64, origins: &[Vec<i64>], live_after: &[Vec<i64>]) {
     let row = op_at(f, op);
     let kind = row.0;
@@ -3185,12 +2519,8 @@ fn conflicts_at(f: &F, ctx: &mut Ctx, op: i64, origins: &[Vec<i64>], live_after:
         return;
     }
     if kind == OP_ASSIGN && row.3 == 1 && row.4 == 0 {
-        // Re-pointing a reference variable overwrites its own origin; it
-        // is not a write through the borrow.
         return;
     }
-    // The new borrow's element key (NONE for the whole-value ops — a move
-    // or write of the whole binding overlaps every element loan).
     let new_key = if kind == OP_BORROW || kind == OP_BORROW_M { row.5 } else { NONE };
     let live = match live_after.get(op as usize) {
         Some(list) => list,
@@ -3203,19 +2533,11 @@ fn conflicts_at(f: &F, ctx: &mut Ctx, op: i64, origins: &[Vec<i64>], live_after:
             Some(v) => *v,
             None => break,
         };
-        // A reference reborrowed through itself (a `&mut` binding passed
-        // to a `&mut` parameter) derives from its own standing loan; that
-        // loan is the reborrow's source, not a conflicting borrow.  Only
-        // loans held by *other* live references can conflict.
         if r == binding {
             li += 1;
             continue;
         }
         if binding_at(f, r).3 == 1 {
-            // A live reference's origin may hold direct loans or
-            // REF_ORIGIN markers; resolve the markers through the origin
-            // table so every loan the reference actually borrows is
-            // compared.
             let mut loans: Vec<i64> = Vec::new();
             let mut visited: Vec<i64> = Vec::new();
             collect_origin_loans(f, origins, r, &mut loans, &mut visited, op);
@@ -3252,10 +2574,6 @@ fn conflicts_at(f: &F, ctx: &mut Ctx, op: i64, origins: &[Vec<i64>], live_after:
     }
 }
 
-/// Traces an origin-loan list at a point to the set of input reference
-/// parameters it ultimately derives from, marking `local` when any part
-/// of the origin is a local value (or a non-parameter slot).  `visited`
-/// guards reborrow chains against cycles.
 fn trace_origin(f: &F, origins: &[Vec<i64>], loans: &[i64], sources: &mut Vec<i64>, local: &mut bool, visited: &mut Vec<i64>) {
     let mut idx = 0usize;
     while idx < loans.len() {
@@ -3285,8 +2603,6 @@ fn trace_origin(f: &F, origins: &[Vec<i64>], loans: &[i64], sources: &mut Vec<i6
             } else {
                 let orow = binding_at(f, owner);
                 if orow.3 == 1 && orow.4 == 1 {
-                    // A borrow through a reference parameter: the memory
-                    // behind the parameter outlives the function.
                     append_unique(sources, owner);
                 } else {
                     *local = true;
@@ -3297,7 +2613,6 @@ fn trace_origin(f: &F, origins: &[Vec<i64>], loans: &[i64], sources: &mut Vec<i6
     }
 }
 
-/// The comma-joined names of the given binding ids.
 fn binding_names(ctx: &mut Ctx, f: &F, ids: &[i64]) -> String {
     let mut names: Vec<String> = Vec::new();
     let mut idx = 0usize;
@@ -3311,14 +2626,6 @@ fn binding_names(ctx: &mut Ctx, f: &F, ids: &[i64]) -> String {
     names.join(", ")
 }
 
-/// The returned-borrow rule: the returned reference's origin must trace
-/// to exactly one input reference parameter.  A local in the origin, an
-/// empty origin, or more than one parameter within a single return is
-/// reported here.  When the return passes, its parameter sources are
-/// returned so the caller can union them across every return of the
-/// function and reject a function whose returned borrow derives from
-/// more than one input parameter overall (the ambiguity rule).  None
-/// means an error was already reported for this return.
 fn ret_ref_check(f: &F, ctx: &mut Ctx, op: i64, origins: &[Vec<i64>]) -> Option<Vec<i64>> {
     let prod = op_loans_at(f, op);
     let mut sources: Vec<i64> = Vec::new();
@@ -3348,11 +2655,6 @@ fn ret_ref_check(f: &F, ctx: &mut Ctx, op: i64, origins: &[Vec<i64>]) -> Option<
     Some(sources)
 }
 
-/// Re-points `origins[binding]` from the op's loan list when the op binds
-/// or re-assigns a reference variable, so a returned borrow flowing
-/// through a (re)bound reference traces against the updated origin.  This
-/// is the single implementation of that write, shared by the authoritative
-/// report walk and the summary trace so the two can never drift apart.
 fn repoint_origin(f: &F, row: (i64, i64, i64, i64, i64, i64, i64, i64, i64), op: i64, origins: &mut [Vec<i64>]) {
     let kind = row.0;
     let binding = row.1;
@@ -3374,12 +2676,6 @@ fn repoint_origin(f: &F, row: (i64, i64, i64, i64, i64, i64, i64, i64, i64), op:
     }
 }
 
-/// The callee-origin summary of a built function: the union of the traced
-/// parameter sources across every OP_RET_REF op, mirroring the
-/// function-level union in `report`.  Returns None when any return path is
-/// unresolved (a local origin or an empty origin): the caller keeps the
-/// conservative top summary, and the phase-2 walk reports the real error
-/// at the return site.
 fn compute_summary(f: &F, ctx: &mut Ctx, entry: i64) -> Option<Vec<i64>> {
     let entry_origins = origin_fixpoint(f, ctx, entry);
     let mut sources: Vec<i64> = Vec::new();
@@ -3387,10 +2683,6 @@ fn compute_summary(f: &F, ctx: &mut Ctx, entry: i64) -> Option<Vec<i64>> {
     let nblocks = f.6.len() as i64;
     let mut blk = 0i64;
     while blk < nblocks {
-        // Mirror `report`'s walk: clone the block's entry origins and
-        // re-point reference bindings as ops are applied, so a returned
-        // borrow that flows through an in-block (re)bound reference
-        // variable traces identically to the diagnostic walk.
         let mut origins = match entry_origins.get(blk as usize) {
             Some(list) => list.clone(),
             None => Vec::new(),
@@ -3417,13 +2709,6 @@ fn compute_summary(f: &F, ctx: &mut Ctx, entry: i64) -> Option<Vec<i64>> {
     }
 }
 
-/// Inserts or refines the callee-origin summary of `fn_node`; returns true
-/// when the table changed so the fixpoint iterates again.  A None trace
-/// keeps whatever is recorded (the conservative top on a first sighting):
-/// an unresolved trace must never under-approximate a returned borrow's
-/// origin.  (A recorded summary can never trace to None in a later round —
-/// callee productions only shrink and a reference-parameter source never
-/// becomes a local — so this branch is defensive, not a refinement path.)
 fn refine_summary(table: &mut Vec<(i64, Vec<i64>)>, fn_node: i64, sources: Option<Vec<i64>>) -> bool {
     let sources = match sources {
         Some(sources) => sources,
@@ -3458,9 +2743,6 @@ fn refine_summary(table: &mut Vec<(i64, Vec<i64>)>, fn_node: i64, sources: Optio
     }
 }
 
-/// The recorded callee-origin summary of `fn_node`, or None when there is
-/// none; callers then conservatively treat every reference parameter as a
-/// possible origin.
 fn summary_of(table: &[(i64, Vec<i64>)], fn_node: i64) -> Option<&Vec<i64>> {
     let mut idx = 0usize;
     while idx < table.len() {
@@ -3477,9 +2759,6 @@ fn summary_of(table: &[(i64, Vec<i64>)], fn_node: i64) -> Option<&Vec<i64>> {
     None
 }
 
-/// The authoritative walk: applies every op once with the converged entry
-/// facts, reporting all consumption, conflict, exit, and returned-borrow
-/// diagnostics.
 fn report(
     f: &F,
     ctx: &mut Ctx,
@@ -3516,11 +2795,6 @@ fn report(
         }
         idx += 1;
     }
-    // The returned-borrow ambiguity rule: the union of the input
-    // reference parameters every return of this function derives from must
-    // be a single parameter.  A per-return error (local or empty origin)
-    // already rejects the function, so the union is only checked when no
-    // per-return check failed.
     let mut fn_ret_sources: Vec<i64> = Vec::new();
     let mut fn_ret_errored = false;
     let nblocks = f.6.len() as i64;
@@ -3550,8 +2824,6 @@ fn report(
                 apply_move(f, &mut state, binding, row.2, true, ctx, (row.6, row.7, row.8));
             } else if kind == OP_ASSIGN {
                 if row.3 == 1 && row.4 == 0 && binding >= 0 {
-                    // Re-pointing a reference variable: its origin is the
-                    // value's origin.
                     repoint_origin(f, row, op, &mut origins);
                 } else {
                     conflicts_at(f, ctx, op, &origins, live_after);
