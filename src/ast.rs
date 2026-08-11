@@ -1,5 +1,23 @@
 pub type Diag = (String, i64, i64, i64);
 
+// A secondary explanatory note attached to a primary diagnostic:
+// (index of the diagnostic in the errors vec at attach time, message,
+// file, start, end).  Notes carry real source spans of facts the checker
+// already computed (a binding site, a path's last move, a branch exit) —
+// never fabricated locations.  Rendering is the consumer's choice: the CLI
+// shows them as secondary labels under --explain-borrow, the language
+// server as related information.
+pub type Note = (i64, String, i64, i64, i64);
+
+// Attach a note to the most recently pushed diagnostic.  A note with no
+// diagnostic to explain is dropped rather than invented.
+pub fn push_note_for_last(errors: &[Diag], notes: &mut Vec<Note>, message: &str, file: i64, start: i64, end: i64) {
+    if errors.is_empty() {
+        return;
+    }
+    notes.push((errors.len() as i64 - 1, message.to_string(), file, start, end));
+}
+
 pub const NONE: i64 = -1;
 pub const NO_FILE: i64 = -1;
 

@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::typecheck::render_type_key;
 
 const ST_UNBOUND: i64 = 0;
 const ST_LIVE: i64 = 1;
@@ -78,6 +79,9 @@ type Ctx<'a> = (
     &'a mut Vec<(i64, Vec<i64>)>,
     i64, // the interned "Err" variant name id of the seeded Result enum
     i64, // the interned "Ok" variant name id of the seeded Result enum
+    // Secondary explanatory notes, each tied to the error it explains by
+    // that error's index in the errors vec at push time.
+    &'a mut Vec<Note>,
 );
 
 fn ref_origin(binding: i64) -> i64 {
@@ -1848,6 +1852,7 @@ pub fn borrow_check(
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
     errors: &mut Vec<Diag>,
+    notes: &mut Vec<Note>,
     root: i64,
     ext_mods: &[(i64, i64)],
 ) -> bool {
@@ -1855,6 +1860,7 @@ pub fn borrow_check(
 
     let mut summaries: Vec<(i64, Vec<i64>)> = Vec::new();
     let mut scratch: Vec<Diag> = Vec::new();
+    let mut scratch_notes: Vec<Note> = Vec::new();
     let mut fns: Vec<i64> = Vec::new();
     collect_fn_nodes(nodes, lists, root, &mut fns);
     let mut m = 0usize;
@@ -1890,7 +1896,7 @@ pub fn borrow_check(
                         let mut b: B = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), NONE, NONE, NONE, NONE, Vec::new(), Vec::new());
                         let err_id = find_name(names, "Err");
                         let ok_id = find_name(names, "Ok");
-                        let mut ctx: Ctx = (names, nodes, lists, &mut scratch, &mut summaries, err_id, ok_id);
+                        let mut ctx: Ctx = (names, nodes, lists, &mut scratch, &mut summaries, err_id, ok_id, &mut scratch_notes);
                         if build_fn(&mut f, &mut b, &mut ctx, *fn_node) {
                             compute_summary(&f, &mut ctx, 0)
                         } else {
@@ -1898,6 +1904,7 @@ pub fn borrow_check(
                         }
                     };
                     scratch.clear();
+                    scratch_notes.clear();
                     changed |= refine_summary(&mut summaries, *fn_node, sources);
                 }
                 None => break,
@@ -1914,11 +1921,11 @@ pub fn borrow_check(
         }
     }
 
-    check_item_list(names, nodes, lists, errors, &mut summaries, root);
+    check_item_list(names, nodes, lists, errors, notes, &mut summaries, root);
     let mut idx = 0usize;
     while idx < ext_mods.len() {
         match ext_mods.get(idx) {
-            Some(pair) => check_item_list(names, nodes, lists, errors, &mut summaries, pair.1),
+            Some(pair) => check_item_list(names, nodes, lists, errors, notes, &mut summaries, pair.1),
             None => break,
         }
         idx += 1;
@@ -1931,6 +1938,7 @@ fn check_item_list(
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
     errors: &mut Vec<Diag>,
+    notes: &mut Vec<Note>,
     summaries: &mut Vec<(i64, Vec<i64>)>,
     list: i64,
 ) {
@@ -1941,13 +1949,13 @@ fn check_item_list(
         if node_tag(nodes, item) == NODE_ITEM {
             let kind = node_a(nodes, item);
             if kind == ITEM_MODULE {
-                check_item_list(names, nodes, lists, errors, summaries, node_e(nodes, item));
+                check_item_list(names, nodes, lists, errors, notes, summaries, node_e(nodes, item));
             } else if kind == ITEM_FUN || kind == ITEM_NATIVE_FUN {
-                check_fn(names, nodes, lists, errors, summaries, node_d(nodes, item));
+                check_fn(names, nodes, lists, errors, notes, summaries, node_d(nodes, item));
             } else if kind == ITEM_IMPL {
-                check_fn_list(names, nodes, lists, errors, summaries, node_f(nodes, item));
+                check_fn_list(names, nodes, lists, errors, notes, summaries, node_f(nodes, item));
             } else if kind == ITEM_TRAIT {
-                check_fn_list(names, nodes, lists, errors, summaries, node_e(nodes, item));
+                check_fn_list(names, nodes, lists, errors, notes, summaries, node_e(nodes, item));
             }
         }
         idx += 1;
@@ -1959,13 +1967,14 @@ fn check_fn_list(
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
     errors: &mut Vec<Diag>,
+    notes: &mut Vec<Note>,
     summaries: &mut Vec<(i64, Vec<i64>)>,
     list: i64,
 ) {
     let count = list_len(lists, list);
     let mut idx = 0i64;
     while idx < count {
-        check_fn(names, nodes, lists, errors, summaries, list_get(lists, list, idx));
+        check_fn(names, nodes, lists, errors, notes, summaries, list_get(lists, list, idx));
         idx += 1;
     }
 }
@@ -1975,6 +1984,7 @@ fn check_fn(
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
     errors: &mut Vec<Diag>,
+    notes: &mut Vec<Note>,
     summaries: &mut Vec<(i64, Vec<i64>)>,
     fn_node: i64,
 ) {
@@ -1997,7 +2007,7 @@ fn check_fn(
     let mut b: B = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), NONE, NONE, NONE, NONE, Vec::new(), Vec::new());
     let err_id = find_name(names, "Err");
     let ok_id = find_name(names, "Ok");
-    let mut ctx: Ctx = (names, nodes, lists, errors, summaries, err_id, ok_id);
+    let mut ctx: Ctx = (names, nodes, lists, errors, summaries, err_id, ok_id, notes);
     if !build_fn(&mut f, &mut b, &mut ctx, fn_node) {
         return;
     }
@@ -2007,10 +2017,10 @@ fn check_fn(
 
 fn analyze_fn(f: &mut F, ctx: &mut Ctx, entry: i64) {
     let live_after = compute_liveness(f, ctx);
-    let (entry_state, inconsistencies) = linear_fixpoint(f, ctx, entry);
+    let (entry_state, exit_states, inconsistencies) = linear_fixpoint(f, ctx, entry);
     let entry_origins = origin_fixpoint(f, ctx, entry);
     let entry_cont = container_fixpoint(f, ctx, entry);
-    report(f, ctx, &live_after, &entry_state, &inconsistencies, &entry_origins, &entry_cont);
+    report(f, ctx, &live_after, &entry_state, &exit_states, &inconsistencies, &entry_origins, &entry_cont);
 }
 
 fn same_set(a: &[i64], b: &[i64]) -> bool {
@@ -2436,7 +2446,7 @@ fn apply_block_linear(f: &F, block: i64, state: &mut [i64], report: bool, ctx: &
     }
 }
 
-fn linear_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> (Vec<Vec<i64>>, Vec<(i64, i64)>) {
+fn linear_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> (Vec<Vec<i64>>, Vec<Vec<i64>>, Vec<(i64, i64)>) {
     let nblocks = f.6.len() as i64;
     let npaths = f.2.len() as i64;
     let mut entry_state: Vec<Vec<i64>> = Vec::new();
@@ -2498,7 +2508,7 @@ fn linear_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> (Vec<Vec<i64>>, Vec<(i64
             break;
         }
     }
-    (entry_state, inconsistencies)
+    (entry_state, exit_state, inconsistencies)
 }
 
 fn cont_get(cont: &[i64], binding: i64) -> i64 {
@@ -2812,11 +2822,13 @@ fn exit_check(f: &F, ctx: &mut Ctx, op: i64, state: &[i64]) {
             let st = state_at(state, root);
             if st == ST_LIVE {
                 push_error(ctx.3, &format!("linear value '{}' must be consumed {}", name, exit_where(kind)), row.6, row.7, row.8);
+                explain_unconsumed(f, ctx, bidx, &name, brow.1);
             } else if st == ST_PARTIAL {
                 let live = first_live_subnode(f, state, root);
                 if live != NONE {
                     let field_name = dotted_name_of(f, ctx, bidx, live);
                     push_error(ctx.3, &format!("partially moved value '{}' cannot be left behind {}: field '{}' is not fully consumed", name, exit_where(kind), field_name), row.6, row.7, row.8);
+                    explain_unconsumed(f, ctx, bidx, &name, brow.1);
                 }
             }
         } else if root >= 0 && ty_kind_of(ctx.1, brow.1) == TYD_REF_MUT {
@@ -3151,11 +3163,114 @@ fn summary_of(table: &[(i64, Vec<i64>)], fn_node: i64) -> Option<&Vec<i64>> {
     None
 }
 
+// One note per predecessor of an inconsistent join, saying whether the
+// value is consumed or still live where that path ends.  The states are the
+// converged dataflow's own per-block exit states — the same facts the join
+// compared to detect the inconsistency.
+fn explain_join(f: &F, ctx: &mut Ctx, exit_states: &[Vec<i64>], join_block: i64, path: i64, name: &str) {
+    let preds = pred_of(f, join_block);
+    let mut pi = 0usize;
+    while pi < preds.len() {
+        let pred = match preds.get(pi) {
+            Some(value) => *value,
+            None => break,
+        };
+        let span = block_span_at(f, pred);
+        if span.0 != NO_FILE {
+            let st = match exit_states.get(pred as usize) {
+                Some(list) => state_at(list, path),
+                None => ST_UNBOUND,
+            };
+            if st == ST_MOVED || st == ST_PARTIAL {
+                push_note_for_last(
+                    ctx.3,
+                    ctx.7,
+                    &format!("'{}' is consumed by the end of this path", name),
+                    span.0,
+                    span.1,
+                    span.2,
+                );
+            } else if st == ST_LIVE {
+                push_note_for_last(
+                    ctx.3,
+                    ctx.7,
+                    &format!("'{}' is still live at the end of this path", name),
+                    span.0,
+                    span.1,
+                    span.2,
+                );
+            }
+        }
+        pi += 1;
+    }
+}
+
+// A note at the binding site of a linear value an exit check found
+// unconsumed, naming the linear type the typechecker attached to it.  The
+// note is dropped when the binding has no source bind site (a synthesized
+// entry) rather than pointing anywhere invented.
+fn explain_unconsumed(f: &F, ctx: &mut Ctx, binding: i64, name: &str, ty_key: i64) {
+    let bind_span = bind_span_of(f, binding);
+    if bind_span.0 == NO_FILE {
+        return;
+    }
+    let rendered = render_type_key(ctx.0, ctx.1, ctx.2, ty_key);
+    push_note_for_last(
+        ctx.3,
+        ctx.7,
+        &format!("'{}' is bound here with linear type '{}'", name, rendered),
+        bind_span.0,
+        bind_span.1,
+        bind_span.2,
+    );
+}
+
+// The source span of the OP_BIND that introduced a binding, or a
+// source-less span when the binding has no bind op (a synthesized entry).
+fn bind_span_of(f: &F, binding: i64) -> (i64, i64, i64) {
+    let mut op = 0i64;
+    while op < f.4.len() as i64 {
+        let row = op_at(f, op);
+        if row.0 == OP_BIND && row.1 == binding {
+            return (row.6, row.7, row.8);
+        }
+        op += 1;
+    }
+    (NO_FILE, 0, 0)
+}
+
+fn empty_spans(count: i64) -> Vec<(i64, i64, i64)> {
+    let mut out: Vec<(i64, i64, i64)> = Vec::new();
+    let mut idx = 0i64;
+    while idx < count {
+        out.push((NO_FILE, 0, 0));
+        idx += 1;
+    }
+    out
+}
+
+fn span_cell(spans: &[(i64, i64, i64)], path: i64) -> (i64, i64, i64) {
+    match spans.get(path as usize) {
+        Some(span) => *span,
+        None => (NO_FILE, 0, 0),
+    }
+}
+
+fn span_cell_set(spans: &mut [(i64, i64, i64)], path: i64, span: (i64, i64, i64)) {
+    if path < 0 {
+        return;
+    }
+    if let Some(cell) = spans.get_mut(path as usize) {
+        *cell = span;
+    }
+}
+
 fn report(
     f: &F,
     ctx: &mut Ctx,
     live_after: &[Vec<i64>],
     entry_state: &[Vec<i64>],
+    exit_states: &[Vec<i64>],
     inconsistencies: &[(i64, i64)],
     entry_origins: &[Vec<Vec<i64>>],
     entry_cont: &[Vec<i64>],
@@ -3183,6 +3298,7 @@ fn report(
                     span.1,
                     span.2,
                 );
+                explain_join(f, ctx, exit_states, pair.0, path, &name);
             }
             None => break,
         }
@@ -3191,6 +3307,7 @@ fn report(
     let mut fn_ret_sources: Vec<i64> = Vec::new();
     let mut fn_ret_errored = false;
     let nblocks = f.6.len() as i64;
+    let npaths = f.2.len() as i64;
     let mut blk = 0i64;
     while blk < nblocks {
         let mut state = match entry_state.get(blk as usize) {
@@ -3205,6 +3322,11 @@ fn report(
             Some(list) => list.clone(),
             None => Vec::new(),
         };
+        // The span of the move that most recently consumed each path within
+        // this block's replay.  Same-block only: a value moved by an earlier
+        // block has no single unambiguous "moved here" site (the CFG may
+        // join several), so no note is invented for it.
+        let mut last_move = empty_spans(npaths);
         let (first, last) = block_op_range(f, blk);
         let mut op = first;
         while op <= last {
@@ -3218,7 +3340,24 @@ fn report(
                 }
             } else if kind == OP_MOVE {
                 conflicts_at(f, ctx, op, &origins, live_after);
+                let prev = state_at(&state, row.2);
                 apply_move(f, &mut state, binding, row.2, true, ctx, (row.6, row.7, row.8));
+                if prev == ST_MOVED || prev == ST_PARTIAL {
+                    let moved_at = span_cell(&last_move, row.2);
+                    if moved_at.0 != NO_FILE {
+                        let name = dotted_name_of(f, ctx, binding, row.2);
+                        push_note_for_last(
+                            ctx.3,
+                            ctx.7,
+                            &format!("'{}' was moved here", name),
+                            moved_at.0,
+                            moved_at.1,
+                            moved_at.2,
+                        );
+                    }
+                } else if prev == ST_LIVE {
+                    span_cell_set(&mut last_move, row.2, (row.6, row.7, row.8));
+                }
             } else if kind == OP_ASSIGN {
                 if row.3 == 1 && row.4 == 0 && binding >= 0 {
                     repoint_origin(f, row, op, &mut origins);

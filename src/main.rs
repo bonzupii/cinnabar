@@ -14,6 +14,7 @@ struct CliArgs {
     dump_ast: bool,
     dump_typed_ast: bool,
     print_layout: bool,
+    explain_borrow: bool,
     run: bool,
     opt_level: String,
     emit_llvm: bool,
@@ -50,6 +51,12 @@ fn parse_args() -> Option<CliArgs> {
                 .action(ArgAction::SetTrue)
                 .conflicts_with_all(["dump_ast", "emit_llvm", "emit_obj", "run"])
                 .help("Run the full front-end (resolve, typecheck, borrow-check), then print the node arena with every attached fact and exit"),
+        )
+        .arg(
+            Arg::new("explain_borrow")
+                .long("explain-borrow")
+                .action(ArgAction::SetTrue)
+                .help("Attach secondary labels to borrow/linearity errors explaining which paths consume a value, where it was bound, and where it was previously moved"),
         )
         .arg(
             Arg::new("print_layout")
@@ -102,6 +109,7 @@ fn parse_args() -> Option<CliArgs> {
         dump_ast: matches.get_flag("dump_ast"),
         dump_typed_ast: matches.get_flag("dump_typed_ast"),
         print_layout: matches.get_flag("print_layout"),
+        explain_borrow: matches.get_flag("explain_borrow"),
         run: matches.get_flag("run"),
         opt_level,
         emit_llvm: matches.get_flag("emit_llvm"),
@@ -118,25 +126,27 @@ fn main() -> ExitCode {
     let mut nodes: Vec<i64> = Vec::new();
     let mut lists: Vec<Vec<i64>> = Vec::new();
     let mut errors: Vec<Diag> = Vec::new();
+    let mut notes: Vec<Note> = Vec::new();
     let entry = args.input.to_string_lossy().to_string();
     let (loaded, files) = module_loader::load(&mut names, &mut nodes, &mut lists, &mut errors, &entry);
     let (root, ext_mods) = match loaded {
         Some(program) => program,
-        None => return finish_with_diagnostics(&errors, &files),
+        None => return finish_with_diagnostics(&errors, &[], &files),
     };
     if args.dump_ast {
         dump_program(&names, &nodes, &lists, root);
         return ExitCode::SUCCESS;
     }
     if !resolver::resolve(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods) {
-        return finish_with_diagnostics(&errors, &files);
+        return finish_with_diagnostics(&errors, &[], &files);
     }
     let (ok, impls_list) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods);
     if !ok {
-        return finish_with_diagnostics(&errors, &files);
+        return finish_with_diagnostics(&errors, &[], &files);
     }
-    if !borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods) {
-        return finish_with_diagnostics(&errors, &files);
+    if !borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods) {
+        let shown_notes: &[Note] = if args.explain_borrow { &notes } else { &[] };
+        return finish_with_diagnostics(&errors, shown_notes, &files);
     }
     if args.dump_typed_ast {
         print!("{}", cinnabar::inspect::dump_typed_arena(&names, &nodes, &lists));
@@ -225,12 +235,12 @@ fn file_path_of(files: &[(String, String)], file_id: i64) -> Option<String> {
     files.get(file_id as usize).map(|entry| entry.0.clone())
 }
 
-fn render_diagnostics(errors: &[Diag], files: &[(String, String)]) -> Result<(), String> {
+fn render_diagnostics(errors: &[Diag], notes: &[Note], files: &[(String, String)]) -> Result<(), String> {
     let mut cache = make_cache(files);
     let mut idx = 0usize;
     while idx < errors.len() {
         match errors.get(idx) {
-            Some(diag) => render_diag(&mut cache, files, diag)?,
+            Some(diag) => render_diag(&mut cache, files, diag, notes, idx as i64)?,
             None => break,
         }
         idx += 1;
@@ -250,6 +260,8 @@ fn render_diag(
     cache: &mut FnCache<String, impl FnMut(&String) -> Result<String, String>, String>,
     files: &[(String, String)],
     diag: &Diag,
+    notes: &[Note],
+    diag_idx: i64,
 ) -> Result<(), String> {
     if diag.1 == NO_FILE {
         return render_source_less(&diag.0);
@@ -261,11 +273,29 @@ fn render_diag(
         }
     };
     let span = diag.2 as usize..diag.3 as usize;
-    let report = Report::build(ReportKind::Error, (path.clone(), span.clone()))
+    let mut report = Report::build(ReportKind::Error, (path.clone(), span.clone()))
         .with_message(&diag.0)
-        .with_label(Label::new((path, span)).with_message("here").with_color(Color::Red))
-        .finish();
+        .with_label(Label::new((path, span)).with_message("here").with_color(Color::Red));
+    let mut note_idx = 0usize;
+    while note_idx < notes.len() {
+        match notes.get(note_idx) {
+            Some(note) => {
+                if note.0 == diag_idx && note.2 != NO_FILE {
+                    if let Some(note_path) = file_path_of(files, note.2) {
+                        report = report.with_label(
+                            Label::new((note_path, note.3 as usize..note.4 as usize))
+                                .with_message(&note.1)
+                                .with_color(Color::Yellow),
+                        );
+                    }
+                }
+            }
+            None => break,
+        }
+        note_idx += 1;
+    }
     report
+        .finish()
         .print(&mut *cache)
         .map_err(|render_err| format!("cannot render '{}': {}", diag.0, render_err))
 }
@@ -314,8 +344,8 @@ fn default_out_path(input: &Path) -> PathBuf {
     }
 }
 
-fn finish_with_diagnostics(errors: &[Diag], files: &[(String, String)]) -> ExitCode {
-    if let Err(message) = render_diagnostics(errors, files) {
+fn finish_with_diagnostics(errors: &[Diag], notes: &[Note], files: &[(String, String)]) -> ExitCode {
+    if let Err(message) = render_diagnostics(errors, notes, files) {
         let detail = format!("failed to render diagnostic: {}", message);
         if render_source_less(&detail).is_err() {
             return ExitCode::FAILURE;
