@@ -20,7 +20,7 @@ end
 use Collections.vec_new
 use Collections.vec_free
 
-fun make_holder() Result(Holder, Collections.Error)
+fun make_holder() impure Result(Holder, Collections.Error)
   val v = match vec_new[Int]()
     Ok(value) => value
     Err(error) => return Err(error)
@@ -28,7 +28,7 @@ fun make_holder() Result(Holder, Collections.Error)
   return Ok(Holder(vec: v))
 end
 
-pub fun main() Int
+pub fun main() impure Int
   val h = match make_holder()
     Ok(value) => value
     Err(error) => return 1

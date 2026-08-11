@@ -26,7 +26,7 @@ use Net.bind
 use Net.listen
 use Net.close
 
-fun fail_socket(sock: Net.Socket, code: Int) Int
+fun fail_socket(sock: Net.Socket, code: Int) impure Int
   close(sock)
   return code
 end

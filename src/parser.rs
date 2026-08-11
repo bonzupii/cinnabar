@@ -1174,6 +1174,18 @@ fn parse_pattern(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &
         let value = node_c(nodes, *pos);
         *pos += 1;
         Some(alloc_pat(nodes, PAT_LIT, file, start, end, &[kind, value]))
+    } else if is_name(nodes, names, *pos, "true") {
+        let file = node_file(nodes, *pos);
+        let start = node_start(nodes, *pos);
+        let end = node_end(nodes, *pos);
+        *pos += 1;
+        Some(alloc_pat(nodes, PAT_LIT, file, start, end, &[LIT_TRUE, 1]))
+    } else if is_name(nodes, names, *pos, "false") {
+        let file = node_file(nodes, *pos);
+        let start = node_start(nodes, *pos);
+        let end = node_end(nodes, *pos);
+        *pos += 1;
+        Some(alloc_pat(nodes, PAT_LIT, file, start, end, &[LIT_FALSE, 0]))
     } else if is_word(nodes, *pos) {
         parse_name_pattern(pos, names, nodes, lists, errors)
     } else {
@@ -1243,6 +1255,17 @@ fn parse_array_pattern(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, li
                 return None;
             }
             rest = node_b(nodes, element);
+            // A rest pattern must be the last element: the fixed prefix ends
+            // here.  An optional trailing comma is allowed, but any element
+            // after the rest would match at the wrong index.
+            if accept(nodes, names, pos, ",") {
+                skip_nl(nodes, pos);
+            }
+            if !expect(nodes, names, pos, "]", errors) {
+                return None;
+            }
+            let end = node_end(nodes, *pos - 1);
+            return Some(alloc_pat(nodes, PAT_ARRAY, file, start, end, &[elements, rest]));
         } else {
             list_push(lists, elements, element);
         }

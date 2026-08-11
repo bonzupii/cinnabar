@@ -1,0 +1,31 @@
+#! Empty statement lists must lower to a Unit value instead of a codegen
+#! error: an empty function body, an empty while body, and empty if/else
+#! bodies all compile and run, and the enclosing control flow proceeds
+#! normally around them.
+#!
+#! Exit code 0 means every check passed; 61..63 name the check that failed.
+
+pub fun empty_body() Unit
+end
+
+pub fun main() Int
+  var count: Int = 0
+
+  #! Empty while body: the condition is false, so the loop must exit
+  #! immediately and the program must not trap or error.
+  while count < 0
+  end
+
+  #! Empty if and else bodies: neither branch runs.
+  if count != 0
+  else
+  end
+
+  #! Call the empty-body function.
+  empty_body()
+
+  if count != 0
+    return 61
+  end
+  return 0
+end

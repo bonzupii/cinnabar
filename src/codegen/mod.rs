@@ -34,11 +34,37 @@ pub fn compile_and_link(
     entry_span: (i64, i64, i64),
 ) -> Result<(), CodegenError> {
     let ir_text = emit_to_ir(names, nodes, lists, impls_list, entry_span)?;
+    let temp_root = temp_dir_root();
+    fs::create_dir_all(&temp_root).map_err(|err| {
+        io_error(&format!("cannot create temp dir '{}': {}", temp_root.display(), err))
+    })?;
     let ir_path = temp_path(out, "ll");
     let obj_path = temp_path(out, "o");
-    write_text(&ir_path, &ir_text)?;
-    assemble(&ir_path, &obj_path, opt_level)?;
-    link(&obj_path, out)
+    let compiled = write_text(&ir_path, &ir_text)
+        .and_then(|()| assemble(&ir_path, &obj_path, opt_level))
+        .and_then(|()| link(&obj_path, out));
+    // The temp dir is removed on success and failure alike, so repeated or
+    // failing compiles never accumulate gigabytes of `libc.a` copies in
+    // tmpfs.  A cleanup failure is reported through the typed error model,
+    // never to stderr.  A compile error takes precedence over a cleanup
+    // error; a missing dir is not an error.
+    match std::fs::remove_dir_all(&temp_root) {
+        Ok(()) => compiled,
+        Err(err) => {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                compiled
+            } else {
+                match compiled {
+                    Ok(()) => Err(io_error(&format!(
+                        "cannot remove temp dir '{}': {}",
+                        temp_root.display(),
+                        err
+                    ))),
+                    Err(err) => Err(err),
+                }
+            }
+        }
+    }
 }
 
 fn emit_to_ir(
@@ -131,12 +157,16 @@ fn verify_module(module: &Module) -> Result<(), CodegenError> {
     }
 }
 
+fn temp_dir_root() -> PathBuf {
+    std::env::temp_dir().join(format!("cinnabar_{}", std::process::id()))
+}
+
 fn temp_path(out: &Path, ext: &str) -> PathBuf {
     let base = match out.file_name() {
         Some(name) => name.to_string_lossy().to_string(),
         None => "out".to_string(),
     };
-    std::env::temp_dir().join(format!("cinnabar_{}_{}.{}", std::process::id(), base, ext))
+    temp_dir_root().join(format!("{}.{}", base, ext))
 }
 
 fn write_text(path: &Path, text: &str) -> Result<(), CodegenError> {

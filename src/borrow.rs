@@ -526,7 +526,10 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         let flags = (is_linear_key(ctx, binding_key), if is_ref_key(ctx.1, binding_key) { 1 } else { 0 }, 0, is_mut);
         let binding = bind_var(f, b, ctx, name, binding_key, flags, span);
         let op = emit_op(f, OP_BIND, binding, NONE, (flags.1, has_init, 0), span);
-        if flags.1 == 1 && has_init == 1 {
+        // A struct/array literal whose field initialisers borrow keeps those
+        // loans against the new binding, so a later borrow of `s.f` resolves
+        // back to the underlying owner instead of being dropped.
+        if has_init == 1 && (flags.1 == 1 || !prod.is_empty()) {
             set_op_loans(f, op, &prod);
         }
         return (block, cont, prod);
@@ -540,7 +543,7 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         let (binding, path, tkind, owner) = assign_target_of(f, b, ctx, target);
         let is_ref = if tkind == 0 && binding >= 0 { binding_at(f, binding).3 } else { 0 };
         let op = emit_op(f, OP_ASSIGN, binding, path, (is_ref, tkind, owner), span);
-        if tkind == 0 && is_ref == 1 {
+        if tkind == 0 && (is_ref == 1 || !prod.is_empty()) {
             set_op_loans(f, op, &prod);
         }
         return (block, cont, Vec::new());
@@ -993,8 +996,11 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
                 return;
             }
             let elem_key = ty_elem_of(ctx.1, row.1);
-            let (_, rpath) = walk_field_segments(f, ctx, segs, 1, elem_key, rroot);
-            if rpath == NONE || rpath == rroot {
+            let (rkey, rpath) = walk_field_segments(f, ctx, segs, 1, elem_key, rroot);
+            // `rkey` is NONE exactly when `rpath` never resolved (every linear
+            // field walk that extends `rpath` also yields a concrete key), so
+            // guarding on it adds no new failure mode for valid programs.
+            if rkey == NONE || rpath == NONE || rpath == rroot {
                 let text = dotted_seg_name(ctx, row.0, segs, count);
                 push_error(ctx.3, &format!("cannot consume the whole value '{}' through a mutable reference; move the referent into a local and consume that instead", text), span.0, span.1, span.2);
                 return;
@@ -1203,10 +1209,22 @@ fn origin_owners_of(f: &F, binding: i64, owner: &mut i64, ok: &mut bool, visited
         return;
     }
     visited.push(binding);
-    let mut op = 0i64;
-    while op < f.4.len() as i64 {
+    // Backward scan: the most recent bind/assign of this binding determines
+    // its current referents.  A forward scan returns on the first
+    // (stale) re-initialisation and can resolve a reassigned &mut binding
+    // to its old referent.  Only loan-bearing ops carry referent facts;
+    // a plain value binding has no loans to contribute.
+    let mut op = f.4.len() as i64 - 1;
+    while op >= 0 {
         let row = op_at(f, op);
-        if row.1 == binding && (row.0 == OP_BIND || row.0 == OP_ASSIGN) && row.3 == 1 {
+        // Loans are read for reference bindings and for any binding whose
+        // OP_BIND/OP_ASSIGN carries loans: a struct literal whose field
+        // initialisers borrow keeps those field loans on its own bind, so a
+        // later borrow of `s.f` resolves back to the underlying owner.
+        if row.1 == binding
+            && (row.0 == OP_BIND || row.0 == OP_ASSIGN)
+            && (row.3 == 1 || !op_loans_at(f, op).is_empty())
+        {
             let loans = op_loans_at(f, op);
             let mut idx = 0usize;
             while idx < loans.len() {
@@ -1240,7 +1258,7 @@ fn origin_owners_of(f: &F, binding: i64, owner: &mut i64, ok: &mut bool, visited
             }
             return;
         }
-        op += 1;
+        op -= 1;
     }
 }
 
@@ -2241,6 +2259,12 @@ fn linear_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> (Vec<Vec<i64>>, Vec<(i64
             push_internal(ctx.3, "internal: linear-consumption analysis did not converge");
             break;
         }
+        // Inconsistencies are recorded only on the converged sweep.  A
+        // (MOVED, LIVE) join that is inconsistent mid-iteration can later
+        // converge as both sides reach MOVED; recording those intermediate
+        // joins would report false positives.  Each sweep restarts the
+        // record so the final break leaves only the converged joins.
+        inconsistencies.clear();
         let mut changed = false;
         let mut blk = 0i64;
         while blk < nblocks {
@@ -2296,7 +2320,7 @@ fn apply_block_origins(f: &F, block: i64, origins: &mut [Vec<i64>]) {
         let row = op_at(f, op);
         let kind = row.0;
         let binding = row.1;
-        if binding >= 0 && (kind == OP_BIND || kind == OP_ASSIGN) && row.3 == 1 {
+        if binding >= 0 && (kind == OP_BIND || kind == OP_ASSIGN) && (row.3 == 1 || !op_loans_at(f, op).is_empty()) {
             let loans = op_loans_at(f, op);
             if let Some(slot) = origins.get_mut(binding as usize) {
                 slot.clear();
@@ -2489,7 +2513,7 @@ fn collect_origin_loans(f: &F, origins: &[Vec<i64>], binding: i64, out: &mut Vec
         };
         while op >= 0 {
             let row = op_at(f, op);
-            if row.1 == binding && (row.0 == OP_BIND || row.0 == OP_ASSIGN) && row.3 == 1 {
+            if row.1 == binding && (row.0 == OP_BIND || row.0 == OP_ASSIGN) && (row.3 == 1 || !op_loans_at(f, op).is_empty()) {
                 let loans = op_loans_at(f, op);
                 let mut li = 0usize;
                 while li < loans.len() {

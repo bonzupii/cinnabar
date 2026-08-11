@@ -10,7 +10,7 @@ pub type Holder
   pub tag: Int
 end
 
-pub fun main() Int
+pub fun main() impure Int
   val first = make()
   var holder = Holder(block: first, tag: 7)
   val second = make()

@@ -19,17 +19,17 @@ fun fail_alloc() Int
   return 1
 end
 
-fun fail_write(block: Memory.Block) Int
+fun fail_write(block: Memory.Block) impure Int
   deallocate(block)
   return 2
 end
 
-fun fail_read(block: Memory.Block) Int
+fun fail_read(block: Memory.Block) impure Int
   deallocate(block)
   return 3
 end
 
-pub fun main() Int
+pub fun main() impure Int
   val block = match allocate(1)
     Ok(b) => b
     Err(error) => return fail_alloc()

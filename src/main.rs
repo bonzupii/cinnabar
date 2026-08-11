@@ -211,7 +211,7 @@ fn render_codegen_error(codegen_err: &codegen::error::CodegenError, files: &[(St
 
 fn entry_span_of(files: &[(String, String)]) -> (i64, i64, i64) {
     match files.first() {
-        Some((_, text)) => (0, 0, text.len() as i64),
+        Some(pair) => (0, 0, pair.1.len() as i64),
         None => (NO_FILE, 0, 0),
     }
 }

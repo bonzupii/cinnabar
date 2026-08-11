@@ -3,12 +3,26 @@
 # each alias.  The second extraction reads a moved field, so the program
 # is rejected by the linearity rules even if the borrow checker were to
 # accept the aliasing element borrows.  (EXPECT_REJECTED.)
+pub mod Collections
+  pub nat type Vec(T)
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+  end
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
+end
+
 pub type Holder
   pub vec: Collections.Vec(U8)
 end
 
 pub fun main() impure Int
-  val h = Holder(vec: try Collections.vec_new[U8]())
+  val v = match Collections.vec_new[U8]()
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  val h = Holder(vec: v)
   val hs: [Holder; 1] = [h]
   val a = &mut hs[0]
   val b = &mut hs[0]

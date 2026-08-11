@@ -462,7 +462,7 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
         node_set_e(state.1, sym, sub);
         state.8.push((item, sub));
         enter_type_params(state.1, state.2, state.4, sub, node_f(state.1, item));
-        collect_fields_casing(state.0, state.1, state.2, state.3, item);
+        collect_fields_casing(state.0, state.1, state.2, state.3, item, scope);
     } else if kind == ITEM_ENUM {
         let name = node_d(state.1, item);
         let full = qualified_name(state.0, state.2, prefix, name);
@@ -527,13 +527,18 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
     }
 }
 
-fn collect_fields_casing(names: &[String], nodes: &[i64], lists: &[Vec<i64>], errors: &mut Vec<Diag>, item: i64) {
+fn collect_fields_casing(names: &[String], nodes: &mut [i64], lists: &[Vec<i64>], errors: &mut Vec<Diag>, item: i64, scope: i64) {
     let fields = node_e(nodes, item);
     let count = list_len(lists, fields);
     let mut idx = 0i64;
     while idx < count {
         let field = list_get(lists, fields, idx);
         report_casing(names, node_a(nodes, field), 1, errors, node_file(nodes, field), node_start(nodes, field), node_end(nodes, field));
+        // Slot d records the module scope the struct is declared in; the
+        // typechecker compares it against the accessing scope to enforce
+        // field visibility.  The scope id is a resolver fact, never
+        // re-derived downstream.
+        node_set_d(nodes, field, scope);
         idx += 1;
     }
 }

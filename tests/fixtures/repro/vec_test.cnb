@@ -38,12 +38,12 @@ use Slice.len as slice_len
 const BAD_NEW: Int = 1
 const BAD_PUSH: Int = 2
 
-fun fail_vec<T>(vec: Collections.Vec(T)) Int
+fun fail_vec<T>(vec: Collections.Vec(T)) impure Int
   vec_free(vec)
   return BAD_PUSH
 end
 
-fun fill_squares(vec: &mut Collections.Vec(Int)) Result(Unit, Collections.Error)
+fun fill_squares(vec: &mut Collections.Vec(Int)) impure Result(Unit, Collections.Error)
   var i: Int = 0
   while i < 5
     try vec_push(vec, i * i)
@@ -52,7 +52,7 @@ fun fill_squares(vec: &mut Collections.Vec(Int)) Result(Unit, Collections.Error)
   return Ok(Unit)
 end
 
-pub fun main() Int
+pub fun main() impure Int
   val vec = match vec_new[Int]()
     Ok(v) => v
     Err(error) => return BAD_NEW

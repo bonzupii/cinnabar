@@ -152,7 +152,7 @@ fn lex_block_comment(bytes: &[u8], mut pos: usize, start: usize, file: i64, erro
     while byte_at(bytes, pos) != 0 {
         if is_block_opener(bytes, pos) {
             report_nested_comment(file, pos, errors);
-            pos += 1;
+            pos = skip_nested_block(bytes, pos);
             continue;
         }
         if is_block_close(bytes, pos) {
@@ -162,6 +162,22 @@ fn lex_block_comment(bytes: &[u8], mut pos: usize, start: usize, file: i64, erro
     }
     report_unterminated_comment(file, start, errors);
     pos
+}
+
+// Advances past the nested block's matching `|#`, so the nested closer
+// never terminates the outer comment.  When the nested block has no
+// closer, the scan reaches end of input and the outer unterminated
+// handling fires.
+fn skip_nested_block(bytes: &[u8], pos: usize) -> usize {
+    let mut scan = pos + 2;
+    while byte_at(bytes, scan) != 0 && !is_block_close(bytes, scan) {
+        scan += 1;
+    }
+    if byte_at(bytes, scan) == 0 {
+        scan
+    } else {
+        scan + 2
+    }
 }
 
 fn is_block_close(bytes: &[u8], pos: usize) -> bool {
@@ -298,6 +314,10 @@ fn hex_value(bytes: &[u8], start: usize, end: usize, file: i64, errors: &mut Vec
             }
         }
         pos += 1;
+    }
+    if value > i64::MAX as u64 {
+        push_error(errors, "hexadecimal literal is too large", file, start as i64, end as i64);
+        return None;
     }
     Some(value as i64)
 }
@@ -551,6 +571,23 @@ mod tests {
             Some(diag) => assert!(diag.0.contains("nested")),
             None => assert!(false),
         }
+    }
+
+    #[test]
+    fn nested_comment_skip_keeps_outer_closer() {
+        let (kinds, errors) = lex_all("#| outer #| inner |# val x = 1 |#\nval y = 2\n");
+        assert_eq!(errors.len(), 1);
+        match errors.get(0) {
+            Some(diag) => assert!(diag.0.contains("nested")),
+            None => assert!(false),
+        }
+        // The nested block's `|#` must not terminate the outer comment:
+        // `val x = 1` stays inside the comment and lexes nothing, while the
+        // outer `|#` closes it and the following line lexes normally.
+        assert_eq!(
+            kinds,
+            vec![TOK_NL, TOK_IDENT, TOK_IDENT, TOK_SYM, TOK_INT, TOK_NL, TOK_EOF]
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@
 
 ## The language spec (normative)
 - `MANIFESTO.md` is the authoritative language specification. It is normative; if a fixture, harness, or existing program contradicts it, the fixture is wrong. Never treat an existing `.cnb` file as authoritative.
-- `tests/fixtures/spec.cnb` is the reference implementation fixture **and is immutable** — never edit it. It is reference data exercising the grammar, not the source of authority. All other fixtures under `tests/fixtures/` are reference data, not source.
+- `tests/fixtures/spec.cnb` is the immutable reference implementation fixture — never edit it. New .cnb fixtures under `tests/fixtures/` are encouraged for regression tests and examples; they are reference data, not normative.
 - Casing (compiler-enforced): functions/vals/vars `snake_case`; types/traits/modules/enum variants `PascalCase`; consts `SCREAMING_SNAKE_CASE`.
 - Bindings: `const` (compile-time), `val` (immutable), `var` (mutable — required for assignment).
 - Borrowing: `&T` shared, `&mut T` exclusive, flow-sensitive, no lifetime annotations, ambiguous returned borrows are errors, linear handles (e.g. `Memory.Block`) consumed exactly once.

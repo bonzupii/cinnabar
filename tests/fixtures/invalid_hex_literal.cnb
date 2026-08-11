@@ -1,4 +1,5 @@
 pub const BAD_HEX: U32 = 0xG123
+pub const TOO_BIG_HEX: Int = 0xFFFFFFFFFFFFFFFF
 pub const UNEXPECTED_CHAR: Int = $100
 
 pub fun main() Int

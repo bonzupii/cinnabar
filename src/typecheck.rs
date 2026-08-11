@@ -16,6 +16,7 @@ type State<'a> = (
     i64,
     i64,
     i64,
+    i64,
 );
 
 pub fn typecheck(
@@ -51,6 +52,7 @@ pub fn typecheck(
         option_sym,
         div_err_sym,
         index_err_sym,
+        0,
     );
 
     collect_types(&mut state, root);
@@ -548,6 +550,23 @@ fn is_int_key(nodes: &[i64], key: i64) -> bool {
     sub == BUILTIN_INT || sub == BUILTIN_U8 || sub == BUILTIN_U32 || sub == BUILTIN_USIZE
 }
 
+// The bit width of a builtin integer key (8 for U8, 32 for U32, 64 for
+// Int/Usize).  The constant folder masks shift amounts by this width so
+// it agrees with codegen, which masks by the LLVM operand type's width.
+fn int_bit_width(nodes: &[i64], key: i64) -> u32 {
+    if key_kind(nodes, key) != TYD_BUILTIN {
+        return 64;
+    }
+    let sub = tyinfo_builtin_kind(nodes, key);
+    if sub == BUILTIN_U8 {
+        8
+    } else if sub == BUILTIN_U32 {
+        32
+    } else {
+        64
+    }
+}
+
 fn is_bool_key(nodes: &[i64], key: i64) -> bool {
     key_kind(nodes, key) == TYD_BUILTIN && tyinfo_builtin_kind(nodes, key) == BUILTIN_BOOL
 }
@@ -638,6 +657,11 @@ fn linear_of(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, key: i64, seen: &m
         linear_of(nodes, lists, node_e(nodes, row), seen)
     } else if kind == TYD_STRUCT || kind == TYD_ENUM {
         linear_members_of(nodes, lists, node_c(nodes, row), key, seen)
+    } else if kind == TYD_PARAM {
+        // Type parameters carry no linearity bound in the grammar, so the
+        // only sound default is to treat them as linear (MANIFESTO): a
+        // generic body must consume its type-parameter values exactly once.
+        1
     } else {
         0
     };
@@ -944,7 +968,10 @@ fn collect_impl_item(state: &mut State, item: i64) {
     }
     let kind = node_a(state.1, item);
     if kind == ITEM_MODULE {
+        let saved_scope = state.13;
+        state.13 = module_scope_of(state.1, item);
         collect_impls(state, node_e(state.1, item));
+        state.13 = saved_scope;
         return;
     }
     if kind != ITEM_IMPL {
@@ -956,12 +983,24 @@ fn collect_impl_item(state: &mut State, item: i64) {
     }
     let for_ty = node_e(state.1, item);
     let for_key = canon_ty(state, for_ty, NONE, 1);
+    // At most one impl of a given trait may exist for a given type; two
+    // impls would let impl_find and codegen's deferred dispatch disagree.
+    let mut di = 0i64;
+    while di < state.5.len() as i64 / IMPL_STRIDE {
+        if impl_at(state.5, (di * IMPL_STRIDE) as usize) == trait_sym
+            && impl_at(state.5, (di * IMPL_STRIDE + 1) as usize) == for_key
+        {
+            push_error(state.3, &format!("duplicate impl of trait '{}' for type '{}'", name_text(state.0, sym_name(state.1, trait_sym)), render_key(state.0, state.1, state.2, state.6, state.7, for_key)), node_file(state.1, item), node_start(state.1, item), node_end(state.1, item));
+            return;
+        }
+        di += 1;
+    }
     let methods = node_f(state.1, item);
     let method_count = list_len(state.2, methods);
     let mut idx = 0i64;
     while idx < method_count {
         let method = list_get(state.2, methods, idx);
-        check_fn(state, method, for_key);
+        check_fn(state, method, for_key, 0);
         verify_impl_method(state, trait_sym, for_key, method);
         idx += 1;
     }
@@ -1094,9 +1133,26 @@ fn check_fn_item(state: &mut State, item: i64) {
     }
     let kind = node_a(state.1, item);
     if kind == ITEM_MODULE {
+        let saved_scope = state.13;
+        state.13 = module_scope_of(state.1, item);
         check_fn_list(state, node_e(state.1, item));
+        state.13 = saved_scope;
     } else if kind == ITEM_FUN || kind == ITEM_NATIVE_FUN {
-        check_fn(state, node_d(state.1, item), NONE);
+        let sym = item_sym_of(state.1, item);
+        let is_main = if sym != NONE && node_f(state.1, sym) == SYM_FUN_MAIN { 1 } else { 0 };
+        check_fn(state, node_d(state.1, item), NONE, is_main);
+    }
+}
+
+// The resolver stores every module's scope id on its symbol (slot e); the
+// typechecker tracks the scope it is currently walking so field accesses can
+// be checked against the declaring module.  The root item list is scope 0.
+fn module_scope_of(nodes: &[i64], item: i64) -> i64 {
+    let sym = item_sym_of(nodes, item);
+    if sym == NONE {
+        0
+    } else {
+        node_e(nodes, sym)
     }
 }
 
@@ -1139,7 +1195,7 @@ fn check_fn_sigs(state: &mut State, fn_node: i64) {
     pop_scope(state.4);
 }
 
-fn check_fn(state: &mut State, fn_node: i64, self_key: i64) {
+fn check_fn(state: &mut State, fn_node: i64, self_key: i64, is_main: i64) {
     if node_tag(state.1, fn_node) != NODE_FN {
         return;
     }
@@ -1157,6 +1213,15 @@ fn check_fn(state: &mut State, fn_node: i64, self_key: i64) {
     }
     let ret_ty = node_d(state.1, fn_node);
     let ret = canon_ty(state, ret_ty, self_key, 1);
+    // The program entry point (`SYM_FUN_MAIN`, set by the resolver) must
+    // return a builtin scalar, Unit, or an exit-status enum (MANIFESTO):
+    // codegen derives the process exit code only from those two layouts.
+    if is_main == 1 {
+        let ret_kind = key_kind(state.1, ret);
+        if ret_kind != TYD_BUILTIN && ret_kind != TYD_ENUM {
+            push_error(state.3, "main must return a builtin scalar, Unit, or an exit-status enum", node_file(state.1, ret_ty), node_start(state.1, ret_ty), node_end(state.1, ret_ty));
+        }
+    }
     let impure = node_e(state.1, fn_node);
     let body = node_f(state.1, fn_node);
     if body != NONE {
@@ -1395,7 +1460,11 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
 fn euclid_div_i64(lv: i64, rv: i64) -> i64 {
     let rem = lv.wrapping_rem(rv);
     let euclid_rem = if rem < 0 {
-        rem.wrapping_add(rv.wrapping_abs())
+        if rv > 0 {
+            rem.wrapping_add(rv)
+        } else {
+            rem.wrapping_sub(rv)
+        }
     } else {
         rem
     };
@@ -1405,7 +1474,11 @@ fn euclid_div_i64(lv: i64, rv: i64) -> i64 {
 fn euclid_rem_i64(lv: i64, rv: i64) -> i64 {
     let rem = lv.wrapping_rem(rv);
     if rem < 0 {
-        rem.wrapping_add(rv.wrapping_abs())
+        if rv > 0 {
+            rem.wrapping_add(rv)
+        } else {
+            rem.wrapping_sub(rv)
+        }
     } else {
         rem
     }
@@ -1442,10 +1515,12 @@ fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, 
         return (euclid_rem_i64(lv, rv), key);
     }
     if op == BIN_SHL {
-        return (lv.wrapping_shl(rv as u32), key);
+        let amount = (rv as u32) % int_bit_width(state.1, key);
+        return (lv.wrapping_shl(amount), key);
     }
     if op == BIN_SHR {
-        return (lv.wrapping_shr(rv as u32), key);
+        let amount = (rv as u32) % int_bit_width(state.1, key);
+        return (lv.wrapping_shr(amount), key);
     }
     if op == BIN_BAND {
         return (lv & rv, key);
@@ -1996,6 +2071,13 @@ fn variant_value_key(state: &mut State, expr: i64, expected: i64, sym: i64) -> i
         } else {
             let item = sym_decl(state.1, enum_sym);
             key = enum_key_with_fresh(state.1, state.2, state.6, state.7, expr, enum_sym, item);
+            // A payload-bearing variant cannot be used as a bare value: the
+            // constructor requires its declared payload values, otherwise
+            // codegen would lower an enum with an uninitialised payload.
+            let payload_decl = node_b(state.1, decl);
+            if list_len(state.2, payload_decl) > 0 {
+                push_error(state.3, &format!("variant '{}' requires payload values", name_text(state.0, node_a(state.1, decl))), file, start, end);
+            }
         }
     }
     if expected != NONE {
@@ -2051,6 +2133,12 @@ fn field_access_key(state: &mut State, expr: i64, base: i64, field: i64) -> i64 
         push_error(state.3, &format!("no field '{}' on type '{}'", name_text(state.0, field), render_key(state.0, state.1, state.2, state.6, state.7, eff)), file, start, end);
         return unknown_key(state.1, state.2);
     }
+    // Fields are private to their declaring module unless marked `pub`; the
+    // resolver attached the declaring scope to the field row (slot d).
+    let fnode = struct_field_node(state.1, state.2, item, field);
+    if fnode != NONE && node_c(state.1, fnode) == 0 && node_d(state.1, fnode) != state.13 {
+        push_error(state.3, &format!("field '{}' of type '{}' is private to its module", name_text(state.0, field), render_key(state.0, state.1, state.2, state.6, state.7, eff)), file, start, end);
+    }
     let from = declared_param_keys(state.1, state.2, item);
     let to = list_to_vec(state.2, key_args(state.1, eff));
     subst_key(state.1, state.2, declared_key, &from, &to)
@@ -2068,6 +2156,20 @@ fn struct_field_of(nodes: &[i64], lists: &[Vec<i64>], item: i64, name: i64) -> (
         idx += 1;
     }
     (NONE, NONE)
+}
+
+fn struct_field_node(nodes: &[i64], lists: &[Vec<i64>], item: i64, name: i64) -> i64 {
+    let fields = node_e(nodes, item);
+    let count = list_len(lists, fields);
+    let mut idx = 0i64;
+    while idx < count {
+        let field = list_get(lists, fields, idx);
+        if node_a(nodes, field) == name {
+            return field;
+        }
+        idx += 1;
+    }
+    NONE
 }
 
 fn enum_sym_of_variant(nodes: &[i64], variant_sym: i64) -> i64 {
@@ -2206,6 +2308,12 @@ fn check_direct_call(state: &mut State, expr: i64, sym: i64, ret: i64, impure: i
     }
     let fn_node = fn_node_of(state.1, decl);
     let kind = sym_kind(state.1, sym);
+    // A function not declared `impure` may not call an `impure` function or
+    // native (MANIFESTO).  The enclosing purity flag is threaded down from
+    // the current function's declaration.
+    if node_e(state.1, fn_node) == 1 && impure == 0 {
+        push_error(state.3, &format!("impure function '{}' cannot be called from a pure context", name_text(state.0, node_a(state.1, fn_node))), node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
+    }
     let from = fn_declared_param_keys(state.1, state.2, fn_node);
     let (args_list, to) = call_type_args(state, expr, fn_node, &from);
     let params = node_c(state.1, fn_node);
@@ -2431,6 +2539,9 @@ fn trait_call_concrete(state: &mut State, expr: i64, trait_sym: i64, trait_metho
         push_error(state.3, "impl method not found", file, start, end);
         return unknown_key(state.1, state.2);
     }
+    if node_e(state.1, method) == 1 && impure == 0 {
+        push_error(state.3, &format!("impure trait method '{}' cannot be called from a pure context", name_text(state.0, node_a(state.1, method))), file, start, end);
+    }
     let fn_node = method;
     let params = node_c(state.1, fn_node);
     let pcount = list_len(state.2, params);
@@ -2463,6 +2574,11 @@ fn trait_call_deferred(state: &mut State, expr: i64, trait_sym: i64, trait_metho
     let end = node_end(state.1, expr);
     if !param_has_bound(state.1, recv, trait_sym) {
         push_error(state.3, &format!("type parameter '{}' does not implement trait '{}'", name_text(state.0, key_sym(state.1, recv)), name_text(state.0, sym_name(state.1, trait_sym))), file, start, end);
+    }
+    // A trait method not declared `impure` may not be called from a pure
+    // context (MANIFESTO); the enclosing purity flag is threaded down.
+    if node_e(state.1, trait_method) == 1 && impure == 0 {
+        push_error(state.3, &format!("impure trait method '{}' cannot be called from a pure context", name_text(state.0, node_a(state.1, trait_method))), file, start, end);
     }
     push_scope(state.4);
     let tparams = node_b(state.1, trait_method);
@@ -2573,6 +2689,30 @@ fn check_struct_construct(state: &mut State, expr: i64, sym: i64, ret: i64, impu
         }
         idx += 1;
     }
+    // A struct literal must initialize every declared field; an absent field
+    // would be left uninitialised in the lowered value.
+    if item != NONE && node_tag(state.1, item) == NODE_ITEM {
+        let declared_fields = node_e(state.1, item);
+        let dcount = list_len(state.2, declared_fields);
+        let mut didx = 0i64;
+        while didx < dcount {
+            let df = list_get(state.2, declared_fields, didx);
+            let dname = node_a(state.1, df);
+            let mut present = 0;
+            let mut pidx = 0i64;
+            while pidx < fcount {
+                if list_get(state.2, field_names, pidx) == dname {
+                    present = 1;
+                    break;
+                }
+                pidx += 1;
+            }
+            if present == 0 {
+                push_error(state.3, &format!("struct literal is missing field '{}'", name_text(state.0, dname)), file, start, end);
+            }
+            didx += 1;
+        }
+    }
     key
 }
 
@@ -2682,11 +2822,27 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64) -> i64 {
     }
     if kind == PAT_LIT {
         let lit = node_b(state.1, pat);
-        let key = if lit == LIT_TRUE || lit == LIT_FALSE {
+        let is_bool = lit == LIT_TRUE || lit == LIT_FALSE;
+        let mut key = if is_bool {
             builtin_key_of(state.1, BUILTIN_BOOL)
         } else {
             builtin_key_of(state.1, BUILTIN_INT)
         };
+        // A literal pattern carries the scrutinee's own scalar type when that
+        // type is a primitive integer or Bool, so `5` matches a U8 scrutinee
+        // instead of forcing an Int key that cannot unify.
+        let scrut = deref_key(state.1, s_key);
+        if key_kind(state.1, scrut) == TYD_BUILTIN {
+            let sub = tyinfo_builtin_kind(state.1, scrut);
+            let matches = if is_bool {
+                sub == BUILTIN_BOOL
+            } else {
+                sub == BUILTIN_U8 || sub == BUILTIN_U32 || sub == BUILTIN_USIZE || sub == BUILTIN_INT
+            };
+            if matches {
+                key = scrut;
+            }
+        }
         let ok = unify_key(state.1, state.2, state.6, key, s_key);
         if !ok {
             push_error(state.3, &format!("literal pattern type mismatch: expected '{}'", render_key(state.0, state.1, state.2, state.6, state.7, s_key)), file, start, end);

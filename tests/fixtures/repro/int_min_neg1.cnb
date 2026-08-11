@@ -1,0 +1,46 @@
+#! INT_MIN / -1 and INT_MIN % -1 must wrap: the quotient is INT_MIN and
+#! the remainder is 0, in BOTH the constant folder (the const declarations
+#! below) and the runtime division path (the var operands in main, which
+#! lower through the div_neg1 block).  The fixture asserts that the two
+#! cannot drift apart and pins both to the defined wrapped values.
+#!
+#! Exit code 0 means every check passed; 41..44 name the check that failed.
+
+pub const INT_MIN: Int = -9223372036854775807 - 1
+pub const NEG_ONE: Int = -1
+
+#! Constant-folder path: INT_MIN / -1 folds to INT_MIN, INT_MIN % -1 folds
+#! to 0 (wrapping is the defined semantics; there is no panic or trap).
+pub const FOLD_MIN_DIV: Int = INT_MIN / NEG_ONE
+pub const FOLD_MIN_MOD: Int = INT_MIN % NEG_ONE
+
+pub fun main() Int
+  #! Runtime path: both operands are variables, so the codegen div_neg1
+  #! block runs and must produce the identical wrapped values.
+  var a: Int = INT_MIN
+  var b: Int = NEG_ONE
+
+  val q = match a / b
+    Ok(qv) => qv
+    Err(DivByZero) => 0
+  end
+
+  val r = match a % b
+    Ok(rv) => rv
+    Err(DivByZero) => 0
+  end
+
+  if q != FOLD_MIN_DIV
+    return 41
+  end
+  if r != FOLD_MIN_MOD
+    return 42
+  end
+  if q != INT_MIN
+    return 43
+  end
+  if r != 0
+    return 44
+  end
+  return 0
+end

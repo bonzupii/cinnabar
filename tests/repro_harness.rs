@@ -37,6 +37,10 @@ const EXPECT_OK: &[(&str, i32)] = &[
     ("elif_chain", 3),
     ("modulo", 42),
     ("div_runtime", 7),
+    ("int_min_neg1", 0),
+    ("shift_mask", 0),
+    ("empty_block", 0),
+    ("utf8_validation", 0),
     ("multiline_const", 30),
     ("fib", 155),
     ("linear_field_reinit", 0),
@@ -69,6 +73,7 @@ const EXPECT_REJECTED: &[&str] = &[
     "duplicate_user_symbol",
     "idx10b_mut_alias_used",
     "idx10c_mut_shared_same",
+    "vec_push_linear_move",
     "idx10j2_dyn_dyn_match",
     "idx10f_element_move_while_borrowed",
     "idx10g_element_double_move",
@@ -183,6 +188,20 @@ fn temp_dir() -> PathBuf {
     std::env::temp_dir().join(format!("cinnabar_repro_{}", std::process::id()))
 }
 
+// Removes the harness temp dir even when an assertion fails mid-run: a
+// failed iteration must not leak its compiled binaries (each a ~4.5 MB
+// embedded-libc.a link) into the temp filesystem.
+struct TempDirGuard(PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        match std::fs::remove_dir_all(&self.0) {
+            Ok(()) => {}
+            Err(err) => eprintln!("repro temp cleanup failed: {}", err),
+        }
+    }
+}
+
 #[test]
 fn repro_corpus_baseline() {
     let cinnabar = env!("CARGO_BIN_EXE_cinnabar");
@@ -194,6 +213,7 @@ fn repro_corpus_baseline() {
             return;
         }
     }
+    let guard = TempDirGuard(dir.clone());
 
     let mut idx = 0usize;
     while idx < EXPECT_OK.len() {
@@ -250,8 +270,5 @@ fn repro_corpus_baseline() {
         cidx += 1;
     }
 
-    match std::fs::remove_dir_all(&dir) {
-        Ok(()) => {}
-        Err(err) => eprintln!("temp cleanup failed: {}", err),
-    }
+    drop(guard);
 }

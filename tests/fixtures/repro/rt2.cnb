@@ -9,7 +9,7 @@ end
 
 use Collections.vec_new
 
-pub fun main() Int
+pub fun main() impure Int
   val vec = match vec_new[Int]()
     Ok(v) => v
     Err(error) => return 1

@@ -26,20 +26,20 @@ fun fail_alloc() Int
 end
 
 #! Error path: consume the whole holder so the early return is legal.
-fun fail_consume(holder: Holder) Int
+fun fail_consume(holder: Holder) impure Int
   deallocate(holder.block)
   return 1
 end
 
 #! Consumes the old handle through the &mut parameter, then re-initializes
 #! the field with the replacement handle.
-fun replace_block(holder: &mut Holder, replacement: Memory.Block) Unit
+fun replace_block(holder: &mut Holder, replacement: Memory.Block) impure Unit
   deallocate(holder.block)
   holder.block = replacement
   return Unit
 end
 
-pub fun main() Int
+pub fun main() impure Int
   val original = match allocate(1)
     Ok(value) => value
     Err(error) => return fail_alloc()

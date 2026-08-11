@@ -1078,18 +1078,18 @@ fun build_response() impure Result(Collections.Vec(U8), Collections.Error)
   return Ok(vec)
 end
 
-fun fail_start(vec: Collections.Vec(U8), error: Net.Error) Int
+fun fail_start(vec: Collections.Vec(U8), error: Net.Error) impure Int
   vec_free(vec)
   return 2
 end
 
-fun fail_serve(listener: Net.Socket, vec: Collections.Vec(U8), error: Net.Error) Int
+fun fail_serve(listener: Net.Socket, vec: Collections.Vec(U8), error: Net.Error) impure Int
   close(listener)
   vec_free(vec)
   return 3
 end
 
-fun fail_conn(listener: Net.Socket, conn: Net.Socket, vec: Collections.Vec(U8), error: Net.Error) Int
+fun fail_conn(listener: Net.Socket, conn: Net.Socket, vec: Collections.Vec(U8), error: Net.Error) impure Int
   close(conn)
   close(listener)
   vec_free(vec)

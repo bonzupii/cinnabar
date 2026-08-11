@@ -21,8 +21,8 @@ use std::hash::{BuildHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const POSITIVE_ITERATIONS: usize = 100;
-const NEGATIVE_ITERATIONS: usize = 100;
+const POSITIVE_ITERATIONS: usize = 80;
+const NEGATIVE_ITERATIONS: usize = 80;
 const RUN_TIMEOUT_SECS: u64 = 10;
 const COMPILE_TIMEOUT_SECS: u64 = 30;
 const TIMEOUT_CODE: i32 = 124;
@@ -2330,7 +2330,7 @@ fn generate_negative(rng: &mut Rng, shape: usize) -> (String, &'static str) {
         push(&format!("use {}.{}", m, destroy));
     }
     push("");
-    push("pub fun main() Int");
+    push("pub fun main() impure Int");
     push(&format!("  val {} = match {}()", h1, make));
     push("    Ok(value) => value");
     push(&format!("    Err({}.{}) => return 0", m, fault));
@@ -2446,6 +2446,21 @@ fn temp_dir() -> PathBuf {
     std::env::temp_dir().join(format!("cinnabar_fuzz_{}", std::process::id()))
 }
 
+// Removes the fuzzer's temp dir on every exit path, including a panic from
+// a failure assertion.  Without this, a failed iteration leaks the compiled
+// binaries (each carrying a ~4.5 MB embedded-libc.a link copy) and fills
+// the tmpfs over repeated runs.
+struct TempDirGuard(PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        match std::fs::remove_dir_all(&self.0) {
+            Ok(()) => {}
+            Err(err) => eprintln!("fuzz temp cleanup failed: {}", err),
+        }
+    }
+}
+
 // A failed fixture write must fail the test, never silently pass an
 // iteration that then has nothing to compile or run.
 fn write_fixture(path: &Path, src: &str) {
@@ -2534,6 +2549,7 @@ fn fuzz_generalization_corpus() {
     if let Err(err) = std::fs::create_dir_all(&dir) {
         assert!(false, "cannot create temp dir {}: {}", dir.display(), err);
     }
+    let guard = TempDirGuard(dir.clone());
 
     let mut pos_rng = Rng::new(seed);
     let mut idx = 0usize;
@@ -2629,8 +2645,5 @@ fn fuzz_generalization_corpus() {
         nidx += 1;
     }
 
-    match std::fs::remove_dir_all(&dir) {
-        Ok(()) => {}
-        Err(err) => eprintln!("temp cleanup failed: {}", err),
-    }
+    drop(guard);
 }

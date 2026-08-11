@@ -93,14 +93,14 @@ fun digit_byte(digit: Int) U8
 end
 
 #! Frees the vec and returns the error (linearity: vec consumed once).
-fun fail_free_vec<T>(vec: Collections.Vec(U8), error: Collections.Error) Result(T, Collections.Error)
+fun fail_free_vec<T>(vec: Collections.Vec(U8), error: Collections.Error) impure Result(T, Collections.Error)
   vec_free(vec)
   return Err(error)
 end
 
 #! Appends the decimal digits of `value` (>= 0) to `vec`, most significant
 #! first, extracting digits with Euclidean division by 10.
-fun append_int_digits(vec: &mut Collections.Vec(U8), value: Int) Result(Unit, Collections.Error)
+fun append_int_digits(vec: &mut Collections.Vec(U8), value: Int) impure Result(Unit, Collections.Error)
   val quotient = match value / 10
     Ok(qv) => qv
     Err(DivByZero) => 0
@@ -125,7 +125,7 @@ end
 #! print functions below stay straight-line (the `print_byte_string`
 #! shape), so the borrowed handle is never carried across a branch merge
 #! in a function that owns it.
-fun append_int(vec: &mut Collections.Vec(U8), value: Int) Result(Unit, Collections.Error)
+fun append_int(vec: &mut Collections.Vec(U8), value: Int) impure Result(Unit, Collections.Error)
   if value < 0
     try vec_push(vec, MINUS)
   end
@@ -145,7 +145,7 @@ fun append_int(vec: &mut Collections.Vec(U8), value: Int) Result(Unit, Collectio
 end
 
 #! Owns the vec in straight-line code only: build, view, string, print.
-fun print_int_inline(value: Int) Result(Unit, Collections.Error)
+fun print_int_inline(value: Int) impure Result(Unit, Collections.Error)
   val vec = try vec_new[U8]()
 
   val build_result = append_int(&mut vec, value)
@@ -168,7 +168,7 @@ fun print_int_inline(value: Int) Result(Unit, Collections.Error)
 end
 
 #! Like `print_int_inline`, but ends with a newline.
-fun print_int_newline(value: Int) Result(Unit, Collections.Error)
+fun print_int_newline(value: Int) impure Result(Unit, Collections.Error)
   val vec = try vec_new[U8]()
 
   val build_result = append_int(&mut vec, value)
@@ -191,7 +191,7 @@ fun print_int_newline(value: Int) Result(Unit, Collections.Error)
 end
 
 #! Prints one one-byte piece (a separator) without a newline.
-fun print_byte_string(byte: U8) Result(Unit, Collections.Error)
+fun print_byte_string(byte: U8) impure Result(Unit, Collections.Error)
   val vec = try vec_new[U8]()
 
   val push_result = vec_push(&mut vec, byte)
@@ -213,7 +213,7 @@ fun print_byte_string(byte: U8) Result(Unit, Collections.Error)
 end
 
 #! Prints one line "a/b=q r" for the Euclidean quotient and remainder.
-fun print_div_rem(a: Int, b: Int) Result(Unit, Collections.Error)
+fun print_div_rem(a: Int, b: Int) impure Result(Unit, Collections.Error)
   try print_int_inline(a)
   try print_byte_string(SLASH)
   try print_int_inline(b)
@@ -235,7 +235,7 @@ fun print_div_rem(a: Int, b: Int) Result(Unit, Collections.Error)
   return Ok(Unit)
 end
 
-fun run_all() Result(Unit, Collections.Error)
+fun run_all() impure Result(Unit, Collections.Error)
   try print_div_rem(10, 3)
   try print_div_rem(21, 3)
   try print_div_rem(21, 5)

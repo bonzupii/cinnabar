@@ -19,7 +19,7 @@ pub type Holder
   pub tag: Int
 end
 
-pub fun main() Int
+pub fun main() impure Int
   val block = match allocate(1)
     Ok(value) => value
     Err(error) => return 1

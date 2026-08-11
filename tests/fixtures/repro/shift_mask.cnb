@@ -1,0 +1,52 @@
+#! Shift amounts are masked by the operand's bit width minus one (63 for
+#! Int): 1 << 64 is 1 << 0, 1 << 70 is 1 << 6, 8 >> 65 is 8 >> 1.  The
+#! constant folder and the runtime codegen path must apply the identical
+#! mask; this fixture asserts the two cannot drift apart.
+#!
+#! Exit code 0 means every check passed; 51..58 name the check that failed.
+
+#! Constant-folder path: both operands are literals, so fold_bin applies
+#! the mask (rv % int_bit_width).
+pub const SHIFT_64: Int = 1 << 64
+pub const SHIFT_70: Int = 1 << 70
+pub const SHIFT_63: Int = 1 << 63
+pub const SHR_65: Int = 8 >> 65
+
+pub fun main() Int
+  #! Runtime path: both operands are variables, so emit_binary applies the
+  #! mask (rhs & (bit_width - 1)) and must produce the identical values.
+  var one: Int = 1
+  var eight: Int = 8
+
+  val r_64 = one << 64
+  val r_70 = one << 70
+  val r_63 = one << 63
+  val rs_65 = eight >> 65
+
+  if SHIFT_64 != 1
+    return 51
+  end
+  if SHIFT_70 != 64
+    return 52
+  end
+  if SHIFT_63 != -9223372036854775807 - 1
+    return 53
+  end
+  if SHR_65 != 4
+    return 54
+  end
+
+  if r_64 != SHIFT_64
+    return 55
+  end
+  if r_70 != SHIFT_70
+    return 56
+  end
+  if r_63 != SHIFT_63
+    return 57
+  end
+  if rs_65 != SHR_65
+    return 58
+  end
+  return 0
+end

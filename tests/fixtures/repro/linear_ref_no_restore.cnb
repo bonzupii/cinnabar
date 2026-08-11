@@ -20,12 +20,12 @@ pub type Holder
   pub tag: Int
 end
 
-fun steal_block(r: &mut Holder) Int
+fun steal_block(r: &mut Holder) impure Int
   deallocate(r.block)
   return 0
 end
 
-pub fun main() Int
+pub fun main() impure Int
   val block = match allocate(1)
     Ok(value) => value
     Err(error) => return 1

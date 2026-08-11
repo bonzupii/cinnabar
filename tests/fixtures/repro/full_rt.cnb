@@ -84,7 +84,7 @@ use Collections.hash_map_insert
 use Collections.hash_map_get
 use Collections.hash_map_free
 
-fun fill_squares(vec: &mut Collections.Vec(Int)) Result(Unit, Collections.Error)
+fun fill_squares(vec: &mut Collections.Vec(Int)) impure Result(Unit, Collections.Error)
   var i: Int = 0
   while i < 5
     try vec_push(vec, i * i)
@@ -93,12 +93,12 @@ fun fill_squares(vec: &mut Collections.Vec(Int)) Result(Unit, Collections.Error)
   return Ok(Unit)
 end
 
-fun fail_vec<T>(vec: Collections.Vec(T)) Int
+fun fail_vec<T>(vec: Collections.Vec(T)) impure Int
   vec_free(vec)
   return 2
 end
 
-pub fun main() Int
+pub fun main() impure Int
   val vec = match vec_new[Int]()
     Ok(v) => v
     Err(error) => return 1

@@ -1,0 +1,136 @@
+#! UTF-8 validation completeness fixture.
+#!
+#! string_from_slice must accept every well-formed UTF-8 sequence and
+#! reject malformed input, including the three cases that only a code
+#! point decode can catch: overlong encodings (a code point squeezed into
+#! more bytes than it needs), UTF-16 surrogates (U+D800..U+DFFF), and code
+#! points above U+10FFFF.  The lead/continuation byte-shape checks alone
+#! would accept all of these.
+#!
+#! Exit code 0 means every check passed; 71..78 name the check that failed.
+
+pub mod Collections
+  pub nat type String
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+    pub KeyNotFound
+    pub EmptySlice
+    pub InvalidUtf8
+  end
+
+  pub nat fun string_from_slice(view: &[U8]) impure Result(String, Error)
+  pub nat fun string_free(value: String) impure Unit
+end
+
+use Collections.string_from_slice
+use Collections.string_free
+
+#! Well-formed UTF-8 byte sequences.
+pub const B_43: U8 = 0x43  # 'C'
+pub const B_69: U8 = 0x69  # 'i'
+pub const B_6E: U8 = 0x6E  # 'n'
+pub const B_21: U8 = 0x21  # '!'
+pub const B_C2: U8 = 0xC2  # lead byte of the 2-byte U+00A9
+pub const B_A9: U8 = 0xA9
+pub const B_E2: U8 = 0xE2  # lead byte of the 3-byte U+20AC
+pub const B_82: U8 = 0x82
+pub const B_AC: U8 = 0xAC
+pub const B_F0: U8 = 0xF0  # lead byte of the 4-byte U+1F600
+pub const B_9F: U8 = 0x9F
+pub const B_98: U8 = 0x98
+pub const B_80: U8 = 0x80
+
+#! Malformed sequences: overlong leads, a surrogate lead, and a lead that
+#! can exceed U+10FFFF.
+pub const B_E0: U8 = 0xE0  # 3-byte lead; E0 80..9F would be overlong
+pub const B_ED: U8 = 0xED  # 3-byte lead; ED A0..BF encodes surrogates
+pub const B_A0: U8 = 0xA0  # first continuation of U+D800
+pub const B_90: U8 = 0x90  # continuation pushing 4-byte values over the limit
+pub const B_F4: U8 = 0xF4  # 4-byte lead; F4 90..BF exceeds U+10FFFF
+
+#! A Usize-typed zero for comparing payloads against (a bare literal
+#! would infer as Int), and an impossible value for consuming the
+#! unreachable numeric payloads below.
+pub const ZERO_USIZE: Usize = 0
+pub const SENTINEL_USIZE: Usize = 999999
+
+#! True when the error is exactly InvalidUtf8.  Every Error variant is
+#! bound and consumed: the numeric payloads of the unreachable failure
+#! variants are compared against SENTINEL_USIZE, a value no real payload
+#! equals, so no binding is discarded.
+fun is_invalid_utf8(error: Collections.Error) Bool
+  match error
+    Collections.InvalidUtf8 => return true
+    Collections.AllocationFailed(size) => return size == SENTINEL_USIZE
+    Collections.IndexOutOfBounds(index) => return index == SENTINEL_USIZE
+    Collections.KeyNotFound => return false
+    Collections.EmptySlice => return false
+  end
+end
+
+#! True when string_from_slice accepts the slice's bytes as well-formed
+#! UTF-8: an Ok result accepts, an InvalidUtf8 rejection denies, and any
+#! other rejection (an allocation failure) means the bytes were well
+#! formed but could not be copied.
+fun utf8_ok(view: &[U8]) impure Bool
+  val result = string_from_slice(view)
+  match result
+    Ok(string) => return ok_and_free(string)
+    Err(error) => return !is_invalid_utf8(error)
+  end
+end
+
+#! The Ok arm of utf8_ok is a single statement, so freeing the accepted
+#! string and reporting success lives in one helper: the free is the real
+#! effect, and the result is the success flag.
+fun ok_and_free(string: Collections.String) impure Bool
+  string_free(string)
+  return true
+end
+
+pub fun main() impure Int
+  #! Valid sequences must be accepted.
+  val ascii = [B_43, B_69, B_6E, B_21]
+  if !utf8_ok(&ascii)
+    return 71
+  end
+  val two = [B_C2, B_A9]
+  if !utf8_ok(&two)
+    return 72
+  end
+  val three = [B_E2, B_82, B_AC]
+  if !utf8_ok(&three)
+    return 73
+  end
+  val four = [B_F0, B_9F, B_98, B_80]
+  if !utf8_ok(&four)
+    return 74
+  end
+
+  #! Overlong encodings must be rejected: U+0000 in three bytes, U+0000 in
+  #! four bytes.
+  val over3 = [B_E0, B_80, B_80]
+  if utf8_ok(&over3)
+    return 75
+  end
+  val over4 = [B_F0, B_80, B_80, B_80]
+  if utf8_ok(&over4)
+    return 76
+  end
+
+  #! A UTF-16 surrogate (U+D800) must be rejected.
+  val surrogate = [B_ED, B_A0, B_80]
+  if utf8_ok(&surrogate)
+    return 77
+  end
+
+  #! A code point above U+10FFFF (U+110000) must be rejected.
+  val above = [B_F4, B_90, B_80, B_80]
+  if utf8_ok(&above)
+    return 78
+  end
+
+  return 0
+end

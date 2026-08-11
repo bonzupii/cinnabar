@@ -22,7 +22,7 @@ fun view_of(v: &Collections.Vec(Int)) &[Int]
   return vec_view(v)
 end
 
-pub fun main() Int
+pub fun main() impure Int
   val x = match vec_new[Int]()
     Ok(v) => v
     Err(error) => return 1

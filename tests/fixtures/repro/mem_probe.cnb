@@ -61,7 +61,7 @@ const ZERO_USIZE: Usize = 0
 # shapes are turned into loops.  Every level keeps a real frame; the
 # stack guard must fire cleanly (exit 70) instead of the OS SIGSEGV.
 # The accumulated value is never asserted; the exit code 70 is.
-fun recurse(n: Int, block: &Memory.Block) Int
+fun recurse(n: Int, block: &Memory.Block) impure Int
   if n <= 0
     return 0
   end
@@ -76,17 +76,17 @@ fun recurse(n: Int, block: &Memory.Block) Int
   return inner + 2
 end
 
-fun fail_write(block: Memory.Block, error: Memory.Error) Result(U8, Memory.Error)
+fun fail_write(block: Memory.Block, error: Memory.Error) impure Result(U8, Memory.Error)
   deallocate(block)
   return Err(error)
 end
 
-fun fail_read(block: Memory.Block, error: Memory.Error) Result(U8, Memory.Error)
+fun fail_read(block: Memory.Block, error: Memory.Error) impure Result(U8, Memory.Error)
   deallocate(block)
   return Err(error)
 end
 
-fun memory_roundtrip() Result(U8, Memory.Error)
+fun memory_roundtrip() impure Result(U8, Memory.Error)
   val block = match allocate(1)
     Ok(b) => b
     Err(error) => return Err(error)
@@ -108,7 +108,7 @@ fun memory_roundtrip() Result(U8, Memory.Error)
   return Ok(value)
 end
 
-pub fun main() Int
+pub fun main() impure Int
   val block = match allocate(1)
     Ok(value) => value
     Err(error) => return 1

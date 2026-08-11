@@ -92,6 +92,15 @@ const UTF8_LEAD_3_MAX: u64 = 0xEF;
 const UTF8_LEAD_4_MIN: u64 = 0xF0;
 const UTF8_LEAD_4_MAX: u64 = 0xF4;
 
+// Minimum decodable code point per sequence length (any smaller value is
+// an overlong encoding), the maximum Unicode code point, and the UTF-16
+// surrogate window.
+const UTF8_CP_3_MIN: u64 = 0x800;
+const UTF8_CP_4_MIN: u64 = 0x10000;
+const UTF8_CP_MAX: u64 = 0x10FFFF;
+const UTF8_SURROGATE_MIN: u64 = 0xD800;
+const UTF8_SURROGATE_MAX: u64 = 0xDFFF;
+
 fn utf8_byte_value<'ctx>(sess: &mut Session<'ctx, '_, '_>, b: IntValue<'ctx>) -> Result<IntValue<'ctx>, CodegenError> {
     let bw = sess.2.build_int_cast(b, sess.0.i64_type(), "").map_err(builder_fail)?;
     let byte = sess.2.build_and(bw, sess.0.i64_type().const_int(0xFF, false), "").map_err(builder_fail)?;
@@ -659,11 +668,18 @@ fn emit_stmt_list<'ctx, 'a>(
     sess: &mut Session<'ctx, '_, '_>,
     ctx: &mut FnCtx<'ctx, 'a>,
     list: i64,
+    expected_key: i64,
     span: (i64, i64, i64),
 ) -> Result<(PointerValue<'ctx>, bool), CodegenError> {
     let count = list_len(sess.6, list);
     if count == 0 {
-        return Err(builder_error(span.0, span.1, span.2, "internal: empty statement list"));
+        // An empty block evaluates to its expected type.  The typechecker
+        // attaches Unit to empty while/if bodies and to the fall-through of
+        // Unit-returning functions; build a tag-0 value into a fresh slot
+        // instead of failing, so empty blocks lower cleanly.
+        let slot = alloca_typed(sess, expected_key, "empty", span)?;
+        build_unit_value_into(sess, expected_key, slot, span)?;
+        return Ok((slot, false));
     }
     let mut out = emit_stmt(sess, ctx, list_get(sess.6, list, 0))?;
     let mut idx = 1i64;
@@ -837,13 +853,13 @@ fn emit_while<'ctx, 'a>(
     sess.2.build_conditional_branch(cv, body_block, exit_block).map_err(builder_fail)?;
     sess.2.position_at_end(body_block);
     ctx.2.push((exit_block, cond_block));
-    emit_stmt_list(sess, ctx, body, span)?;
+    let key = sub_key(sess, ctx.3, ctx.4, stmt_ty_of(sess.5, stmt));
+    emit_stmt_list(sess, ctx, body, key, span)?;
     ctx.2.pop();
     if !block_terminated(sess) {
         sess.2.build_unconditional_branch(cond_block).map_err(builder_fail)?;
     }
     sess.2.position_at_end(exit_block);
-    let key = sub_key(sess, ctx.3, ctx.4, stmt_ty_of(sess.5, stmt));
     let slot = alloca_typed(sess, key, "while", span)?;
     Ok((slot, false))
 }
@@ -865,13 +881,14 @@ fn emit_if<'ctx, 'a>(
     let merge_block = new_block(sess, ctx.0, "if_merge");
     sess.2.build_conditional_branch(cv, then_block, else_block).map_err(builder_fail)?;
     sess.2.position_at_end(then_block);
-    emit_stmt_list(sess, ctx, then_list, span)?;
+    let key = sub_key(sess, ctx.3, ctx.4, stmt_ty_of(sess.5, stmt));
+    emit_stmt_list(sess, ctx, then_list, key, span)?;
     if !block_terminated(sess) {
         sess.2.build_unconditional_branch(merge_block).map_err(builder_fail)?;
     }
     sess.2.position_at_end(else_block);
     if else_list != NONE {
-        emit_stmt_list(sess, ctx, else_list, span)?;
+        emit_stmt_list(sess, ctx, else_list, key, span)?;
         if !block_terminated(sess) {
             sess.2.build_unconditional_branch(merge_block).map_err(builder_fail)?;
         }
@@ -879,7 +896,6 @@ fn emit_if<'ctx, 'a>(
         sess.2.build_unconditional_branch(merge_block).map_err(builder_fail)?;
     }
     sess.2.position_at_end(merge_block);
-    let key = sub_key(sess, ctx.3, ctx.4, stmt_ty_of(sess.5, stmt));
     let slot = alloca_typed(sess, key, "if", span)?;
     Ok((slot, false))
 }
@@ -1139,13 +1155,20 @@ fn emit_binary<'ctx, 'a>(
         r = sess.2.build_int_sub(lv, rv, "").map_err(builder_fail)?;
     } else if op == BIN_MUL {
         r = sess.2.build_int_mul(lv, rv, "").map_err(builder_fail)?;
-    } else if op == BIN_SHL {
-        r = sess.2.build_left_shift(lv, rv, "").map_err(builder_fail)?;
-    } else if op == BIN_SHR {
-        r = if key_is_signed(sess, lkey) {
-            sess.2.build_right_shift(lv, rv, true, "").map_err(builder_fail)?
+    } else if op == BIN_SHL || op == BIN_SHR {
+        // A shift amount >= the operand bit width is poison in LLVM, so it
+        // is masked by bit_width - 1 (7 for i8, 31 for i32, 63 for i64),
+        // matching the constant folder's wrapping_shl/wrapping_shr mask.
+        let rhs_ty = rv.get_type();
+        let width = rhs_ty.get_bit_width();
+        let mask_const = rhs_ty.const_int((width - 1) as u64, false);
+        let rmasked = sess.2.build_and(rv, mask_const, "").map_err(builder_fail)?;
+        if op == BIN_SHL {
+            r = sess.2.build_left_shift(lv, rmasked, "").map_err(builder_fail)?;
+        } else if key_is_signed(sess, lkey) {
+            r = sess.2.build_right_shift(lv, rmasked, true, "").map_err(builder_fail)?
         } else {
-            sess.2.build_right_shift(lv, rv, false, "").map_err(builder_fail)?
+            r = sess.2.build_right_shift(lv, rmasked, false, "").map_err(builder_fail)?
         };
     } else if op == BIN_BAND {
         r = sess.2.build_and(lv, rv, "").map_err(builder_fail)?;
@@ -2088,7 +2111,7 @@ fn get_or_emit_fn<'ctx>(
         idx += 1;
     }
     let mut ctx: FnCtx<'ctx, '_> = (fn_val, body_locals, fn_loops, from.as_slice(), to.as_slice(), ret_key, false);
-    let body_result = emit_stmt_list(sess, &mut ctx, body, span);
+    let body_result = emit_stmt_list(sess, &mut ctx, body, ret_key, span);
     if let Err(err) = body_result {
         return Err(with_fn_span(err, fn_slot, sess));
     }
@@ -2823,6 +2846,7 @@ fn native_hash_map_insert<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
     let vsize = sess.3.get_abi_size(&llvm_of(sess, v_key, span)?);
     let stride_const = sess.0.i64_type().const_int(ksize + vsize, false);
     let ksize_const = sess.0.i64_type().const_int(ksize, false);
+    let vsize_const = sess.0.i64_type().const_int(vsize, false);
     let map_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let map_ref = load_ptr(sess, p0)?;
     let dptr = struct_gep(sess, map_key, map_ref, 0, "", span)?;
@@ -2911,9 +2935,17 @@ fn native_hash_map_insert<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
     let len2 = load_i64(sess, lptr)?;
     let entry_off = sess.2.build_int_mul(len2, stride_const, "").map_err(builder_fail)?;
     let keyptr2 = byte_offset(sess, data2, entry_off)?;
+    // Zero-fill the new key and value slots before copying: struct and
+    // enum keys lowered with ABI layout carry padding bytes, and the scan
+    // compares whole keys with memcmp over ksize bytes.  Deterministic
+    // padding keeps that comparison well-defined (interim measure; the
+    // long-term fix is structural key equality).
+    let zero8 = sess.0.i8_type().const_zero();
+    sess.2.build_memset(keyptr2, 1, zero8, ksize_const).map_err(builder_fail)?;
     copy_value(sess, k_key, keyptr2, p1, span)?;
     let voff2 = sess.2.build_int_add(entry_off, ksize_const, "").map_err(builder_fail)?;
     let valueptr2 = byte_offset(sess, data2, voff2)?;
+    sess.2.build_memset(valueptr2, 1, zero8, vsize_const).map_err(builder_fail)?;
     copy_value(sess, v_key, valueptr2, p2, span)?;
     let len3 = sess.2.build_int_add(len2, one, "").map_err(builder_fail)?;
     store_key(sess, lptr, len3.into())?;
@@ -3312,6 +3344,8 @@ fn native_string_from_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionV
     sess.2.position_at_end(chk1);
     let c1 = emit_cont_step(sess, f, i, len, data, 1, bad)?;
     sess.2.position_at_end(c1);
+    // A 2-byte sequence from C2..DF decodes to U+0080..U+07FF: never
+    // overlong, never a surrogate, never above U+10FFFF, so no range check.
     let two = sess.0.i64_type().const_int(2, false);
     let i3 = sess.2.build_int_add(i, two, "").map_err(builder_fail)?;
     store_key(sess, i_slot, i3.into())?;
@@ -3321,6 +3355,33 @@ fn native_string_from_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionV
     sess.2.position_at_end(c2a);
     let c2b = emit_cont_step(sess, f, i, len, data, 2, bad)?;
     sess.2.position_at_end(c2b);
+    // Decode the 3-byte code point
+    // ((lead & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F) and reject
+    // overlong encodings (cp < U+0800) and surrogates (U+D800..U+DFFF).
+    let one = sess.0.i64_type().const_int(1, false);
+    let i1 = sess.2.build_int_add(i, one, "").map_err(builder_fail)?;
+    let i2 = sess.2.build_int_add(i, two, "").map_err(builder_fail)?;
+    let b1p = byte_offset(sess, data, i1)?;
+    let b1r = load_i8(sess, b1p)?;
+    let b1 = utf8_byte_value(sess, b1r)?;
+    let b2p = byte_offset(sess, data, i2)?;
+    let b2r = load_i8(sess, b2p)?;
+    let b2 = utf8_byte_value(sess, b2r)?;
+    let lead_lo = sess.2.build_and(byte, sess.0.i64_type().const_int(0x0F, false), "").map_err(builder_fail)?;
+    let lead_sh = sess.2.build_left_shift(lead_lo, sess.0.i64_type().const_int(12, false), "").map_err(builder_fail)?;
+    let b1_lo = sess.2.build_and(b1, sess.0.i64_type().const_int(0x3F, false), "").map_err(builder_fail)?;
+    let b1_sh = sess.2.build_left_shift(b1_lo, sess.0.i64_type().const_int(6, false), "").map_err(builder_fail)?;
+    let b2_lo = sess.2.build_and(b2, sess.0.i64_type().const_int(0x3F, false), "").map_err(builder_fail)?;
+    let cp_mid = sess.2.build_or(lead_sh, b1_sh, "").map_err(builder_fail)?;
+    let cp3 = sess.2.build_or(cp_mid, b2_lo, "").map_err(builder_fail)?;
+    let ge_min3 = sess.2.build_int_compare(IntPredicate::UGE, cp3, sess.0.i64_type().const_int(UTF8_CP_3_MIN, false), "").map_err(builder_fail)?;
+    let lt_surr = sess.2.build_int_compare(IntPredicate::ULT, cp3, sess.0.i64_type().const_int(UTF8_SURROGATE_MIN, false), "").map_err(builder_fail)?;
+    let gt_surr = sess.2.build_int_compare(IntPredicate::UGT, cp3, sess.0.i64_type().const_int(UTF8_SURROGATE_MAX, false), "").map_err(builder_fail)?;
+    let not_surr = sess.2.build_or(lt_surr, gt_surr, "").map_err(builder_fail)?;
+    let ok3 = sess.2.build_and(ge_min3, not_surr, "").map_err(builder_fail)?;
+    let chk2_valid = new_block(sess, f, "utf8_3ok");
+    sess.2.build_conditional_branch(ok3, chk2_valid, bad).map_err(builder_fail)?;
+    sess.2.position_at_end(chk2_valid);
     let three = sess.0.i64_type().const_int(3, false);
     let i4 = sess.2.build_int_add(i, three, "").map_err(builder_fail)?;
     store_key(sess, i_slot, i4.into())?;
@@ -3332,6 +3393,39 @@ fn native_string_from_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionV
     sess.2.position_at_end(c3b);
     let c3c = emit_cont_step(sess, f, i, len, data, 3, bad)?;
     sess.2.position_at_end(c3c);
+    // Decode the 4-byte code point
+    // ((lead & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) |
+    // (b3 & 0x3F) and reject overlong encodings (cp < U+10000) and code
+    // points above U+10FFFF.  A 4-byte sequence can never be a surrogate.
+    let three_c = sess.0.i64_type().const_int(3, false);
+    let i1b = sess.2.build_int_add(i, one, "").map_err(builder_fail)?;
+    let i2b = sess.2.build_int_add(i, two, "").map_err(builder_fail)?;
+    let i3b = sess.2.build_int_add(i, three_c, "").map_err(builder_fail)?;
+    let b1p = byte_offset(sess, data, i1b)?;
+    let b1r = load_i8(sess, b1p)?;
+    let b1b = utf8_byte_value(sess, b1r)?;
+    let b2p = byte_offset(sess, data, i2b)?;
+    let b2r = load_i8(sess, b2p)?;
+    let b2b = utf8_byte_value(sess, b2r)?;
+    let b3p = byte_offset(sess, data, i3b)?;
+    let b3r = load_i8(sess, b3p)?;
+    let b3b = utf8_byte_value(sess, b3r)?;
+    let lead4_lo = sess.2.build_and(byte, sess.0.i64_type().const_int(0x07, false), "").map_err(builder_fail)?;
+    let lead4_sh = sess.2.build_left_shift(lead4_lo, sess.0.i64_type().const_int(18, false), "").map_err(builder_fail)?;
+    let b1_lo2 = sess.2.build_and(b1b, sess.0.i64_type().const_int(0x3F, false), "").map_err(builder_fail)?;
+    let b1_sh2 = sess.2.build_left_shift(b1_lo2, sess.0.i64_type().const_int(12, false), "").map_err(builder_fail)?;
+    let b2_lo2 = sess.2.build_and(b2b, sess.0.i64_type().const_int(0x3F, false), "").map_err(builder_fail)?;
+    let b2_sh2 = sess.2.build_left_shift(b2_lo2, sess.0.i64_type().const_int(6, false), "").map_err(builder_fail)?;
+    let b3_lo2 = sess.2.build_and(b3b, sess.0.i64_type().const_int(0x3F, false), "").map_err(builder_fail)?;
+    let cp_mid2 = sess.2.build_or(lead4_sh, b1_sh2, "").map_err(builder_fail)?;
+    let cp_mid3 = sess.2.build_or(cp_mid2, b2_sh2, "").map_err(builder_fail)?;
+    let cp4 = sess.2.build_or(cp_mid3, b3_lo2, "").map_err(builder_fail)?;
+    let ge_min4 = sess.2.build_int_compare(IntPredicate::UGE, cp4, sess.0.i64_type().const_int(UTF8_CP_4_MIN, false), "").map_err(builder_fail)?;
+    let le_max = sess.2.build_int_compare(IntPredicate::ULE, cp4, sess.0.i64_type().const_int(UTF8_CP_MAX, false), "").map_err(builder_fail)?;
+    let ok4 = sess.2.build_and(ge_min4, le_max, "").map_err(builder_fail)?;
+    let chk3_valid = new_block(sess, f, "utf8_4ok");
+    sess.2.build_conditional_branch(ok4, chk3_valid, bad).map_err(builder_fail)?;
+    sess.2.position_at_end(chk3_valid);
     let four = sess.0.i64_type().const_int(4, false);
     let i5 = sess.2.build_int_add(i, four, "").map_err(builder_fail)?;
     store_key(sess, i_slot, i5.into())?;
@@ -3464,37 +3558,45 @@ pub fn emit_program<'ctx>(sess: &mut Session<'ctx, '_, '_>, entry_span: (i64, i6
         sess.2.build_return(Some(&code)).map_err(builder_fail)?;
         return Ok(());
     }
-    let tag_ptr = struct_gep(sess, exit_key, exit_alloca, 0, "", main_span)?;
-    let tag = load_i64(sess, tag_ptr)?;
-    let zero = sess.0.i64_type().const_zero();
-    let one = sess.0.i64_type().const_int(1, false);
-    let is_success = sess.2.build_int_compare(IntPredicate::EQ, tag, zero, "").map_err(builder_fail)?;
-    let success_block = new_block(sess, main_wrapper, "exit_0");
-    let failure_block = new_block(sess, main_wrapper, "exit_1");
-    sess.2.build_conditional_branch(is_success, success_block, failure_block).map_err(builder_fail)?;
-    sess.2.position_at_end(success_block);
-    let code0 = i32_ty.const_zero();
-    sess.2.build_return(Some(&code0)).map_err(builder_fail)?;
-    sess.2.position_at_end(failure_block);
-    let is_failure = sess.2.build_int_compare(IntPredicate::EQ, tag, one, "").map_err(builder_fail)?;
-    let fail_ret = new_block(sess, main_wrapper, "exit_fail");
-    let diag_block = new_block(sess, main_wrapper, "exit_diag");
-    sess.2.build_conditional_branch(is_failure, fail_ret, diag_block).map_err(builder_fail)?;
-    sess.2.position_at_end(fail_ret);
-    let code1 = i32_ty.const_int(1, false);
-    sess.2.build_return(Some(&code1)).map_err(builder_fail)?;
-    let diag_tag = variant_tag_of_opt(sess, exit_key, sess.12.exit_diag);
-    sess.2.position_at_end(diag_block);
-    if diag_tag != NONE {
-        let (region, pty) = enum_payload_ptr(sess, exit_alloca, exit_key, diag_tag, main_span)?;
-        let payload = sess.2.build_struct_gep(pty, region, 0, "").map_err(builder_fail)?;
-        let diag_key = variant_payload_key(sess, exit_key, diag_tag, 0, main_span)?;
-        let diag = load_key(sess, diag_key, payload, main_span)?.into_int_value();
-        let code = sess.2.build_int_cast(diag, i32_ty, "").map_err(builder_fail)?;
-        sess.2.build_return(Some(&code)).map_err(builder_fail)?;
-    } else {
+    if exit_kind == TYD_ENUM {
+        let tag_ptr = struct_gep(sess, exit_key, exit_alloca, 0, "", main_span)?;
+        let tag = load_i64(sess, tag_ptr)?;
+        let zero = sess.0.i64_type().const_zero();
+        let one = sess.0.i64_type().const_int(1, false);
+        let is_success = sess.2.build_int_compare(IntPredicate::EQ, tag, zero, "").map_err(builder_fail)?;
+        let success_block = new_block(sess, main_wrapper, "exit_0");
+        let failure_block = new_block(sess, main_wrapper, "exit_1");
+        sess.2.build_conditional_branch(is_success, success_block, failure_block).map_err(builder_fail)?;
+        sess.2.position_at_end(success_block);
+        let code0 = i32_ty.const_zero();
+        sess.2.build_return(Some(&code0)).map_err(builder_fail)?;
+        sess.2.position_at_end(failure_block);
+        let is_failure = sess.2.build_int_compare(IntPredicate::EQ, tag, one, "").map_err(builder_fail)?;
+        let fail_ret = new_block(sess, main_wrapper, "exit_fail");
+        let diag_block = new_block(sess, main_wrapper, "exit_diag");
+        sess.2.build_conditional_branch(is_failure, fail_ret, diag_block).map_err(builder_fail)?;
+        sess.2.position_at_end(fail_ret);
         let code1 = i32_ty.const_int(1, false);
         sess.2.build_return(Some(&code1)).map_err(builder_fail)?;
+        let diag_tag = variant_tag_of_opt(sess, exit_key, sess.12.exit_diag);
+        sess.2.position_at_end(diag_block);
+        if diag_tag != NONE {
+            let (region, pty) = enum_payload_ptr(sess, exit_alloca, exit_key, diag_tag, main_span)?;
+            let payload = sess.2.build_struct_gep(pty, region, 0, "").map_err(builder_fail)?;
+            let diag_key = variant_payload_key(sess, exit_key, diag_tag, 0, main_span)?;
+            let diag = load_key(sess, diag_key, payload, main_span)?.into_int_value();
+            let code = sess.2.build_int_cast(diag, i32_ty, "").map_err(builder_fail)?;
+            sess.2.build_return(Some(&code)).map_err(builder_fail)?;
+        } else {
+            let code1 = i32_ty.const_int(1, false);
+            sess.2.build_return(Some(&code1)).map_err(builder_fail)?;
+        }
+        return Ok(());
     }
+    // Any other return layout is rejected by the typechecker (main must
+    // return a builtin scalar, Unit, or an exit-status enum), so this is
+    // defensive: exit with code 1 instead of misreading a non-tag layout.
+    let code1 = i32_ty.const_int(1, false);
+    sess.2.build_return(Some(&code1)).map_err(builder_fail)?;
     Ok(())
 }

@@ -34,12 +34,12 @@ fun b_len(v: &Collections.Vec(Int)) Int
   return 2
 end
 
-fun fail_with_x(x: Collections.Vec(Int)) Int
+fun fail_with_x(x: Collections.Vec(Int)) impure Int
   vec_free(x)
   return 1
 end
 
-pub fun main() Int
+pub fun main() impure Int
   val x = match vec_new[Int]()
     Ok(v) => v
     Err(error) => return 1
