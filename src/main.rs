@@ -1,18 +1,10 @@
-mod ast;
-mod borrow;
-mod codegen;
-mod lexer;
-mod module_loader;
-mod parser;
-mod resolver;
-mod typecheck;
-
-use crate::ast::*;
+use cinnabar::ast::*;
+use cinnabar::{borrow, codegen, module_loader, resolver, typecheck};
 use ariadne::{Color, FnCache, Label, Report, ReportKind, Source};
 use clap::builder::PathBufValueParser;
 use clap::{Arg, ArgAction, Command as ClapCommand};
-use codegen::compile_and_link;
-use codegen::error::codegen_error_message;
+use cinnabar::codegen::compile_and_link;
+use cinnabar::codegen::error::codegen_error_message;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 

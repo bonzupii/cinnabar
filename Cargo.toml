@@ -3,6 +3,15 @@ name = "cinnabar"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 WITH LLVM-exception"
+default-run = "cinnabar"
+
+[lib]
+name = "cinnabar"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cinnabar"
+path = "src/main.rs"
 
 [dependencies]
 ariadne = "0.6.0"
