@@ -4,6 +4,7 @@
 // unchanged: each stage computes its facts once and attaches them to the
 // flat node arena for every later consumer to read (Single-Fact Rule).
 
+pub mod analysis;
 pub mod ast;
 pub mod borrow;
 pub mod codegen;

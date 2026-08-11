@@ -1,0 +1,31 @@
+#! Explainer fixture (EXPECT_REJECTED): a linear Block is consumed on the
+#! then-path but leaks on the fall-through path, so the borrow checker
+#! reports "consumed on some paths but not on all paths".  The tooling
+#! tests assert that the checker's explanatory notes name both paths.
+
+pub mod Memory
+  pub nat type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+  end
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+end
+
+use Memory.allocate
+use Memory.deallocate
+
+fun leak_on_one_path(flag: Bool, block: Memory.Block) impure I64
+  if flag
+    deallocate(block)
+  end
+  return 0
+end
+
+pub fun main() impure I64
+  val block = match allocate(8)
+    Ok(b) => b
+    Err(error) => return 1
+  end
+  return leak_on_one_path(true, block)
+end
