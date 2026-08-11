@@ -790,9 +790,12 @@ pub const NODE_FIELDKEY: i64 = 17;
 //
 // SCOPE_AT:      a=kind, b=source node, c=scope
 // SCOPE_VISIBLE: a=kind, b=query scope, c=local name, d=symbol, e=namespace
+// SCOPE_MEMBER:  a=kind, b=query scope, c=member scope, d=local name,
+//                e=symbol, f=namespace
 pub const NODE_SCOPEFACT: i64 = 18;
 pub const SCOPE_AT: i64 = 0;
 pub const SCOPE_VISIBLE: i64 = 1;
+pub const SCOPE_MEMBER: i64 = 2;
 
 pub fn alloc_scope_at(nodes: &mut Vec<i64>, source: i64, scope: i64) -> i64 {
     alloc_node(
@@ -832,6 +835,31 @@ pub fn alloc_scope_visible(
             sym,
             namespace,
             NONE,
+        ],
+    )
+}
+
+pub fn alloc_scope_member(
+    nodes: &mut Vec<i64>,
+    query: i64,
+    member_scope: i64,
+    name: i64,
+    sym: i64,
+    namespace: i64,
+) -> i64 {
+    alloc_node(
+        nodes,
+        &[
+            NODE_SCOPEFACT,
+            NO_FILE,
+            NO_FILE,
+            NO_FILE,
+            SCOPE_MEMBER,
+            query,
+            member_scope,
+            name,
+            sym,
+            namespace,
         ],
     )
 }

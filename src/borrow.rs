@@ -2389,8 +2389,23 @@ fn apply_assign(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool,
     if report {
         if eff == ST_LIVE {
             push_error(ctx.3, &format!("linear value '{}' is reassigned without being consumed", name), span.0, span.1, span.2);
+            let row = binding_at(f, binding);
+            explain_unconsumed(f, ctx, binding, &name, row.1);
+            let bind_span = bind_span_of(f, binding);
+            if bind_span.0 != NO_FILE {
+                push_note_for_last(
+                    ctx.3,
+                    ctx.7,
+                    "consume the existing value before assigning its replacement",
+                    bind_span.0,
+                    bind_span.1,
+                    bind_span.2,
+                );
+            }
         } else if eff == ST_PARTIAL {
             push_error(ctx.3, &format!("cannot reassign partially moved value '{}'", name), span.0, span.1, span.2);
+            let row = binding_at(f, binding);
+            explain_unconsumed(f, ctx, binding, &name, row.1);
         }
     }
     if eff == ST_LIVE || eff == ST_PARTIAL {
@@ -3396,6 +3411,20 @@ fn report(
                     row.7,
                     row.8,
                 );
+                let binding_row = binding_at(f, binding);
+                let name = name_text(ctx.0, binding_row.0);
+                explain_unconsumed(f, ctx, binding, &name, binding_row.1);
+                let bind_span = bind_span_of(f, binding);
+                if bind_span.0 != NO_FILE {
+                    push_note_for_last(
+                        ctx.3,
+                        ctx.7,
+                        "extract every linear element through the container's native extraction operation before freeing it",
+                        bind_span.0,
+                        bind_span.1,
+                        bind_span.2,
+                    );
+                }
             }
             op += 1;
         }

@@ -576,6 +576,10 @@ pub fn completions(analysis: &Analysis, file: i64, offset: i64) -> Vec<(String, 
             }
         }
     }
+    let use_items = use_path_completions(analysis, file, offset);
+    if !use_items.is_empty() {
+        return use_items;
+    }
     scope_completions(analysis, file, offset)
 }
 
@@ -600,6 +604,130 @@ fn scope_at(analysis: &Analysis, file: i64, offset: i64) -> i64 {
     best_scope
 }
 
+fn use_path_completions(analysis: &Analysis, file: i64, offset: i64) -> Vec<(String, i64)> {
+    let text = file_text_of(analysis, file);
+    let end = if offset < 0 {
+        0usize
+    } else if offset as usize > text.len() {
+        text.len()
+    } else {
+        offset as usize
+    };
+    let before = match text.get(0..end) {
+        Some(value) => value,
+        None => return Vec::new(),
+    };
+    let line = match before.rsplit('\n').next() {
+        Some(value) => value.trim_start(),
+        None => return Vec::new(),
+    };
+    let path = match line.strip_prefix("use ") {
+        Some(value) => value.trim(),
+        None => return Vec::new(),
+    };
+    let parts: Vec<&str> = path.split('.').collect();
+    let scope = scope_at(analysis, file, offset);
+    let count = node_count(analysis);
+    if parts.len() <= 1 {
+        let typed = match parts.first() {
+            Some(value) => *value,
+            None => "",
+        };
+        let mut roots: Vec<(String, i64)> = Vec::new();
+        let mut id = 0i64;
+        while id < count {
+            if node_tag(&analysis.nodes, id) == NODE_SCOPEFACT
+                && node_a(&analysis.nodes, id) == SCOPE_VISIBLE
+                && node_b(&analysis.nodes, id) == scope
+            {
+                let label = name_text(&analysis.names, node_c(&analysis.nodes, id));
+                let sym = node_d(&analysis.nodes, id);
+                if label.starts_with(typed) && node_a(&analysis.nodes, sym) == SYM_MODULE {
+                    push_unique(&mut roots, label, SYM_MODULE);
+                }
+            }
+            id += 1;
+        }
+        return roots;
+    }
+
+    let first = match parts.first() {
+        Some(value) => *value,
+        None => return Vec::new(),
+    };
+    let first_name = find_name(&analysis.names, first);
+    let mut module_sym = NONE;
+    let mut id = 0i64;
+    while id < count {
+        if node_tag(&analysis.nodes, id) == NODE_SCOPEFACT
+            && node_a(&analysis.nodes, id) == SCOPE_VISIBLE
+            && node_b(&analysis.nodes, id) == scope
+            && node_c(&analysis.nodes, id) == first_name
+        {
+            let candidate = node_d(&analysis.nodes, id);
+            if node_a(&analysis.nodes, candidate) == SYM_MODULE {
+                module_sym = candidate;
+                break;
+            }
+        }
+        id += 1;
+    }
+    if module_sym == NONE {
+        return Vec::new();
+    }
+    let mut segment = 1usize;
+    while segment + 1 < parts.len() {
+        let wanted = match parts.get(segment) {
+            Some(value) => find_name(&analysis.names, value),
+            None => return Vec::new(),
+        };
+        let member_scope = node_e(&analysis.nodes, module_sym);
+        let mut next = NONE;
+        let mut row = 0i64;
+        while row < count {
+            if node_tag(&analysis.nodes, row) == NODE_SCOPEFACT
+                && node_a(&analysis.nodes, row) == SCOPE_MEMBER
+                && node_b(&analysis.nodes, row) == scope
+                && node_c(&analysis.nodes, row) == member_scope
+                && node_d(&analysis.nodes, row) == wanted
+            {
+                let candidate = node_e(&analysis.nodes, row);
+                if node_a(&analysis.nodes, candidate) == SYM_MODULE {
+                    next = candidate;
+                    break;
+                }
+            }
+            row += 1;
+        }
+        if next == NONE {
+            return Vec::new();
+        }
+        module_sym = next;
+        segment += 1;
+    }
+    let typed = match parts.last() {
+        Some(value) => *value,
+        None => "",
+    };
+    let member_scope = node_e(&analysis.nodes, module_sym);
+    let mut out: Vec<(String, i64)> = Vec::new();
+    id = 0;
+    while id < count {
+        if node_tag(&analysis.nodes, id) == NODE_SCOPEFACT
+            && node_a(&analysis.nodes, id) == SCOPE_MEMBER
+            && node_b(&analysis.nodes, id) == scope
+            && node_c(&analysis.nodes, id) == member_scope
+        {
+            let label = name_text(&analysis.names, node_d(&analysis.nodes, id));
+            let sym = node_e(&analysis.nodes, id);
+            if label.starts_with(typed) {
+                push_unique(&mut out, label, node_a(&analysis.nodes, sym));
+            }
+        }
+        id += 1;
+    }
+    out
+}
 // Fields of the struct value ending right before the dot, read from the
 // typechecker's NODE_FIELDKEY facts for that struct's canonical key.
 fn field_completions(analysis: &Analysis, file: i64, dot: i64) -> Vec<(String, i64)> {
@@ -656,7 +784,7 @@ fn field_completions(analysis: &Analysis, file: i64, dot: i64) -> Vec<(String, i
 fn scope_completions(analysis: &Analysis, file: i64, offset: i64) -> Vec<(String, i64)> {
     let mut out: Vec<(String, i64)> = Vec::new();
     // Only symbols the resolver attached as visible from the cursor's
-    // precise scope. Names and visibility are not reconstructed here.
+    // precise scope.  Names and visibility are not reconstructed here.
     let count = node_count(analysis);
     let scope = scope_at(analysis, file, offset);
     let mut id = 0i64;
@@ -755,9 +883,7 @@ fn collect_lets(analysis: &Analysis, stmt_list: i64, offset: i64, out: &mut Vec<
                 name_text(&analysis.names, node_c(&analysis.nodes, stmt)),
                 COMPLETE_LOCAL,
             );
-        } else if kind == STMT_WHILE
-            && covers(analysis, stmt, node_file(&analysis.nodes, stmt), offset)
-        {
+        } else if kind == STMT_WHILE && covers(analysis, stmt, node_file(&analysis.nodes, stmt), offset) {
             collect_lets(analysis, node_c(&analysis.nodes, stmt), offset, out);
         } else if kind == STMT_IF {
             let then_list = node_c(&analysis.nodes, stmt);
@@ -765,7 +891,7 @@ fn collect_lets(analysis: &Analysis, stmt_list: i64, offset: i64, out: &mut Vec<
             if list_covers_offset(analysis, then_list, offset) {
                 collect_lets(analysis, then_list, offset, out);
             } else if else_list != NONE && list_covers_offset(analysis, else_list, offset) {
-                collect_lets(analysis, else_list, offset, out);
+                collect_lets(analysis, node_d(&analysis.nodes, stmt), offset, out);
             }
         }
         idx += 1;

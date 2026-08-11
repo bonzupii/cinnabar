@@ -3044,9 +3044,13 @@ fn check_container_resolvability(state: &mut State, expr: i64, param_keys: i64) 
                 if has_linear == 1 {
                     let cty_sym = key_sym_of(state.1, key);
                     if cty_sym == NONE || node_f(state.1, cty_sym) == NONE {
+                        let container = render_type_key(state.0, state.1, state.2, key);
                         push_error(
                             state.3,
-                            "cannot store linear element in container: container provides no native extraction surface",
+                            &format!(
+                                "cannot store linear element in container '{}': its native API provides no by-value extraction operation",
+                                container
+                            ),
                             node_file(state.1, expr),
                             node_start(state.1, expr),
                             node_end(state.1, expr),
