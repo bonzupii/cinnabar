@@ -1,0 +1,25 @@
+pub mod Tools
+  fun secret() I64
+    return 1
+  end
+
+  pub fun visible() I64
+    return 2
+  end
+end
+
+use Tools.visible
+
+fun branch_locals(flag: Bool) I64
+  if flag
+    val only_then = 1
+    return only_then
+  else
+    val only_else = 2
+    return only_else
+  end
+end
+
+pub fun main() I64
+  return 0
+end

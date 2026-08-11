@@ -801,24 +801,7 @@ fn scope_completions(analysis: &Analysis, file: i64, offset: i64) -> Vec<(String
         }
         id += 1;
     }
-    // Params and let-bindings of the enclosing function, lexically before
-    // the cursor.
-    let fn_node = enclosing_fn(analysis, file, offset);
-    if fn_node != NONE {
-        let params = node_c(&analysis.nodes, fn_node);
-        let pcount = list_len(&analysis.lists, params);
-        let mut idx = 0i64;
-        while idx < pcount {
-            let param = list_get(&analysis.lists, params, idx);
-            push_unique(
-                &mut out,
-                name_text(&analysis.names, node_a(&analysis.nodes, param)),
-                COMPLETE_LOCAL,
-            );
-            idx += 1;
-        }
-        collect_lets(analysis, node_f(&analysis.nodes, fn_node), offset, &mut out);
-    }
+    append_local_completions(analysis, file, offset, &mut out);
     let mut kw = 0usize;
     while kw < KEYWORDS.len() {
         match KEYWORDS.get(kw) {
@@ -849,63 +832,46 @@ fn push_unique(out: &mut Vec<(String, i64)>, label: String, kind: i64) {
     out.push((label, kind));
 }
 
-fn enclosing_fn(analysis: &Analysis, file: i64, offset: i64) -> i64 {
+fn append_local_completions(
+    analysis: &Analysis,
+    file: i64,
+    offset: i64,
+    out: &mut Vec<(String, i64)>,
+) {
     let count = node_count(analysis);
-    let mut best = NONE;
+    let mut best_source = NONE;
     let mut best_width = i64::MAX;
     let mut id = 0i64;
     while id < count {
-        if node_tag(&analysis.nodes, id) == NODE_FN && covers(analysis, id, file, offset) {
+        if node_tag(&analysis.nodes, id) == NODE_LOCALFACT
+            && node_file(&analysis.nodes, id) == file
+            && node_start(&analysis.nodes, id) <= offset
+            && offset <= node_end(&analysis.nodes, id)
+        {
             let width = node_end(&analysis.nodes, id) - node_start(&analysis.nodes, id);
             if width <= best_width {
-                best = id;
+                best_source = node_a(&analysis.nodes, id);
                 best_width = width;
             }
         }
         id += 1;
     }
-    best
-}
-
-fn collect_lets(analysis: &Analysis, stmt_list: i64, offset: i64, out: &mut Vec<(String, i64)>) {
-    let count = list_len(&analysis.lists, stmt_list);
-    let mut idx = 0i64;
-    while idx < count {
-        let stmt = list_get(&analysis.lists, stmt_list, idx);
-        if node_tag(&analysis.nodes, stmt) != NODE_STMT {
-            idx += 1;
-            continue;
-        }
-        let kind = node_a(&analysis.nodes, stmt);
-        if kind == STMT_LET && node_start(&analysis.nodes, stmt) < offset {
+    if best_source == NONE {
+        return;
+    }
+    id = 0;
+    while id < count {
+        if node_tag(&analysis.nodes, id) == NODE_LOCALFACT
+            && node_a(&analysis.nodes, id) == best_source
+        {
             push_unique(
                 out,
-                name_text(&analysis.names, node_c(&analysis.nodes, stmt)),
+                name_text(&analysis.names, node_b(&analysis.nodes, id)),
                 COMPLETE_LOCAL,
             );
-        } else if kind == STMT_WHILE && covers(analysis, stmt, node_file(&analysis.nodes, stmt), offset) {
-            collect_lets(analysis, node_c(&analysis.nodes, stmt), offset, out);
-        } else if kind == STMT_IF {
-            let then_list = node_c(&analysis.nodes, stmt);
-            let else_list = node_d(&analysis.nodes, stmt);
-            if list_covers_offset(analysis, then_list, offset) {
-                collect_lets(analysis, then_list, offset, out);
-            } else if else_list != NONE && list_covers_offset(analysis, else_list, offset) {
-                collect_lets(analysis, node_d(&analysis.nodes, stmt), offset, out);
-            }
         }
-        idx += 1;
+        id += 1;
     }
-}
-
-fn list_covers_offset(analysis: &Analysis, list: i64, offset: i64) -> bool {
-    let count = list_len(&analysis.lists, list);
-    if count == 0 {
-        return false;
-    }
-    let first = list_get(&analysis.lists, list, 0);
-    let last = list_get(&analysis.lists, list, count - 1);
-    node_start(&analysis.nodes, first) <= offset && offset <= node_end(&analysis.nodes, last)
 }
 
 // ---------------------------------------------------------------------------

@@ -864,6 +864,33 @@ pub fn alloc_scope_member(
     )
 }
 
+// Typechecker-owned lexical-environment snapshots.  One row is attached
+// for every visible local at a checked source node: a=source node, b=name,
+// c=canonical type key, d=is_mut.  Completion reads these rows instead of
+// reconstructing branch scopes from the raw AST.
+pub const NODE_LOCALFACT: i64 = 19;
+
+pub fn alloc_localfact(nodes: &mut Vec<i64>, source: i64, name: i64, key: i64, is_mut: i64) -> i64 {
+    let file = node_file(nodes, source);
+    let start = node_start(nodes, source);
+    let end = node_end(nodes, source);
+    alloc_node(
+        nodes,
+        &[
+            NODE_LOCALFACT,
+            file,
+            start,
+            end,
+            source,
+            name,
+            key,
+            is_mut,
+            NONE,
+            NONE,
+        ],
+    )
+}
+
 pub fn alloc_fieldkey(nodes: &mut Vec<i64>, key: i64, name: i64, fkey: i64, idx: i64) -> i64 {
     alloc_node(nodes, &[NODE_FIELDKEY, NO_FILE, NO_FILE, NO_FILE, key, name, fkey, idx, NONE, NONE])
 }

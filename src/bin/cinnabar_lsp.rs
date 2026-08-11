@@ -38,7 +38,11 @@ struct ServerState {
     // loader's overlay, so unsaved edits are analyzed like saved files.
     docs: Vec<(String, String)>,
     // URIs we last published diagnostics for, so stale ones are cleared.
-    published: Vec<String>,
+    published: Vec<(String, Vec<String>)>,
+    // Analysis roots and the root that owns each open document.  Secondary
+    // modules stay in their entry file's graph when editors open them.
+    roots: Vec<String>,
+    doc_entries: Vec<(String, String)>,
     // Per-document edit generations and pending debounce deadlines.  A
     // completed analysis is published only when its generation is still
     // current, which makes superseded full checks harmless.
@@ -78,6 +82,8 @@ fn main() -> Result<(), String> {
     let mut state = ServerState {
         docs: Vec::new(),
         published: Vec::new(),
+        roots: Vec::new(),
+        doc_entries: Vec::new(),
         generations: Vec::new(),
         pending: Vec::new(),
         analysis_tx,
@@ -193,7 +199,8 @@ fn positional(state: &ServerState, params: &Value) -> Option<(Analysis, i64, i64
     let path = uri_to_path(uri)?;
     let line = params.get("position")?.get("line")?.as_i64()?;
     let character = params.get("position")?.get("character")?.as_i64()?;
-    let analysis = analysis_for_path(state, &path);
+    let entry = entry_of_doc(state, &path);
+    let analysis = analyze(&entry, &state.docs);
     let file = file_id_of(&analysis, &path);
     if file == NONE_ID {
         return None;
@@ -204,29 +211,6 @@ fn positional(state: &ServerState, params: &Value) -> Option<(Analysis, i64, i64
 }
 
 const NONE_ID: i64 = -1;
-
-fn analysis_for_path(state: &ServerState, path: &str) -> Analysis {
-    let mut best: Option<Analysis> = None;
-    let mut best_file_count = 0usize;
-    let mut idx = 0usize;
-    while idx < state.docs.len() {
-        let root = match state.docs.get(idx) {
-            Some(entry) => entry.0.clone(),
-            None => break,
-        };
-        let candidate = analyze(&root, &state.docs);
-        let contains_path = file_id_of(&candidate, path) != NONE_ID;
-        if contains_path && candidate.files.len() > best_file_count {
-            best_file_count = candidate.files.len();
-            best = Some(candidate);
-        }
-        idx += 1;
-    }
-    match best {
-        Some(analysis) => analysis,
-        None => analyze(path, &state.docs),
-    }
-}
 
 fn range_json(analysis: &Analysis, file: i64, start: i64, end: i64) -> Value {
     let text = file_text_of(analysis, file);
@@ -383,7 +367,8 @@ fn on_code_lens(state: &ServerState, params: &Value) -> Value {
         Some(value) => value,
         None => return Value::Array(Vec::new()),
     };
-    let analysis = analyze(&path, &state.docs);
+    let entry = entry_of_doc(state, &path);
+    let analysis = analyze(&entry, &state.docs);
     let file = file_id_of(&analysis, &path);
     if file == NONE_ID {
         return Value::Array(Vec::new());
@@ -436,7 +421,8 @@ fn handle_notification(
             .map(|text| text.to_string());
         if let (Some(path), Some(content)) = (uri_path, text) {
             set_doc(state, &path, content);
-            schedule_analysis(state, &path, DIAGNOSTIC_DEBOUNCE_MS);
+            let entry = register_document(state, &path);
+            schedule_analysis(state, &entry, DIAGNOSTIC_DEBOUNCE_MS);
         }
         return Ok(());
     }
@@ -458,7 +444,8 @@ fn handle_notification(
             .map(|text| text.to_string());
         if let (Some(path), Some(content)) = (uri_path, text) {
             set_doc(state, &path, content);
-            schedule_analysis(state, &path, DIAGNOSTIC_DEBOUNCE_MS);
+            let entry = entry_of_doc(state, &path);
+            schedule_analysis(state, &entry, DIAGNOSTIC_DEBOUNCE_MS);
         }
         return Ok(());
     }
@@ -470,7 +457,8 @@ fn handle_notification(
             .and_then(|uri| uri.as_str())
             .and_then(uri_to_path);
         if let Some(path) = uri_path {
-            schedule_analysis(state, &path, 0);
+            let entry = entry_of_doc(state, &path);
+            schedule_analysis(state, &entry, 0);
         }
         return Ok(());
     }
@@ -482,15 +470,124 @@ fn handle_notification(
             .and_then(|uri| uri.as_str())
             .and_then(uri_to_path);
         if let Some(path) = uri_path {
+            let entry = entry_of_doc(state, &path);
             remove_doc(state, &path);
-            invalidate_analysis(state, &path);
-            let cleared: Vec<Value> = Vec::new();
-            send_diagnostics(connection, &path_to_uri(&path), cleared)?;
+            remove_doc_entry(state, &path);
+            if entry == path {
+                close_root(connection, state, &entry)?;
+            } else {
+                let cleared: Vec<Value> = Vec::new();
+                send_diagnostics(connection, &path_to_uri(&path), cleared)?;
+                schedule_analysis(state, &entry, 0);
+            }
         }
         return Ok(());
     }
     // initialized, setTrace, cancelRequest, exit and anything else need no
     // action from this server.
+    Ok(())
+}
+
+fn entry_of_doc(state: &ServerState, path: &str) -> String {
+    let mut idx = 0usize;
+    while idx < state.doc_entries.len() {
+        match state.doc_entries.get(idx) {
+            Some(pair) => {
+                if pair.0 == path {
+                    return pair.1.clone();
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    path.to_string()
+}
+
+fn register_document(state: &mut ServerState, path: &str) -> String {
+    let existing = entry_of_doc(state, path);
+    if existing != path || state.roots.contains(&path.to_string()) {
+        return existing;
+    }
+    let mut idx = 0usize;
+    while idx < state.roots.len() {
+        match state.roots.get(idx) {
+            Some(root) => {
+                let analysis = analyze(root, &state.docs);
+                if file_id_of(&analysis, path) != NONE_ID {
+                    let entry = root.clone();
+                    state.doc_entries.push((path.to_string(), entry.clone()));
+                    return entry;
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    let entry = path.to_string();
+    state.roots.push(entry.clone());
+    state.doc_entries.push((entry.clone(), entry.clone()));
+    entry
+}
+
+fn remove_doc_entry(state: &mut ServerState, path: &str) {
+    let mut kept: Vec<(String, String)> = Vec::new();
+    while let Some(pair) = state.doc_entries.pop() {
+        if pair.0 != path {
+            kept.push(pair);
+        }
+    }
+    state.doc_entries = kept;
+}
+
+fn close_root(connection: &Connection, state: &mut ServerState, entry: &str) -> Result<(), String> {
+    invalidate_analysis(state, entry);
+    let mut roots: Vec<String> = Vec::new();
+    while let Some(root) = state.roots.pop() {
+        if root != entry {
+            roots.push(root);
+        }
+    }
+    state.roots = roots;
+    let mut remap: Vec<String> = Vec::new();
+    let mut mappings: Vec<(String, String)> = Vec::new();
+    while let Some(pair) = state.doc_entries.pop() {
+        if pair.1 == entry {
+            if pair.0 != entry {
+                remap.push(pair.0);
+            }
+        } else {
+            mappings.push(pair);
+        }
+    }
+    state.doc_entries = mappings;
+    let mut records: Vec<(String, Vec<String>)> = Vec::new();
+    let mut closing_uris: Vec<String> = Vec::new();
+    while let Some(record) = state.published.pop() {
+        if record.0 == entry {
+            closing_uris = record.1;
+        } else {
+            records.push(record);
+        }
+    }
+    let mut idx = 0usize;
+    while idx < closing_uris.len() {
+        match closing_uris.get(idx) {
+            Some(uri) => {
+                if !uri_owned_by(&records, uri) {
+                    let cleared: Vec<Value> = Vec::new();
+                    send_diagnostics(connection, uri, cleared)?;
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    state.published = records;
+    while let Some(path) = remap.pop() {
+        let new_entry = register_document(state, &path);
+        schedule_analysis(state, &new_entry, 0);
+    }
     Ok(())
 }
 
@@ -574,7 +671,7 @@ fn start_due_analyses(state: &mut ServerState) {
 fn publish_completed(connection: &Connection, state: &mut ServerState) -> Result<(), String> {
     while let Ok(result) = state.analysis_rx.try_recv() {
         if current_generation(state, &result.path) == result.generation {
-            publish_analysis(connection, state, result.analysis)?;
+            publish_analysis(connection, state, &result.path, result.analysis)?;
         }
     }
     Ok(())
@@ -615,6 +712,7 @@ fn severity_error() -> i64 {
 fn publish_analysis(
     connection: &Connection,
     state: &mut ServerState,
+    entry_path: &str,
     analysis: Analysis,
 ) -> Result<(), String> {
     let mut fresh: Vec<String> = Vec::new();
@@ -630,23 +728,50 @@ fn publish_analysis(
         fresh.push(uri);
         file += 1;
     }
-    // Clear diagnostics for files that dropped out of the module graph.
+    // Replace only this root's publication set.  Another open root may own
+    // the same URI, so a stale URI is cleared only when no remaining root
+    // still publishes it.
+    let mut prior: Vec<String> = Vec::new();
+    let mut records: Vec<(String, Vec<String>)> = Vec::new();
+    while let Some(record) = state.published.pop() {
+        if record.0 == entry_path {
+            prior = record.1;
+        } else {
+            records.push(record);
+        }
+    }
     let mut idx = 0usize;
-    while idx < state.published.len() {
-        let stale = match state.published.get(idx) {
-            Some(uri) => !fresh.contains(uri),
-            None => false,
-        };
-        if stale
-            && let Some(uri) = state.published.get(idx)
-        {
-            let cleared: Vec<Value> = Vec::new();
-            send_diagnostics(connection, &uri.clone(), cleared)?;
+    while idx < prior.len() {
+        match prior.get(idx) {
+            Some(uri) => {
+                if !fresh.contains(uri) && !uri_owned_by(&records, uri) {
+                    let cleared: Vec<Value> = Vec::new();
+                    send_diagnostics(connection, uri, cleared)?;
+                }
+            }
+            None => break,
         }
         idx += 1;
     }
-    state.published = fresh;
+    records.push((entry_path.to_string(), fresh));
+    state.published = records;
     Ok(())
+}
+
+fn uri_owned_by(records: &[(String, Vec<String>)], uri: &str) -> bool {
+    let mut idx = 0usize;
+    while idx < records.len() {
+        match records.get(idx) {
+            Some(record) => {
+                if record.1.contains(&uri.to_string()) {
+                    return true;
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    false
 }
 
 fn file_diagnostics(analysis: &Analysis, file: i64) -> Vec<Value> {

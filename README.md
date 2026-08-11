@@ -238,7 +238,7 @@ The repository also builds `cinnabar-lsp`, a Language Server Protocol server ove
 cargo build --release --bin cinnabar-lsp
 ```
 
-It speaks stdio and provides diagnostics (with the borrow checker's explanatory notes as related information), hover (attached types and signatures, linearity), go-to-definition and find-references across the module graph, completion (symbols, locals, struct fields after `.`, keywords), and signature help. Point any LSP client at the binary for `.cnb` files — e.g. in VS Code via a generic LSP extension, or in Neovim:
+It speaks stdio and provides diagnostics (with the borrow checker's explanatory notes as related information and code lenses), hover (attached types and signatures, linearity), go-to-definition and find-references across the module graph, completion (resolver-visible symbols and `use` paths, lexically scoped locals, struct fields after `.`, enum variants, keywords), and signature help. Full front-end checks are debounced after edits and run off the protocol loop; generation checks prevent superseded results from being published. Point any LSP client at the binary for `.cnb` files — e.g. in VS Code via a generic LSP extension, or in Neovim:
 
 ```lua
 vim.lsp.start({ name = "cinnabar", cmd = { "/path/to/cinnabar-lsp" }, root_dir = vim.fn.getcwd() })

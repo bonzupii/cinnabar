@@ -212,6 +212,30 @@ fn completions_exclude_locals_from_sibling_branches() {
 }
 
 #[test]
+fn completions_follow_resolver_visibility_and_branch_scope() {
+    let entry = fixture("tooling_scope.cnb");
+    let analysis = analyze(&entry, &[]);
+    let text = analysis
+        .files
+        .first()
+        .map(|pair| pair.1.clone())
+        .unwrap_or_default();
+    let file = file_id_of(&analysis, &entry);
+
+    let use_cursor = offset_of(&text, "use Tools.v") + "use Tools.v".len() as i64;
+    let use_items = completions(&analysis, file, use_cursor);
+    let use_labels: Vec<String> = use_items.iter().map(|item| item.0.clone()).collect();
+    assert!(use_labels.iter().any(|label| label == "visible"), "use items: {:?}", use_labels);
+    assert!(!use_labels.iter().any(|label| label == "secret"), "private member leaked: {:?}", use_labels);
+
+    let then_cursor = offset_of(&text, "return only_then") + "return ".len() as i64;
+    let then_items = completions(&analysis, file, then_cursor);
+    let then_labels: Vec<String> = then_items.iter().map(|item| item.0.clone()).collect();
+    assert!(then_labels.iter().any(|label| label == "only_then"), "then items: {:?}", then_labels);
+    assert!(!then_labels.iter().any(|label| label == "only_else"), "else local leaked: {:?}", then_labels);
+}
+
+#[test]
 fn signature_help_tracks_the_active_argument() {
     let entry = fixture("multi_file/main.cnb");
     let analysis = analyze(&entry, &[]);
