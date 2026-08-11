@@ -34,21 +34,65 @@ pub fn compile_and_link(
     entry_span: (i64, i64, i64),
 ) -> Result<(), CodegenError> {
     let ir_text = emit_to_ir(names, nodes, lists, impls_list, entry_span)?;
-    let temp_root = temp_dir_root();
-    fs::create_dir_all(&temp_root).map_err(|err| {
-        io_error(&format!("cannot create temp dir '{}': {}", temp_root.display(), err))
-    })?;
+    let temp_root = make_temp_root()?;
     let ir_path = temp_path(out, "ll");
     let obj_path = temp_path(out, "o");
     let compiled = write_text(&ir_path, &ir_text)
         .and_then(|()| assemble(&ir_path, &obj_path, opt_level))
         .and_then(|()| link(&obj_path, out));
-    // The temp dir is removed on success and failure alike, so repeated or
-    // failing compiles never accumulate gigabytes of `libc.a` copies in
-    // tmpfs.  A cleanup failure is reported through the typed error model,
-    // never to stderr.  A compile error takes precedence over a cleanup
-    // error; a missing dir is not an error.
-    match std::fs::remove_dir_all(&temp_root) {
+    finish_temp(&temp_root, compiled)
+}
+
+/// Emit the program's LLVM IR and return it as text, without running `opt`,
+/// `llc`, or the linker.  This is exactly the IR `compile_and_link` hands to
+/// `opt` — the emitter's own output, before any optimization pass.
+pub fn compile_to_ir(
+    names: &[String],
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    impls_list: i64,
+    entry_span: (i64, i64, i64),
+) -> Result<String, CodegenError> {
+    emit_to_ir(names, nodes, lists, impls_list, entry_span)
+}
+
+/// Emit, optimize, and assemble the program to a relocatable object file at
+/// `out`, skipping the final static link.  Runs the same `opt`/`llc` steps as
+/// `compile_and_link` at the same optimization level.
+pub fn compile_to_object(
+    names: &[String],
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    impls_list: i64,
+    out: &Path,
+    opt_level: &str,
+    entry_span: (i64, i64, i64),
+) -> Result<(), CodegenError> {
+    let ir_text = emit_to_ir(names, nodes, lists, impls_list, entry_span)?;
+    let temp_root = make_temp_root()?;
+    let ir_path = temp_path(out, "ll");
+    let obj_path = temp_path(out, "o");
+    let compiled = write_text(&ir_path, &ir_text)
+        .and_then(|()| assemble(&ir_path, &obj_path, opt_level))
+        .and_then(|()| copy_file(&obj_path, out));
+    finish_temp(&temp_root, compiled)
+}
+
+fn make_temp_root() -> Result<PathBuf, CodegenError> {
+    let temp_root = temp_dir_root();
+    fs::create_dir_all(&temp_root).map_err(|err| {
+        io_error(&format!("cannot create temp dir '{}': {}", temp_root.display(), err))
+    })?;
+    Ok(temp_root)
+}
+
+// The temp dir is removed on success and failure alike, so repeated or
+// failing compiles never accumulate gigabytes of `libc.a` copies in
+// tmpfs.  A cleanup failure is reported through the typed error model,
+// never to stderr.  A compile error takes precedence over a cleanup
+// error; a missing dir is not an error.
+fn finish_temp(temp_root: &Path, compiled: Result<(), CodegenError>) -> Result<(), CodegenError> {
+    match std::fs::remove_dir_all(temp_root) {
         Ok(()) => compiled,
         Err(err) => {
             if err.kind() == std::io::ErrorKind::NotFound {
@@ -64,6 +108,24 @@ pub fn compile_and_link(
                 }
             }
         }
+    }
+}
+
+fn copy_file(from: &Path, to: &Path) -> Result<(), CodegenError> {
+    match fs::copy(from, to) {
+        Ok(bytes_copied) => {
+            if bytes_copied == 0 {
+                Err(io_error(&format!("copied empty object file to '{}'", to.display())))
+            } else {
+                Ok(())
+            }
+        }
+        Err(err) => Err(io_error(&format!(
+            "cannot copy '{}' to '{}': {}",
+            from.display(),
+            to.display(),
+            err
+        ))),
     }
 }
 

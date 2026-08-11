@@ -3,12 +3,22 @@ use cinnabar::{borrow, codegen, module_loader, resolver, typecheck};
 use ariadne::{Color, FnCache, Label, Report, ReportKind, Source};
 use clap::builder::PathBufValueParser;
 use clap::{Arg, ArgAction, Command as ClapCommand};
-use cinnabar::codegen::compile_and_link;
 use cinnabar::codegen::error::codegen_error_message;
+use cinnabar::codegen::{compile_and_link, compile_to_ir, compile_to_object};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-fn parse_args() -> Option<(PathBuf, Option<PathBuf>, bool, bool, String)> {
+struct CliArgs {
+    input: PathBuf,
+    output: Option<PathBuf>,
+    dump_ast: bool,
+    run: bool,
+    opt_level: String,
+    emit_llvm: bool,
+    emit_obj: bool,
+}
+
+fn parse_args() -> Option<CliArgs> {
     let matches = ClapCommand::new("cinnabar")
         .about("Cinnabar compiler")
         .arg(
@@ -36,6 +46,7 @@ fn parse_args() -> Option<(PathBuf, Option<PathBuf>, bool, bool, String)> {
             Arg::new("run")
                 .long("run")
                 .action(ArgAction::SetTrue)
+                .conflicts_with_all(["emit_llvm", "emit_obj"])
                 .help("Execute the compiled binary after building"),
         )
         .arg(
@@ -45,6 +56,19 @@ fn parse_args() -> Option<(PathBuf, Option<PathBuf>, bool, bool, String)> {
                 .value_name("LEVEL")
                 .value_parser(clap::builder::PossibleValuesParser::new(["0", "1", "2", "3", "s", "z"]))
                 .help("Optimization level: 0, 1, 2, 3, s, z (default 2)"),
+        )
+        .arg(
+            Arg::new("emit_llvm")
+                .long("emit-llvm")
+                .action(ArgAction::SetTrue)
+                .conflicts_with("emit_obj")
+                .help("Write the emitted LLVM IR (before optimization) and stop; default output is the input path with .ll"),
+        )
+        .arg(
+            Arg::new("emit_obj")
+                .long("emit-obj")
+                .action(ArgAction::SetTrue)
+                .help("Optimize and assemble to a relocatable object file, skipping the link; default output is the input path with .o"),
         )
         .get_matches();
     let input = {
@@ -56,11 +80,19 @@ fn parse_args() -> Option<(PathBuf, Option<PathBuf>, bool, bool, String)> {
         .get_one::<String>("opt_level")
         .cloned()
         .unwrap_or_else(|| "2".to_string());
-    Some((input, output, matches.get_flag("dump_ast"), matches.get_flag("run"), opt_level))
+    Some(CliArgs {
+        input,
+        output,
+        dump_ast: matches.get_flag("dump_ast"),
+        run: matches.get_flag("run"),
+        opt_level,
+        emit_llvm: matches.get_flag("emit_llvm"),
+        emit_obj: matches.get_flag("emit_obj"),
+    })
 }
 
 fn main() -> ExitCode {
-    let (input, output, dump_ast, run, opt_level) = match parse_args() {
+    let args = match parse_args() {
         Some(args) => args,
         None => return ExitCode::FAILURE,
     };
@@ -68,13 +100,13 @@ fn main() -> ExitCode {
     let mut nodes: Vec<i64> = Vec::new();
     let mut lists: Vec<Vec<i64>> = Vec::new();
     let mut errors: Vec<Diag> = Vec::new();
-    let entry = input.to_string_lossy().to_string();
+    let entry = args.input.to_string_lossy().to_string();
     let (loaded, files) = module_loader::load(&mut names, &mut nodes, &mut lists, &mut errors, &entry);
     let (root, ext_mods) = match loaded {
         Some(program) => program,
         None => return finish_with_diagnostics(&errors, &files),
     };
-    if dump_ast {
+    if args.dump_ast {
         dump_program(&names, &nodes, &lists, root);
         return ExitCode::SUCCESS;
     }
@@ -88,19 +120,54 @@ fn main() -> ExitCode {
     if !borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods) {
         return finish_with_diagnostics(&errors, &files);
     }
-    let out = match &output {
-        Some(path) => path.clone(),
-        None => default_out_path(&input),
-    };
     let entry_span = entry_span_of(&files);
-    if let Err(codegen_err) = compile_and_link(&names, &mut nodes, &mut lists, impls_list, &out, &opt_level, entry_span) {
+    if args.emit_llvm {
+        let out = emit_out_path(&args, "ll");
+        let written = compile_to_ir(&names, &mut nodes, &mut lists, impls_list, entry_span)
+            .and_then(|ir_text| write_output_text(&out, &ir_text));
+        if let Err(codegen_err) = written {
+            return finish_with_codegen_error(&codegen_err, &files);
+        }
+        println!("Emitted LLVM IR for {} to '{}'.", entry, out.display());
+        return ExitCode::SUCCESS;
+    }
+    if args.emit_obj {
+        let out = emit_out_path(&args, "o");
+        if let Err(codegen_err) =
+            compile_to_object(&names, &mut nodes, &mut lists, impls_list, &out, &args.opt_level, entry_span)
+        {
+            return finish_with_codegen_error(&codegen_err, &files);
+        }
+        println!("Emitted object file for {} to '{}'.", entry, out.display());
+        return ExitCode::SUCCESS;
+    }
+    let out = match &args.output {
+        Some(path) => path.clone(),
+        None => default_out_path(&args.input),
+    };
+    if let Err(codegen_err) =
+        compile_and_link(&names, &mut nodes, &mut lists, impls_list, &out, &args.opt_level, entry_span)
+    {
         return finish_with_codegen_error(&codegen_err, &files);
     }
-    if run {
+    if args.run {
         return run_binary(&out);
     }
     println!("Successfully compiled {} to '{}'.", entry, out.display());
     ExitCode::SUCCESS
+}
+
+fn emit_out_path(args: &CliArgs, ext: &str) -> PathBuf {
+    match &args.output {
+        Some(path) => path.clone(),
+        None => default_out_path(&args.input).with_extension(ext),
+    }
+}
+
+fn write_output_text(path: &Path, text: &str) -> Result<(), cinnabar::codegen::error::CodegenError> {
+    std::fs::write(path, text).map_err(|err| {
+        cinnabar::codegen::error::io_error(&format!("cannot write '{}': {}", path.display(), err))
+    })
 }
 
 fn make_cache(
