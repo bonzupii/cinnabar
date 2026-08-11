@@ -16,17 +16,87 @@
 //! execution tests completely new trees.  Set CINNABAR_FUZZ_SEED to replay a
 //! specific run.  Any failure saves the generated source to
 //! tests/fixtures/repro/fuzz_fail_<seed>.cnb and prints the seed to stderr.
+//! CINNABAR_TEST_PROFILE selects full (default), balanced, or smoke coverage;
+//! the CINNABAR_FUZZ_* controls can override individual corpus budgets.
+
+#[path = "support/test_controls.rs"]
+mod test_controls;
 
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use test_controls::{evenly_selected, profile_name, profile_usize, test_profile, usize_control};
 
-const POSITIVE_ITERATIONS: usize = 80;
-const NEGATIVE_ITERATIONS: usize = 80;
-const RUN_TIMEOUT_SECS: u64 = 10;
-const COMPILE_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_POSITIVE_CASES: usize = 80;
+const DEFAULT_NEGATIVE_CASES: usize = 80;
+const BALANCED_POSITIVE_CASES: usize = 32;
+const BALANCED_NEGATIVE_CASES: usize = 32;
+const BALANCED_RUN_CASES: usize = 8;
+const SMOKE_POSITIVE_CASES: usize = 8;
+const SMOKE_NEGATIVE_CASES: usize = 8;
+const SMOKE_RUN_CASES: usize = 2;
+const DEFAULT_RUN_TIMEOUT_SECS: usize = 10;
+const DEFAULT_COMPILE_TIMEOUT_SECS: usize = 30;
 const TIMEOUT_CODE: i32 = 124;
 const NEG_SEED_XOR: u64 = 0x9E37_79B9_7F4A_7C15;
+
+struct FuzzConfig {
+    profile: test_controls::TestProfile,
+    positive_cases: usize,
+    negative_cases: usize,
+    run_cases: usize,
+    run_timeout_secs: u64,
+    compile_timeout_secs: u64,
+}
+
+fn fuzz_config() -> FuzzConfig {
+    let profile = test_profile();
+    let positive_default = profile_usize(
+        profile,
+        DEFAULT_POSITIVE_CASES,
+        BALANCED_POSITIVE_CASES,
+        SMOKE_POSITIVE_CASES,
+    );
+    let negative_default = profile_usize(
+        profile,
+        DEFAULT_NEGATIVE_CASES,
+        BALANCED_NEGATIVE_CASES,
+        SMOKE_NEGATIVE_CASES,
+    );
+    let positive_cases = usize_control("CINNABAR_FUZZ_POSITIVE_CASES", positive_default);
+    let negative_cases = usize_control("CINNABAR_FUZZ_NEGATIVE_CASES", negative_default);
+    let run_default = profile_usize(
+        profile,
+        positive_cases,
+        positive_cases.min(BALANCED_RUN_CASES),
+        positive_cases.min(SMOKE_RUN_CASES),
+    );
+    let run_cases = usize_control("CINNABAR_FUZZ_RUN_CASES", run_default);
+    assert!(
+        run_cases <= positive_cases,
+        "CINNABAR_FUZZ_RUN_CASES ({}) cannot exceed CINNABAR_FUZZ_POSITIVE_CASES ({})",
+        run_cases,
+        positive_cases
+    );
+    let run_timeout = usize_control("CINNABAR_TEST_RUN_TIMEOUT_SECS", DEFAULT_RUN_TIMEOUT_SECS);
+    let compile_timeout = usize_control(
+        "CINNABAR_TEST_COMPILE_TIMEOUT_SECS",
+        DEFAULT_COMPILE_TIMEOUT_SECS,
+    );
+    assert!(run_timeout > 0, "CINNABAR_TEST_RUN_TIMEOUT_SECS must be greater than zero");
+    assert!(
+        compile_timeout > 0,
+        "CINNABAR_TEST_COMPILE_TIMEOUT_SECS must be greater than zero"
+    );
+    FuzzConfig {
+        profile,
+        positive_cases,
+        negative_cases,
+        run_cases,
+        run_timeout_secs: run_timeout as u64,
+        compile_timeout_secs: compile_timeout as u64,
+    }
+}
 
 const KEYWORDS: &[&str] = &[
     "fun", "end", "val", "var", "const", "pub", "nat", "impure", "if", "elif", "else",
@@ -2427,15 +2497,21 @@ fn run_tool(cmd: &mut Command, secs: u64) -> (i32, String) {
     }
 }
 
-fn compile(cinnabar: &str, src_path: &Path, bin: &Path, secs: u64) -> (i32, String) {
+fn compile_and_link(cinnabar: &str, src_path: &Path, bin: &Path, secs: u64) -> (i32, String) {
     let mut cmd = Command::new(cinnabar);
     cmd.arg(src_path).arg("-o").arg(bin);
     run_tool(&mut cmd, secs)
 }
 
-fn run_binary(bin: &Path) -> (i32, String) {
+fn compile_to_llvm(cinnabar: &str, src_path: &Path, ir: &Path, secs: u64) -> (i32, String) {
+    let mut cmd = Command::new(cinnabar);
+    cmd.arg(src_path).arg("--emit-llvm").arg("-o").arg(ir);
+    run_tool(&mut cmd, secs)
+}
+
+fn run_binary(bin: &Path, secs: u64) -> (i32, String) {
     let mut cmd = Command::new(bin);
-    run_tool(&mut cmd, RUN_TIMEOUT_SECS)
+    run_tool(&mut cmd, secs)
 }
 
 fn temp_dir() -> PathBuf {
@@ -2538,7 +2614,15 @@ fn run_seed() -> u64 {
 #[test]
 fn fuzz_generalization_corpus() {
     let seed = run_seed();
+    let config = fuzz_config();
     eprintln!("fuzz seed: {}", seed);
+    eprintln!(
+        "fuzz profile: {} (positive={}, negative={}, link+run={}, remaining positive cases emit LLVM only)",
+        profile_name(config.profile),
+        config.positive_cases,
+        config.negative_cases,
+        config.run_cases
+    );
     clear_stale_failures();
     let cinnabar = env!("CARGO_BIN_EXE_cinnabar");
     let dir = temp_dir();
@@ -2549,12 +2633,23 @@ fn fuzz_generalization_corpus() {
 
     let mut pos_rng = Rng::new(seed);
     let mut idx = 0usize;
-    while idx < POSITIVE_ITERATIONS {
+    while idx < config.positive_cases {
         let src = generate_positive(&mut pos_rng, seed, idx);
         let src_path = dir.join(format!("pos_{}.cnb", idx));
         let bin = dir.join(format!("pos_{}_bin", idx));
+        let ir = dir.join(format!("pos_{}.ll", idx));
         write_fixture(&src_path, &src);
-        let (code, out) = compile(&cinnabar, &src_path, &bin, COMPILE_TIMEOUT_SECS);
+        let execute = evenly_selected(idx, config.positive_cases, config.run_cases);
+        let (code, out) = if execute {
+            compile_and_link(
+                &cinnabar,
+                &src_path,
+                &bin,
+                config.compile_timeout_secs,
+            )
+        } else {
+            compile_to_llvm(&cinnabar, &src_path, &ir, config.compile_timeout_secs)
+        };
         if code != 0 {
             let path = save_failure(seed, &src);
             eprintln!("fuzz failure seed: {}", seed);
@@ -2581,20 +2676,22 @@ fn fuzz_generalization_corpus() {
                 path.display()
             );
         }
-        let (run_code, run_out) = run_binary(&bin);
-        if run_code != 0 {
-            let path = save_failure(seed, &src);
-            eprintln!("fuzz failure seed: {}", seed);
-            assert_eq!(
-                run_code,
-                0,
-                "positive iteration {} ran with exit {} (want 0):\n{}\n--- source ---\n{}\n--- saved to {} ---",
-                idx,
-                run_code,
-                run_out,
-                src,
-                path.display()
-            );
+        if execute {
+            let (run_code, run_out) = run_binary(&bin, config.run_timeout_secs);
+            if run_code != 0 {
+                let path = save_failure(seed, &src);
+                eprintln!("fuzz failure seed: {}", seed);
+                assert_eq!(
+                    run_code,
+                    0,
+                    "positive iteration {} ran with exit {} (want 0):\n{}\n--- source ---\n{}\n--- saved to {} ---",
+                    idx,
+                    run_code,
+                    run_out,
+                    src,
+                    path.display()
+                );
+            }
         }
         idx += 1;
     }
@@ -2602,13 +2699,18 @@ fn fuzz_generalization_corpus() {
     let neg_seed = seed ^ NEG_SEED_XOR;
     let mut neg_rng = Rng::new(neg_seed);
     let mut nidx = 0usize;
-    while nidx < NEGATIVE_ITERATIONS {
+    while nidx < config.negative_cases {
         let shape = nidx % 4;
         let (src, want) = generate_negative(&mut neg_rng, shape);
         let src_path = dir.join(format!("lin_{}.cnb", nidx));
         let bin = dir.join(format!("lin_{}_bin", nidx));
         write_fixture(&src_path, &src);
-        let (code, out) = compile(&cinnabar, &src_path, &bin, COMPILE_TIMEOUT_SECS);
+        let (code, out) = compile_and_link(
+            &cinnabar,
+            &src_path,
+            &bin,
+            config.compile_timeout_secs,
+        );
         if code == 0 {
             let path = save_failure(neg_seed, &src);
             eprintln!("fuzz failure seed: {}", neg_seed);

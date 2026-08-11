@@ -294,6 +294,42 @@ nix develop --command ./pre_commit_check.sh
 
 It runs `cargo check`, `cargo clippy -D warnings`, a custom Semgrep ruleset, `cargo test`, CLI smoke checks, compiles and `--dump-ast`s several fixtures, runs the compiled `spec.cnb` reference binary, and runs a battery of `EXPECT_REJECTED` negative fixtures (bad casing, immutable assignment, unknown variables, nested comments, etc.). See [`AGENTS.md`](AGENTS.md) for the full set of repository conventions this project holds itself to (no `unwrap`/`panic!`, no `_` discard bindings, no re-derived facts, category-level fixes only, etc.).
 
+### Faster local test profiles
+
+The default `full` profile preserves exhaustive gate coverage. For quicker local feedback, `balanced` and `smoke` reduce the randomized corpus sizes and the number of successful fixtures that are linked and executed. Successful cases not selected for execution still pass through parsing, resolution, typechecking, borrow checking, code generation, and LLVM IR emission; the reduced profiles mainly avoid repeated `llc` and static-link work. Rejected fixtures remain checked.
+
+| Profile | Fuzz corpus | Native fuzz runs | Native expected-fixture runs | Record-only runs |
+| --- | ---: | ---: | ---: | ---: |
+| `full` | 80 valid + 80 invalid | all 80 valid cases | all | all |
+| `balanced` | 32 valid + 32 invalid | 8 | 10 | 2 |
+| `smoke` | 8 valid + 8 invalid | 2 | 4 | 0 |
+
+```bash
+# Full coverage (the default)
+nix develop --command cargo test --quiet
+
+# Routine local iteration
+nix develop --command env CINNABAR_TEST_PROFILE=balanced cargo test --quiet
+
+# Fastest structural feedback
+nix develop --command env CINNABAR_TEST_PROFILE=smoke cargo test --quiet
+```
+
+Individual budgets can be overridden when a profile is still broader or narrower than needed:
+
+| Environment variable | Controls |
+| --- | --- |
+| `CINNABAR_FUZZ_POSITIVE_CASES` | Generated valid programs compiled |
+| `CINNABAR_FUZZ_NEGATIVE_CASES` | Generated invalid linearity programs rejected |
+| `CINNABAR_FUZZ_RUN_CASES` | Valid fuzz programs additionally linked and executed |
+| `CINNABAR_REPRO_RUN_CASES` | Expected-success fixtures additionally linked and executed |
+| `CINNABAR_REPRO_RECORD_CASES` | Record-only fixtures compiled and run |
+| `CINNABAR_REPRO_LINK_COMPILE_ONLY` | Whether blocking compile-only fixtures are linked (`true`) instead of stopping at LLVM IR (`false`) |
+| `CINNABAR_TEST_RUN_TIMEOUT_SECS` | Per-program execution timeout |
+| `CINNABAR_TEST_COMPILE_TIMEOUT_SECS` | Per-program fuzz compilation timeout |
+
+Case budgets use an even sample across each ordered corpus instead of taking only its first entries. These controls are intended for local iteration; run `nix develop --command ./pre_commit_check.sh` with no profile override before submitting a change.
+
 ## Status
 
 Cinnabar is under active early development. See [`ROADMAP.md`](ROADMAP.md) for what's resolved and what's planned next (the fixed-width integer suite, string literals, native OS surfaces, a project manifest format, diagnostic quality improvements, and formal verification work). Self-hosting — Cinnabar compiling itself — is a long-term goal and completeness test, not a gate for any individual feature.
