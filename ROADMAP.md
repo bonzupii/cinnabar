@@ -64,7 +64,7 @@ linear elements to be fully drained before vec_free / hash_map_free.
 
 ---
 
-## Milestone 1 — Fixed-Width Integer Suite
+## Milestone 1 — Fixed-Width Integer Suite (COMPLETE)
 
 Implement the full standard suite of fixed-width, non-floating-point integer types. This is a core
 capability of any general-purpose systems language, independent of whether the compiler needs it
