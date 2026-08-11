@@ -154,7 +154,7 @@ fn positional(state: &ServerState, params: &Value) -> Option<(Analysis, i64, i64
     let path = uri_to_path(uri)?;
     let line = params.get("position")?.get("line")?.as_i64()?;
     let character = params.get("position")?.get("character")?.as_i64()?;
-    let analysis = analyze(&path, &state.docs);
+    let analysis = analysis_for_path(state, &path);
     let file = file_id_of(&analysis, &path);
     if file == NONE_ID {
         return None;
@@ -165,6 +165,29 @@ fn positional(state: &ServerState, params: &Value) -> Option<(Analysis, i64, i64
 }
 
 const NONE_ID: i64 = -1;
+
+fn analysis_for_path(state: &ServerState, path: &str) -> Analysis {
+    let mut best: Option<Analysis> = None;
+    let mut best_file_count = 0usize;
+    let mut idx = 0usize;
+    while idx < state.docs.len() {
+        let root = match state.docs.get(idx) {
+            Some(entry) => entry.0.clone(),
+            None => break,
+        };
+        let candidate = analyze(&root, &state.docs);
+        let contains_path = file_id_of(&candidate, path) != NONE_ID;
+        if contains_path && candidate.files.len() > best_file_count {
+            best_file_count = candidate.files.len();
+            best = Some(candidate);
+        }
+        idx += 1;
+    }
+    match best {
+        Some(analysis) => analysis,
+        None => analyze(path, &state.docs),
+    }
+}
 
 fn range_json(analysis: &Analysis, file: i64, start: i64, end: i64) -> Value {
     let text = file_text_of(analysis, file);
@@ -333,7 +356,7 @@ fn handle_notification(
             .map(|text| text.to_string());
         if let (Some(path), Some(content)) = (uri_path, text) {
             set_doc(state, &path, content);
-            publish_diagnostics(connection, state, &path)?;
+            publish_diagnostics(connection, state)?;
         }
         return Ok(());
     }
@@ -355,7 +378,7 @@ fn handle_notification(
             .map(|text| text.to_string());
         if let (Some(path), Some(content)) = (uri_path, text) {
             set_doc(state, &path, content);
-            publish_diagnostics(connection, state, &path)?;
+            publish_diagnostics(connection, state)?;
         }
         return Ok(());
     }
@@ -367,7 +390,10 @@ fn handle_notification(
             .and_then(|uri| uri.as_str())
             .and_then(uri_to_path);
         if let Some(path) = uri_path {
-            publish_diagnostics(connection, state, &path)?;
+            let path_is_open = state.docs.iter().any(|entry| entry.0 == path);
+            if path_is_open {
+                publish_diagnostics(connection, state)?;
+            }
         }
         return Ok(());
     }
@@ -380,6 +406,7 @@ fn handle_notification(
             .and_then(uri_to_path);
         if let Some(path) = uri_path {
             remove_doc(state, &path);
+            publish_diagnostics(connection, state)?;
         }
         return Ok(());
     }
@@ -423,21 +450,73 @@ fn severity_error() -> i64 {
 fn publish_diagnostics(
     connection: &Connection,
     state: &mut ServerState,
-    entry_path: &str,
 ) -> Result<(), String> {
-    let analysis = analyze(entry_path, &state.docs);
-    let mut fresh: Vec<String> = Vec::new();
-    let mut file = 0i64;
-    while (file as usize) < analysis.files.len() {
-        let path = match analysis.files.get(file as usize) {
-            Some(pair) => pair.0.clone(),
+    let mut candidates: Vec<(String, Analysis)> = Vec::new();
+    let mut doc_idx = 0usize;
+    while doc_idx < state.docs.len() {
+        match state.docs.get(doc_idx) {
+            Some(entry) => candidates.push((entry.0.clone(), analyze(&entry.0, &state.docs))),
+            None => break,
+        }
+        doc_idx += 1;
+    }
+
+    // An imported open document is not a project root. Keep the maximal
+    // open-document module graphs; independent projects remain separate.
+    let mut roots: Vec<usize> = Vec::new();
+    let mut candidate_idx = 0usize;
+    while candidate_idx < candidates.len() {
+        let candidate = match candidates.get(candidate_idx) {
+            Some(value) => value,
             None => break,
         };
-        let uri = path_to_uri(&path);
-        let diags = file_diagnostics(&analysis, file);
-        send_diagnostics(connection, &uri, diags)?;
-        fresh.push(uri);
-        file += 1;
+        let mut dominated = false;
+        let mut other_idx = 0usize;
+        while other_idx < candidates.len() {
+            if other_idx != candidate_idx {
+                let other = match candidates.get(other_idx) {
+                    Some(value) => value,
+                    None => break,
+                };
+                let other_contains_root = file_id_of(&other.1, &candidate.0) != NONE_ID;
+                let other_is_preferred = other.1.files.len() > candidate.1.files.len()
+                    || (other.1.files.len() == candidate.1.files.len() && other_idx < candidate_idx);
+                if other_contains_root && other_is_preferred {
+                    dominated = true;
+                    break;
+                }
+            }
+            other_idx += 1;
+        }
+        if !dominated {
+            roots.push(candidate_idx);
+        }
+        candidate_idx += 1;
+    }
+
+    let mut fresh: Vec<String> = Vec::new();
+    let mut root_idx = 0usize;
+    while root_idx < roots.len() {
+        let selected = match roots.get(root_idx).and_then(|idx| candidates.get(*idx)) {
+            Some(value) => value,
+            None => break,
+        };
+        let analysis = &selected.1;
+        let mut file = 0i64;
+        while (file as usize) < analysis.files.len() {
+            let path = match analysis.files.get(file as usize) {
+                Some(pair) => pair.0.clone(),
+                None => break,
+            };
+            let uri = path_to_uri(&path);
+            if !fresh.contains(&uri) {
+                let diags = file_diagnostics(analysis, file);
+                send_diagnostics(connection, &uri, diags)?;
+                fresh.push(uri);
+            }
+            file += 1;
+        }
+        root_idx += 1;
     }
     // Clear diagnostics for files that dropped out of the module graph.
     let mut idx = 0usize;

@@ -579,6 +579,27 @@ pub fn completions(analysis: &Analysis, file: i64, offset: i64) -> Vec<(String, 
     scope_completions(analysis, file, offset)
 }
 
+fn scope_at(analysis: &Analysis, file: i64, offset: i64) -> i64 {
+    let count = node_count(analysis);
+    let mut best_scope = 0i64;
+    let mut best_width = i64::MAX;
+    let mut id = 0i64;
+    while id < count {
+        if node_tag(&analysis.nodes, id) == NODE_SCOPEFACT && node_a(&analysis.nodes, id) == SCOPE_AT {
+            let source = node_b(&analysis.nodes, id);
+            if covers(analysis, source, file, offset) {
+                let width = node_end(&analysis.nodes, source) - node_start(&analysis.nodes, source);
+                if width <= best_width {
+                    best_scope = node_c(&analysis.nodes, id);
+                    best_width = width;
+                }
+            }
+        }
+        id += 1;
+    }
+    best_scope
+}
+
 // Fields of the struct value ending right before the dot, read from the
 // typechecker's NODE_FIELDKEY facts for that struct's canonical key.
 fn field_completions(analysis: &Analysis, file: i64, dot: i64) -> Vec<(String, i64)> {
@@ -634,14 +655,20 @@ fn field_completions(analysis: &Analysis, file: i64, dot: i64) -> Vec<(String, i
 
 fn scope_completions(analysis: &Analysis, file: i64, offset: i64) -> Vec<(String, i64)> {
     let mut out: Vec<(String, i64)> = Vec::new();
-    // Every declared symbol, by its resolver-qualified name.
+    // Only symbols the resolver attached as visible from the cursor's
+    // precise scope. Names and visibility are not reconstructed here.
     let count = node_count(analysis);
+    let scope = scope_at(analysis, file, offset);
     let mut id = 0i64;
     while id < count {
-        if node_tag(&analysis.nodes, id) == NODE_SYM {
-            let name = name_text(&analysis.names, node_b(&analysis.nodes, id));
+        if node_tag(&analysis.nodes, id) == NODE_SCOPEFACT
+            && node_a(&analysis.nodes, id) == SCOPE_VISIBLE
+            && node_b(&analysis.nodes, id) == scope
+        {
+            let name = name_text(&analysis.names, node_c(&analysis.nodes, id));
+            let sym = node_d(&analysis.nodes, id);
             if !name.is_empty() {
-                push_unique(&mut out, name, node_a(&analysis.nodes, id));
+                push_unique(&mut out, name, node_a(&analysis.nodes, sym));
             }
         }
         id += 1;
@@ -728,16 +755,31 @@ fn collect_lets(analysis: &Analysis, stmt_list: i64, offset: i64, out: &mut Vec<
                 name_text(&analysis.names, node_c(&analysis.nodes, stmt)),
                 COMPLETE_LOCAL,
             );
-        } else if kind == STMT_WHILE {
+        } else if kind == STMT_WHILE
+            && covers(analysis, stmt, node_file(&analysis.nodes, stmt), offset)
+        {
             collect_lets(analysis, node_c(&analysis.nodes, stmt), offset, out);
         } else if kind == STMT_IF {
-            collect_lets(analysis, node_c(&analysis.nodes, stmt), offset, out);
-            if node_d(&analysis.nodes, stmt) != NONE {
-                collect_lets(analysis, node_d(&analysis.nodes, stmt), offset, out);
+            let then_list = node_c(&analysis.nodes, stmt);
+            let else_list = node_d(&analysis.nodes, stmt);
+            if list_covers_offset(analysis, then_list, offset) {
+                collect_lets(analysis, then_list, offset, out);
+            } else if else_list != NONE && list_covers_offset(analysis, else_list, offset) {
+                collect_lets(analysis, else_list, offset, out);
             }
         }
         idx += 1;
     }
+}
+
+fn list_covers_offset(analysis: &Analysis, list: i64, offset: i64) -> bool {
+    let count = list_len(&analysis.lists, list);
+    if count == 0 {
+        return false;
+    }
+    let first = list_get(&analysis.lists, list, 0);
+    let last = list_get(&analysis.lists, list, count - 1);
+    node_start(&analysis.nodes, first) <= offset && offset <= node_end(&analysis.nodes, last)
 }
 
 // ---------------------------------------------------------------------------

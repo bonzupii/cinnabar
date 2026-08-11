@@ -167,6 +167,51 @@ fn completions_offer_symbols_locals_and_keywords() {
 }
 
 #[test]
+fn completions_exclude_symbols_the_resolver_hides() {
+    let entry = fixture("spec.cnb");
+    let analysis = analyze(&entry, &[]);
+    let text = analysis
+        .files
+        .first()
+        .map(|pair| pair.1.clone())
+        .unwrap_or_default();
+    let file = file_id_of(&analysis, &entry);
+    let inside_main = offset_of(&text, "return reference_checks") + 7;
+    let items = completions(&analysis, file, inside_main);
+    let labels: Vec<String> = items.iter().map(|item| item.0.clone()).collect();
+    assert!(labels.iter().any(|label| label == "gate"), "missing visible import: {:?}", labels);
+    assert!(
+        !labels.iter().any(|label| label == "Runtime.probe_twice"),
+        "private module member leaked into completion: {:?}",
+        labels
+    );
+    assert!(
+        !labels.iter().any(|label| label == "Binary.combine_le_bytes"),
+        "private helper leaked into completion: {:?}",
+        labels
+    );
+}
+
+#[test]
+fn completions_exclude_locals_from_sibling_branches() {
+    let entry = fixture("multi_file/main.cnb");
+    let source = "use Math.add\n\npub fun main() I64\n  if true\n    val only_then: I64 = 1\n    return only_then\n  else\n    val only_else: I64 = 2\n    return only_else\n  end\nend\n";
+    let overlay = [(entry.clone(), source.to_string())];
+    let analysis = analyze(&entry, &overlay);
+    assert!(analysis.errors.is_empty(), "unexpected errors: {:?}", analysis.errors);
+    let file = file_id_of(&analysis, &entry);
+    let in_else = offset_of(source, "return only_else") + 7;
+    let items = completions(&analysis, file, in_else);
+    let labels: Vec<String> = items.iter().map(|item| item.0.clone()).collect();
+    assert!(labels.iter().any(|label| label == "only_else"), "missing branch local: {:?}", labels);
+    assert!(
+        !labels.iter().any(|label| label == "only_then"),
+        "sibling-branch local leaked into completion: {:?}",
+        labels
+    );
+}
+
+#[test]
 fn signature_help_tracks_the_active_argument() {
     let entry = fixture("multi_file/main.cnb");
     let analysis = analyze(&entry, &[]);

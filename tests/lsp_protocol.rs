@@ -93,6 +93,33 @@ fn read_notification(
     }
 }
 
+fn read_diagnostics_for_uri(
+    reader: &MessageReader,
+    expected_uri: &str,
+) -> Result<Value, Box<dyn Error>> {
+    loop {
+        let message = reader.next()?;
+        let is_diagnostics = message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics");
+        let uri_matches = message
+            .get("params")
+            .and_then(|params| params.get("uri"))
+            .and_then(Value::as_str)
+            == Some(expected_uri);
+        if is_diagnostics && uri_matches {
+            return Ok(message);
+        }
+    }
+}
+
+fn diagnostic_count(message: &Value) -> Option<usize> {
+    message
+        .get("params")
+        .and_then(|params| params.get("diagnostics"))
+        .and_then(Value::as_array)
+        .map(Vec::len)
+}
+
 fn read_response(
     reader: &MessageReader,
     expected_id: i64,
@@ -194,6 +221,91 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
         .and_then(Value::as_str)
         .ok_or("hover response had no markdown value")?;
     assert!(hover_text.contains("fun add(a: I64, b: I64) I64"), "hover: {}", hover_text);
+
+    let broken_entry = "use Math.add\n\npub fun main() I64\n  return add(30)\nend\n";
+    send_message(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [{ "text": broken_entry }]
+            }
+        }),
+    )?;
+    let broken_entry_diagnostics = read_diagnostics_for_uri(&reader, &uri)?;
+    assert!(
+        diagnostic_count(&broken_entry_diagnostics).is_some_and(|count| count > 0),
+        "entry-file arity error was not published: {}",
+        broken_entry_diagnostics
+    );
+
+    let module = fixture("multi_file/Math.cnb");
+    let module_uri = file_uri(&module);
+    let module_text = std::fs::read_to_string(&module)?;
+    send_message(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": module_uri,
+                    "languageId": "cinnabar",
+                    "version": 1,
+                    "text": module_text
+                }
+            }
+        }),
+    )?;
+    let entry_after_module_open = read_diagnostics_for_uri(&reader, &uri)?;
+    assert!(
+        diagnostic_count(&entry_after_module_open).is_some_and(|count| count > 0),
+        "opening an imported module cleared entry diagnostics: {}",
+        entry_after_module_open
+    );
+    let clean_module = read_diagnostics_for_uri(&reader, &module_uri)?;
+    assert_eq!(diagnostic_count(&clean_module), Some(0));
+
+    let broken_module = "pub fun add(a: I64, b: I64) I64\n  return a + missing\nend\n";
+    send_message(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": module_uri, "version": 2 },
+                "contentChanges": [{ "text": broken_module }]
+            }
+        }),
+    )?;
+    let entry_after_module_change = read_diagnostics_for_uri(&reader, &uri)?;
+    assert!(diagnostic_count(&entry_after_module_change).is_some_and(|count| count > 0));
+    let broken_module_diagnostics = read_diagnostics_for_uri(&reader, &module_uri)?;
+    assert!(
+        diagnostic_count(&broken_module_diagnostics).is_some_and(|count| count > 0),
+        "module overlay error was not published: {}",
+        broken_module_diagnostics
+    );
+
+    send_message(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didClose",
+            "params": { "textDocument": { "uri": module_uri } }
+        }),
+    )?;
+    let entry_after_module_close = read_diagnostics_for_uri(&reader, &uri)?;
+    assert!(diagnostic_count(&entry_after_module_close).is_some_and(|count| count > 0));
+    let module_after_close = read_diagnostics_for_uri(&reader, &module_uri)?;
+    assert_eq!(
+        diagnostic_count(&module_after_close),
+        Some(0),
+        "closing the module left stale overlay diagnostics: {}",
+        module_after_close
+    );
 
     send_message(
         &mut writer,
