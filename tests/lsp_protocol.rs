@@ -96,9 +96,16 @@ fn read_notification(
 fn read_diagnostics_for_uri(
     reader: &MessageReader,
     expected_uri: &str,
+    stage: &str,
 ) -> Result<Value, Box<dyn Error>> {
+    let mut observed: Vec<String> = Vec::new();
     loop {
-        let message = reader.next()?;
+        let message = match reader.next() {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(format!("{}: {}; observed {:?}", stage, error, observed).into());
+            }
+        };
         let is_diagnostics = message.get("method").and_then(Value::as_str)
             == Some("textDocument/publishDiagnostics");
         let uri_matches = message
@@ -109,6 +116,21 @@ fn read_diagnostics_for_uri(
         if is_diagnostics && uri_matches {
             return Ok(message);
         }
+        let method = message
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or("response");
+        let uri = message
+            .get("params")
+            .and_then(|params| params.get("uri"))
+            .and_then(Value::as_str)
+            .unwrap_or("no-uri");
+        let detail = message
+            .get("params")
+            .and_then(|params| params.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or(uri);
+        observed.push(format!("{} {}", method, detail));
     }
 }
 
@@ -256,7 +278,7 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
             }
         }),
     )?;
-    let latest = read_diagnostics_for_uri(&reader, &uri)?;
+    let latest = read_diagnostics_for_uri(&reader, &uri, "rapid-edit result")?;
     assert_eq!(
         latest
             .get("params")
@@ -282,7 +304,7 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
             }
         }),
     )?;
-    let broken_entry_diagnostics = read_diagnostics_for_uri(&reader, &uri)?;
+    let broken_entry_diagnostics = read_diagnostics_for_uri(&reader, &uri, "broken entry")?;
     assert!(
         diagnostic_count(&broken_entry_diagnostics).is_some_and(|count| count > 0),
         "entry-file arity error was not published: {}",
@@ -307,13 +329,13 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
             }
         }),
     )?;
-    let entry_after_secondary_open = read_diagnostics_for_uri(&reader, &uri)?;
+    let entry_after_secondary_open = read_diagnostics_for_uri(&reader, &uri, "entry after secondary open")?;
     assert!(
         diagnostic_count(&entry_after_secondary_open).is_some_and(|count| count > 0),
         "opening an imported module cleared entry diagnostics: {}",
         entry_after_secondary_open
     );
-    let clean_secondary = read_diagnostics_for_uri(&reader, &secondary_uri)?;
+    let clean_secondary = read_diagnostics_for_uri(&reader, &secondary_uri, "clean secondary")?;
     assert_eq!(diagnostic_count(&clean_secondary), Some(0));
 
     let broken_secondary = "pub fun add(a: I64, b: I64) I64\n  return a + missing\nend\n";
@@ -328,9 +350,9 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
             }
         }),
     )?;
-    let entry_after_secondary_change = read_diagnostics_for_uri(&reader, &uri)?;
+    let entry_after_secondary_change = read_diagnostics_for_uri(&reader, &uri, "entry after secondary change")?;
     assert!(diagnostic_count(&entry_after_secondary_change).is_some_and(|count| count > 0));
-    let secondary_diagnostics = read_diagnostics_for_uri(&reader, &secondary_uri)?;
+    let secondary_diagnostics = read_diagnostics_for_uri(&reader, &secondary_uri, "broken secondary")?;
     assert!(
         diagnostic_count(&secondary_diagnostics).is_some_and(|count| count > 0),
         "module overlay error was not published: {}",
@@ -345,14 +367,14 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
             "params": { "textDocument": { "uri": secondary_uri } }
         }),
     )?;
-    let secondary_after_close = read_diagnostics_for_uri(&reader, &secondary_uri)?;
+    let secondary_after_close = read_diagnostics_for_uri(&reader, &secondary_uri, "secondary close clear")?;
     assert_eq!(
         diagnostic_count(&secondary_after_close),
         Some(0),
         "closing the module left stale overlay diagnostics: {}",
         secondary_after_close
     );
-    let entry_after_secondary_close = read_diagnostics_for_uri(&reader, &uri)?;
+    let entry_after_secondary_close = read_diagnostics_for_uri(&reader, &uri, "entry after secondary close")?;
     assert!(diagnostic_count(&entry_after_secondary_close).is_some_and(|count| count > 0));
 
     let explain = fixture("explain_leak.cnb");
@@ -373,7 +395,7 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
             }
         }),
     )?;
-    let explain_diagnostics = read_diagnostics_for_uri(&reader, &explain_uri)?;
+    let explain_diagnostics = read_diagnostics_for_uri(&reader, &explain_uri, "explain diagnostics")?;
     let explain_count = explain_diagnostics
         .get("params")
         .and_then(|params| params.get("diagnostics"))
@@ -397,6 +419,86 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
         .map(Vec::len)
         .ok_or("code-lens result was not an array")?;
     assert!(lens_count > 0, "borrow explanations were not exposed as code lenses: {}", lenses);
+
+    // Reverse open order: Math.cnb first becomes a temporary standalone
+    // root.  Opening main.cnb afterward must adopt it into main's larger
+    // compiler-produced graph, so subsequent Math edits retain main's
+    // importing context and diagnostics.
+    send_message(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didClose",
+            "params": { "textDocument": { "uri": uri } }
+        }),
+    )?;
+    let closed_entry = read_diagnostics_for_uri(&reader, &uri, "reverse-order entry clear")?;
+    assert_eq!(diagnostic_count(&closed_entry), Some(0));
+    let closed_secondary = read_diagnostics_for_uri(&reader, &secondary_uri, "reverse-order secondary clear")?;
+    assert_eq!(diagnostic_count(&closed_secondary), Some(0));
+
+    send_message(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": secondary_uri,
+                    "languageId": "cinnabar",
+                    "version": 3,
+                    "text": secondary_text
+                }
+            }
+        }),
+    )?;
+    let standalone_secondary = read_diagnostics_for_uri(&reader, &secondary_uri, "standalone secondary")?;
+    assert_eq!(diagnostic_count(&standalone_secondary), Some(0));
+
+    send_message(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "cinnabar",
+                    "version": 5,
+                    "text": broken_entry
+                }
+            }
+        }),
+    )?;
+    let adopted_entry = read_diagnostics_for_uri(&reader, &uri, "adopted entry")?;
+    assert!(
+        diagnostic_count(&adopted_entry).is_some_and(|count| count > 0),
+        "reverse-order entry diagnostics were not published: {}",
+        adopted_entry
+    );
+    let adopted_secondary = read_diagnostics_for_uri(&reader, &secondary_uri, "adopted secondary")?;
+    assert_eq!(diagnostic_count(&adopted_secondary), Some(0));
+
+    send_message(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": secondary_uri, "version": 4 },
+                "contentChanges": [{ "text": broken_secondary }]
+            }
+        }),
+    )?;
+    let adopted_entry_after_change = read_diagnostics_for_uri(&reader, &uri, "adopted entry after change")?;
+    assert!(diagnostic_count(&adopted_entry_after_change).is_some_and(|count| count > 0));
+    let adopted_secondary_after_change = read_diagnostics_for_uri(&reader, &secondary_uri, "adopted secondary after change")?;
+    assert!(
+        diagnostic_count(&adopted_secondary_after_change).is_some_and(|count| count > 0),
+        "reverse-order module edit escaped the entry graph: {}",
+        adopted_secondary_after_change
+    );
+
     send_message(
         &mut writer,
         &json!({ "jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null }),

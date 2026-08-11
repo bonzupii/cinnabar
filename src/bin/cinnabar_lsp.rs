@@ -48,6 +48,10 @@ struct ServerState {
     // current, which makes superseded full checks harmless.
     generations: Vec<(String, i64)>,
     pending: Vec<(String, i64, Instant)>,
+    // At most one full front-end run is active.  Newer generations remain
+    // pending until it finishes, so sustained editing cannot accumulate
+    // detached compiler threads.
+    running_path: Option<String>,
     analysis_tx: Sender<AnalysisResult>,
     analysis_rx: Receiver<AnalysisResult>,
 }
@@ -86,6 +90,7 @@ fn main() -> Result<(), String> {
         doc_entries: Vec::new(),
         generations: Vec::new(),
         pending: Vec::new(),
+        running_path: None,
         analysis_tx,
         analysis_rx,
     };
@@ -506,16 +511,19 @@ fn entry_of_doc(state: &ServerState, path: &str) -> String {
 
 fn register_document(state: &mut ServerState, path: &str) -> String {
     let existing = entry_of_doc(state, path);
-    if existing != path || state.roots.contains(&path.to_string()) {
+    if existing != path {
         return existing;
     }
+    if state.roots.contains(&path.to_string()) {
+        return path.to_string();
+    }
+    let uri = path_to_uri(path);
     let mut idx = 0usize;
-    while idx < state.roots.len() {
-        match state.roots.get(idx) {
-            Some(root) => {
-                let analysis = analyze(root, &state.docs);
-                if file_id_of(&analysis, path) != NONE_ID {
-                    let entry = root.clone();
+    while idx < state.published.len() {
+        match state.published.get(idx) {
+            Some(record) => {
+                if record.1.contains(&uri) {
+                    let entry = record.0.clone();
                     state.doc_entries.push((path.to_string(), entry.clone()));
                     return entry;
                 }
@@ -528,6 +536,82 @@ fn register_document(state: &mut ServerState, path: &str) -> String {
     state.roots.push(entry.clone());
     state.doc_entries.push((entry.clone(), entry.clone()));
     entry
+}
+
+// Reconcile open-order differences from the compiler's actual module graph.
+// If this entry contains roots that were opened earlier as standalone files,
+// it becomes their owner.  No import or path semantics are reconstructed here:
+// membership comes exclusively from module_loader's analyzed file set.
+fn reconcile_root_graph(state: &mut ServerState, entry: &str, analysis: &Analysis) {
+    let mut adopted: Vec<String> = Vec::new();
+    let mut idx = 0usize;
+    while idx < state.roots.len() {
+        match state.roots.get(idx) {
+            Some(root) => {
+                if root != entry && file_id_of(analysis, root) != NONE_ID {
+                    adopted.push(root.clone());
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    idx = 0;
+    while idx < adopted.len() {
+        match adopted.get(idx) {
+            Some(root) => invalidate_analysis(state, root),
+            None => break,
+        }
+        idx += 1;
+    }
+    idx = 0;
+    while idx < state.doc_entries.len() {
+        let owner = match state.doc_entries.get(idx) {
+            Some(pair) => pair.1.clone(),
+            None => break,
+        };
+        if adopted.contains(&owner)
+            && let Some(pair) = state.doc_entries.get_mut(idx)
+        {
+            pair.1 = entry.to_string();
+        }
+        idx += 1;
+    }
+    let mut roots: Vec<String> = Vec::new();
+    while let Some(root) = state.roots.pop() {
+        if !adopted.contains(&root) {
+            roots.push(root);
+        }
+    }
+    state.roots = roots;
+    if !adopted.is_empty() {
+        transfer_publications(state, entry, &adopted);
+    }
+}
+
+fn transfer_publications(state: &mut ServerState, entry: &str, adopted: &[String]) {
+    let mut records: Vec<(String, Vec<String>)> = Vec::new();
+    let mut owned: Vec<String> = Vec::new();
+    while let Some(record) = state.published.pop() {
+        if record.0 == entry || adopted.contains(&record.0) {
+            let mut uri_idx = 0usize;
+            while uri_idx < record.1.len() {
+                match record.1.get(uri_idx) {
+                    Some(uri) => {
+                        if !owned.contains(uri) {
+                            owned.push(uri.clone());
+                        }
+                    }
+                    None => break,
+                }
+                uri_idx += 1;
+            }
+        } else {
+            records.push(record);
+        }
+    }
+    records.push((entry.to_string(), owned));
+    state.published = records;
 }
 
 fn remove_doc_entry(state: &mut ServerState, path: &str) {
@@ -628,13 +712,18 @@ fn advance_generation(state: &mut ServerState, path: &str) -> i64 {
 
 fn invalidate_analysis(state: &mut ServerState, path: &str) {
     advance_generation(state, path);
-    let mut kept: Vec<(String, i64, Instant)> = Vec::new();
-    while let Some(entry) = state.pending.pop() {
-        if entry.0 != path {
-            kept.push(entry);
+    let mut idx = 0usize;
+    while idx < state.pending.len() {
+        let matches_path = match state.pending.get(idx) {
+            Some(entry) => entry.0 == path,
+            None => false,
+        };
+        if matches_path {
+            state.pending.remove(idx);
+        } else {
+            idx += 1;
         }
     }
-    state.pending = kept;
 }
 
 fn schedule_analysis(state: &mut ServerState, path: &str, delay_ms: u64) {
@@ -648,28 +737,46 @@ fn schedule_analysis(state: &mut ServerState, path: &str, delay_ms: u64) {
 }
 
 fn start_due_analyses(state: &mut ServerState) {
-    let now = Instant::now();
-    let mut waiting: Vec<(String, i64, Instant)> = Vec::new();
-    while let Some(entry) = state.pending.pop() {
-        if entry.2 <= now {
-            let path = entry.0;
-            let generation = entry.1;
-            let docs = state.docs.clone();
-            let tx = state.analysis_tx.clone();
-            std::thread::spawn(move || {
-                let analysis = analyze(&path, &docs);
-                let send_result = tx.send(AnalysisResult { path, generation, analysis });
-                drop(send_result);
-            });
-        } else {
-            waiting.push(entry);
-        }
+    if state.running_path.is_some() {
+        return;
     }
-    state.pending = waiting;
+    let now = Instant::now();
+    let mut due_idx: Option<usize> = None;
+    let mut idx = 0usize;
+    while idx < state.pending.len() {
+        let due = match state.pending.get(idx) {
+            Some(entry) => entry.2 <= now,
+            None => false,
+        };
+        if due {
+            due_idx = Some(idx);
+            break;
+        }
+        idx += 1;
+    }
+    if let Some(selected_idx) = due_idx {
+        let selected = state.pending.remove(selected_idx);
+        let path = selected.0;
+        let generation = selected.1;
+        let docs = state.docs.clone();
+        let tx = state.analysis_tx.clone();
+        state.running_path = Some(path.clone());
+        std::thread::spawn(move || {
+            let analysis = analyze(&path, &docs);
+            tx.send(AnalysisResult { path, generation, analysis }).is_ok()
+        });
+    }
 }
 
 fn publish_completed(connection: &Connection, state: &mut ServerState) -> Result<(), String> {
     while let Ok(result) = state.analysis_rx.try_recv() {
+        let finished_running = state
+            .running_path
+            .as_ref()
+            .is_some_and(|path| path == &result.path);
+        if finished_running {
+            state.running_path = None;
+        }
         if current_generation(state, &result.path) == result.generation {
             publish_analysis(connection, state, &result.path, result.analysis)?;
         }
@@ -715,6 +822,7 @@ fn publish_analysis(
     entry_path: &str,
     analysis: Analysis,
 ) -> Result<(), String> {
+    reconcile_root_graph(state, entry_path, &analysis);
     let mut fresh: Vec<String> = Vec::new();
     let mut file = 0i64;
     while (file as usize) < analysis.files.len() {
@@ -919,7 +1027,37 @@ fn path_to_uri(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{path_to_uri, uri_to_path};
+    use super::{path_to_uri, start_due_analyses, uri_to_path, AnalysisResult, ServerState};
+    use std::sync::mpsc::channel;
+    use std::time::Instant;
+
+    #[test]
+    fn analysis_scheduler_allows_only_one_active_frontend() {
+        let (analysis_tx, analysis_rx) = channel::<AnalysisResult>();
+        let now = Instant::now();
+        let mut state = ServerState {
+            docs: Vec::new(),
+            published: Vec::new(),
+            roots: Vec::new(),
+            doc_entries: Vec::new(),
+            generations: vec![("first.cnb".to_string(), 1), ("second.cnb".to_string(), 1)],
+            pending: vec![
+                ("first.cnb".to_string(), 1, now),
+                ("second.cnb".to_string(), 1, now),
+            ],
+            running_path: None,
+            analysis_tx,
+            analysis_rx,
+        };
+
+        start_due_analyses(&mut state);
+        assert!(state.running_path.is_some());
+        assert_eq!(state.pending.len(), 1);
+
+        start_due_analyses(&mut state);
+        assert!(state.running_path.is_some());
+        assert_eq!(state.pending.len(), 1, "a second full analysis started concurrently");
+    }
 
     #[test]
     fn windows_file_uri_roundtrips_reserved_characters() {
