@@ -1,5 +1,11 @@
+#[path = "support/test_controls.rs"]
+mod test_controls;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use test_controls::{
+    evenly_selected, profile_name, profile_usize, reduced_usize_control, test_profile,
+};
 
 const EXPECT_OK: &[(&str, i32)] = &[
     ("hello", 0),
@@ -137,15 +143,121 @@ fn exit_code(cmd: &mut Command) -> i32 {
     }
 }
 
-fn compile(cinnabar: &str, fixture: &Path, bin: &Path) -> i32 {
+fn compile_and_link(cinnabar: &str, fixture: &Path, bin: &Path) -> i32 {
     exit_code(Command::new(cinnabar).arg(fixture).arg("-o").arg(bin))
 }
 
-const RUN_TIMEOUT_SECS: u64 = 10;
+fn compile_to_llvm(cinnabar: &str, fixture: &Path, ir: &Path) -> i32 {
+    exit_code(
+        Command::new(cinnabar)
+            .arg(fixture)
+            .arg("--emit-llvm")
+            .arg("-o")
+            .arg(ir),
+    )
+}
+
+const DEFAULT_RUN_TIMEOUT_SECS: usize = 10;
+const BALANCED_RUN_CASES: usize = 10;
+const BALANCED_RECORD_CASES: usize = 2;
+const SMOKE_RUN_CASES: usize = 4;
+const SMOKE_RECORD_CASES: usize = 0;
 
 const TIMEOUT_CODE: i32 = 124;
 
-fn run_binary(bin: &Path) -> i32 {
+struct ReproConfig {
+    profile: test_controls::TestProfile,
+    run_cases: usize,
+    record_cases: usize,
+    link_compile_only: bool,
+    run_timeout_secs: u64,
+}
+
+fn bool_control(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) => match value.as_str() {
+            "1" | "true" | "yes" => true,
+            "0" | "false" | "no" => false,
+            invalid => {
+                assert!(
+                    false,
+                    "{} must be one of 1, true, yes, 0, false, or no; got '{}'",
+                    name,
+                    invalid
+                );
+                default
+            }
+        },
+        Err(error) => match error {
+            std::env::VarError::NotPresent => default,
+            std::env::VarError::NotUnicode(value) => {
+                assert!(false, "{} is not Unicode: {:?}", name, value);
+                default
+            }
+        },
+    }
+}
+
+fn repro_config() -> ReproConfig {
+    let profile = test_profile();
+    let run_default = profile_usize(
+        profile,
+        EXPECT_OK.len(),
+        BALANCED_RUN_CASES,
+        SMOKE_RUN_CASES,
+    );
+    let record_default = profile_usize(
+        profile,
+        RECORD_ONLY.len(),
+        BALANCED_RECORD_CASES,
+        SMOKE_RECORD_CASES,
+    );
+    let run_cases =
+        reduced_usize_control(profile, "CINNABAR_REPRO_RUN_CASES", run_default);
+    let record_cases =
+        reduced_usize_control(profile, "CINNABAR_REPRO_RECORD_CASES", record_default);
+    assert!(
+        run_cases <= EXPECT_OK.len(),
+        "CINNABAR_REPRO_RUN_CASES ({}) cannot exceed the {} expected-success fixtures",
+        run_cases,
+        EXPECT_OK.len()
+    );
+    assert!(
+        record_cases <= RECORD_ONLY.len(),
+        "CINNABAR_REPRO_RECORD_CASES ({}) cannot exceed the {} record-only fixtures",
+        record_cases,
+        RECORD_ONLY.len()
+    );
+    let link_default = match profile {
+        test_controls::TestProfile::Full => true,
+        test_controls::TestProfile::Balanced => false,
+        test_controls::TestProfile::Smoke => false,
+    };
+    let link_compile_only = match profile {
+        test_controls::TestProfile::Full => link_default,
+        test_controls::TestProfile::Balanced => {
+            bool_control("CINNABAR_REPRO_LINK_COMPILE_ONLY", link_default)
+        }
+        test_controls::TestProfile::Smoke => {
+            bool_control("CINNABAR_REPRO_LINK_COMPILE_ONLY", link_default)
+        }
+    };
+    let run_timeout = reduced_usize_control(
+        profile,
+        "CINNABAR_TEST_RUN_TIMEOUT_SECS",
+        DEFAULT_RUN_TIMEOUT_SECS,
+    );
+    assert!(run_timeout > 0, "CINNABAR_TEST_RUN_TIMEOUT_SECS must be greater than zero");
+    ReproConfig {
+        profile,
+        run_cases,
+        record_cases,
+        link_compile_only,
+        run_timeout_secs: run_timeout as u64,
+    }
+}
+
+fn run_binary(bin: &Path, timeout_secs: u64) -> i32 {
     let mut child = match Command::new(bin)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -157,7 +269,7 @@ fn run_binary(bin: &Path) -> i32 {
             return 139;
         }
     };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(RUN_TIMEOUT_SECS);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -220,6 +332,15 @@ impl Drop for TempDirGuard {
 #[test]
 fn repro_corpus_baseline() {
     let cinnabar = env!("CARGO_BIN_EXE_cinnabar");
+    let config = repro_config();
+    eprintln!(
+        "repro profile: {} (link+run expected-success={}, LLVM-only expected-success={}, record-only={}, link compile-only={})",
+        profile_name(config.profile),
+        config.run_cases,
+        EXPECT_OK.len() - config.run_cases,
+        config.record_cases,
+        config.link_compile_only
+    );
     let dir = temp_dir();
     match std::fs::create_dir_all(&dir) {
         Ok(()) => {}
@@ -237,10 +358,18 @@ fn repro_corpus_baseline() {
             None => break,
         };
         let bin = dir.join(format!("{}_bin", name));
-        let compile_code = compile(cinnabar, &fixture_path(name), &bin);
+        let ir = dir.join(format!("{}.ll", name));
+        let execute = evenly_selected(idx, EXPECT_OK.len(), config.run_cases);
+        let compile_code = if execute {
+            compile_and_link(cinnabar, &fixture_path(name), &bin)
+        } else {
+            compile_to_llvm(cinnabar, &fixture_path(name), &ir)
+        };
         assert_eq!(compile_code, 0, "{} failed to compile (code {})", name, compile_code);
-        let run_code = run_binary(&bin);
-        assert_eq!(run_code, want, "{} ran with exit {} (want {})", name, run_code, want);
+        if execute {
+            let run_code = run_binary(&bin, config.run_timeout_secs);
+            assert_eq!(run_code, want, "{} ran with exit {} (want {})", name, run_code, want);
+        }
         idx += 1;
     }
 
@@ -251,7 +380,7 @@ fn repro_corpus_baseline() {
             None => break,
         };
         let bin = dir.join(format!("{}_bin", name));
-        let compile_code = compile(cinnabar, &fixture_path(name), &bin);
+        let compile_code = compile_and_link(cinnabar, &fixture_path(name), &bin);
         assert!(compile_code != 0, "{} was unexpectedly accepted", name);
         ridx += 1;
     }
@@ -262,13 +391,15 @@ fn repro_corpus_baseline() {
             Some(name) => *name,
             None => break,
         };
-        let bin = dir.join(format!("{}_bin", name));
-        let compile_code = compile(cinnabar, &fixture_path(name), &bin);
-        if compile_code == 0 {
-            let run_code = run_binary(&bin);
-            println!("RECORD {}: compile=OK run={}", name, run_code);
-        } else {
-            println!("RECORD {}: compile=FAIL({})", name, compile_code);
+        if evenly_selected(oidx, RECORD_ONLY.len(), config.record_cases) {
+            let bin = dir.join(format!("{}_bin", name));
+            let compile_code = compile_and_link(cinnabar, &fixture_path(name), &bin);
+            if compile_code == 0 {
+                let run_code = run_binary(&bin, config.run_timeout_secs);
+                println!("RECORD {}: compile=OK run={}", name, run_code);
+            } else {
+                println!("RECORD {}: compile=FAIL({})", name, compile_code);
+            }
         }
         oidx += 1;
     }
@@ -280,7 +411,12 @@ fn repro_corpus_baseline() {
             None => break,
         };
         let bin = dir.join(format!("{}_bin", name));
-        let compile_code = compile(cinnabar, &fixture_rel_path(rel), &bin);
+        let ir = dir.join(format!("{}.ll", name));
+        let compile_code = if config.link_compile_only {
+            compile_and_link(cinnabar, &fixture_rel_path(rel), &bin)
+        } else {
+            compile_to_llvm(cinnabar, &fixture_rel_path(rel), &ir)
+        };
         assert_eq!(compile_code, 0, "{} failed to compile (code {})", name, compile_code);
         cidx += 1;
     }

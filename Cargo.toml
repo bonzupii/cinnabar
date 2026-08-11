@@ -17,6 +17,10 @@ path = "src/main.rs"
 name = "cinnabar-lsp"
 path = "src/bin/cinnabar_lsp.rs"
 
+[features]
+test-profile-balanced = []
+test-profile-smoke = []
+
 [dependencies]
 ariadne = "0.6.0"
 clap = "4.6.5"
