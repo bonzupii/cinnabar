@@ -941,6 +941,15 @@ fn render_key(
     text
 }
 
+/// Render a canonical type key for display outside the typechecker (the
+/// arena dump, layout printing, and the language server).  Attached keys are
+/// fully resolved after type checking, so no inference-variable bindings or
+/// origin table are needed; this is the same rendering the typechecker's own
+/// diagnostics use.
+pub fn render_type_key(names: &[String], nodes: &[i64], lists: &[Vec<i64>], key: i64) -> String {
+    render_key(names, nodes, lists, &[], &[], key)
+}
+
 fn var_origin_name(origins: &[(i64, i64, i64)], var: i64) -> i64 {
     let mut idx = 0usize;
     while idx < origins.len() {

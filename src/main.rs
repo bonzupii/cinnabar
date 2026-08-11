@@ -12,6 +12,7 @@ struct CliArgs {
     input: PathBuf,
     output: Option<PathBuf>,
     dump_ast: bool,
+    dump_typed_ast: bool,
     run: bool,
     opt_level: String,
     emit_llvm: bool,
@@ -41,6 +42,13 @@ fn parse_args() -> Option<CliArgs> {
                 .long("dump-ast")
                 .action(ArgAction::SetTrue)
                 .help("Print the parsed AST and exit"),
+        )
+        .arg(
+            Arg::new("dump_typed_ast")
+                .long("dump-typed-ast")
+                .action(ArgAction::SetTrue)
+                .conflicts_with_all(["dump_ast", "emit_llvm", "emit_obj", "run"])
+                .help("Run the full front-end (resolve, typecheck, borrow-check), then print the node arena with every attached fact and exit"),
         )
         .arg(
             Arg::new("run")
@@ -84,6 +92,7 @@ fn parse_args() -> Option<CliArgs> {
         input,
         output,
         dump_ast: matches.get_flag("dump_ast"),
+        dump_typed_ast: matches.get_flag("dump_typed_ast"),
         run: matches.get_flag("run"),
         opt_level,
         emit_llvm: matches.get_flag("emit_llvm"),
@@ -119,6 +128,10 @@ fn main() -> ExitCode {
     }
     if !borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods) {
         return finish_with_diagnostics(&errors, &files);
+    }
+    if args.dump_typed_ast {
+        print!("{}", cinnabar::inspect::dump_typed_arena(&names, &nodes, &lists));
+        return ExitCode::SUCCESS;
     }
     let entry_span = entry_span_of(&files);
     if args.emit_llvm {

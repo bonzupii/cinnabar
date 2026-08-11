@@ -7,6 +7,7 @@
 pub mod ast;
 pub mod borrow;
 pub mod codegen;
+pub mod inspect;
 pub mod lexer;
 pub mod module_loader;
 pub mod parser;
