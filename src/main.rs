@@ -353,9 +353,9 @@ fn dump_field_list(names: &[String], nodes: &[i64], lists: &[Vec<i64>], list: i6
     while idx < count {
         let field = list_get(lists, list, idx);
         let pad = pad_str(depth);
-        let pub_flag = if node_f(nodes, field) == 1 { "is_pub: true" } else { "is_pub: false" };
-        println!("{}Field({}, name: {}, ty: ", pad, pub_flag, name_text(names, node_d(nodes, field)));
-        dump_ty(names, nodes, lists, node_e(nodes, field), depth + 1);
+        let pub_flag = if node_c(nodes, field) == 1 { "is_pub: true" } else { "is_pub: false" };
+        println!("{}Field({}, name: {}, ty: ", pad, pub_flag, name_text(names, node_a(nodes, field)));
+        dump_ty(names, nodes, lists, node_b(nodes, field), depth + 1);
         println!("{})", pad);
         idx += 1;
     }
@@ -367,8 +367,8 @@ fn dump_variant_list(names: &[String], nodes: &[i64], lists: &[Vec<i64>], list: 
     while idx < count {
         let variant = list_get(lists, list, idx);
         let pad = pad_str(depth);
-        println!("{}Variant(name: {}, payload:", pad, name_text(names, node_d(nodes, variant)));
-        dump_ty_list(names, nodes, lists, node_e(nodes, variant), depth + 1);
+        println!("{}Variant(name: {}, payload:", pad, name_text(names, node_a(nodes, variant)));
+        dump_ty_list(names, nodes, lists, node_b(nodes, variant), depth + 1);
         println!("{})", pad);
         idx += 1;
     }
@@ -406,8 +406,8 @@ fn dump_param_list(names: &[String], nodes: &[i64], lists: &[Vec<i64>], list: i6
     while idx < count {
         let param = list_get(lists, list, idx);
         let pad = pad_str(depth);
-        println!("{}Param(name: {}, ty: ", pad, name_text(names, node_d(nodes, param)));
-        dump_ty(names, nodes, lists, node_e(nodes, param), depth + 1);
+        println!("{}Param(name: {}, ty: ", pad, name_text(names, node_a(nodes, param)));
+        dump_ty(names, nodes, lists, node_b(nodes, param), depth + 1);
         println!("{})", pad);
         idx += 1;
     }
