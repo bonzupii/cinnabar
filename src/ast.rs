@@ -790,9 +790,12 @@ pub const NODE_FIELDKEY: i64 = 17;
 //
 // SCOPE_AT:      a=kind, b=source node, c=scope
 // SCOPE_VISIBLE: a=kind, b=query scope, c=local name, d=symbol, e=namespace
+// SCOPE_MEMBER:  a=kind, b=query scope, c=member scope, d=local name,
+//                e=symbol, f=namespace
 pub const NODE_SCOPEFACT: i64 = 18;
 pub const SCOPE_AT: i64 = 0;
 pub const SCOPE_VISIBLE: i64 = 1;
+pub const SCOPE_MEMBER: i64 = 2;
 
 pub fn alloc_scope_at(nodes: &mut Vec<i64>, source: i64, scope: i64) -> i64 {
     alloc_node(
@@ -831,6 +834,58 @@ pub fn alloc_scope_visible(
             name,
             sym,
             namespace,
+            NONE,
+        ],
+    )
+}
+
+pub fn alloc_scope_member(
+    nodes: &mut Vec<i64>,
+    query: i64,
+    member_scope: i64,
+    name: i64,
+    sym: i64,
+    namespace: i64,
+) -> i64 {
+    alloc_node(
+        nodes,
+        &[
+            NODE_SCOPEFACT,
+            NO_FILE,
+            NO_FILE,
+            NO_FILE,
+            SCOPE_MEMBER,
+            query,
+            member_scope,
+            name,
+            sym,
+            namespace,
+        ],
+    )
+}
+
+// Typechecker-owned lexical-environment snapshots.  One row is attached
+// for every visible local at a checked source node: a=source node, b=name,
+// c=canonical type key, d=is_mut.  Completion reads these rows instead of
+// reconstructing branch scopes from the raw AST.
+pub const NODE_LOCALFACT: i64 = 19;
+
+pub fn alloc_localfact(nodes: &mut Vec<i64>, source: i64, name: i64, key: i64, is_mut: i64) -> i64 {
+    let file = node_file(nodes, source);
+    let start = node_start(nodes, source);
+    let end = node_end(nodes, source);
+    alloc_node(
+        nodes,
+        &[
+            NODE_LOCALFACT,
+            file,
+            start,
+            end,
+            source,
+            name,
+            key,
+            is_mut,
+            NONE,
             NONE,
         ],
     )

@@ -112,6 +112,7 @@ pub fn resolve(
 
 fn materialize_scope_facts(state: &mut State) {
     let mut visible: Vec<(i64, i64, i64, i64)> = Vec::new();
+    let mut members: Vec<(i64, i64, i64, i64, i64)> = Vec::new();
     let scope_count = state.4.len() as i64;
     let mut query = 0i64;
     while query < scope_count {
@@ -139,17 +140,46 @@ fn materialize_scope_facts(state: &mut State) {
             }
             current = parent_of(state.5, current);
         }
+        let mut member_scope = 0i64;
+        while member_scope < scope_count {
+            let entries = match state.4.get(member_scope as usize) {
+                Some(value) => value,
+                None => break,
+            };
+            let count = entries.len() as i64 / 4;
+            let mut idx = 0i64;
+            while idx < count {
+                let name = entry_get(entries, idx, 0);
+                let sym = entry_get(entries, idx, 1);
+                let namespace = entry_get(entries, idx, 2);
+                if sym != NONE && is_visible(state.5, state.6, state.1, query, sym) {
+                    members.push((query, member_scope, name, sym, namespace));
+                }
+                idx += 1;
+            }
+            member_scope += 1;
+        }
         query += 1;
     }
-    let mut idx = 0usize;
-    while idx < visible.len() {
-        match visible.get(idx) {
+    let mut visible_idx = 0usize;
+    while visible_idx < visible.len() {
+        match visible.get(visible_idx) {
             Some(row) => {
                 alloc_scope_visible(state.1, row.0, row.1, row.2, row.3);
             }
             None => break,
         }
-        idx += 1;
+        visible_idx += 1;
+    }
+    let mut member_idx = 0usize;
+    while member_idx < members.len() {
+        match members.get(member_idx) {
+            Some(row) => {
+                alloc_scope_member(state.1, row.0, row.1, row.2, row.3, row.4);
+            }
+            None => break,
+        }
+        member_idx += 1;
     }
 }
 

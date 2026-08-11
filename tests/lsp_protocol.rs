@@ -96,9 +96,16 @@ fn read_notification(
 fn read_diagnostics_for_uri(
     reader: &MessageReader,
     expected_uri: &str,
+    stage: &str,
 ) -> Result<Value, Box<dyn Error>> {
+    let mut observed: Vec<String> = Vec::new();
     loop {
-        let message = reader.next()?;
+        let message = match reader.next() {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(format!("{}: {}; observed {:?}", stage, error, observed).into());
+            }
+        };
         let is_diagnostics = message.get("method").and_then(Value::as_str)
             == Some("textDocument/publishDiagnostics");
         let uri_matches = message
@@ -109,6 +116,21 @@ fn read_diagnostics_for_uri(
         if is_diagnostics && uri_matches {
             return Ok(message);
         }
+        let method = message
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or("response");
+        let uri = message
+            .get("params")
+            .and_then(|params| params.get("uri"))
+            .and_then(Value::as_str)
+            .unwrap_or("no-uri");
+        let detail = message
+            .get("params")
+            .and_then(|params| params.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or(uri);
+        observed.push(format!("{} {}", method, detail));
     }
 }
 
@@ -160,6 +182,15 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
             .and_then(|capabilities| capabilities.get("hoverProvider"))
             .and_then(Value::as_bool),
         Some(true)
+    );
+    assert_eq!(
+        initialized
+            .get("result")
+            .and_then(|result| result.get("capabilities"))
+            .and_then(|capabilities| capabilities.get("codeLensProvider"))
+            .and_then(|provider| provider.get("resolveProvider"))
+            .and_then(Value::as_bool),
+        Some(false)
     );
     send_message(
         &mut writer,
@@ -222,6 +253,8 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
         .ok_or("hover response had no markdown value")?;
     assert!(hover_text.contains("fun add(a: I64, b: I64) I64"), "hover: {}", hover_text);
 
+    // Rapid edits coalesce: the superseded broken generation must never be
+    // published after the immediately-following valid generation.
     let broken_entry = "use Math.add\n\npub fun main() I64\n  return add(30)\nend\n";
     send_message(
         &mut writer,
@@ -234,16 +267,53 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
             }
         }),
     )?;
-    let broken_entry_diagnostics = read_diagnostics_for_uri(&reader, &uri)?;
+    send_message(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 3 },
+                "contentChanges": [{ "text": overlay }]
+            }
+        }),
+    )?;
+    let latest = read_diagnostics_for_uri(&reader, &uri, "rapid-edit result")?;
+    assert_eq!(
+        latest
+            .get("params")
+            .and_then(|params| params.get("diagnostics"))
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(0),
+        "a superseded edit published diagnostics: {}",
+        latest
+    );
+
+    // Keep a real entry error live while a secondary module opens, changes,
+    // and closes.  Secondary buffers must stay in the entry graph and must
+    // never erase the entry file's diagnostics.
+    send_message(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 4 },
+                "contentChanges": [{ "text": broken_entry }]
+            }
+        }),
+    )?;
+    let broken_entry_diagnostics = read_diagnostics_for_uri(&reader, &uri, "broken entry")?;
     assert!(
         diagnostic_count(&broken_entry_diagnostics).is_some_and(|count| count > 0),
         "entry-file arity error was not published: {}",
         broken_entry_diagnostics
     );
 
-    let module = fixture("multi_file/Math.cnb");
-    let module_uri = file_uri(&module);
-    let module_text = std::fs::read_to_string(&module)?;
+    let secondary = fixture("multi_file/Math.cnb");
+    let secondary_uri = file_uri(&secondary);
+    let secondary_text = std::fs::read_to_string(&secondary)?;
     send_message(
         &mut writer,
         &json!({
@@ -251,42 +321,42 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
             "method": "textDocument/didOpen",
             "params": {
                 "textDocument": {
-                    "uri": module_uri,
+                    "uri": secondary_uri,
                     "languageId": "cinnabar",
                     "version": 1,
-                    "text": module_text
+                    "text": secondary_text
                 }
             }
         }),
     )?;
-    let entry_after_module_open = read_diagnostics_for_uri(&reader, &uri)?;
+    let entry_after_secondary_open = read_diagnostics_for_uri(&reader, &uri, "entry after secondary open")?;
     assert!(
-        diagnostic_count(&entry_after_module_open).is_some_and(|count| count > 0),
+        diagnostic_count(&entry_after_secondary_open).is_some_and(|count| count > 0),
         "opening an imported module cleared entry diagnostics: {}",
-        entry_after_module_open
+        entry_after_secondary_open
     );
-    let clean_module = read_diagnostics_for_uri(&reader, &module_uri)?;
-    assert_eq!(diagnostic_count(&clean_module), Some(0));
+    let clean_secondary = read_diagnostics_for_uri(&reader, &secondary_uri, "clean secondary")?;
+    assert_eq!(diagnostic_count(&clean_secondary), Some(0));
 
-    let broken_module = "pub fun add(a: I64, b: I64) I64\n  return a + missing\nend\n";
+    let broken_secondary = "pub fun add(a: I64, b: I64) I64\n  return a + missing\nend\n";
     send_message(
         &mut writer,
         &json!({
             "jsonrpc": "2.0",
             "method": "textDocument/didChange",
             "params": {
-                "textDocument": { "uri": module_uri, "version": 2 },
-                "contentChanges": [{ "text": broken_module }]
+                "textDocument": { "uri": secondary_uri, "version": 2 },
+                "contentChanges": [{ "text": broken_secondary }]
             }
         }),
     )?;
-    let entry_after_module_change = read_diagnostics_for_uri(&reader, &uri)?;
-    assert!(diagnostic_count(&entry_after_module_change).is_some_and(|count| count > 0));
-    let broken_module_diagnostics = read_diagnostics_for_uri(&reader, &module_uri)?;
+    let entry_after_secondary_change = read_diagnostics_for_uri(&reader, &uri, "entry after secondary change")?;
+    assert!(diagnostic_count(&entry_after_secondary_change).is_some_and(|count| count > 0));
+    let secondary_diagnostics = read_diagnostics_for_uri(&reader, &secondary_uri, "broken secondary")?;
     assert!(
-        diagnostic_count(&broken_module_diagnostics).is_some_and(|count| count > 0),
+        diagnostic_count(&secondary_diagnostics).is_some_and(|count| count > 0),
         "module overlay error was not published: {}",
-        broken_module_diagnostics
+        secondary_diagnostics
     );
 
     send_message(
@@ -294,17 +364,139 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
         &json!({
             "jsonrpc": "2.0",
             "method": "textDocument/didClose",
-            "params": { "textDocument": { "uri": module_uri } }
+            "params": { "textDocument": { "uri": secondary_uri } }
         }),
     )?;
-    let entry_after_module_close = read_diagnostics_for_uri(&reader, &uri)?;
-    assert!(diagnostic_count(&entry_after_module_close).is_some_and(|count| count > 0));
-    let module_after_close = read_diagnostics_for_uri(&reader, &module_uri)?;
+    let secondary_after_close = read_diagnostics_for_uri(&reader, &secondary_uri, "secondary close clear")?;
     assert_eq!(
-        diagnostic_count(&module_after_close),
+        diagnostic_count(&secondary_after_close),
         Some(0),
         "closing the module left stale overlay diagnostics: {}",
-        module_after_close
+        secondary_after_close
+    );
+    let entry_after_secondary_close = read_diagnostics_for_uri(&reader, &uri, "entry after secondary close")?;
+    assert!(diagnostic_count(&entry_after_secondary_close).is_some_and(|count| count > 0));
+
+    let explain = fixture("explain_leak.cnb");
+    let explain_uri = file_uri(&explain);
+    let explain_text = std::fs::read_to_string(&explain)?;
+    send_message(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": explain_uri,
+                    "languageId": "cinnabar",
+                    "version": 1,
+                    "text": explain_text
+                }
+            }
+        }),
+    )?;
+    let explain_diagnostics = read_diagnostics_for_uri(&reader, &explain_uri, "explain diagnostics")?;
+    let explain_count = explain_diagnostics
+        .get("params")
+        .and_then(|params| params.get("diagnostics"))
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .ok_or("explain diagnostics were not an array")?;
+    assert!(explain_count > 0, "explain fixture unexpectedly clean");
+    send_message(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "textDocument/codeLens",
+            "params": { "textDocument": { "uri": explain_uri } }
+        }),
+    )?;
+    let lenses = read_response(&reader, 4)?;
+    let lens_count = lenses
+        .get("result")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .ok_or("code-lens result was not an array")?;
+    assert!(lens_count > 0, "borrow explanations were not exposed as code lenses: {}", lenses);
+
+    // Reverse open order: Math.cnb first becomes a temporary standalone
+    // root.  Opening main.cnb afterward must adopt it into main's larger
+    // compiler-produced graph, so subsequent Math edits retain main's
+    // importing context and diagnostics.
+    send_message(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didClose",
+            "params": { "textDocument": { "uri": uri } }
+        }),
+    )?;
+    let closed_entry = read_diagnostics_for_uri(&reader, &uri, "reverse-order entry clear")?;
+    assert_eq!(diagnostic_count(&closed_entry), Some(0));
+    let closed_secondary = read_diagnostics_for_uri(&reader, &secondary_uri, "reverse-order secondary clear")?;
+    assert_eq!(diagnostic_count(&closed_secondary), Some(0));
+
+    send_message(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": secondary_uri,
+                    "languageId": "cinnabar",
+                    "version": 3,
+                    "text": secondary_text
+                }
+            }
+        }),
+    )?;
+    let standalone_secondary = read_diagnostics_for_uri(&reader, &secondary_uri, "standalone secondary")?;
+    assert_eq!(diagnostic_count(&standalone_secondary), Some(0));
+
+    send_message(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "cinnabar",
+                    "version": 5,
+                    "text": broken_entry
+                }
+            }
+        }),
+    )?;
+    let adopted_entry = read_diagnostics_for_uri(&reader, &uri, "adopted entry")?;
+    assert!(
+        diagnostic_count(&adopted_entry).is_some_and(|count| count > 0),
+        "reverse-order entry diagnostics were not published: {}",
+        adopted_entry
+    );
+    let adopted_secondary = read_diagnostics_for_uri(&reader, &secondary_uri, "adopted secondary")?;
+    assert_eq!(diagnostic_count(&adopted_secondary), Some(0));
+
+    send_message(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": secondary_uri, "version": 4 },
+                "contentChanges": [{ "text": broken_secondary }]
+            }
+        }),
+    )?;
+    let adopted_entry_after_change = read_diagnostics_for_uri(&reader, &uri, "adopted entry after change")?;
+    assert!(diagnostic_count(&adopted_entry_after_change).is_some_and(|count| count > 0));
+    let adopted_secondary_after_change = read_diagnostics_for_uri(&reader, &secondary_uri, "adopted secondary after change")?;
+    assert!(
+        diagnostic_count(&adopted_secondary_after_change).is_some_and(|count| count > 0),
+        "reverse-order module edit escaped the entry graph: {}",
+        adopted_secondary_after_change
     );
 
     send_message(

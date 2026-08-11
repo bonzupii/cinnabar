@@ -263,6 +263,59 @@ fn lookup(env: &[Vec<i64>], name: i64) -> (i64, i64) {
     (NONE, 0)
 }
 
+fn attach_local_facts(state: &mut State, source: i64) {
+    let node_total = state.1.len() as i64 / NODE_STRIDE;
+    let mut node_idx = 0i64;
+    while node_idx < node_total {
+        if node_tag(state.1, node_idx) == NODE_LOCALFACT && node_a(state.1, node_idx) == source {
+            return;
+        }
+        node_idx += 1;
+    }
+    let mut facts: Vec<(i64, i64, i64)> = Vec::new();
+    let mut depth = state.4.len();
+    while depth > 0 {
+        depth -= 1;
+        match state.4.get(depth) {
+            Some(scope) => {
+                let mut idx = 0i64;
+                while idx < scope.len() as i64 / 3 {
+                    let name = entry_at(scope, idx, 0);
+                    let mut shadowed = false;
+                    let mut fact_idx = 0usize;
+                    while fact_idx < facts.len() {
+                        match facts.get(fact_idx) {
+                            Some(fact) => {
+                                if fact.0 == name {
+                                    shadowed = true;
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                        fact_idx += 1;
+                    }
+                    if !shadowed {
+                        facts.push((name, entry_at(scope, idx, 1), entry_at(scope, idx, 2)));
+                    }
+                    idx += 1;
+                }
+            }
+            None => break,
+        }
+    }
+    let mut idx = 0usize;
+    while idx < facts.len() {
+        match facts.get(idx) {
+            Some(fact) => {
+                alloc_localfact(state.1, source, fact.0, fact.1, fact.2);
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+}
+
 fn is_var(key: i64) -> bool {
     key < NONE
 }
@@ -1327,6 +1380,7 @@ fn check_fn(state: &mut State, fn_node: i64, self_key: i64, is_main: i64) {
     }
     let impure = node_e(state.1, fn_node);
     let body = node_f(state.1, fn_node);
+    attach_local_facts(state, fn_node);
     if body != NONE {
         check_stmt_list(state, body, ret, impure, self_key);
     }
@@ -1525,6 +1579,7 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
     if node_tag(state.1, stmt) != NODE_STMT {
         return unit_key_of(state);
     }
+    attach_local_facts(state, stmt);
     let kind = node_a(state.1, stmt);
     let file = node_file(state.1, stmt);
     let start = node_start(state.1, stmt);
@@ -2072,6 +2127,7 @@ fn check_expr(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64
     if node_tag(state.1, expr) != NODE_EXPR {
         return unknown_key(state.1, state.2);
     }
+    attach_local_facts(state, expr);
     let kind = node_a(state.1, expr);
     if kind == EXPR_LIT {
         return check_lit(state, expr, expected);
@@ -3044,9 +3100,13 @@ fn check_container_resolvability(state: &mut State, expr: i64, param_keys: i64) 
                 if has_linear == 1 {
                     let cty_sym = key_sym_of(state.1, key);
                     if cty_sym == NONE || node_f(state.1, cty_sym) == NONE {
+                        let container = render_type_key(state.0, state.1, state.2, key);
                         push_error(
                             state.3,
-                            "cannot store linear element in container: container provides no native extraction surface",
+                            &format!(
+                                "cannot store linear element in container '{}': its native API provides no by-value extraction operation",
+                                container
+                            ),
                             node_file(state.1, expr),
                             node_start(state.1, expr),
                             node_end(state.1, expr),
@@ -3523,6 +3583,7 @@ fn check_match(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
 fn check_arm(state: &mut State, arm: i64, s_key: i64, ret: i64, impure: i64, self_key: i64, expected: i64) -> i64 {
     push_scope(state.4);
     check_pattern(state, node_a(state.1, arm), s_key);
+    attach_local_facts(state, arm);
     let body = node_b(state.1, arm);
     let key = if node_tag(state.1, body) == NODE_STMT && node_a(state.1, body) == STMT_EXPR {
         // Later arms are checked against the merged type of the non-diverging
