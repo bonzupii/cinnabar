@@ -105,7 +105,67 @@ pub fn resolve(
         idx += 1;
     }
 
+    materialize_scope_facts(&mut state);
+
     state.3.is_empty()
+}
+
+fn materialize_scope_facts(state: &mut State) {
+    let mut visible: Vec<(i64, i64, i64, i64)> = Vec::new();
+    let scope_count = state.4.len() as i64;
+    let mut query = 0i64;
+    while query < scope_count {
+        let mut seen: Vec<(i64, i64)> = Vec::new();
+        let mut current = query;
+        while current != NONE {
+            let entries = match state.4.get(current as usize) {
+                Some(value) => value,
+                None => break,
+            };
+            let count = entries.len() as i64 / 4;
+            let mut idx = 0i64;
+            while idx < count {
+                let name = entry_get(entries, idx, 0);
+                let sym = entry_get(entries, idx, 1);
+                let namespace = entry_get(entries, idx, 2);
+                if sym != NONE
+                    && !seen.contains(&(name, namespace))
+                    && is_visible(state.5, state.6, state.1, query, sym)
+                {
+                    visible.push((query, name, sym, namespace));
+                    seen.push((name, namespace));
+                }
+                idx += 1;
+            }
+            current = parent_of(state.5, current);
+        }
+        query += 1;
+    }
+    let mut idx = 0usize;
+    while idx < visible.len() {
+        match visible.get(idx) {
+            Some(row) => {
+                alloc_scope_visible(state.1, row.0, row.1, row.2, row.3);
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+}
+
+fn attach_scope(state: &mut State, source: i64, scope: i64) {
+    let count = state.1.len() as i64 / NODE_STRIDE;
+    let mut idx = 0i64;
+    while idx < count {
+        if node_tag(state.1, idx) == NODE_SCOPEFACT
+            && node_a(state.1, idx) == SCOPE_AT
+            && node_b(state.1, idx) == source
+        {
+            return;
+        }
+        idx += 1;
+    }
+    alloc_scope_at(state.1, source, scope);
 }
 
 fn alloc_scope(scopes: &mut Vec<Vec<i64>>, parents: &mut Vec<i64>, pubs: &mut Vec<i64>, prefixes: &mut Vec<i64>, parent: i64, prefix: i64, is_pub: i64) -> i64 {
@@ -1055,6 +1115,12 @@ fn walk_item(state: &mut State, scope: i64, item: i64) {
         return;
     }
     let kind = node_a(state.1, item);
+    let item_scope = if kind == ITEM_MODULE {
+        item_scope_of(state.8, item)
+    } else {
+        scope
+    };
+    attach_scope(state, item, item_scope);
     if kind == ITEM_MODULE {
         let children = node_e(state.1, item);
         walk_item_list(state, item_scope_of(state.8, item), children);
@@ -1183,6 +1249,7 @@ fn walk_fn(state: &mut State, scope: i64, fn_node: i64) {
     }
     let prefix = scope_prefix_of(state.7, scope);
     let param_scope = alloc_scope(state.4, state.5, state.6, state.7, scope, prefix, 1);
+    attach_scope(state, fn_node, param_scope);
     enter_type_params(state.1, state.2, state.4, param_scope, node_b(state.1, fn_node));
     walk_type_params(state, scope, node_b(state.1, fn_node));
     let params = node_c(state.1, fn_node);
@@ -1210,6 +1277,7 @@ fn walk_stmt(state: &mut State, scope: i64, stmt: i64) {
     if node_tag(state.1, stmt) != NODE_STMT {
         return;
     }
+    attach_scope(state, stmt, scope);
     let kind = node_a(state.1, stmt);
     if kind == STMT_LET {
         if node_d(state.1, stmt) != NONE {
@@ -1241,6 +1309,7 @@ fn walk_expr(state: &mut State, scope: i64, expr: i64) {
     if node_tag(state.1, expr) != NODE_EXPR {
         return;
     }
+    attach_scope(state, expr, scope);
     let kind = node_a(state.1, expr);
     if kind == EXPR_PATH {
         resolve_expr_path(state, scope, expr);
@@ -1355,6 +1424,7 @@ fn walk_pattern(state: &mut State, scope: i64, pat: i64) {
     if node_tag(state.1, pat) != NODE_PAT {
         return;
     }
+    attach_scope(state, pat, scope);
     let kind = node_a(state.1, pat);
     if kind == PAT_BIND {
         let name = node_b(state.1, pat);
@@ -1410,6 +1480,7 @@ fn walk_type(state: &mut State, scope: i64, ty: i64) {
     if node_tag(state.1, ty) != NODE_TY {
         return;
     }
+    attach_scope(state, ty, scope);
     let kind = node_a(state.1, ty);
     if kind == TY_NAMED {
         resolve_type_name(state, scope, ty, node_b(state.1, ty));

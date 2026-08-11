@@ -125,6 +125,17 @@ This file carries the densest set of user-facing English error strings in the co
 
 `tests/fixtures/` holds real `.cnb` programs used both as positive examples and as a negative-space specification: files like `tests/fixtures/repro/*.cnb` are borrow-checker edge cases (two live `&mut` of the same place, partial moves, dynamic-index double-move, etc.), each paired with an `EXPECT_OK`/`EXPECT_REJECTED` entry in `tests/repro_harness.rs`. `tests/fixtures/spec.cnb` is the single immutable reference-implementation fixture — never edited — that is simultaneously a language feature tour and an executable self-test. `tests/fixtures/multi_file/` demonstrates the sibling-module-file loading described in Stage 1, and `tests/fixtures/verify_math/` exercises the Euclidean division/modulo semantics described in Stage 5.
 
+## Tooling over the attached facts
+
+The pipeline is also exposed as a library (`src/lib.rs`), and everything under this heading is a *consumer* of the attachments the stages above already computed — none of it re-resolves a name, re-infers a type, or re-derives a layout with parallel logic:
+
+- **`src/analysis.rs`** — `analyze()` runs load → resolve → typecheck → borrow over a file set, optionally overlaid with unsaved editor buffers (`module_loader::load_with_overlay`), and answers position queries: hover (attached type key + resolved signature + linearity), go-to-definition and find-references (following resolver symbol ids across the module graph), completion (declared symbols, enclosing-function locals, struct fields after `.` via `NODE_FIELDKEY` facts, keywords), and signature help. Includes byte-offset ↔ line/UTF-16-column mapping for LSP interop.
+- **`src/bin/cinnabar_lsp.rs`** — the `cinnabar-lsp` binary: a JSON-RPC shell (via `lsp-server`) around `analysis`, with full-document sync and diagnostics republished per change. The borrow checker's explanatory notes ride along as LSP `relatedInformation`.
+- **`src/inspect.rs`** — `--dump-typed-ast`: serializes the entire arena (names, lists, node rows) with symbolic tags and every attachment rendered.
+- **`src/codegen/layout.rs`** — `--print-layout`: ABI sizes/alignments/field offsets measured through the same `llvm_type` lowering and `TargetData` a real build uses; variant tags read from `NODE_VARFACT`.
+- **Borrow explainer** — the borrow checker records `Note` rows (`ast.rs`) tied to each error: per-predecessor consumed/live spans on join inconsistencies (from the converged dataflow's own exit states), binding sites with rendered linear types on unconsumed-at-exit errors, and prior same-block move sites on use-after-move. The CLI renders them under `--explain-borrow`; the LSP always sends them.
+- **`--emit-llvm` / `--emit-obj`** — stop the backend after IR emission or after `opt`+`llc`, for inspecting exactly what a real build feeds forward.
+
 ## Where to look next
 
 - For the language itself (syntax, semantics, type system, what is and isn't allowed): [`MANIFESTO.md`](MANIFESTO.md).

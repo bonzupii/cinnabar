@@ -202,7 +202,9 @@ Outside of `nix develop`, `cargo build`/`cargo clippy` will fail unless you have
 ## Using the compiler
 
 ```
-cinnabar <FILE> [-o|--output PATH] [--dump-ast] [--run] [-O|--opt-level {0,1,2,3,s,z}]
+cinnabar <FILE> [-o|--output PATH] [--dump-ast] [--dump-typed-ast] [--print-layout]
+                [--emit-llvm] [--emit-obj] [--explain-borrow] [--run]
+                [-O|--opt-level {0,1,2,3,s,z}]
 ```
 
 | Flag | Description |
@@ -210,6 +212,11 @@ cinnabar <FILE> [-o|--output PATH] [--dump-ast] [--run] [-O|--opt-level {0,1,2,3
 | `<FILE>` | Input Cinnabar source file (positional, required), conventionally `.cnb` |
 | `-o, --output <PATH>` | Output binary path (defaults to the input path with `.cnb` stripped) |
 | `--dump-ast` | Parse only, pretty-print the AST, and exit (no resolve/typecheck/borrow-check/codegen) |
+| `--dump-typed-ast` | Run the full front-end, then print the node arena with every attached fact (resolved symbols, canonical type keys, linearity flags, variant tags, field facts) and exit |
+| `--print-layout` | Run the full front-end, then print ABI size, alignment, field offsets, and enum variant tags for every concrete struct/enum/native handle and exit |
+| `--emit-llvm` | Write the emitter's LLVM IR (before optimization) to the input path with `.ll` and stop |
+| `--emit-obj` | Optimize and assemble to a relocatable object at the input path with `.o`, skipping the static link |
+| `--explain-borrow` | Attach secondary labels to borrow/linearity errors: which paths consume a value, where it was bound (and its linear type), where it was previously moved |
 | `--run` | Execute the produced binary after a successful build and propagate its exit code |
 | `-O, --opt-level <LEVEL>` | LLVM optimization level: `0`, `1`, `2`, `3`, `s`, `z` (default `2`) |
 
@@ -222,6 +229,22 @@ cargo run -- my_program.cnb --dump-ast                # inspect the parsed AST
 ```
 
 On success, the compiler prints `Successfully compiled <input> to '<output>'.` and exits `0`. Any lex, parse, resolve, typecheck, borrow-check, or codegen failure is rendered as one or more source-located diagnostics (via [`ariadne`](https://github.com/zesterer/ariadne)) and exits non-zero.
+
+## Language server
+
+The repository also builds `cinnabar-lsp`, a Language Server Protocol server over the same compiler pipeline:
+
+```bash
+cargo build --release --bin cinnabar-lsp
+```
+
+It speaks stdio and provides diagnostics (with the borrow checker's explanatory notes as related information), hover (attached types and signatures, linearity), go-to-definition and find-references across the module graph, completion (symbols, locals, struct fields after `.`, keywords), and signature help. Point any LSP client at the binary for `.cnb` files — e.g. in VS Code via a generic LSP extension, or in Neovim:
+
+```lua
+vim.lsp.start({ name = "cinnabar", cmd = { "/path/to/cinnabar-lsp" }, root_dir = vim.fn.getcwd() })
+```
+
+Every answer is read from the facts the pipeline attaches (resolved symbol ids, canonical type keys); the server contains no second implementation of name resolution or type inference.
 
 ## Compiler architecture
 
@@ -237,15 +260,19 @@ Every stage computes its facts exactly once and attaches them to the program rep
 
 ```
 src/
+  lib.rs            Library crate exposing the pipeline to the CLI and tooling
   main.rs           CLI driver, pipeline wiring, AST dumper
+  bin/cinnabar_lsp.rs  Language server (JSON-RPC shell over analysis.rs)
   lexer.rs          Hand-written byte-level lexer
   parser.rs         Recursive-descent parser
   ast.rs            Flat node-arena AST representation and opcode constants
-  module_loader.rs  Multi-file module discovery/loading
+  module_loader.rs  Multi-file module discovery/loading (with editor-buffer overlay)
   resolver.rs       Name resolution, scoping, casing enforcement
   typecheck.rs      Type checking, canonical type keys, linearity inference
-  borrow.rs         Flow-sensitive borrow/linearity checker (CFG dataflow)
-  codegen/          LLVM IR generation (via inkwell) and native linking
+  borrow.rs         Flow-sensitive borrow/linearity checker (CFG dataflow, explainer notes)
+  analysis.rs       IDE queries over attached facts (hover, definition, references, ...)
+  inspect.rs        --dump-typed-ast arena serialization
+  codegen/          LLVM IR generation (via inkwell), layout report, native linking
 tests/
   fixtures/         .cnb example/regression programs (positive and EXPECT_REJECTED)
 austral_refs/       Reference material from Austral (the language's direct influence)

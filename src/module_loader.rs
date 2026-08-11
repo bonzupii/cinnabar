@@ -3,7 +3,13 @@ use std::path::Path;
 
 type Loaded = (i64, Vec<(i64, i64)>);
 
-type Loader = (Vec<(String, String)>, Vec<(i64, i64)>, Vec<(String, i64)>);
+// (loaded files, external modules, worklist, unsaved-buffer overlay).
+type Loader<'a> = (
+    Vec<(String, String)>,
+    Vec<(i64, i64)>,
+    Vec<(String, i64)>,
+    &'a [(String, String)],
+);
 
 pub fn load(
     names: &mut Vec<String>,
@@ -12,12 +18,27 @@ pub fn load(
     errors: &mut Vec<Diag>,
     entry_path: &str,
 ) -> (Option<Loaded>, Vec<(String, String)>) {
+    load_with_overlay(names, nodes, lists, errors, entry_path, &[])
+}
+
+/// Load exactly like `load`, but prefer in-memory sources from `overlay`
+/// (path, text) over the file system.  The language server uses this to
+/// analyze unsaved editor buffers; paths are compared component-wise so
+/// `a/b.cnb` and `a\b.cnb` name the same overlay entry.
+pub fn load_with_overlay(
+    names: &mut Vec<String>,
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    errors: &mut Vec<Diag>,
+    entry_path: &str,
+    overlay: &[(String, String)],
+) -> (Option<Loaded>, Vec<(String, String)>) {
     let root = alloc_list(lists);
-    let source = match read_source(entry_path, errors) {
+    let source = match read_source(entry_path, overlay, errors) {
         Some(text) => text,
         None => return (None, Vec::new()),
     };
-    let mut loader: Loader = (Vec::new(), Vec::new(), Vec::new());
+    let mut loader: Loader = (Vec::new(), Vec::new(), Vec::new(), overlay);
     loader.0.push((entry_path.to_string(), source.clone()));
     if !parse_file(names, nodes, lists, errors, &source, 0, root) {
         return (None, loader.0);
@@ -29,6 +50,23 @@ pub fn load(
     let files = loader.0;
     let ext_mods = loader.1;
     (Some((root, ext_mods)), files)
+}
+
+fn overlay_lookup(overlay: &[(String, String)], path: &str) -> Option<String> {
+    let target = Path::new(path);
+    let mut idx = 0usize;
+    while idx < overlay.len() {
+        match overlay.get(idx) {
+            Some(entry) => {
+                if Path::new(&entry.0) == target {
+                    return Some(entry.1.clone());
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    None
 }
 
 fn parse_file(
@@ -63,7 +101,7 @@ fn process_imports(
     while let Some(pair) = uses.get(idx) {
         if !name_in(&declared, pair.0)
             && !loaded_name(&loader.1, pair.0)
-            && let Some(module) = sibling_module(&dir, names, pair.0)
+            && let Some(module) = sibling_module(&dir, names, loader.3, pair.0)
         {
             load_sibling(names, nodes, lists, errors, module, pair.1, loader);
         }
@@ -71,8 +109,8 @@ fn process_imports(
     }
 }
 
-fn sibling_module(dir: &str, names: &[String], seg: i64) -> Option<(String, i64)> {
-    let mod_path = sibling_path(dir, names, seg)?;
+fn sibling_module(dir: &str, names: &[String], overlay: &[(String, String)], seg: i64) -> Option<(String, i64)> {
+    let mod_path = sibling_path(dir, names, overlay, seg)?;
     Some((mod_path, seg))
 }
 
@@ -86,7 +124,7 @@ fn load_sibling(
     loader: &mut Loader,
 ) {
     let (mod_path, mod_name) = module;
-    let source = read_source_at(&mod_path, errors, node_file(nodes, use_item), node_start(nodes, use_item), node_end(nodes, use_item));
+    let source = read_source_at(&mod_path, loader.3, errors, node_file(nodes, use_item), node_start(nodes, use_item), node_end(nodes, use_item));
     let mod_source = match source {
         Some(text) => text,
         None => return,
@@ -101,7 +139,10 @@ fn load_sibling(
     loader.2.push((mod_path, child_list));
 }
 
-fn read_source(path: &str, errors: &mut Vec<Diag>) -> Option<String> {
+fn read_source(path: &str, overlay: &[(String, String)], errors: &mut Vec<Diag>) -> Option<String> {
+    if let Some(text) = overlay_lookup(overlay, path) {
+        return Some(text);
+    }
     match std::fs::read_to_string(path) {
         Ok(text) => Some(text),
         Err(cause) => {
@@ -111,7 +152,10 @@ fn read_source(path: &str, errors: &mut Vec<Diag>) -> Option<String> {
     }
 }
 
-fn read_source_at(path: &str, errors: &mut Vec<Diag>, file: i64, start: i64, end: i64) -> Option<String> {
+fn read_source_at(path: &str, overlay: &[(String, String)], errors: &mut Vec<Diag>, file: i64, start: i64, end: i64) -> Option<String> {
+    if let Some(text) = overlay_lookup(overlay, path) {
+        return Some(text);
+    }
     match std::fs::read_to_string(path) {
         Ok(text) => Some(text),
         Err(cause) => {
@@ -128,11 +172,11 @@ fn parent_dir(path: &str) -> String {
     }
 }
 
-fn sibling_path(dir: &str, names: &[String], seg: i64) -> Option<String> {
+fn sibling_path(dir: &str, names: &[String], overlay: &[(String, String)], seg: i64) -> Option<String> {
     let name = name_text(names, seg);
     let candidate = Path::new(dir).join(format!("{}.cnb", name));
     let path = candidate.to_string_lossy().to_string();
-    if Path::new(&path).exists() {
+    if overlay_lookup(overlay, &path).is_some() || Path::new(&path).exists() {
         Some(path)
     } else {
         None

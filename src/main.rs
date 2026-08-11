@@ -1,22 +1,27 @@
-mod ast;
-mod borrow;
-mod codegen;
-mod lexer;
-mod module_loader;
-mod parser;
-mod resolver;
-mod typecheck;
-
-use crate::ast::*;
+use cinnabar::ast::*;
+use cinnabar::{borrow, codegen, module_loader, resolver, typecheck};
 use ariadne::{Color, FnCache, Label, Report, ReportKind, Source};
 use clap::builder::PathBufValueParser;
 use clap::{Arg, ArgAction, Command as ClapCommand};
-use codegen::compile_and_link;
-use codegen::error::codegen_error_message;
+use cinnabar::codegen::error::codegen_error_message;
+use cinnabar::codegen::{compile_and_link, compile_to_ir, compile_to_object};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-fn parse_args() -> Option<(PathBuf, Option<PathBuf>, bool, bool, String)> {
+struct CliArgs {
+    input: PathBuf,
+    output: Option<PathBuf>,
+    dump_ast: bool,
+    dump_typed_ast: bool,
+    print_layout: bool,
+    explain_borrow: bool,
+    run: bool,
+    opt_level: String,
+    emit_llvm: bool,
+    emit_obj: bool,
+}
+
+fn parse_args() -> Option<CliArgs> {
     let matches = ClapCommand::new("cinnabar")
         .about("Cinnabar compiler")
         .arg(
@@ -41,9 +46,30 @@ fn parse_args() -> Option<(PathBuf, Option<PathBuf>, bool, bool, String)> {
                 .help("Print the parsed AST and exit"),
         )
         .arg(
+            Arg::new("dump_typed_ast")
+                .long("dump-typed-ast")
+                .action(ArgAction::SetTrue)
+                .conflicts_with_all(["dump_ast", "emit_llvm", "emit_obj", "run"])
+                .help("Run the full front-end (resolve, typecheck, borrow-check), then print the node arena with every attached fact and exit"),
+        )
+        .arg(
+            Arg::new("explain_borrow")
+                .long("explain-borrow")
+                .action(ArgAction::SetTrue)
+                .help("Attach secondary labels to borrow/linearity errors explaining which paths consume a value, where it was bound, and where it was previously moved"),
+        )
+        .arg(
+            Arg::new("print_layout")
+                .long("print-layout")
+                .action(ArgAction::SetTrue)
+                .conflicts_with_all(["dump_ast", "dump_typed_ast", "emit_llvm", "emit_obj", "run"])
+                .help("Run the full front-end, then print size/alignment/field offsets for every concrete struct, enum, and native handle and exit"),
+        )
+        .arg(
             Arg::new("run")
                 .long("run")
                 .action(ArgAction::SetTrue)
+                .conflicts_with_all(["emit_llvm", "emit_obj"])
                 .help("Execute the compiled binary after building"),
         )
         .arg(
@@ -53,6 +79,19 @@ fn parse_args() -> Option<(PathBuf, Option<PathBuf>, bool, bool, String)> {
                 .value_name("LEVEL")
                 .value_parser(clap::builder::PossibleValuesParser::new(["0", "1", "2", "3", "s", "z"]))
                 .help("Optimization level: 0, 1, 2, 3, s, z (default 2)"),
+        )
+        .arg(
+            Arg::new("emit_llvm")
+                .long("emit-llvm")
+                .action(ArgAction::SetTrue)
+                .conflicts_with("emit_obj")
+                .help("Write the emitted LLVM IR (before optimization) and stop; default output is the input path with .ll"),
+        )
+        .arg(
+            Arg::new("emit_obj")
+                .long("emit-obj")
+                .action(ArgAction::SetTrue)
+                .help("Optimize and assemble to a relocatable object file, skipping the link; default output is the input path with .o"),
         )
         .get_matches();
     let input = {
@@ -64,11 +103,22 @@ fn parse_args() -> Option<(PathBuf, Option<PathBuf>, bool, bool, String)> {
         .get_one::<String>("opt_level")
         .cloned()
         .unwrap_or_else(|| "2".to_string());
-    Some((input, output, matches.get_flag("dump_ast"), matches.get_flag("run"), opt_level))
+    Some(CliArgs {
+        input,
+        output,
+        dump_ast: matches.get_flag("dump_ast"),
+        dump_typed_ast: matches.get_flag("dump_typed_ast"),
+        print_layout: matches.get_flag("print_layout"),
+        explain_borrow: matches.get_flag("explain_borrow"),
+        run: matches.get_flag("run"),
+        opt_level,
+        emit_llvm: matches.get_flag("emit_llvm"),
+        emit_obj: matches.get_flag("emit_obj"),
+    })
 }
 
 fn main() -> ExitCode {
-    let (input, output, dump_ast, run, opt_level) = match parse_args() {
+    let args = match parse_args() {
         Some(args) => args,
         None => return ExitCode::FAILURE,
     };
@@ -76,39 +126,89 @@ fn main() -> ExitCode {
     let mut nodes: Vec<i64> = Vec::new();
     let mut lists: Vec<Vec<i64>> = Vec::new();
     let mut errors: Vec<Diag> = Vec::new();
-    let entry = input.to_string_lossy().to_string();
+    let mut notes: Vec<Note> = Vec::new();
+    let entry = args.input.to_string_lossy().to_string();
     let (loaded, files) = module_loader::load(&mut names, &mut nodes, &mut lists, &mut errors, &entry);
     let (root, ext_mods) = match loaded {
         Some(program) => program,
-        None => return finish_with_diagnostics(&errors, &files),
+        None => return finish_with_diagnostics(&errors, &[], &files),
     };
-    if dump_ast {
+    if args.dump_ast {
         dump_program(&names, &nodes, &lists, root);
         return ExitCode::SUCCESS;
     }
     if !resolver::resolve(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods) {
-        return finish_with_diagnostics(&errors, &files);
+        return finish_with_diagnostics(&errors, &[], &files);
     }
     let (ok, impls_list) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods);
     if !ok {
-        return finish_with_diagnostics(&errors, &files);
+        return finish_with_diagnostics(&errors, &[], &files);
     }
-    if !borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods) {
-        return finish_with_diagnostics(&errors, &files);
+    if !borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods) {
+        let shown_notes: &[Note] = if args.explain_borrow { &notes } else { &[] };
+        return finish_with_diagnostics(&errors, shown_notes, &files);
     }
-    let out = match &output {
-        Some(path) => path.clone(),
-        None => default_out_path(&input),
-    };
+    if args.dump_typed_ast {
+        print!("{}", cinnabar::inspect::dump_typed_arena(&names, &nodes, &lists));
+        return ExitCode::SUCCESS;
+    }
+    if args.print_layout {
+        match cinnabar::codegen::layout::render_layouts(&names, &mut nodes, &mut lists) {
+            Ok(report) => {
+                print!("{}", report);
+                return ExitCode::SUCCESS;
+            }
+            Err(codegen_err) => return finish_with_codegen_error(&codegen_err, &files),
+        }
+    }
     let entry_span = entry_span_of(&files);
-    if let Err(codegen_err) = compile_and_link(&names, &mut nodes, &mut lists, impls_list, &out, &opt_level, entry_span) {
+    if args.emit_llvm {
+        let out = emit_out_path(&args, "ll");
+        let written = compile_to_ir(&names, &mut nodes, &mut lists, impls_list, entry_span)
+            .and_then(|ir_text| write_output_text(&out, &ir_text));
+        if let Err(codegen_err) = written {
+            return finish_with_codegen_error(&codegen_err, &files);
+        }
+        println!("Emitted LLVM IR for {} to '{}'.", entry, out.display());
+        return ExitCode::SUCCESS;
+    }
+    if args.emit_obj {
+        let out = emit_out_path(&args, "o");
+        if let Err(codegen_err) =
+            compile_to_object(&names, &mut nodes, &mut lists, impls_list, &out, &args.opt_level, entry_span)
+        {
+            return finish_with_codegen_error(&codegen_err, &files);
+        }
+        println!("Emitted object file for {} to '{}'.", entry, out.display());
+        return ExitCode::SUCCESS;
+    }
+    let out = match &args.output {
+        Some(path) => path.clone(),
+        None => default_out_path(&args.input),
+    };
+    if let Err(codegen_err) =
+        compile_and_link(&names, &mut nodes, &mut lists, impls_list, &out, &args.opt_level, entry_span)
+    {
         return finish_with_codegen_error(&codegen_err, &files);
     }
-    if run {
+    if args.run {
         return run_binary(&out);
     }
     println!("Successfully compiled {} to '{}'.", entry, out.display());
     ExitCode::SUCCESS
+}
+
+fn emit_out_path(args: &CliArgs, ext: &str) -> PathBuf {
+    match &args.output {
+        Some(path) => path.clone(),
+        None => default_out_path(&args.input).with_extension(ext),
+    }
+}
+
+fn write_output_text(path: &Path, text: &str) -> Result<(), cinnabar::codegen::error::CodegenError> {
+    std::fs::write(path, text).map_err(|err| {
+        cinnabar::codegen::error::io_error(&format!("cannot write '{}': {}", path.display(), err))
+    })
 }
 
 fn make_cache(
@@ -135,12 +235,12 @@ fn file_path_of(files: &[(String, String)], file_id: i64) -> Option<String> {
     files.get(file_id as usize).map(|entry| entry.0.clone())
 }
 
-fn render_diagnostics(errors: &[Diag], files: &[(String, String)]) -> Result<(), String> {
+fn render_diagnostics(errors: &[Diag], notes: &[Note], files: &[(String, String)]) -> Result<(), String> {
     let mut cache = make_cache(files);
     let mut idx = 0usize;
     while idx < errors.len() {
         match errors.get(idx) {
-            Some(diag) => render_diag(&mut cache, files, diag)?,
+            Some(diag) => render_diag(&mut cache, files, diag, notes, idx as i64)?,
             None => break,
         }
         idx += 1;
@@ -160,6 +260,8 @@ fn render_diag(
     cache: &mut FnCache<String, impl FnMut(&String) -> Result<String, String>, String>,
     files: &[(String, String)],
     diag: &Diag,
+    notes: &[Note],
+    diag_idx: i64,
 ) -> Result<(), String> {
     if diag.1 == NO_FILE {
         return render_source_less(&diag.0);
@@ -171,11 +273,30 @@ fn render_diag(
         }
     };
     let span = diag.2 as usize..diag.3 as usize;
-    let report = Report::build(ReportKind::Error, (path.clone(), span.clone()))
+    let mut report = Report::build(ReportKind::Error, (path.clone(), span.clone()))
         .with_message(&diag.0)
-        .with_label(Label::new((path, span)).with_message("here").with_color(Color::Red))
-        .finish();
+        .with_label(Label::new((path, span)).with_message("here").with_color(Color::Red));
+    let mut note_idx = 0usize;
+    while note_idx < notes.len() {
+        match notes.get(note_idx) {
+            Some(note) => {
+                if note.0 == diag_idx
+                    && note.2 != NO_FILE
+                    && let Some(note_path) = file_path_of(files, note.2)
+                {
+                    report = report.with_label(
+                        Label::new((note_path, note.3 as usize..note.4 as usize))
+                            .with_message(&note.1)
+                            .with_color(Color::Yellow),
+                    );
+                }
+            }
+            None => break,
+        }
+        note_idx += 1;
+    }
     report
+        .finish()
         .print(&mut *cache)
         .map_err(|render_err| format!("cannot render '{}': {}", diag.0, render_err))
 }
@@ -224,8 +345,8 @@ fn default_out_path(input: &Path) -> PathBuf {
     }
 }
 
-fn finish_with_diagnostics(errors: &[Diag], files: &[(String, String)]) -> ExitCode {
-    if let Err(message) = render_diagnostics(errors, files) {
+fn finish_with_diagnostics(errors: &[Diag], notes: &[Note], files: &[(String, String)]) -> ExitCode {
+    if let Err(message) = render_diagnostics(errors, notes, files) {
         let detail = format!("failed to render diagnostic: {}", message);
         if render_source_less(&detail).is_err() {
             return ExitCode::FAILURE;
@@ -361,9 +482,9 @@ fn dump_field_list(names: &[String], nodes: &[i64], lists: &[Vec<i64>], list: i6
     while idx < count {
         let field = list_get(lists, list, idx);
         let pad = pad_str(depth);
-        let pub_flag = if node_f(nodes, field) == 1 { "is_pub: true" } else { "is_pub: false" };
-        println!("{}Field({}, name: {}, ty: ", pad, pub_flag, name_text(names, node_d(nodes, field)));
-        dump_ty(names, nodes, lists, node_e(nodes, field), depth + 1);
+        let pub_flag = if node_c(nodes, field) == 1 { "is_pub: true" } else { "is_pub: false" };
+        println!("{}Field({}, name: {}, ty: ", pad, pub_flag, name_text(names, node_a(nodes, field)));
+        dump_ty(names, nodes, lists, node_b(nodes, field), depth + 1);
         println!("{})", pad);
         idx += 1;
     }
@@ -375,8 +496,8 @@ fn dump_variant_list(names: &[String], nodes: &[i64], lists: &[Vec<i64>], list: 
     while idx < count {
         let variant = list_get(lists, list, idx);
         let pad = pad_str(depth);
-        println!("{}Variant(name: {}, payload:", pad, name_text(names, node_d(nodes, variant)));
-        dump_ty_list(names, nodes, lists, node_e(nodes, variant), depth + 1);
+        println!("{}Variant(name: {}, payload:", pad, name_text(names, node_a(nodes, variant)));
+        dump_ty_list(names, nodes, lists, node_b(nodes, variant), depth + 1);
         println!("{})", pad);
         idx += 1;
     }
@@ -414,8 +535,8 @@ fn dump_param_list(names: &[String], nodes: &[i64], lists: &[Vec<i64>], list: i6
     while idx < count {
         let param = list_get(lists, list, idx);
         let pad = pad_str(depth);
-        println!("{}Param(name: {}, ty: ", pad, name_text(names, node_d(nodes, param)));
-        dump_ty(names, nodes, lists, node_e(nodes, param), depth + 1);
+        println!("{}Param(name: {}, ty: ", pad, name_text(names, node_a(nodes, param)));
+        dump_ty(names, nodes, lists, node_b(nodes, param), depth + 1);
         println!("{})", pad);
         idx += 1;
     }

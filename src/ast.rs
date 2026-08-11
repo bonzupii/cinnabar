@@ -1,5 +1,23 @@
 pub type Diag = (String, i64, i64, i64);
 
+// A secondary explanatory note attached to a primary diagnostic:
+// (index of the diagnostic in the errors vec at attach time, message,
+// file, start, end).  Notes carry real source spans of facts the checker
+// already computed (a binding site, a path's last move, a branch exit) —
+// never fabricated locations.  Rendering is the consumer's choice: the CLI
+// shows them as secondary labels under --explain-borrow, the language
+// server as related information.
+pub type Note = (i64, String, i64, i64, i64);
+
+// Attach a note to the most recently pushed diagnostic.  A note with no
+// diagnostic to explain is dropped rather than invented.
+pub fn push_note_for_last(errors: &[Diag], notes: &mut Vec<Note>, message: &str, file: i64, start: i64, end: i64) {
+    if errors.is_empty() {
+        return;
+    }
+    notes.push((errors.len() as i64 - 1, message.to_string(), file, start, end));
+}
+
 pub const NONE: i64 = -1;
 pub const NO_FILE: i64 = -1;
 
@@ -764,6 +782,59 @@ pub fn varfact_index_of(nodes: &[i64], key: i64, name: i64) -> i64 {
 // lists and re-running generic substitution (Single-Fact Rule).
 
 pub const NODE_FIELDKEY: i64 = 17;
+
+// Resolver-owned tooling facts. These rows preserve the resolver's scope
+// decisions after its transient lookup tables are gone, so editor tooling
+// consumes name-resolution output instead of rebuilding a parallel scope
+// walker.
+//
+// SCOPE_AT:      a=kind, b=source node, c=scope
+// SCOPE_VISIBLE: a=kind, b=query scope, c=local name, d=symbol, e=namespace
+pub const NODE_SCOPEFACT: i64 = 18;
+pub const SCOPE_AT: i64 = 0;
+pub const SCOPE_VISIBLE: i64 = 1;
+
+pub fn alloc_scope_at(nodes: &mut Vec<i64>, source: i64, scope: i64) -> i64 {
+    alloc_node(
+        nodes,
+        &[
+            NODE_SCOPEFACT,
+            NO_FILE,
+            NO_FILE,
+            NO_FILE,
+            SCOPE_AT,
+            source,
+            scope,
+            NONE,
+            NONE,
+            NONE,
+        ],
+    )
+}
+
+pub fn alloc_scope_visible(
+    nodes: &mut Vec<i64>,
+    scope: i64,
+    name: i64,
+    sym: i64,
+    namespace: i64,
+) -> i64 {
+    alloc_node(
+        nodes,
+        &[
+            NODE_SCOPEFACT,
+            NO_FILE,
+            NO_FILE,
+            NO_FILE,
+            SCOPE_VISIBLE,
+            scope,
+            name,
+            sym,
+            namespace,
+            NONE,
+        ],
+    )
+}
 
 pub fn alloc_fieldkey(nodes: &mut Vec<i64>, key: i64, name: i64, fkey: i64, idx: i64) -> i64 {
     alloc_node(nodes, &[NODE_FIELDKEY, NO_FILE, NO_FILE, NO_FILE, key, name, fkey, idx, NONE, NONE])
