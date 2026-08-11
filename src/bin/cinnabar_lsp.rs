@@ -31,14 +31,10 @@ struct ServerState {
     published: Vec<String>,
 }
 
-fn main() {
-    if let Err(message) = run() {
-        eprintln!("cinnabar-lsp: {}", message);
-        std::process::exit(1);
-    }
-}
-
-fn run() -> Result<(), String> {
+// A fatal transport failure surfaces through main's Result: there is no
+// usable channel left to log through when the JSON-RPC connection itself is
+// gone.
+fn main() -> Result<(), String> {
     let (connection, io_threads) = Connection::stdio();
     let capabilities = json!({
         "textDocumentSync": 1,
@@ -50,18 +46,34 @@ fn run() -> Result<(), String> {
     });
     // lsp-server wraps this value in the InitializeResult's `capabilities`
     // field itself.
-    let init_result = connection
+    let init_params = connection
         .initialize(capabilities)
         .map_err(|err| format!("initialize failed: {}", err))?;
-    // The client's initialize params carry nothing this server configures
-    // itself by yet; acknowledge receipt in the log for debuggability.
-    if init_result.is_null() {
-        eprintln!("cinnabar-lsp: client sent null initialize params");
-    }
+    let client = init_params
+        .get("clientInfo")
+        .and_then(|info| info.get("name"))
+        .and_then(|name| name.as_str())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| "unnamed client".to_string());
+    log_message(&connection, &format!("cinnabar-lsp ready for {}", client))?;
     let mut state = ServerState { docs: Vec::new(), published: Vec::new() };
     main_loop(&connection, &mut state)?;
     io_threads.join().map_err(|err| format!("io threads: {}", err))?;
     Ok(())
+}
+
+// Server-side logging goes through the protocol (`window/logMessage`, type
+// 3 = Info), never through the process's own stdio, which the JSON-RPC
+// transport owns.
+fn log_message(connection: &Connection, message: &str) -> Result<(), String> {
+    let note = Notification {
+        method: "window/logMessage".to_string(),
+        params: json!({ "type": 3, "message": message }),
+    };
+    connection
+        .sender
+        .send(Message::Notification(note))
+        .map_err(|err| format!("send log message: {}", err))
 }
 
 fn main_loop(connection: &Connection, state: &mut ServerState) -> Result<(), String> {
@@ -76,7 +88,10 @@ fn main_loop(connection: &Connection, state: &mut ServerState) -> Result<(), Str
             }
             Message::Notification(note) => handle_notification(connection, state, note)?,
             Message::Response(resp) => {
-                eprintln!("cinnabar-lsp: ignoring unexpected response to request {:?}", resp.id);
+                log_message(
+                    connection,
+                    &format!("cinnabar-lsp: ignoring unexpected response to request {:?}", resp.id),
+                )?;
             }
         }
     }
@@ -426,11 +441,11 @@ fn publish_diagnostics(
             Some(uri) => !fresh.contains(uri),
             None => false,
         };
-        if stale {
-            if let Some(uri) = state.published.get(idx) {
-                let cleared: Vec<Value> = Vec::new();
-                send_diagnostics(connection, &uri.clone(), cleared)?;
-            }
+        if stale
+            && let Some(uri) = state.published.get(idx)
+        {
+            let cleared: Vec<Value> = Vec::new();
+            send_diagnostics(connection, &uri.clone(), cleared)?;
         }
         idx += 1;
     }
@@ -452,10 +467,11 @@ fn file_diagnostics(analysis: &Analysis, file: i64) -> Vec<Value> {
             while note_idx < analysis.notes.len() {
                 match analysis.notes.get(note_idx) {
                     Some(note) => {
-                        if note.0 == idx as i64 && note.2 != NO_FILE {
-                            if let Some(location) = location_json(analysis, note.2, note.3, note.4) {
-                                related.push(json!({ "location": location, "message": note.1 }));
-                            }
+                        if note.0 == idx as i64
+                            && note.2 != NO_FILE
+                            && let Some(location) = location_json(analysis, note.2, note.3, note.4)
+                        {
+                            related.push(json!({ "location": location, "message": note.1 }));
                         }
                     }
                     None => break,
@@ -468,10 +484,10 @@ fn file_diagnostics(analysis: &Analysis, file: i64) -> Vec<Value> {
                 "source": "cinnabar",
                 "message": diag.0
             });
-            if !related.is_empty() {
-                if let Some(object) = diag_json.as_object_mut() {
-                    object.insert("relatedInformation".to_string(), Value::Array(related));
-                }
+            if !related.is_empty()
+                && let Some(object) = diag_json.as_object_mut()
+            {
+                object.insert("relatedInformation".to_string(), Value::Array(related));
             }
             out.push(diag_json);
         }
@@ -499,10 +515,10 @@ fn hex_value(byte: u8) -> Option<u8> {
     if byte.is_ascii_digit() {
         return Some(byte - b'0');
     }
-    if (b'a'..=b'f').contains(&byte) {
+    if byte.is_ascii_hexdigit() && byte.is_ascii_lowercase() {
         return Some(byte - b'a' + 10);
     }
-    if (b'A'..=b'F').contains(&byte) {
+    if byte.is_ascii_hexdigit() && byte.is_ascii_uppercase() {
         return Some(byte - b'A' + 10);
     }
     None
@@ -517,7 +533,7 @@ fn percent_decode(text: &str) -> String {
             Some(value) => *value,
             None => break,
         };
-        if byte == b'%' && idx + 2 < bytes.len() + 1 {
+        if byte == b'%' && idx + 2 <= bytes.len() {
             let high = bytes.get(idx + 1).and_then(|value| hex_value(*value));
             let low = bytes.get(idx + 2).and_then(|value| hex_value(*value));
             if let (Some(hi), Some(lo)) = (high, low) {
@@ -551,14 +567,9 @@ fn percent_encode_path(path: &str) -> String {
 fn uri_to_path(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("file://")?;
     // Strip an empty authority; a non-empty authority (remote host) is not
-    // a local file.
-    let path_part = if let Some(after) = rest.strip_prefix('/') {
-        // "file:///..." — after is the absolute path (minus its leading
-        // slash on Windows drive paths).
-        after
-    } else {
-        return None;
-    };
+    // a local file.  "file:///..." leaves the absolute path (minus its
+    // leading slash on Windows drive paths).
+    let path_part = rest.strip_prefix('/')?;
     let decoded = percent_decode(path_part);
     // Windows drive path: "C:/..." after decoding.  A path that does not
     // look like a drive keeps its leading slash (POSIX).

@@ -280,14 +280,15 @@ fn render_diag(
     while note_idx < notes.len() {
         match notes.get(note_idx) {
             Some(note) => {
-                if note.0 == diag_idx && note.2 != NO_FILE {
-                    if let Some(note_path) = file_path_of(files, note.2) {
-                        report = report.with_label(
-                            Label::new((note_path, note.3 as usize..note.4 as usize))
-                                .with_message(&note.1)
-                                .with_color(Color::Yellow),
-                        );
-                    }
+                if note.0 == diag_idx
+                    && note.2 != NO_FILE
+                    && let Some(note_path) = file_path_of(files, note.2)
+                {
+                    report = report.with_label(
+                        Label::new((note_path, note.3 as usize..note.4 as usize))
+                            .with_message(&note.1)
+                            .with_color(Color::Yellow),
+                    );
                 }
             }
             None => break,
