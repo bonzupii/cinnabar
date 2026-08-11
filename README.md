@@ -21,6 +21,10 @@ See [`MANIFESTO.md`](MANIFESTO.md) for the full, normative specification and the
 
 ## A taste of the language
 
+Every snippet below is copied verbatim from the repository's own known-good fixture corpus in [`tests/fixtures/`](tests/fixtures/) — each is a complete, compiling program with a real `main`, not hand-assembled for this document. (This repo's toolchain requires LLVM 21 + a staged musl libc via `nix develop`, which isn't available in the environment these docs were written in, so "known-good, taken from the fixture corpus" stands in for "compiled and verified locally.")
+
+Tail recursion and structs — [`tests/fixtures/repro/hanoi.cnb`](tests/fixtures/repro/hanoi.cnb):
+
 ```cinnabar
 pub const DISKS: I64 = 8
 
@@ -35,38 +39,136 @@ fun hanoi_acc(n: I64, acc: I64) I64
   return hanoi_acc(n - 1, acc + acc + 1)
 end
 
+fun hanoi_moves(disks: I64) I64
+  return hanoi_acc(disks, 0)
+end
+
 fun hanoi(n: I64) MoveCount
-  return MoveCount(moves: hanoi_acc(n, 0))
+  return MoveCount(moves: hanoi_moves(n))
+end
+
+pub fun main() I64
+  val result = hanoi(DISKS)
+  return result.moves
 end
 ```
 
-Linear native handles must be consumed exactly once:
+Linear native handles, generics, and `Result` — [`tests/fixtures/repro/vec_test.cnb`](tests/fixtures/repro/vec_test.cnb):
 
 ```cinnabar
-fun print_int_inline(value: I64) impure Result(Unit, Collections.Error)
-  val vec = try Collections.vec_new[U8]()
-  try Collections.vec_push(&mut vec, digit_byte(value))
-  Collections.vec_free(vec)          # linear handle consumed exactly once
+pub mod Collections
+  pub nat type Vec(T)
+  pub nat type String
+  pub nat type HashMap(K, V)
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+    pub KeyNotFound
+    pub EmptySlice
+    pub InvalidUtf8
+  end
+
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_push<T>(vec: &mut Vec(T), value: T) impure Result(Unit, Error)
+  pub nat fun vec_view<T>(vec: &Vec(T)) &[T]
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
+  pub nat fun string_from_slice(view: &[U8]) impure Result(String, Error)
+  pub nat fun string_len(value: &String) Usize
+  pub nat fun string_free(value: String) impure Unit
+  pub nat fun hash_map_new<K, V>() impure Result(HashMap(K, V), Error)
+  pub nat fun hash_map_insert<K, V>(map: &mut HashMap(K, V), key: K, value: V) impure Result(Unit, Error)
+  pub nat fun hash_map_get<K, V>(map: &HashMap(K, V), key: K) impure Result(V, Error)
+  pub nat fun hash_map_free<K, V>(map: HashMap(K, V)) impure Unit
+end
+
+use Collections.vec_new
+use Collections.vec_push
+use Collections.vec_view
+use Collections.vec_free
+
+pub mod Slice
+  pub nat fun len<T>(view: &[T]) Usize
+end
+
+use Slice.len as slice_len
+
+const BAD_NEW: I64 = 1
+const BAD_PUSH: I64 = 2
+
+fun fail_vec<T>(vec: Collections.Vec(T)) impure I64
+  vec_free(vec)
+  return BAD_PUSH
+end
+
+fun fill_squares(vec: &mut Collections.Vec(I64)) impure Result(Unit, Collections.Error)
+  var i: I64 = 0
+  while i < 5
+    try vec_push(vec, i * i)
+    i = i + 1
+  end
   return Ok(Unit)
 end
+
+pub fun main() impure I64
+  val vec = match vec_new[I64]()
+    Ok(v) => v
+    Err(error) => return BAD_NEW
+  end
+
+  val fill_result = fill_squares(&mut vec)
+  match fill_result
+    Ok(Unit) => Unit
+    Err(error) => return fail_vec(vec)
+  end
+
+  val view = vec_view(&vec)
+  val n = slice_len(view)
+  vec_free(vec)          # linear handle consumed exactly once
+  return 0
+end
 ```
 
-Pattern matching with array rest-patterns and traits:
+Slices, array rest-patterns, and tail-recursive folds — [`tests/fixtures/repro/slice_test.cnb`](tests/fixtures/repro/slice_test.cnb):
 
 ```cinnabar
-pub trait Checksum
-  pub fun checksum(value: &Self) U32
+pub mod Slice
+  pub nat fun len<T>(view: &[T]) Usize
 end
 
-fun split_first(view: &[U8]) Option(SplitFirst)
+use Slice.len as slice_len
+
+fun slice_sum_acc(view: &[U8], acc: Usize) Usize
   match view
-    [] => return None
-    [first, rest @ ..] => return Some(SplitFirst(first: first, rest_len: slice_len(rest)))
+    [] => return acc
+    [first, rest @ ..] => return slice_sum_acc(rest, acc + Usize.from(first))
   end
+end
+
+fun slice_sum(view: &[U8]) Usize
+  return slice_sum_acc(view, 0)
+end
+
+pub const MAGIC_BYTE_0: U8 = 0x0D
+pub const MAGIC_BYTE_1: U8 = 0xF0
+pub const MAGIC_BYTE_2: U8 = 0xAD
+pub const MAGIC_BYTE_3: U8 = 0x0B
+pub const EXPECTED_SUM: Usize = 437
+
+fun array_as_slice() Usize
+  val bytes: [U8; 4] = [MAGIC_BYTE_0, MAGIC_BYTE_1, MAGIC_BYTE_2, MAGIC_BYTE_3]
+  return slice_sum(&bytes)
+end
+
+pub fun main() I64
+  if array_as_slice() == EXPECTED_SUM
+    return 0
+  end
+  return 1
 end
 ```
 
-Multi-file modules are resolved automatically from `use` statements — `use Math.add` in `main.cnb` loads the sibling file `Math.cnb`:
+Multi-file modules, resolved automatically from `use` statements — [`tests/fixtures/multi_file/`](tests/fixtures/multi_file/), where `use Math.add` in `main.cnb` loads the sibling file `Math.cnb`:
 
 ```cinnabar
 # main.cnb
@@ -77,7 +179,14 @@ pub fun main() I64
 end
 ```
 
-More real examples live in [`tests/fixtures/`](tests/fixtures/), especially [`tests/fixtures/spec.cnb`](tests/fixtures/spec.cnb) — the immutable reference implementation fixture, which doubles as an executable language tour.
+```cinnabar
+# Math.cnb
+pub fun add(a: I64, b: I64) I64
+  return a + b
+end
+```
+
+More real examples live in [`tests/fixtures/`](tests/fixtures/), especially [`tests/fixtures/spec.cnb`](tests/fixtures/spec.cnb) — the immutable reference implementation fixture, which doubles as an executable language tour (traits, `impl`, checksum-style dispatch, and more).
 
 ## Building the compiler
 
