@@ -13,6 +13,7 @@ struct CliArgs {
     output: Option<PathBuf>,
     dump_ast: bool,
     dump_typed_ast: bool,
+    print_layout: bool,
     run: bool,
     opt_level: String,
     emit_llvm: bool,
@@ -49,6 +50,13 @@ fn parse_args() -> Option<CliArgs> {
                 .action(ArgAction::SetTrue)
                 .conflicts_with_all(["dump_ast", "emit_llvm", "emit_obj", "run"])
                 .help("Run the full front-end (resolve, typecheck, borrow-check), then print the node arena with every attached fact and exit"),
+        )
+        .arg(
+            Arg::new("print_layout")
+                .long("print-layout")
+                .action(ArgAction::SetTrue)
+                .conflicts_with_all(["dump_ast", "dump_typed_ast", "emit_llvm", "emit_obj", "run"])
+                .help("Run the full front-end, then print size/alignment/field offsets for every concrete struct, enum, and native handle and exit"),
         )
         .arg(
             Arg::new("run")
@@ -93,6 +101,7 @@ fn parse_args() -> Option<CliArgs> {
         output,
         dump_ast: matches.get_flag("dump_ast"),
         dump_typed_ast: matches.get_flag("dump_typed_ast"),
+        print_layout: matches.get_flag("print_layout"),
         run: matches.get_flag("run"),
         opt_level,
         emit_llvm: matches.get_flag("emit_llvm"),
@@ -132,6 +141,15 @@ fn main() -> ExitCode {
     if args.dump_typed_ast {
         print!("{}", cinnabar::inspect::dump_typed_arena(&names, &nodes, &lists));
         return ExitCode::SUCCESS;
+    }
+    if args.print_layout {
+        match cinnabar::codegen::layout::render_layouts(&names, &mut nodes, &mut lists) {
+            Ok(report) => {
+                print!("{}", report);
+                return ExitCode::SUCCESS;
+            }
+            Err(codegen_err) => return finish_with_codegen_error(&codegen_err, &files),
+        }
     }
     let entry_span = entry_span_of(&files);
     if args.emit_llvm {

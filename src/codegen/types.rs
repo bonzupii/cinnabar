@@ -144,17 +144,42 @@ fn native_llvm<'ctx>(context: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, Code
     Ok(context.struct_type(&[ptr.into(), i64_ty.into(), i64_ty.into()], false).into())
 }
 
-fn struct_llvm<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, item: i64, args: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
-    let from = declared_param_keys(env.3, env.4, item);
-    let to = list_to_vec(env.4, args);
-    let fields = node_e(env.3, item);
-    let count = list_len(env.4, fields);
-    let mut field_tys: Vec<BasicTypeEnum<'ctx>> = Vec::new();
+/// The (field name id, substituted field key) pairs of a struct item at the
+/// given type arguments, in declared order.  This is the single place struct
+/// field keys are derived during lowering: `struct_llvm` builds the LLVM
+/// struct from it, and the layout printer reads it for field naming.
+pub fn struct_field_keys(
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    item: i64,
+    args: i64,
+) -> Vec<(i64, i64)> {
+    let from = declared_param_keys(nodes, lists, item);
+    let to = list_to_vec(lists, args);
+    let fields = node_e(nodes, item);
+    let count = list_len(lists, fields);
+    let mut out: Vec<(i64, i64)> = Vec::new();
     let mut idx = 0i64;
     while idx < count {
-        let field = list_get(env.4, fields, idx);
-        let declared = ty_key_of(env.3, node_b(env.3, field));
-        let concrete = subst_key(env.3, env.4, declared, &from, &to);
+        let field = list_get(lists, fields, idx);
+        let name = node_a(nodes, field);
+        let declared = ty_key_of(nodes, node_b(nodes, field));
+        let concrete = subst_key(nodes, lists, declared, &from, &to);
+        out.push((name, concrete));
+        idx += 1;
+    }
+    out
+}
+
+fn struct_llvm<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, item: i64, args: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+    let fields = struct_field_keys(env.3, env.4, item, args);
+    let mut field_tys: Vec<BasicTypeEnum<'ctx>> = Vec::new();
+    let mut idx = 0usize;
+    while idx < fields.len() {
+        let concrete = match fields.get(idx) {
+            Some(pair) => pair.1,
+            None => break,
+        };
         let ty = llvm_type(env, concrete, span)?;
         field_tys.push(ty);
         idx += 1;

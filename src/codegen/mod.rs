@@ -1,5 +1,6 @@
 pub mod emitter;
 pub mod error;
+pub mod layout;
 pub mod types;
 
 use crate::codegen::emitter::{emit_program, protocol_of, InstFns, Session};
@@ -190,7 +191,7 @@ fn run_emitter<'ctx, 'm, 'a>(
     emit_program(&mut sess, entry_span)
 }
 
-fn host_target() -> Result<(TargetData, TargetTriple), CodegenError> {
+pub(crate) fn host_target() -> Result<(TargetData, TargetTriple), CodegenError> {
     Target::initialize_native(&InitializationConfig::default())
         .map_err(|message| tool_error("llvm", None, &message))?;
     let triple = TargetMachine::get_default_triple();
