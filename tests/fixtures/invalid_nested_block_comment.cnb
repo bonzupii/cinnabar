@@ -5,6 +5,6 @@
   |#
 |#
 
-pub fun main() Int
+pub fun main() I64
   return 0
 end

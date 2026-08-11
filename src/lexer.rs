@@ -268,10 +268,10 @@ fn decimal_value(bytes: &[u8], start: usize, end: usize, file: i64, errors: &mut
         }
         pos += 1;
     }
-    if value > i64::MAX as u64 {
-        push_error(errors, "integer literal is too large", file, start as i64, end as i64);
-        return None;
-    }
+    // A literal is a non-negative magnitude stored as its u64 bit pattern;
+    // the typechecker range-checks it against the adopting type's bounds
+    // (so 0xFFFFFFFFFFFFFFFF is legal as U64 and rejected as I64), and an
+    // untyped literal defaults to I64, whose range check rejects it there.
     Some(value as i64)
 }
 
@@ -315,10 +315,10 @@ fn hex_value(bytes: &[u8], start: usize, end: usize, file: i64, errors: &mut Vec
         }
         pos += 1;
     }
-    if value > i64::MAX as u64 {
-        push_error(errors, "hexadecimal literal is too large", file, start as i64, end as i64);
-        return None;
-    }
+    // A literal is a non-negative magnitude stored as its u64 bit pattern;
+    // the typechecker range-checks it against the adopting type's bounds
+    // (so 0xFFFFFFFFFFFFFFFF is legal as U64 and rejected as I64), and an
+    // untyped literal defaults to I64, whose range check rejects it there.
     Some(value as i64)
 }
 

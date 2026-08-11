@@ -1437,8 +1437,7 @@ fn gen_while(g: &mut Gen) {
     let k = 1 + g.rng.below(4) as i64;
     let i = g.fresh_snake();
     let form = g.rng.below(4);
-    if form == 0 {
-        g.push(&format!("var {}: Int = 0", i));
+    if form == 0 {            g.push(&format!("var {}: I64 = 0", i));
         g.push(&format!("while {} < {}", i, n));
         g.indent.push_str("  ");
         g.push(&format!("{} = {} + {}", total, total, k));
@@ -1447,8 +1446,7 @@ fn gen_while(g: &mut Gen) {
         g.push("end");
         set_int(&mut g.state, &total, cur + n * k);
         add_int(&mut g.state, &i, n);
-    } else if form == 1 {
-        g.push(&format!("var {}: Int = 0", i));
+    } else if form == 1 {            g.push(&format!("var {}: I64 = 0", i));
         g.push(&format!("while {} < {}", i, n));
         g.indent.push_str("  ");
         g.push(&format!("{} = {} + {}", total, total, i));
@@ -1457,8 +1455,7 @@ fn gen_while(g: &mut Gen) {
         g.push("end");
         set_int(&mut g.state, &total, cur + n * (n - 1) / 2);
         add_int(&mut g.state, &i, n);
-    } else if form == 2 {
-        g.push(&format!("var {}: Int = 0", i));
+    } else if form == 2 {            g.push(&format!("var {}: I64 = 0", i));
         g.push("while true");
         g.indent.push_str("  ");
         g.push(&format!("{} = {} + 1", i, i));
@@ -1472,8 +1469,7 @@ fn gen_while(g: &mut Gen) {
         g.push("end");
         set_int(&mut g.state, &total, cur + (n - 1) * k);
         add_int(&mut g.state, &i, n);
-    } else {
-        g.push(&format!("var {}: Int = 0", i));
+    } else {            g.push(&format!("var {}: I64 = 0", i));
         g.push(&format!("while {} < {}", i, n));
         g.indent.push_str("  ");
         g.push(&format!("{} = {} + 1", i, i));
@@ -1756,11 +1752,11 @@ fn gen_nested_while(g: &mut Gen) {
     let n2 = 2 + g.rng.below(3) as i64;
     let k = 1 + g.rng.below(4) as i64;
     let i = g.fresh_snake();
-    g.push(&format!("var {}: Int = 0", i));
+    g.push(&format!("var {}: I64 = 0", i));
     g.push(&format!("while {} < {}", i, n1));
     g.indent.push_str("  ");
     let j = g.fresh_snake();
-    g.push(&format!("var {}: Int = 0", j));
+    g.push(&format!("var {}: I64 = 0", j));
     g.push(&format!("while {} < {}", j, n2));
     g.indent.push_str("  ");
     g.push(&format!("{} = {} + {}", total, total, k));
@@ -2079,7 +2075,7 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
         let mut f = 0usize;
         while f < fields.len() {
             match fields.get(f) {
-                Some(fname) => g.push(&format!("  pub {}: Int", fname)),
+                Some(fname) => g.push(&format!("  pub {}: I64", fname)),
                 None => {}
             }
             f += 1;
@@ -2115,9 +2111,9 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
                         let mut p = 0usize;
                         while p < *pcount {
                             if p == 0 {
-                                line.push_str("Int");
+                                line.push_str("I64");
                             } else {
-                                line.push_str(", Int");
+                                line.push_str(", I64");
                             }
                             p += 1;
                         }
@@ -2148,52 +2144,52 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
     let trait_name = g.fresh_pascal();
     let trait_method = g.fresh_snake();
     g.push(&format!("pub trait {}", trait_name));
-    g.push(&format!("  pub fun {}(value: &Self) Int", trait_method));
+    g.push(&format!("  pub fun {}(value: &Self) I64", trait_method));
     g.push("end");
     g.push("");
     g.push(&format!("pub impl {} for {}", trait_name, sdef0.name));
-    g.push(&format!("  pub fun {}(value: &{}) Int", trait_method, sdef0.name));
+    g.push(&format!("  pub fun {}(value: &{}) I64", trait_method, sdef0.name));
     g.push(&format!("    return value.{}", f0name));
     g.push("  end");
     g.push("end");
     g.push("");
     let bounded = g.fresh_snake();
-    g.push(&format!("fun {}<T: {}>(value: &T) Int", bounded, trait_name));
+    g.push(&format!("fun {}<T: {}>(value: &T) I64", bounded, trait_name));
     g.push(&format!("  return {}.{}(value)", trait_name, trait_method));
     g.push("end");
     g.push("");
     g.bounded = bounded;
     let uname = g.fresh_snake();
     let usem = pick_unary_sem(&mut g.rng);
-    g.push(&format!("fun {}(x: Int) Int", uname));
+    g.push(&format!("fun {}(x: I64) I64", uname));
     g.push(&format!("  return {}", unary_body(&usem)));
     g.push("end");
     g.push("");
     g.unary_helpers.push((uname, usem));
     let bname = g.fresh_snake();
     let bsem = pick_binary_sem(&mut g.rng);
-    g.push(&format!("fun {}(x: Int, y: Int) Int", bname));
+    g.push(&format!("fun {}(x: I64, y: I64) I64", bname));
     g.push(&format!("  return {}", binary_body(&bsem)));
     g.push("end");
     g.push("");
     g.binary_helpers.push((bname, bsem));
     let flname = g.fresh_snake();
     let flsem = pick_bool_sem(&mut g.rng);
-    g.push(&format!("fun {}(x: Int) Bool", flname));
+    g.push(&format!("fun {}(x: I64) Bool", flname));
     g.push(&format!("  return {}", bool_body(&flsem)));
     g.push("end");
     g.push("");
     g.bool_helpers.push((flname, flsem));
     let (shr_fields, shr_body) = struct_reader_parts(&mut g.rng, &sdef0);
     let shr_name = g.fresh_snake();
-    g.push(&format!("fun {}(value: &{}) Int", shr_name, sdef0.name));
+    g.push(&format!("fun {}(value: &{}) I64", shr_name, sdef0.name));
     g.push(&format!("  return {}", shr_body));
     g.push("end");
     g.push("");
     g.shared_helpers.push((shr_name, shr_fields));
     let (mut_fields, mut_body) = struct_reader_parts(&mut g.rng, &sdef0);
     let mut_name = g.fresh_snake();
-    g.push(&format!("fun {}(value: &mut {}) Int", mut_name, sdef0.name));
+    g.push(&format!("fun {}(value: &mut {}) I64", mut_name, sdef0.name));
     g.push(&format!("  return {}", mut_body));
     g.push("end");
     g.push("");
@@ -2210,7 +2206,7 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
         g.push(&format!("pub const {}: Usize = {}", c0, k0));
         g.push(&format!("pub const {}: Usize = {}", c1, k1));
         g.push("");
-        g.push(&format!("fun {}(index: Usize, length: Usize) Int", oob_name));
+        g.push(&format!("fun {}(index: Usize, length: Usize) I64", oob_name));
         g.push(&format!("  if index == {} && length == {}", c0, c1));
         g.push(&format!("    return {}", a));
         g.push("  end");
@@ -2227,7 +2223,7 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
         let htail = g.fresh_snake();
         let rest_len = (arr_n - 1) as i64;
         g.push(&format!(
-            "fun {}({}: {}, {}: &[{}], {}: Int, {}: Int) Int",
+            "fun {}({}: {}, {}: &[{}], {}: I64, {}: I64) I64",
             finish_name, hp0, sdef0.name, hrest, sdef0.name, htotal, hwant
         ));
         g.push(&format!("  val {} = match &{}[0]", hd0, hrest));
@@ -2261,10 +2257,10 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
         g.finish = Some(finish_name);
         g.arr_len = arr_n;
     }
-    g.push("pub fun main() Int");
+    g.push("pub fun main() I64");
     g.indent = "  ".to_string();
     let total = g.fresh_snake();
-    g.push(&format!("var {}: Int = 0", total));
+    g.push(&format!("var {}: I64 = 0", total));
     g.total = total.clone();
     add_int(&mut g.state, &total, 0);
     gen_struct_block(&mut g, 0);
@@ -2330,7 +2326,7 @@ fn generate_negative(rng: &mut Rng, shape: usize) -> (String, &'static str) {
         push(&format!("use {}.{}", m, destroy));
     }
     push("");
-    push("pub fun main() impure Int");
+    push("pub fun main() impure I64");
     push(&format!("  val {} = match {}()", h1, make));
     push("    Ok(value) => value");
     push(&format!("    Err({}.{}) => return 0", m, fault));

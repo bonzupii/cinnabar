@@ -2,8 +2,6 @@
 
 Cinnabar is a systems programming language designed for building compilers, runtimes, and low-level infrastructure. It exists because existing systems languages force an unacceptable trade-off: either accept hidden complexity (implicit lifetimes, dereferencing, warnings-as-errors theater) or abandon safety. Cinnabar rejects both.
 
-The language is named after Cantharellus cinnabarinus, the Cinnabar Chanterelle mushroom. Not an acronym. Not a committee compromise. A name from the trail.
-
 ## Core Principles
 
 ### 1. No Information Loss
@@ -35,6 +33,28 @@ Native handles (`Memory.Block`, `Collections.Vec`, `Collections.String`, `Collec
 
 Native containers are linear regardless of their element type. `Vec(T)` and `HashMap(K, V)` own heap storage that requires an explicit corresponding free, independent of what they hold; their linearity does not derive from their element. Inserting a value into a container (`vec_push`, `hash_map_insert`) moves the element: a linear element is consumed by the insertion and cannot be reused afterward.
 
+Native Container Opacity — three perspectives:
+
+(1) User-code perspective (opaque): Native handles are opaque to Cinnabar
+    code. User code sees no raw pointers, performs no manual memory
+    operations, and accesses containers only through declared native
+    functions.
+
+(2) Compiler type-model perspective (transparent): A native container's
+    element type is known to the compiler. A native container holding
+    linear elements represents a collection of independent linear
+    obligations.
+
+(3) The Resolvability Rule: A native container type constructor C(T) may
+    hold linear elements T if and only if the native surface of C provides
+    a native by-value extraction function for that container
+    (Collections.vec_pop for Vec, Collections.hash_map_remove for HashMap).
+    Storing a linear value in a native container that lacks an extraction
+    surface is a hard compile-time error.
+
+The error message is: "cannot store linear element in container: container
+provides no native extraction surface".
+
 Type parameters are conservatively linear. A generic function's type parameter has no linearity bound in the grammar, so its instantiation is unknown at definition time; a value of a type-parameter type must therefore be consumed exactly once on every execution path, exactly as a native handle. A generic body that moves a type-parameter value is subject to the same consumption checks as one that moves a `Block`.
 
 Linearity is container-aware for user-defined aggregates: a struct, enum, or array whose fields, payloads, or elements are linear is itself linear, and moving a linear value into a struct constructor consumes it.
@@ -58,7 +78,7 @@ Block comments may not nest (nesting is a lexical error). Trailing comments may 
 The compiler operates on a flat node arena with fixed-width records rather than a heap of boxed/reference-counted tree nodes. Trees are integer ids. Each stage is a pure function (or set of functions) that reads the arena and writes attachments — no stage retains internal mutable state past its own return. This is exactly the data structure a Cinnabar program would use to represent itself. When the language is self-hosted, the compiler's architecture does not change — only the host language does.
 
 ### 11. The Crucible Rule
-If a program compiles, it runs without crashing or panicking. Every runtime failure mode that can be moved to compile time must be: bounds are `Result` errors on the native surface and on array/slice indexing, never traps; division/modulo by a compile-time-provable zero is a compile-time error; recursion must not be able to exhaust the stack. The compiler is judged by the binaries it produces — disassembled, executed, and checked for memory safety — not by whether the frontend accepts a program.
+If a program compiles, it runs without crashing or panicking. Every runtime failure mode that can be moved to compile time must be: bounds are `Result` errors on the native surface and on array/slice indexing, never traps; division/modulo by a compile-time-provable zero is a compile-time error; call-stack exhaustion is eliminated at compile time by requiring every self-recursive function call to be in tail position, so all recursion runs in O(1) call-stack space — non-tail self-recursion is a compile-time error, never a runtime crash. The compiler is judged by the binaries it produces — disassembled, executed, and checked for memory safety — not by whether the frontend accepts a program.
 
 ### 12. Self-Hosting Discipline
 Once Cinnabar compiles itself, the compiler is a Cinnabar-emitted binary and is bound by every principle above, including the Crucible Rule — it is not exempt as tooling. Where a compiler feature is temporarily unrepresentable in Cinnabar itself, the boundary is marked explicitly with a native declaration and the temporary status is visible, not hidden; the feature is rewritten in Cinnabar once the language can express it.
@@ -81,7 +101,7 @@ Comments: `#`, `#!`, `#| |#`, `#!| |#`. Block comments do not nest. Trailing com
 
 `match` arms are single-expression bodies separated by newlines. No semicolons. Match is exhaustive — every variant, array length, and rest pattern must be covered; missing coverage is a compile error.
 
-The program entry point is `main`. It must return `Unit`, a builtin integer scalar (`Int`, `U8`, `U32`, `Usize`), or an exit-status enum. An exit-status enum's first declared variant denotes success (exit code 0), its second denotes failure (exit code 1), and it may declare one further variant carrying an `Int` payload used as the process exit code. Any other `main` return type is a compile error.
+The program entry point is `main`. It must return `Unit`, a builtin integer scalar (any of the ten fixed-width integer types), or an exit-status enum. An exit-status enum's first declared variant denotes success (exit code 0), its second denotes failure (exit code 1), and it may declare one further variant carrying an `I64` payload used as the process exit code. Any other `main` return type is a compile error.
 
 ### Operators
 Arithmetic: `+`, `-`, `*`, `/`, `%`. Modulo has the same precedence as `*` and `/`.
@@ -114,7 +134,9 @@ Writing through a shared `&T` reference is a hard compile error ("cannot assign 
 Reassigning an effectively-Live linear field without consuming the previous handle is a hard compile error ("linear value 'a.b' is reassigned without being consumed"). Consuming the field first (a move into a call) transitions it to Moved, after which assignment re-initializes it and restores its moved-out ancestors.
 
 ### Types
-Compiler builtins: `Unit`, `Result(T, E)`, `Option(T)`, `IndexError`, `Bool`, `Int`, `U8`, `U32`, `Usize`. They are always available; no program may declare them.
+Compiler builtins: `Unit`, `Result(T, E)`, `Option(T)`, `IndexError`, `Bool`, and the ten fixed-width integer types `I8`, `I16`, `I32`, `I64`, `Isize` (signed) and `U8`, `U16`, `U32`, `U64`, `Usize` (unsigned). They are always available; no program may declare them.
+
+The ten integer types form a fixed-width grid: every width supports every operator, and arithmetic and bitwise operations wrap per-width in two's complement. Shift counts mask by `width - 1` (so `1 << 8` on `U8` is `1 << 0`); signed types shift and compare arithmetically, unsigned types logically. Integer literals are non-negative magnitudes that adopt the expected type in a typed context and are range-checked against that type's width (`300` as `U8`, `-1` as `U16`, `0x100` as `U8` are compile errors); untyped literals default to `I64`, and unary `-` on an unsigned type is a compile error. `T.from(value)` converts any integer to `T`, selecting the correct truncation, zero-extension, or sign-extension from the source and destination width and signedness; no implicit conversions exist.
 
 Fixed-size arrays `[T; N]`: indexed with `arr[i]`, `&arr[i]`, and `&mut arr[i]` (see Indexing), and destructured with `match arr [a, b, c] => ...` and rest patterns. Array length is always statically known, so a constant index is proven at compile time.
 
@@ -139,6 +161,20 @@ Linear values may be stored in structs; moving a linear value into a struct cons
 
 Error paths must free linear values before returning.
 
+### Native Surface: Collections
+
+Collections.vec_pop<T>(vec: &mut Vec(T)) impure Result(T, Collections.Error)
+  Pops the last element from the vector by value. Returns Ok(element) or
+  Err(IndexOutOfBounds) if the vector is empty. Popping a linear element
+  transfers its linear obligation to the caller's linear context.
+
+Collections.hash_map_remove<K,V>(map: &mut HashMap(K,V), key: K)
+    impure Result(V, Collections.Error)
+  Removes the entry with the given key and returns the value by value.
+  Returns Ok(value) or Err(KeyNotFound) if the key is absent. Popping a
+  linear value transfers its linear obligation to the caller's linear
+  context.
+
 ### Visibility
 Private by default. `pub` exposes.
 `pub` on a local `val`/`var` is a compile error.
@@ -158,9 +194,9 @@ A type parameter is conservatively linear (see Linear Types).
 At most one `impl` of a given trait may exist for a given type. A duplicate `impl Trait for Type` is a compile error.
 
 ### Runtime Guarantees
-Recursion cannot exhaust the stack. Every compiled function checks, at entry, how much process stack it has consumed against the process's own `RLIMIT_STACK` soft limit, measured once in the real `main` wrapper's entry and reduced by a guard margin. Past the limit, the binary writes `Cinnabar: stack overflow` to stderr and exits with status 70 (`EX_SOFTWARE`) — a defined, observable failure — instead of dying with the OS's SIGSEGV on the guard page. An unlimited soft limit (`ulimit -s unlimited`, `RLIM_INFINITY`) is clamped to the POSIX default main-thread limit (8 MiB) so the guard is never silently disabled; a failed `getrlimit` uses the same default.
+The O(1) call-stack guarantee: recursion cannot exhaust the stack because exhaustion is prevented at compile time, not detected at runtime. The typechecker verifies that every self-recursive call occupies a strict tail position — the direct expression value of a `return` statement, or the non-diverging result expression of a tail-positioned match/if — and rejects any other self-recursive call with a source-located error. There is no runtime stack guard in any compiled binary: no per-entry stack checks, no `RLIMIT_STACK` measurement, no `getrlimit`, no stack-overflow message, and no `exit(70)` termination.
 
-Self-tail-recursion runs in O(1) stack. A call that is the direct value of a `return` statement is a tail call: codegen marks it `tail` and LLVM's tail-call elimination turns self-tail-recursive calls into jumps at `-O2`, so a self-recursive function's depth does not consume stack. Marking is precise — argument subexpressions are never marked, so `return x + f(y)` does not treat `f` as a tail call. Non-tail recursion is bounded by the recursion guard above.
+All valid recursive functions therefore execute in O(1) call-stack memory via tail-call elimination. Codegen marks a call in tail position `tail`: tailness propagates through the value expression of a tail-positioned match arm and is cleared in every other position, so argument subexpressions and scrutinees are never marked (`return x + f(y)` does not treat `f` as a tail call). LLVM's tail-call elimination turns self-tail-recursive calls into jumps at `-O2`. Algorithms requiring O(N) depth must use explicit accumulators or explicit, user-managed linear work stacks (`Collections.Vec`, fixed-size arrays).
 
 ## What Is NOT Cinnabar
 Semicolons as statement separators
@@ -180,7 +216,7 @@ Memory safety without garbage collection. Resource safety without RAII magic. Co
 Every invariant that can be checked at compile time must be checked at compile time. Exhaustive matching. Linear consumption. Borrow exclusivity. Visibility. Casing. Unused imports. Unhandled `Result`/`Option` values. Constant division by zero. Type mismatches. Effect purity. If the compiler accepts a program, the program satisfies all stated invariants — and, by the Crucible Rule, runs without crashing. Runtime checks exist only for genuinely dynamic conditions (bounds checking on native surfaces, UTF-8 validation on string construction).
 
 ### Minimal Surface Area
-Every feature must justify its existence against the self-hosting requirement. Features that exist only for ergonomics, convention, or compatibility with other languages are rejected. The language is small because the problem domain demands precision, not expressiveness.
+Every feature must justify its existence against the needs of general-purpose systems programming — kernels, firmware, network stacks, runtimes, and compilers. Features that exist only for ergonomics, convention, or compatibility with other languages are rejected. The language is small because the problem domain demands precision, not expressiveness.
 
 ### Honest Diagnostics
 Every diagnostic points to a real source location, or, where a fact genuinely has no source origin (a builtin declaration, a compiler-synthesized wrapper), says so explicitly rather than fabricating a placeholder location. Internal compiler failures carry no fabricated span. Toolchain failures name the tool and its exit status. The diagnostic model never invents information.

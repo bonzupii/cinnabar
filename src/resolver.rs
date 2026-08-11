@@ -93,6 +93,8 @@ pub fn resolve(
         idx += 1;
     }
 
+    link_extraction_surfaces(&mut state);
+
     check_unused_imports(state.0, state.1, state.2, state.3, state.9, root);
     idx = 0;
     while idx < ext_mods.len() {
@@ -624,8 +626,8 @@ fn seed_builtins(state: &mut State, root_scope: i64, root: i64) {
             Some(id) => *id,
             None => break,
         };
-        let sub = seed_builtin_type(state, root_scope, name_id);
-        seed_from_u8(state, sub, name_id);
+        let scope = seed_builtin_type(state, root_scope, name_id);
+        seed_int_from(state, scope, name_id);
         idx += 1;
     }
     let bool_name = intern(state.0, "Bool");
@@ -684,23 +686,29 @@ fn seed_ty_node(nodes: &mut Vec<i64>, kind: i64, name: i64) -> i64 {
     alloc_node(nodes, &[NODE_TY, NO_FILE, 0, 0, kind, name, NONE])
 }
 
-fn seed_from_u8(state: &mut State, sub: i64, name: i64) {
+fn seed_int_from(state: &mut State, scope: i64, name: i64) {
     let prefix = alloc_list(state.2);
     list_push(state.2, prefix, name);
-    let from_u8_name = intern(state.0, "from_u8");
-    let method = qualified_name(state.0, state.2, prefix, from_u8_name);
-    let from_u8 = alloc_sym(state.1, SYM_NATIVE_FUN, method, NONE, sub, NONE);
-    sym_set_native_op(state.1, from_u8, native_opcode_of(state.0, method));
-    push_entry(state.4, sub, from_u8_name, from_u8, NS_VALUE, NONE);
+    let from_name = intern(state.0, "from");
+    let method = qualified_name(state.0, state.2, prefix, from_name);
+    let from = alloc_sym(state.1, SYM_NATIVE_FUN, method, NONE, scope, NONE);
+    sym_set_native_op(state.1, from, native_opcode_of(state.0, method));
+    push_entry(state.4, scope, from_name, from, NS_VALUE, NONE);
 }
 
 fn native_opcode_of(names: &[String], full: i64) -> i64 {
-    if name_is(names, full, "U8.from_u8")
-        || name_is(names, full, "U32.from_u8")
-        || name_is(names, full, "Int.from_u8")
-        || name_is(names, full, "Usize.from_u8")
+    if name_is(names, full, "I8.from")
+        || name_is(names, full, "I16.from")
+        || name_is(names, full, "I32.from")
+        || name_is(names, full, "I64.from")
+        || name_is(names, full, "Isize.from")
+        || name_is(names, full, "U8.from")
+        || name_is(names, full, "U16.from")
+        || name_is(names, full, "U32.from")
+        || name_is(names, full, "U64.from")
+        || name_is(names, full, "Usize.from")
     {
-        return NAT_FROM_U8;
+        return NAT_INT_FROM;
     }
     if name_is(names, full, "Slice.len") {
         return NAT_SLICE_LEN;
@@ -729,6 +737,9 @@ fn native_opcode_of(names: &[String], full: i64) -> i64 {
     if name_is(names, full, "Collections.vec_free") {
         return NAT_VEC_FREE;
     }
+    if name_is(names, full, "Collections.vec_pop") {
+        return NAT_VEC_POP;
+    }
     if name_is(names, full, "Collections.string_from_slice") {
         return NAT_STRING_FROM_SLICE;
     }
@@ -749,6 +760,9 @@ fn native_opcode_of(names: &[String], full: i64) -> i64 {
     }
     if name_is(names, full, "Collections.hash_map_free") {
         return NAT_HASH_MAP_FREE;
+    }
+    if name_is(names, full, "Collections.hash_map_remove") {
+        return NAT_HASH_MAP_REMOVE;
     }
     if name_is(names, full, "Runtime.self_check") {
         return NAT_SELF_CHECK;
@@ -783,6 +797,54 @@ fn native_opcode_of(names: &[String], full: i64) -> i64 {
     NAT_NONE
 }
 
+// Every native function with an extraction opcode (vec_pop, hash_map_remove)
+// marks the container type its first parameter names as having an extraction
+// surface: the typechecker's Resolvability Rule reads this flag at insertion
+// sites, so the fact is computed here once, from the declared signature.
+fn link_extraction_surfaces(state: &mut State) {
+    let count = state.1.len() as i64 / NODE_STRIDE;
+    let mut idx = 0i64;
+    while idx < count {
+        if node_tag(state.1, idx) == NODE_SYM && node_a(state.1, idx) == SYM_NATIVE_FUN {
+            let op = sym_native_op(state.1, idx);
+            if op == NAT_VEC_POP || op == NAT_HASH_MAP_REMOVE {
+                let decl = sym_decl_of(state.1, idx);
+                if decl != NONE && node_tag(state.1, decl) == NODE_ITEM {
+                    let fn_node = node_d(state.1, decl);
+                    let first = list_first(state.2, node_c(state.1, fn_node));
+                    if first != NONE {
+                        let cty_sym = container_type_sym(state.1, node_b(state.1, first));
+                        if cty_sym != NONE {
+                            node_set_f(state.1, cty_sym, idx);
+                        }
+                    }
+                }
+            }
+        }
+        idx += 1;
+    }
+}
+
+// The resolved type symbol of a parameter type node, dereferencing any
+// reference layers so `&mut Vec(T)` resolves to the Vec type symbol.
+fn container_type_sym(nodes: &[i64], ty_node: i64) -> i64 {
+    let mut node = ty_node;
+    let mut guard = 0i64;
+    loop {
+        let kind = node_a(nodes, node);
+        if kind == TY_REF || kind == TY_REF_MUT {
+            node = node_b(nodes, node);
+            guard += 1;
+            if guard > 4 {
+                return NONE;
+            }
+            continue;
+        }
+        break;
+    }
+    node_e(nodes, node)
+}
+
 fn prim_kind_of(names: &mut Vec<String>, full: i64) -> i64 {
     if full == intern(names, "Unit") {
         PRIM_UNIT
@@ -801,9 +863,15 @@ fn prim_kind_of(names: &mut Vec<String>, full: i64) -> i64 {
 
 fn builtin_int_names(names: &mut Vec<String>) -> Vec<i64> {
     vec![
-        intern(names, "Int"),
+        intern(names, "I8"),
+        intern(names, "I16"),
+        intern(names, "I32"),
+        intern(names, "I64"),
+        intern(names, "Isize"),
         intern(names, "U8"),
+        intern(names, "U16"),
         intern(names, "U32"),
+        intern(names, "U64"),
         intern(names, "Usize"),
     ]
 }
@@ -925,15 +993,6 @@ fn resolve_path(state: &mut State, scope: i64, segs: i64, final_ns: i64) -> i64 
 fn mark_used(used: &mut Vec<i64>, use_item: i64) {
     if !contains_i64(used, use_item) {
         used.push(use_item);
-    }
-}
-
-fn list_last(lists: &[Vec<i64>], list: i64) -> i64 {
-    let count = list_len(lists, list);
-    if count == 0 {
-        NONE
-    } else {
-        list_get(lists, list, count - 1)
     }
 }
 

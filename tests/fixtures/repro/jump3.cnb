@@ -1,11 +1,11 @@
-fun f(x: Int) Int
+fun f(x: I64) I64
   return (x * 8) & 0xF
 end
 
-pub fun main() Int
-  var pc: Int = 0
+pub fun main() I64
+  var pc: I64 = 0
   var running: Bool = true
-  var count: Int = 0
+  var count: I64 = 0
 
   while running
     val code = f(pc)

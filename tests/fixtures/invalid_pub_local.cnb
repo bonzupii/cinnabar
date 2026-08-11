@@ -1,8 +1,8 @@
 pub fun test_func() Unit
-  pub val local_val: Int = 10
+  pub val local_val: I64 = 10
 end
 
-pub fun main() Int
+pub fun main() I64
   test_func()
   return 0
 end

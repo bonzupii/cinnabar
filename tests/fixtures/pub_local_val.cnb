@@ -1,8 +1,8 @@
-pub fun test_func() Int
-  pub val local_var: Int = 10
+pub fun test_func() I64
+  pub val local_var: I64 = 10
   return local_var
 end
 
-pub fun main() Int
+pub fun main() I64
   return test_func()
 end

@@ -3,11 +3,11 @@
 # proven disjoint from anything, so the second exclusive borrow must be
 # rejected.  (EXPECT_REJECTED.)
 pub type P
-  pub x: Int
-  pub y: Int
+  pub x: I64
+  pub y: I64
 end
 
-pub fun main() Int
+pub fun main() I64
   var pts: [P; 2] = [P(x: 1, y: 2), P(x: 3, y: 4)]
   var i: Usize = 0
   val a = match &mut pts[i]

@@ -1,0 +1,73 @@
+#! Drain-before-free (MANIFESTO): freeing a native container that may
+#! hold linear elements is a compile error.  The HashMap gains a linear
+#! Block via hash_map_insert but is freed without removing it, so
+#! hash_map_free must be rejected with "cannot free container holding
+#! linear elements: drain the container (pop all elements) before
+#! freeing".  hash_map_remove is declared so the insertion itself is
+#! legal under the Resolvability Rule.  The error paths consume the map
+#! through fail_map_free (which drains before freeing), so the only
+#! diagnostic is the drain error.
+
+pub const MAP_KEY: I64 = 7
+
+pub mod Collections
+  pub nat type HashMap(K, V)
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub KeyNotFound
+  end
+
+  pub nat fun hash_map_new<K, V>() impure Result(HashMap(K, V), Error)
+  pub nat fun hash_map_insert<K, V>(map: &mut HashMap(K, V), key: K, value: V) impure Result(Unit, Error)
+  pub nat fun hash_map_remove<K, V>(map: &mut HashMap(K, V), key: K) impure Result(V, Error)
+  pub nat fun hash_map_free<K, V>(map: HashMap(K, V)) impure Unit
+end
+
+pub mod Memory
+  pub nat type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+  end
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+end
+
+use Collections.hash_map_new
+use Collections.hash_map_insert
+use Collections.hash_map_remove
+use Collections.hash_map_free
+use Collections.HashMap
+use Memory.allocate
+use Memory.deallocate
+
+fun fail_map_free(map: Collections.HashMap(I64, Memory.Block)) impure I64
+  while true
+    match hash_map_remove(&mut map, MAP_KEY)
+      Ok(value) => deallocate(value)
+      Err(error) => break
+    end
+  end
+  hash_map_free(map)
+  return 1
+end
+
+pub fun main() impure I64
+  val map = match hash_map_new[I64, Memory.Block]()
+    Ok(m) => m
+    Err(error) => return 1
+  end
+
+  val block = match allocate(64)
+    Ok(b) => b
+    Err(error) => return fail_map_free(map)
+  end
+
+  match hash_map_insert(&mut map, MAP_KEY, block)
+    Ok(v) => v
+    Err(error) => return fail_map_free(map)
+  end
+
+  hash_map_free(map)
+  return 0
+end

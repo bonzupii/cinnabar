@@ -6,7 +6,7 @@ end
 
 pub use Binary.check_magic as verify_magic
 
-pub fun main() Int
+pub fun main() I64
   verify_magic()
   return 0
 end

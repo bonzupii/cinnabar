@@ -54,35 +54,35 @@
   This is a block documentation comment.
 |#
 
-pub const SENTINEL_INT: Int = 999999 # Trailing comments may follow any line of code.
-pub const ZERO_INT: Int = 0
+pub const SENTINEL_INT: I64 = 999999 # Trailing comments may follow any line of code.
+pub const ZERO_INT: I64 = 0
 
-pub const GOOD_RANGE_INPUT: Int = 21
-pub const SMALL_RANGE_INPUT: Int = -1
-pub const LARGE_RANGE_INPUT: Int = 101
-pub const GOOD_RANGE_OUTPUT: Int = 42
-pub const MAX_RANGE: Int = 100
+pub const GOOD_RANGE_INPUT: I64 = 21
+pub const SMALL_RANGE_INPUT: I64 = -1
+pub const LARGE_RANGE_INPUT: I64 = 101
+pub const GOOD_RANGE_OUTPUT: I64 = 42
+pub const MAX_RANGE: I64 = 100
 
-pub const GOOD_PORT: Int = 8080
-pub const BAD_PORT: Int = 0
-pub const MIN_PORT: Int = 1
-pub const MAX_PORT: Int = 65535
+pub const GOOD_PORT: I64 = 8080
+pub const BAD_PORT: I64 = 0
+pub const MIN_PORT: I64 = 1
+pub const MAX_PORT: I64 = 65535
 
-pub const EVEN_TWO: Int = 2
-pub const EVEN_FOUR: Int = 4
-pub const HALF_TWO: Int = 1
-pub const HALF_FOUR: Int = 2
+pub const EVEN_TWO: I64 = 2
+pub const EVEN_FOUR: I64 = 4
+pub const HALF_TWO: I64 = 1
+pub const HALF_FOUR: I64 = 2
 
-pub const LOOP_LIMIT: Int = 5
-pub const LOOP_EXPECTED: Int = 10
-pub const BREAK_CONTINUE_EXPECTED: Int = 13
-pub const OPTION_TRY_EXPECTED: Int = 3
+pub const LOOP_LIMIT: I64 = 5
+pub const LOOP_EXPECTED: I64 = 10
+pub const BREAK_CONTINUE_EXPECTED: I64 = 13
+pub const OPTION_TRY_EXPECTED: I64 = 3
 
-pub const POINT_DX: Int = 3
-pub const POINT_DY: Int = 4
+pub const POINT_DX: I64 = 3
+pub const POINT_DY: I64 = 4
 
-pub const FLAG_ACTIVE: Int = 1
-pub const FLAG_ADMIN: Int = 2
+pub const FLAG_ACTIVE: I64 = 1
+pub const FLAG_ADMIN: I64 = 2
 
 pub const MAGIC_U32: U32 = 0x0BADF00D
 pub const SENTINEL_U32: U32 = 0xFFFFFFFF
@@ -120,16 +120,16 @@ pub const EXPECTED_TAG_CHECKSUM: U32 = 0x00000055
 pub type ExitCode
   pub ExitSuccess
   pub ExitFailure
-  pub ExitDiagnostic(Int)
+  pub ExitDiagnostic(I64)
 end
 
 pub type RangeError
-  pub TooSmall(Int)
-  pub TooLarge(Int)
+  pub TooSmall(I64)
+  pub TooLarge(I64)
 end
 
 pub type PortError
-  pub PortInvalid(Int)
+  pub PortInvalid(I64)
 end
 
 pub type AppError
@@ -138,12 +138,12 @@ pub type AppError
 end
 
 pub type Port
-  pub Port(Int)
+  pub Port(I64)
 end
 
 pub type Point
-  pub x: Int
-  pub y: Int
+  pub x: I64
+  pub y: I64
 end
 
 pub type Header
@@ -183,13 +183,13 @@ end
 pub mod Runtime
   pub type Error
     pub NotReady
-    pub ProbeFailed(Int)
+    pub ProbeFailed(I64)
   end
 
   pub nat fun self_check() impure Result(Unit, Error)
 
   #! Compiler error if a local inside probe_twice were marked pub:
-  #!   pub val probe_count: Int = 2
+  #!   pub val probe_count: I64 = 2
   #! pub cannot appear on local val/var.
   fun probe_twice() impure Result(Unit, Error)
     try self_check()
@@ -253,10 +253,10 @@ pub mod Binary
 
   # Private helper.
   fun combine_le_bytes(b0: U8, b1: U8, b2: U8, b3: U8) U32
-    val v0 = U32.from_u8(b0)
-    val v1 = U32.from_u8(b1)
-    val v2 = U32.from_u8(b2)
-    val v3 = U32.from_u8(b3)
+    val v0 = U32.from(b0)
+    val v1 = U32.from(b1)
+    val v2 = U32.from(b2)
+    val v3 = U32.from(b3)
 
     return (v3 << 24) | (v2 << 16) | (v1 << 8) | v0
   end
@@ -406,11 +406,11 @@ fun checksum_expectation() ChecksumExpectation
   )
 end
 
-#! Validates an Int and constructs a nominal Port.
+#! Validates an I64 and constructs a nominal Port.
 #! Compiler errors:
-#! - using Int where Port is expected: call port_from_int and handle Result
+#! - using I64 where Port is expected: call port_from_int and handle Result
 #! - discarding this Result: use try or match both variants
-fun port_from_int(value: Int) Result(Port, PortError)
+fun port_from_int(value: I64) Result(Port, PortError)
   if value < MIN_PORT
     return Err(PortInvalid(value))
   end
@@ -422,13 +422,13 @@ fun port_from_int(value: Int) Result(Port, PortError)
   return Ok(Port(value))
 end
 
-fun port_value(port: Port) Int
+fun port_value(port: Port) I64
   match port
     Port(value) => return value
   end
 end
 
-fun normalize(value: Int) Result(Int, RangeError)
+fun normalize(value: I64) Result(I64, RangeError)
   if value < ZERO_INT
     return Err(TooSmall(value))
   end
@@ -440,7 +440,7 @@ fun normalize(value: Int) Result(Int, RangeError)
   return Ok(value)
 end
 
-fun double_positive(value: Int) Result(Int, RangeError)
+fun double_positive(value: I64) Result(I64, RangeError)
   if value < ZERO_INT
     return Err(TooSmall(value))
   end
@@ -450,7 +450,7 @@ end
 
 #! Compiler error if normalize or double_positive Result is discarded:
 #! use try or match both variants.
-fun range_workflow(input: Int) Result(Int, RangeError)
+fun range_workflow(input: I64) Result(I64, RangeError)
   val normalized = try normalize(input)
   val doubled = try double_positive(normalized)
   return Ok(doubled)
@@ -467,7 +467,7 @@ end
 
 #! Compiler error if RangeError is returned where AppError is expected:
 #! convert explicitly with range_to_app.
-fun app_workflow(input: Int) Result(Int, AppError)
+fun app_workflow(input: I64) Result(I64, AppError)
   val normalized = match normalize(input)
     Ok(value) => value
     Err(error) => return Err(range_to_app(error))
@@ -481,7 +481,7 @@ fun app_workflow(input: Int) Result(Int, AppError)
   return Ok(doubled)
 end
 
-fun half_if_even(value: Int) Option(Int)
+fun half_if_even(value: I64) Option(I64)
   if value == EVEN_TWO
     return Some(HALF_TWO)
   end
@@ -495,9 +495,9 @@ end
 
 #! Demonstrates var for mutable local state.
 #! Compiler error if total or i is val: assignment requires var.
-fun sum_to(limit: Int) Int
-  var total: Int = ZERO_INT
-  var i: Int = ZERO_INT
+fun sum_to(limit: I64) I64
+  var total: I64 = ZERO_INT
+  var i: I64 = ZERO_INT
 
   while i < limit
     total = total + i
@@ -507,6 +507,6 @@ fun sum_to(limit: Int) Int
   return total
 end
 
-pub fun main() Int
+pub fun main() I64
   return sum_to(LOOP_LIMIT)
 end

@@ -1,0 +1,65 @@
+#! Container linearity is keyed on every type argument, not just the
+#! value: HashMap(K, V) with a linear K holds linear elements too, so
+#! hash_map_free without draining must be rejected with "cannot free
+#! container holding linear elements" even when V is non-linear.  The map
+#! can never be legally freed (its only extraction, hash_map_remove,
+#! returns values, not keys), so the free is a compile error on every
+#! path; the secondary "must be consumed" diagnostics on the error paths
+#! are unavoidable noise from that same rejected free.
+
+pub const MAP_VALUE: I64 = 9
+
+pub mod Collections
+  pub nat type HashMap(K, V)
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub KeyNotFound
+  end
+
+  pub nat fun hash_map_new<K, V>() impure Result(HashMap(K, V), Error)
+  pub nat fun hash_map_insert<K, V>(map: &mut HashMap(K, V), key: K, value: V) impure Result(Unit, Error)
+  pub nat fun hash_map_remove<K, V>(map: &mut HashMap(K, V), key: K) impure Result(V, Error)
+  pub nat fun hash_map_free<K, V>(map: HashMap(K, V)) impure Unit
+end
+
+pub mod Memory
+  pub nat type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+  end
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+end
+
+use Collections.hash_map_new
+use Collections.hash_map_insert
+use Collections.hash_map_free
+use Collections.HashMap
+use Memory.allocate
+use Memory.deallocate
+
+fun fail_key_free(key: Memory.Block) impure I64
+  deallocate(key)
+  return 1
+end
+
+pub fun main() impure I64
+  val key = match allocate(64)
+    Ok(b) => b
+    Err(error) => return 1
+  end
+
+  val map = match hash_map_new[Memory.Block, I64]()
+    Ok(m) => m
+    Err(error) => return fail_key_free(key)
+  end
+
+  match hash_map_insert(&mut map, key, MAP_VALUE)
+    Ok(v) => v
+    Err(error) => return 1
+  end
+
+  hash_map_free(map)
+  return 0
+end

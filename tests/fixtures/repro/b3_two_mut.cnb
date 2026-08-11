@@ -3,11 +3,11 @@
 # variable analogue of idx10b — the element fix must not regress it.
 # (EXPECT_REJECTED.)
 pub type P
-  pub x: Int
-  pub y: Int
+  pub x: I64
+  pub y: I64
 end
 
-pub fun main() Int
+pub fun main() I64
   var p: P = P(x: 1, y: 2)
   val a = &mut p
   val b = &mut p

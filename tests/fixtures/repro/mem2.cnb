@@ -11,7 +11,7 @@ end
 use Memory.allocate
 use Memory.deallocate
 
-pub fun main() impure Int
+pub fun main() impure I64
   val block = match allocate(1)
     Ok(b) => b
     Err(error) => return 1

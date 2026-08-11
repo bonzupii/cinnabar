@@ -35,16 +35,16 @@ end
 
 use Slice.len as slice_len
 
-const BAD_NEW: Int = 1
-const BAD_PUSH: Int = 2
+const BAD_NEW: I64 = 1
+const BAD_PUSH: I64 = 2
 
-fun fail_vec<T>(vec: Collections.Vec(T)) impure Int
+fun fail_vec<T>(vec: Collections.Vec(T)) impure I64
   vec_free(vec)
   return BAD_PUSH
 end
 
-fun fill_squares(vec: &mut Collections.Vec(Int)) impure Result(Unit, Collections.Error)
-  var i: Int = 0
+fun fill_squares(vec: &mut Collections.Vec(I64)) impure Result(Unit, Collections.Error)
+  var i: I64 = 0
   while i < 5
     try vec_push(vec, i * i)
     i = i + 1
@@ -52,8 +52,8 @@ fun fill_squares(vec: &mut Collections.Vec(Int)) impure Result(Unit, Collections
   return Ok(Unit)
 end
 
-pub fun main() impure Int
-  val vec = match vec_new[Int]()
+pub fun main() impure I64
+  val vec = match vec_new[I64]()
     Ok(v) => v
     Err(error) => return BAD_NEW
   end

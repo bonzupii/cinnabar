@@ -1,7 +1,7 @@
-pub const DEFAULT_PORT: Int = 8080 # trailing ordinary comments are legal
+pub const DEFAULT_PORT: I64 = 8080 # trailing ordinary comments are legal
 
 pub type Port
-  pub Port(Int)
+  pub Port(I64)
 end
 
 pub fun unit_demo() Unit
@@ -12,7 +12,7 @@ pub fun port_demo() Port
   return Port(DEFAULT_PORT)
 end
 
-pub fun option_demo() Option(Int)
+pub fun option_demo() Option(I64)
   val some_value = Some(1)
   val none_value = None
   return none_value

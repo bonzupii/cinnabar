@@ -3,13 +3,13 @@
 # diagnostic is reserved for collisions with the language's own builtins.
 
 pub type Foo
-  pub x: Int
+  pub x: I64
 end
 
 pub type Foo
-  pub y: Int
+  pub y: I64
 end
 
-pub fun main() Int
+pub fun main() I64
   return 0
 end

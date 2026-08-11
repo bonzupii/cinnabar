@@ -1,9 +1,9 @@
-pub fun test_func() Int
-  val x: Int = 10
+pub fun test_func() I64
+  val x: I64 = 10
   x = 20
   return x
 end
 
-pub fun main() Int
+pub fun main() I64
   return test_func()
 end

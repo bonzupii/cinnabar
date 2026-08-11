@@ -4,11 +4,11 @@
 # the IndexOutOfBounds variant in the user enum.  (EXPECT_OK 0.)
 pub type Tag
   pub T0
-  pub T1(Int)
-  pub T2(Int, Int)
+  pub T1(I64)
+  pub T2(I64, I64)
 end
 
-pub fun main() Int
+pub fun main() I64
   val tags = [T1(4), T2(3, 4), T0]
   val score = match tags[1]
     T0 => 1

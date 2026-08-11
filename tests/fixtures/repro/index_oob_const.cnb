@@ -1,4 +1,4 @@
-pub fun main() Int
+pub fun main() I64
   val arr = [10, 20, 30]
   val x = arr[5] # Compile error: array index out of bounds (index 5, len 3)
   return 0

@@ -10,7 +10,7 @@ pub const BACKLOG: Usize = 4
 
 pub mod Net
   pub type Error
-    pub SystemFault(Int)
+    pub SystemFault(I64)
   end
 
   pub nat type Socket
@@ -26,12 +26,12 @@ use Net.bind
 use Net.listen
 use Net.close
 
-fun fail_socket(sock: Net.Socket, code: Int) impure Int
+fun fail_socket(sock: Net.Socket, code: I64) impure I64
   close(sock)
   return code
 end
 
-pub fun main() impure Int
+pub fun main() impure I64
   val sock = match socket()
     Ok(s) => s
     Err(Net.SystemFault(code)) => return code

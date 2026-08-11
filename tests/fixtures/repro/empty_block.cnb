@@ -8,8 +8,8 @@
 pub fun empty_body() Unit
 end
 
-pub fun main() Int
-  var count: Int = 0
+pub fun main() I64
+  var count: I64 = 0
 
   #! Empty while body: the condition is false, so the loop must exit
   #! immediately and the program must not trap or error.

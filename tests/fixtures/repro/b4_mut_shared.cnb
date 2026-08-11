@@ -2,11 +2,11 @@
 # exclusive `&mut` borrow of the same whole variable, overlapping, must
 # be rejected.  The variable analogue of idx10c.  (EXPECT_REJECTED.)
 pub type P
-  pub x: Int
-  pub y: Int
+  pub x: I64
+  pub y: I64
 end
 
-pub fun main() Int
+pub fun main() I64
   var p: P = P(x: 1, y: 2)
   val s = &p
   val m = &mut p

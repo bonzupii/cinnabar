@@ -1,7 +1,9 @@
 #! A generic linear element moved into a container is consumed by the
 #! insertion (MANIFESTO: inserting a value into a container moves it; a
-#! linear element is consumed by the insertion and cannot be reused).  The
-#! type parameter `T` is conservatively linear, so pushing `element` twice
+#! linear element is consumed by the insertion and cannot be reused).
+#! Collections declares vec_pop, the Vec extraction surface (the
+#! Resolvability Rule), so the insertion itself is legal; the type
+#! parameter `T` is conservatively linear, so pushing `element` twice
 #! must be rejected: the second push reads a moved value.
 
 pub mod Collections
@@ -9,10 +11,12 @@ pub mod Collections
 
   pub type Error
     pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize, Usize)
   end
 
   pub nat fun vec_new<T>() impure Result(Vec(T), Error)
   pub nat fun vec_push<T>(vec: &mut Vec(T), value: T) impure Result(Unit, Error)
+  pub nat fun vec_pop<T>(vec: &mut Vec(T)) impure Result(T, Error)
   pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
 end
 
@@ -24,6 +28,6 @@ fun push_twice<T>(vec: &mut Vec(T), element: T) impure Result(Unit, Collections.
   try vec_push(vec, element)
 end
 
-pub fun main() impure Int
+pub fun main() impure I64
   return 0
 end

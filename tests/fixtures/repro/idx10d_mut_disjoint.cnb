@@ -3,11 +3,11 @@
 # alias.  Both writes land (pts[0].x = 10, pts[1].y = 20) and the program
 # exits 30.  (EXPECT_OK 30.)
 pub type P
-  pub x: Int
-  pub y: Int
+  pub x: I64
+  pub y: I64
 end
 
-pub fun main() Int
+pub fun main() I64
   var pts: [P; 2] = [P(x: 1, y: 2), P(x: 3, y: 4)]
   val a = &mut pts[0]
   val b = &mut pts[1]

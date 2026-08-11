@@ -1,12 +1,12 @@
 # duplicate_builtin_int: declaring a name the language reserves for a
 # scalar builtin must be rejected as a builtin redeclaration.  Previously
 # the seeded entry (which has no declaration row) fell through to the
-# silent replace branch, letting the user's type shadow Int.
+# silent replace branch, letting the user's type shadow I64.
 
-pub type Int
+pub type I64
   pub x: Bool
 end
 
-pub fun main() Int
+pub fun main() I64
   return 0
 end

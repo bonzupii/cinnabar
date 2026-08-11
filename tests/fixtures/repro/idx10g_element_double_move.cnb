@@ -17,7 +17,7 @@ pub type Holder
   pub vec: Collections.Vec(U8)
 end
 
-pub fun main() impure Int
+pub fun main() impure I64
   val v = match Collections.vec_new[U8]()
     Ok(value) => value
     Err(error) => return 1

@@ -1,5 +1,5 @@
-nat const INVALID_NATIVE: Int = 42
+nat const INVALID_NATIVE: I64 = 42
 
-pub fun main() Int
+pub fun main() I64
   return 0
 end

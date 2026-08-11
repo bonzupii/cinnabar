@@ -1,7 +1,7 @@
-pub fun test_func() Int
+pub fun test_func() I64
   return unknown_variable
 end
 
-pub fun main() Int
+pub fun main() I64
   return test_func()
 end

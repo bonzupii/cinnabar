@@ -1,27 +1,37 @@
 #! hanoi.cnb
-#! Towers of Hanoi recursive solver.
+#! Towers of Hanoi solver, rewritten to the O(1) call-stack guarantee.
 #! Returns the move count for DISKS disks. Optimal solution = 2^DISKS - 1.
-#! main returns Int = process exit code.
+#! main returns I64 = process exit code.
+#!
+#! The classic recursion hanoi(n) = 2*hanoi(n-1) + 1 is non-tail (the
+#! doubling happens after the recursive call returns), which the
+#! compile-time tail-position rule forbids.  The accumulator form folds
+#! the doubling into each recursive step: hanoi_acc(n, acc) descends with
+#! acc -> acc*2 + 1, so hanoi_moves(n) = hanoi_acc(n, 0) = 2^n - 1 in
+#! O(1) stack.
 
-pub const DISKS: Int = 8
+pub const DISKS: I64 = 8
 
 pub type MoveCount
-  pub moves: Int
+  pub moves: I64
 end
 
-fun hanoi_moves(disks: Int) Int
-  if disks <= 0
-    return 0
+fun hanoi_acc(n: I64, acc: I64) I64
+  if n <= 0
+    return acc
   end
-  val rest = hanoi_moves(disks - 1)
-  return rest + rest + 1
+  return hanoi_acc(n - 1, acc + acc + 1)
 end
 
-fun hanoi(n: Int) MoveCount
+fun hanoi_moves(disks: I64) I64
+  return hanoi_acc(disks, 0)
+end
+
+fun hanoi(n: I64) MoveCount
   return MoveCount(moves: hanoi_moves(n))
 end
 
-pub fun main() Int
+pub fun main() I64
   val result = hanoi(DISKS)
   return result.moves
 end

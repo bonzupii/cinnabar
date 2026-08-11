@@ -1,5 +1,5 @@
-pub fun main() Int
-  var x: Int = 7
+pub fun main() I64
+  var x: I64 = 7
   if x < 3
     return 1
   elif x < 5

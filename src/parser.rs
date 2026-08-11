@@ -1392,7 +1392,7 @@ mod tests {
 
     #[test]
     fn parses_simple_fun() {
-        let errors = parse_all("pub fun add(a: Int, b: Int) Int\n  return a + b\nend\n");
+        let errors = parse_all("pub fun add(a: I64, b: I64) I64\n  return a + b\nend\n");
         assert_eq!(errors.len(), 0);
     }
 
@@ -1436,13 +1436,13 @@ mod tests {
 
     #[test]
     fn rejects_mixed_type() {
-        let errors = parse_all("pub type BadMixedType\n  pub x: Int\n  pub BadVariant(U32)\nend\n");
+        let errors = parse_all("pub type BadMixedType\n  pub x: I64\n  pub BadVariant(U32)\nend\n");
         assert_eq!(errors.len(), 1);
     }
 
     #[test]
     fn rejects_nat_on_const() {
-        let errors = parse_all("nat const BAD: Int = 1\n");
+        let errors = parse_all("nat const BAD: I64 = 1\n");
         assert_eq!(errors.len(), 1);
     }
 }

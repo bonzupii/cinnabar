@@ -1,6 +1,6 @@
 #! Euclidean division verification fixture.
 #!
-#! `/` and `%` on Int use Euclidean division: the remainder is always
+#! `/` and `%` on I64 use Euclidean division: the remainder is always
 #! non-negative (0 <= r < abs(divisor)), regardless of operand signs.
 #!
 #! Each line prints "a/b=q r" for one (a, b) pair — the quotient of `a / b`
@@ -25,7 +25,7 @@ pub const SPACE: U8 = 0x20
 pub type ExitCode
   pub ExitSuccess
   pub ExitFailure
-  pub ExitDiagnostic(Int)
+  pub ExitDiagnostic(I64)
 end
 
 pub mod Collections
@@ -68,7 +68,7 @@ use Terminal.print_line
 
 #! ASCII byte for one decimal digit (0-9): '0'..'9'.  A remainder from
 #! Euclidean `% 10` is always in 0..=9, so the final else is the 9 case.
-fun digit_byte(digit: Int) U8
+fun digit_byte(digit: I64) U8
   if digit == 0
     return 0x30
   elif digit == 1
@@ -98,44 +98,69 @@ fun fail_free_vec<T>(vec: Collections.Vec(U8), error: Collections.Error) impure 
   return Err(error)
 end
 
-#! Appends the decimal digits of `value` (>= 0) to `vec`, most significant
-#! first, extracting digits with Euclidean division by 10.
-fun append_int_digits(vec: &mut Collections.Vec(U8), value: Int) impure Result(Unit, Collections.Error)
-  val quotient = match value / 10
-    Ok(qv) => qv
-    Err(DivByZero) => 0
+#! Appends the decimal digits of a non-negative `magnitude`, most
+#! significant first, with an O(1)-stack loop: count the digits, then emit
+#! each digit by dividing a descending power of 10.  The magnitude is U64
+#! so I64::MIN's magnitude (2^63) is representable, and the largest power
+#! reached (10^19) fits in U64.
+fun append_int_digits(vec: &mut Collections.Vec(U8), magnitude: U64) impure Result(Unit, Collections.Error)
+  var count: I64 = 1
+  var remaining: U64 = magnitude
+  while remaining >= U64.from(10)
+    val quotient = match remaining / 10
+      Ok(qv) => qv
+      Err(DivByZero) => 0
+    end
+    remaining = quotient
+    count = count + 1
   end
 
-  if quotient != 0
-    try append_int_digits(vec, quotient)
+  var power: U64 = 1
+  var steps: I64 = 1
+  while steps < count
+    power = power * 10
+    steps = steps + 1
   end
 
-  val remainder = match value % 10
-    Ok(rv) => rv
-    Err(DivByZero) => 0
+  var rest: U64 = magnitude
+  var place: U64 = power
+  while place >= U64.from(1)
+    val digit = match rest / place
+      Ok(dv) => dv
+      Err(DivByZero) => 0
+    end
+    try vec_push(vec, digit_byte(I64.from(digit)))
+    val modded = match rest % place
+      Ok(mv) => mv
+      Err(DivByZero) => 0
+    end
+    rest = modded
+    val next_place = match place / 10
+      Ok(pv) => pv
+      Err(DivByZero) => 0
+    end
+    place = next_place
   end
 
-  try vec_push(vec, digit_byte(remainder))
   return Ok(Unit)
 end
 
 #! Appends the decimal representation of `value` (with a leading '-') to a
 #! BORROWED vec, most significant digit first.  All branching happens here
-#! on the borrowed handle, exactly like `append_int_digits`; the owning
-#! print functions below stay straight-line (the `print_byte_string`
-#! shape), so the borrowed handle is never carried across a branch merge
-#! in a function that owns it.
-fun append_int(vec: &mut Collections.Vec(U8), value: Int) impure Result(Unit, Collections.Error)
+#! on the borrowed handle; the owning print functions below stay
+#! straight-line (the `print_byte_string` shape), so the borrowed handle
+#! is never carried across a branch merge in a function that owns it.
+fun append_int(vec: &mut Collections.Vec(U8), value: I64) impure Result(Unit, Collections.Error)
   if value < 0
     try vec_push(vec, MINUS)
   end
 
-  var magnitude: Int = value
-  if magnitude < 0
-    magnitude = -magnitude
+  var magnitude: U64 = U64.from(value)
+  if value < 0
+    magnitude = U64.from(0 - value)
   end
 
-  if magnitude == 0
+  if magnitude == U64.from(0)
     try vec_push(vec, ZERO_DIGIT)
   else
     try append_int_digits(vec, magnitude)
@@ -145,7 +170,7 @@ fun append_int(vec: &mut Collections.Vec(U8), value: Int) impure Result(Unit, Co
 end
 
 #! Owns the vec in straight-line code only: build, view, string, print.
-fun print_int_inline(value: Int) impure Result(Unit, Collections.Error)
+fun print_int_inline(value: I64) impure Result(Unit, Collections.Error)
   val vec = try vec_new[U8]()
 
   val build_result = append_int(&mut vec, value)
@@ -168,7 +193,7 @@ fun print_int_inline(value: Int) impure Result(Unit, Collections.Error)
 end
 
 #! Like `print_int_inline`, but ends with a newline.
-fun print_int_newline(value: Int) impure Result(Unit, Collections.Error)
+fun print_int_newline(value: I64) impure Result(Unit, Collections.Error)
   val vec = try vec_new[U8]()
 
   val build_result = append_int(&mut vec, value)
@@ -213,7 +238,7 @@ fun print_byte_string(byte: U8) impure Result(Unit, Collections.Error)
 end
 
 #! Prints one line "a/b=q r" for the Euclidean quotient and remainder.
-fun print_div_rem(a: Int, b: Int) impure Result(Unit, Collections.Error)
+fun print_div_rem(a: I64, b: I64) impure Result(Unit, Collections.Error)
   try print_int_inline(a)
   try print_byte_string(SLASH)
   try print_int_inline(b)

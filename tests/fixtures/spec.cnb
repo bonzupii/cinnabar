@@ -38,8 +38,18 @@
   - Native Surfaces:
       - Runtime, Memory, Binary, Slice, Collections, Terminal
   - Built-in Primitives:
-      - Unit, Result(T, E), Option(T), IndexError are built-in language primitives
-      - Int, U8, U32, Usize, Bool are built-in scalar types
+      - Unit, Result(T, E), Option(T), DivError, IndexError are built-in language primitives
+      - the integer grid is the ten fixed-width types I8/I16/I32/I64/Isize (signed) and
+        U8/U16/U32/U64/Usize (unsigned), plus Bool (i1); Int is retired, so I64 is the sole
+        64-bit signed integer and untyped integer literals default to I64
+      - every width supports every operator: arithmetic/bitwise wrap per-width (two's
+        complement), shift counts mask by width - 1, signed types shift and compare
+        arithmetically, unsigned types logically
+      - T.from(value) converts any integer to T, selecting trunc/zext/sext from the source
+        and destination width and signedness; no implicit conversions exist
+      - integer literals are non-negative magnitudes that adopt the expected type in typed
+        contexts and are range-checked against its width (300 as U8, -1 as U16, 0x100 as U8
+        are errors); unary '-' on an unsigned type is an error
 |#
 
 # Line comment: Ignored by the lexer and parser.
@@ -54,35 +64,35 @@
 |#
 
 #! Compile-time constant declarations enforcing SCREAMING_SNAKE_CASE.
-pub const SENTINEL_INT: Int = 999999 # Trailing comments may follow any line of code.
-pub const ZERO_INT: Int = 0
+pub const SENTINEL_INT: I64 = 999999 # Trailing comments may follow any line of code.
+pub const ZERO_INT: I64 = 0
 
-pub const GOOD_RANGE_INPUT: Int = 21
-pub const SMALL_RANGE_INPUT: Int = -1
-pub const LARGE_RANGE_INPUT: Int = 101
-pub const GOOD_RANGE_OUTPUT: Int = 42
-pub const MAX_RANGE: Int = 100
+pub const GOOD_RANGE_INPUT: I64 = 21
+pub const SMALL_RANGE_INPUT: I64 = -1
+pub const LARGE_RANGE_INPUT: I64 = 101
+pub const GOOD_RANGE_OUTPUT: I64 = 42
+pub const MAX_RANGE: I64 = 100
 
-pub const GOOD_PORT: Int = 8080
-pub const BAD_PORT: Int = 0
-pub const MIN_PORT: Int = 1
-pub const MAX_PORT: Int = 65535
+pub const GOOD_PORT: I64 = 8080
+pub const BAD_PORT: I64 = 0
+pub const MIN_PORT: I64 = 1
+pub const MAX_PORT: I64 = 65535
 
-pub const EVEN_TWO: Int = 2
-pub const EVEN_FOUR: Int = 4
-pub const HALF_TWO: Int = 1
-pub const HALF_FOUR: Int = 2
+pub const EVEN_TWO: I64 = 2
+pub const EVEN_FOUR: I64 = 4
+pub const HALF_TWO: I64 = 1
+pub const HALF_FOUR: I64 = 2
 
-pub const LOOP_LIMIT: Int = 5
-pub const LOOP_EXPECTED: Int = 10
-pub const BREAK_CONTINUE_EXPECTED: Int = 13
-pub const OPTION_TRY_EXPECTED: Int = 3
+pub const LOOP_LIMIT: I64 = 5
+pub const LOOP_EXPECTED: I64 = 10
+pub const BREAK_CONTINUE_EXPECTED: I64 = 13
+pub const OPTION_TRY_EXPECTED: I64 = 3
 
-pub const POINT_DX: Int = 3
-pub const POINT_DY: Int = 4
+pub const POINT_DX: I64 = 3
+pub const POINT_DY: I64 = 4
 
-pub const FLAG_ACTIVE: Int = 1
-pub const FLAG_ADMIN: Int = 2
+pub const FLAG_ACTIVE: I64 = 1
+pub const FLAG_ADMIN: I64 = 2
 
 pub const MAGIC_U32: U32 = 0x0BADF00D
 pub const SENTINEL_U32: U32 = 0xFFFFFFFF
@@ -131,17 +141,17 @@ pub const EXPECTED_TAG_CHECKSUM: U32 = 0x00000055
 pub type ExitCode
   pub ExitSuccess
   pub ExitFailure
-  pub ExitDiagnostic(Int)
+  pub ExitDiagnostic(I64)
 end
 
 #! Enum variants demonstrating payload data.
 pub type RangeError
-  pub TooSmall(Int)
-  pub TooLarge(Int)
+  pub TooSmall(I64)
+  pub TooLarge(I64)
 end
 
 pub type PortError
-  pub PortInvalid(Int)
+  pub PortInvalid(I64)
 end
 
 #! Nested sum type demonstrating error wrapping.
@@ -152,13 +162,13 @@ end
 
 #! Nominal single-payload struct wrapper.
 pub type Port
-  pub Port(Int)
+  pub Port(I64)
 end
 
 #! Product type struct demonstrating named fields in PascalCase.
 pub type Point
-  pub x: Int
-  pub y: Int
+  pub x: I64
+  pub y: I64
 end
 
 pub type Header
@@ -197,7 +207,7 @@ end
 pub mod Runtime
   pub type Error
     pub NotReady
-    pub ProbeFailed(Int)
+    pub ProbeFailed(I64)
   end
 
   #! Opaque native runtime check surface.
@@ -255,10 +265,10 @@ pub mod Binary
 
   # Private bit-shifting helper.
   fun combine_le_bytes(b0: U8, b1: U8, b2: U8, b3: U8) U32
-    val v0 = U32.from_u8(b0)
-    val v1 = U32.from_u8(b1)
-    val v2 = U32.from_u8(b2)
-    val v3 = U32.from_u8(b3)
+    val v0 = U32.from(b0)
+    val v1 = U32.from(b1)
+    val v2 = U32.from(b2)
+    val v3 = U32.from(b3)
 
     return (v3 << 24) | (v2 << 16) | (v1 << 8) | v0
   end
@@ -399,24 +409,24 @@ fun checksum_expectation() ChecksumExpectation
 end
 
 #!|
-  `/` and `%` on Int use Euclidean division: the remainder is always
+  `/` and `%` on I64 use Euclidean division: the remainder is always
   non-negative (0 <= r < abs(divisor)), regardless of operand signs.
      -10 / 3 = -4    -10 % 3 = 2
       10 / -3 = -3    10 % -3 = 1
 |#
 
-#! Demonstrates modulo returning Result(Int, DivError).
-fun modulo_demo(value: Int, divisor: Int) Result(Int, DivError)
+#! Demonstrates modulo returning Result(I64, DivError).
+fun modulo_demo(value: I64, divisor: I64) Result(I64, DivError)
   return value % divisor
 end
 
-#! Demonstrates division returning Result(Int, DivError).
-fun div_demo(value: Int, divisor: Int) Result(Int, DivError)
+#! Demonstrates division returning Result(I64, DivError).
+fun div_demo(value: I64, divisor: I64) Result(I64, DivError)
   return value / divisor
 end
 
 #! Demonstrates `if`, `elif`, and `else` conditional branching chains.
-fun port_from_int(value: Int) Result(Port, PortError)
+fun port_from_int(value: I64) Result(Port, PortError)
   if value < MIN_PORT
     return Err(PortInvalid(value))
   elif value > MAX_PORT
@@ -426,13 +436,13 @@ fun port_from_int(value: Int) Result(Port, PortError)
   end
 end
 
-fun port_value(port: Port) Int
+fun port_value(port: Port) I64
   match port
     Port(value) => return value
   end
 end
 
-fun normalize(value: Int) Result(Int, RangeError)
+fun normalize(value: I64) Result(I64, RangeError)
   if value < ZERO_INT
     return Err(TooSmall(value))
   elif value > MAX_RANGE
@@ -442,7 +452,7 @@ fun normalize(value: Int) Result(Int, RangeError)
   end
 end
 
-fun double_positive(value: Int) Result(Int, RangeError)
+fun double_positive(value: I64) Result(I64, RangeError)
   if value < ZERO_INT
     return Err(TooSmall(value))
   end
@@ -450,7 +460,7 @@ fun double_positive(value: Int) Result(Int, RangeError)
   return Ok(value + value)
 end
 
-fun range_workflow(input: Int) Result(Int, RangeError)
+fun range_workflow(input: I64) Result(I64, RangeError)
   val normalized = try normalize(input)
   val doubled = try double_positive(normalized)
   return Ok(doubled)
@@ -463,7 +473,7 @@ fun range_to_app(error: RangeError) AppError
   end
 end
 
-fun app_workflow(input: Int) Result(Int, AppError)
+fun app_workflow(input: I64) Result(I64, AppError)
   val normalized = match normalize(input)
     Ok(value) => value
     Err(error) => return Err(range_to_app(error))
@@ -477,7 +487,7 @@ fun app_workflow(input: Int) Result(Int, AppError)
   return Ok(doubled)
 end
 
-fun half_if_even(value: Int) Option(Int)
+fun half_if_even(value: I64) Option(I64)
   if value == EVEN_TWO
     return Some(HALF_TWO)
   elif value == EVEN_FOUR
@@ -487,9 +497,9 @@ fun half_if_even(value: Int) Option(Int)
   end
 end
 
-fun sum_to(limit: Int) Int
-  var total: Int = ZERO_INT
-  var i: Int = ZERO_INT
+fun sum_to(limit: I64) I64
+  var total: I64 = ZERO_INT
+  var i: I64 = ZERO_INT
 
   while i < limit
     total = total + i
@@ -499,9 +509,9 @@ fun sum_to(limit: Int) Int
   return total
 end
 
-fun break_continue_demo() Int
-  var total: Int = ZERO_INT
-  var i: Int = ZERO_INT
+fun break_continue_demo() I64
+  var total: I64 = ZERO_INT
+  var i: I64 = ZERO_INT
 
   while true
     if i >= LOOP_LIMIT
@@ -520,17 +530,17 @@ fun break_continue_demo() Int
   return total
 end
 
-fun option_try_demo() Option(Int)
+fun option_try_demo() Option(I64)
   val half = try half_if_even(EVEN_FOUR)
   return Some(half + HALF_TWO)
 end
 
-fun move_point(point: Point, dx: Int, dy: Int) Point
+fun move_point(point: Point, dx: I64, dy: I64) Point
   return Point(x: point.x + dx, y: point.y + dy)
 end
 
 #! Mutates a Point's fields in place through a &mut reference.
-fun mutate_point(point: &mut Point, dx: Int, dy: Int) Unit
+fun mutate_point(point: &mut Point, dx: I64, dy: I64) Unit
   point.x = point.x + dx
   point.y = point.y + dy
   return Unit
@@ -541,7 +551,7 @@ end
 #! target.  Dynamic array indexing is runtime-checked, so the try can
 #! propagate IndexError; the returned Bool reports whether the write
 #! actually landed on the element.
-fun mutate_point_array(index: Usize, value: Int) Result(Bool, IndexError)
+fun mutate_point_array(index: Usize, value: I64) Result(Bool, IndexError)
   var points = [Point(x: 1, y: 2), Point(x: 3, y: 4)]
 
   (try &mut points[index]).x = value
@@ -575,7 +585,7 @@ fun check_mut_ref() Bool
 end
 
 #! Reads a Point through a shared borrow; consumes `&arr[i]`.
-fun point_sum(value: &Point) Int
+fun point_sum(value: &Point) I64
   return value.x + value.y
 end
 

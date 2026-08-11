@@ -447,6 +447,9 @@ pub fn ty_set_sym(nodes: &mut [i64], id: i64, sym: i64) -> bool {
 }
 
 // Type-descriptor rows.  (tag=NODE_TYINFO, a=key, b=kind, c=sym, d=args list, e=element key, f=len/bound/sub-kind).
+// Native rows carry the has_linear_elements flag (0/1) in the start slot,
+// attached by the typechecker's linearity pass into a slot the canonical-key
+// lookup never compares.
 
 pub const TYD_UNKNOWN: i64 = 0;
 pub const TYD_BUILTIN: i64 = 1;
@@ -460,14 +463,71 @@ pub const TYD_ARRAY: i64 = 8;
 pub const TYD_PARAM: i64 = 9;
 pub const TYD_MONO: i64 = 10; // (fn node, type-arg keys): one key per monomorphized function
 
-pub const BUILTIN_INT: i64 = 0;
-pub const BUILTIN_U8: i64 = 1;
-pub const BUILTIN_U32: i64 = 2;
-pub const BUILTIN_USIZE: i64 = 3;
-pub const BUILTIN_BOOL: i64 = 4;
+// Builtin scalar sub-kinds.  Stored in slot `f` of TYD_BUILTIN descriptor
+// rows at seed time; every later stage classifies scalars from this
+// integer, never from the symbol's name.  The width, signedness, and
+// two's-complement mask of each sub-kind are the single definitions in
+// `builtin_int_width` / `builtin_int_is_signed` / `builtin_int_mask`;
+// the typechecker and codegen both read those helpers, never a name.
+pub const BUILTIN_I8: i64 = 0;
+pub const BUILTIN_I16: i64 = 1;
+pub const BUILTIN_I32: i64 = 2;
+pub const BUILTIN_I64: i64 = 3;
+pub const BUILTIN_ISIZE: i64 = 4;
+pub const BUILTIN_U8: i64 = 5;
+pub const BUILTIN_U16: i64 = 6;
+pub const BUILTIN_U32: i64 = 7;
+pub const BUILTIN_U64: i64 = 8;
+pub const BUILTIN_USIZE: i64 = 9;
+pub const BUILTIN_BOOL: i64 = 10;
+
+// The bit width of a builtin integer sub-kind.  Isize/Usize are the
+// target pointer width (64 on x86_64/AArch64).  Non-integer sub-kinds
+// report 0; callers only consult this for `builtin_int_is_int` sub-kinds.
+pub fn builtin_int_width(sub: i64) -> u32 {
+    if sub == BUILTIN_I8 || sub == BUILTIN_U8 {
+        8
+    } else if sub == BUILTIN_I16 || sub == BUILTIN_U16 {
+        16
+    } else if sub == BUILTIN_I32 || sub == BUILTIN_U32 {
+        32
+    } else if sub == BUILTIN_I64
+        || sub == BUILTIN_ISIZE
+        || sub == BUILTIN_U64
+        || sub == BUILTIN_USIZE
+    {
+        64
+    } else {
+        0
+    }
+}
+
+// True when the sub-kind is one of the ten integer types (Bool is not).
+pub fn builtin_int_is_int(sub: i64) -> bool {
+    builtin_int_width(sub) != 0
+}
+
+// True when the sub-kind is a signed integer (I8..Isize).
+pub fn builtin_int_is_signed(sub: i64) -> bool {
+    sub == BUILTIN_I8
+        || sub == BUILTIN_I16
+        || sub == BUILTIN_I32
+        || sub == BUILTIN_I64
+        || sub == BUILTIN_ISIZE
+}
+
+// The two's-complement low-`width`-bit mask for a sub-kind.
+pub fn builtin_int_mask(sub: i64) -> u64 {
+    let width = builtin_int_width(sub);
+    if width >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    }
+}
 
 pub const NAT_NONE: i64 = 0;
-pub const NAT_FROM_U8: i64 = 1;
+pub const NAT_INT_FROM: i64 = 1;
 pub const NAT_SLICE_LEN: i64 = 2;
 pub const NAT_MEM_ALLOCATE: i64 = 3;
 pub const NAT_MEM_DEALLOCATE: i64 = 4;
@@ -494,6 +554,8 @@ pub const NAT_NET_LISTEN: i64 = 24;
 pub const NAT_NET_ACCEPT: i64 = 25;
 pub const NAT_NET_SEND: i64 = 26;
 pub const NAT_NET_CLOSE: i64 = 27;
+pub const NAT_VEC_POP: i64 = 28;
+pub const NAT_HASH_MAP_REMOVE: i64 = 29;
 
 pub const PRIM_NONE: i64 = 0;
 pub const PRIM_UNIT: i64 = 1;
@@ -523,6 +585,18 @@ pub fn tyinfo_is_linear(nodes: &[i64], key: i64) -> i64 {
         NONE
     } else {
         node_get(nodes, row, NODE_FILE)
+    }
+}
+
+/// Whether a native container descriptor's type arguments include a linear
+/// key (0 or 1, attached by the typechecker's linearity pass); NONE when
+/// the flag was never attached.  Only meaningful for TYD_NATIVE rows.
+pub fn tyinfo_has_linear_elems(nodes: &[i64], key: i64) -> i64 {
+    let row = find_tyinfo(nodes, key);
+    if row == NONE {
+        NONE
+    } else {
+        node_get(nodes, row, NODE_START)
     }
 }
 
@@ -608,7 +682,11 @@ pub fn find_const_value(nodes: &[i64], sym: i64) -> i64 {
     NONE
 }
 
-// Trait-dispatch rows.  (tag=NODE_TRAIT, a=call expr, b=method instance id, c=trait symbol, d=method name id).
+// Trait-dispatch rows.  (tag=NODE_TRAIT, a=call expr, b=method instance id,
+// c=trait symbol, d=method name id, e=method fn node).  The method fn node
+// is attached by the typechecker at dispatch-row creation so the borrow
+// checker reads the signature directly instead of re-searching the trait's
+// method list (Single-Fact Rule).
 
 pub const NODE_TRAIT: i64 = 15;
 
@@ -624,8 +702,12 @@ pub fn trait_call_method(nodes: &[i64], id: i64) -> i64 {
     node_d(nodes, id)
 }
 
-pub fn alloc_trait_call(nodes: &mut Vec<i64>, expr: i64, inst: i64, trait_sym: i64, method: i64) -> i64 {
-    alloc_node(nodes, &[NODE_TRAIT, NO_FILE, NO_FILE, NO_FILE, expr, inst, trait_sym, method, NONE, NONE])
+pub fn trait_call_method_node(nodes: &[i64], id: i64) -> i64 {
+    node_e(nodes, id)
+}
+
+pub fn alloc_trait_call(nodes: &mut Vec<i64>, expr: i64, inst: i64, trait_sym: i64, method: i64, fn_node: i64) -> i64 {
+    alloc_node(nodes, &[NODE_TRAIT, NO_FILE, NO_FILE, NO_FILE, expr, inst, trait_sym, method, fn_node, NONE])
 }
 
 pub fn find_trait_call(nodes: &[i64], expr: i64) -> i64 {
@@ -639,12 +721,16 @@ pub fn find_trait_call(nodes: &[i64], expr: i64) -> i64 {
     NONE
 }
 
-// Variant-fact rows.  (tag=NODE_VARFACT, a=enum key, b=variant name id, c=variant symbol).
+// Variant-fact rows.  (tag=NODE_VARFACT, a=enum key, b=variant name id,
+// c=variant symbol, d=declared-order tag).  The tag is assigned by the
+// typechecker from the enum's declared variant order, once, and read by
+// codegen instead of re-searching the enum's variant list (Single-Fact
+// Rule).
 
 pub const NODE_VARFACT: i64 = 16;
 
-pub fn alloc_varfact(nodes: &mut Vec<i64>, key: i64, name: i64, sym: i64) -> i64 {
-    alloc_node(nodes, &[NODE_VARFACT, NO_FILE, NO_FILE, NO_FILE, key, name, sym, NONE, NONE, NONE])
+pub fn alloc_varfact(nodes: &mut Vec<i64>, key: i64, name: i64, sym: i64, tag: i64) -> i64 {
+    alloc_node(nodes, &[NODE_VARFACT, NO_FILE, NO_FILE, NO_FILE, key, name, sym, tag, NONE, NONE])
 }
 
 pub fn find_varfact(nodes: &[i64], key: i64, name: i64) -> i64 {
@@ -656,6 +742,50 @@ pub fn find_varfact(nodes: &[i64], key: i64, name: i64) -> i64 {
         idx += 1;
     }
     NONE
+}
+
+// The declared-order tag of `name` in the enum at `key`, or NONE.
+pub fn varfact_index_of(nodes: &[i64], key: i64, name: i64) -> i64 {
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_VARFACT && node_a(nodes, idx) == key && node_b(nodes, idx) == name {
+            return node_d(nodes, idx);
+        }
+        idx += 1;
+    }
+    NONE
+}
+
+// Struct-field-fact rows.  (tag=NODE_FIELDKEY, a=struct key, b=field name
+// id, c=substituted field key, d=declared-order index).  One row per
+// (canonical struct key, field) pair, filled by the typechecker from the
+// declared field types and the key's own type arguments; the borrow
+// checker and codegen read these rows instead of re-walking ITEM_STRUCT
+// lists and re-running generic substitution (Single-Fact Rule).
+
+pub const NODE_FIELDKEY: i64 = 17;
+
+pub fn alloc_fieldkey(nodes: &mut Vec<i64>, key: i64, name: i64, fkey: i64, idx: i64) -> i64 {
+    alloc_node(nodes, &[NODE_FIELDKEY, NO_FILE, NO_FILE, NO_FILE, key, name, fkey, idx, NONE, NONE])
+}
+
+pub fn find_fieldkey(nodes: &[i64], key: i64, name: i64) -> i64 {
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_FIELDKEY && node_a(nodes, idx) == key && node_b(nodes, idx) == name {
+            return idx;
+        }
+        idx += 1;
+    }
+    NONE
+}
+
+pub fn fieldkey_key_of(nodes: &[i64], row: i64) -> i64 {
+    node_c(nodes, row)
+}
+
+pub fn fieldkey_idx_of(nodes: &[i64], row: i64) -> i64 {
+    node_d(nodes, row)
 }
 
 fn list_eq(lists: &[Vec<i64>], a: i64, b: i64) -> bool {
@@ -836,6 +966,16 @@ pub fn list_len(lists: &[Vec<i64>], id: i64) -> i64 {
 pub fn list_first(lists: &[Vec<i64>], id: i64) -> i64 {
     match lists.get(id as usize) {
         Some(items) => match items.first() {
+            Some(value) => *value,
+            None => NONE,
+        },
+        None => NONE,
+    }
+}
+
+pub fn list_last(lists: &[Vec<i64>], id: i64) -> i64 {
+    match lists.get(id as usize) {
+        Some(items) => match items.last() {
             Some(value) => *value,
             None => NONE,
         },

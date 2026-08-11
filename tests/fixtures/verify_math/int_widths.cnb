@@ -1,0 +1,592 @@
+#! Fixed-width integer grid verification fixture.
+#!
+#! Exercises every integer type (I8, I16, I32, I64, Isize, U8, U16, U32,
+#! U64, Usize) at runtime: per-width two's-complement wrapping, unsigned
+#! vs signed comparison, shift-count masking at the width boundary,
+#! bitwise ops, T.from conversions (truncate / zero-extend /
+#! sign-extend), and Euclidean division/modulo at non-64-bit widths.
+#!
+#! Each line prints `label=value` to stdout — the actual computed result,
+#! not just an exit code.  The Rust oracle in tests/verify_math.rs
+#! recomputes every value independently with Rust's wrapping arithmetic
+#! and compares the output line by line.  The labels and their meanings:
+#!
+#!   u8wrap     U8   255 + 1                 wraps to 0
+#!   i8wrap     I8   127 + 1                 wraps to -128
+#!   u16wrap    U16  65535 + 1               wraps to 0
+#!   i16wrap    I16  32767 + 1               wraps to -32768
+#!   u32wrap    U32  0xFFFFFFFF + 1          wraps to 0
+#!   i32wrap    I32  2147483647 + 1          wraps to -2147483648
+#!   u64wrap    U64  0xFFFFFFFFFFFFFFFF + 1  wraps to 0
+#!   i64wrap    I64  9223372036854775807 + 1 wraps to -9223372036854775808
+#!   usizewrap  Usize  0xFFFFFFFFFFFFFFFF + 1  wraps to 0
+#!   isizewrap  Isize  9223372036854775807 + 1  wraps to -9223372036854775808
+#!   u8cmp      U8   255 > 200                 unsigned compare: 1
+#!   i8cmp      I8   -1 < 1                    signed compare: 1
+#!   u64cmp     U64  0xFFFFFFFFFFFFFFFF > 1    unsigned compare: 1 (signed would be 0)
+#!   i64cmp     I64  -1 < 0                    signed compare: 1
+#!   u8shift    U8   1 << 8                    count masked by 7: 1
+#!   i8shift    I8   -128 >> 1                 arithmetic shift: -64
+#!   u16shift   U16  1 << 16                   count masked by 15: 1
+#!   i16shift   I16  1 << 16                   count masked by 15: 1
+#!   u32shift   U32  1 << 32                   count masked by 31: 1
+#!   i32shift   I32  1 << 32                   count masked by 31: 1
+#!   u64shift   U64  1 << 64                   count masked by 63: 1
+#!   i64shift   I64  1 << 64                   count masked by 63: 1
+#!   u8band     U8   0xF0 & 0x0F               0
+#!   u8bor      U8   0xF0 | 0x0F               255
+#!   u8bxor     U8   0xFF ^ 0x0F               240
+#!   trunc8     I8   I8.from(255)              truncate: -1
+#!   trunc16    I16  I16.from(0xFFFF)          truncate: -1
+#!   zext16     U16  U16.from(255)             zero-extend: 255
+#!   sext16     I16  I16.from(-1)              sign-extend: -1
+#!   zext64     U64  U64.from(255)             zero-extend: 255
+#!   udiv       U8   250 / 3                   Euclidean: 83
+#!   urem       U8   250 % 3                   1
+#!   sdiv       I8   -10 / 3                   Euclidean: -4
+#!   srem       I8   -10 % 3                   2
+
+pub const MINUS: U8 = 0x2D
+pub const ZERO_DIGIT: U8 = 0x30
+pub const EQUALS: U8 = 0x3D
+
+pub type ExitCode
+  pub ExitSuccess
+  pub ExitFailure
+  pub ExitDiagnostic(I64)
+end
+
+pub mod Collections
+  pub nat type Vec(T)
+  pub nat type String
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+    pub KeyNotFound
+    pub EmptySlice
+    pub InvalidUtf8
+  end
+
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_push<T>(
+    vec: &mut Vec(T),
+    value: T
+  ) impure Result(Unit, Error)
+
+  pub nat fun vec_view<T>(vec: &Vec(T)) &[T]
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
+  pub nat fun string_from_slice(view: &[U8]) impure Result(String, Error)
+  pub nat fun string_free(value: String) impure Unit
+end
+
+pub mod Terminal
+  pub nat fun print(text: &Collections.String) impure Unit
+  pub nat fun print_line(text: &Collections.String) impure Unit
+end
+
+use Collections.vec_new
+use Collections.vec_push
+use Collections.vec_view
+use Collections.vec_free
+use Collections.string_from_slice
+use Collections.string_free
+use Terminal.print
+use Terminal.print_line
+
+#! ASCII byte for one decimal digit (0-9): '0'..'9'.  A remainder from
+#! Euclidean `% 10` is always in 0..=9, so the final else is the 9 case.
+fun digit_byte(digit: I64) U8
+  if digit == 0
+    return 0x30
+  elif digit == 1
+    return 0x31
+  elif digit == 2
+    return 0x32
+  elif digit == 3
+    return 0x33
+  elif digit == 4
+    return 0x34
+  elif digit == 5
+    return 0x35
+  elif digit == 6
+    return 0x36
+  elif digit == 7
+    return 0x37
+  elif digit == 8
+    return 0x38
+  else
+    return 0x39
+  end
+end
+
+#! Frees the vec and returns the error (linearity: vec consumed once).
+fun fail_free_vec<T>(vec: Collections.Vec(U8), error: Collections.Error) impure Result(T, Collections.Error)
+  vec_free(vec)
+  return Err(error)
+end
+
+#! Appends the decimal digits of a non-negative `magnitude`, most
+#! significant first, with an O(1)-stack loop: count the digits, then emit
+#! each digit by dividing a descending power of 10.  The magnitude is U64
+#! so I64::MIN's magnitude (2^63) is representable, and the largest power
+#! reached (10^19) fits in U64.
+fun append_int_digits(vec: &mut Collections.Vec(U8), magnitude: U64) impure Result(Unit, Collections.Error)
+  var count: I64 = 1
+  var remaining: U64 = magnitude
+  while remaining >= U64.from(10)
+    val quotient = match remaining / 10
+      Ok(qv) => qv
+      Err(DivByZero) => 0
+    end
+    remaining = quotient
+    count = count + 1
+  end
+
+  var power: U64 = 1
+  var steps: I64 = 1
+  while steps < count
+    power = power * 10
+    steps = steps + 1
+  end
+
+  var rest: U64 = magnitude
+  var place: U64 = power
+  while place >= U64.from(1)
+    val digit = match rest / place
+      Ok(dv) => dv
+      Err(DivByZero) => 0
+    end
+    try vec_push(vec, digit_byte(I64.from(digit)))
+    val modded = match rest % place
+      Ok(mv) => mv
+      Err(DivByZero) => 0
+    end
+    rest = modded
+    val next_place = match place / 10
+      Ok(pv) => pv
+      Err(DivByZero) => 0
+    end
+    place = next_place
+  end
+
+  return Ok(Unit)
+end
+
+#! Appends the decimal representation of `value` (with a leading '-').
+#! The magnitude is carried as U64: `0 - value` wraps to |value| for every
+#! negative I64, including I64::MIN, whose negation does not fit in I64.
+fun append_int(vec: &mut Collections.Vec(U8), value: I64) impure Result(Unit, Collections.Error)
+  if value < 0
+    try vec_push(vec, MINUS)
+  end
+
+  var magnitude: U64 = U64.from(value)
+  if value < 0
+    magnitude = U64.from(0 - value)
+  end
+
+  if magnitude == U64.from(0)
+    try vec_push(vec, ZERO_DIGIT)
+  else
+    try append_int_digits(vec, magnitude)
+  end
+
+  return Ok(Unit)
+end
+
+#! Owns the vec in straight-line code only: build, view, string, print.
+fun print_int_inline(value: I64) impure Result(Unit, Collections.Error)
+  val vec = try vec_new[U8]()
+
+  val build_result = append_int(&mut vec, value)
+  match build_result
+    Ok(Unit) => Unit
+    Err(error) => return fail_free_vec(vec, error)
+  end
+
+  val view = vec_view(&vec)
+  val string = match string_from_slice(view)
+    Ok(s) => s
+    Err(error) => return fail_free_vec(vec, error)
+  end
+
+  print(&string)
+
+  string_free(string)
+  vec_free(vec)
+  return Ok(Unit)
+end
+
+#! Like `print_int_inline`, but ends with a newline.
+fun print_int_newline(value: I64) impure Result(Unit, Collections.Error)
+  val vec = try vec_new[U8]()
+
+  val build_result = append_int(&mut vec, value)
+  match build_result
+    Ok(Unit) => Unit
+    Err(error) => return fail_free_vec(vec, error)
+  end
+
+  val view = vec_view(&vec)
+  val string = match string_from_slice(view)
+    Ok(s) => s
+    Err(error) => return fail_free_vec(vec, error)
+  end
+
+  print_line(&string)
+
+  string_free(string)
+  vec_free(vec)
+  return Ok(Unit)
+end
+
+#! Prints one one-byte piece (a separator) without a newline.
+fun print_byte_string(byte: U8) impure Result(Unit, Collections.Error)
+  val vec = try vec_new[U8]()
+
+  val push_result = vec_push(&mut vec, byte)
+  match push_result
+    Ok(Unit) => Unit
+    Err(error) => return fail_free_vec(vec, error)
+  end
+
+  val view = vec_view(&vec)
+  val string = match string_from_slice(view)
+    Ok(s) => s
+    Err(error) => return fail_free_vec(vec, error)
+  end
+
+  print(&string)
+  string_free(string)
+  vec_free(vec)
+  return Ok(Unit)
+end
+
+#! Prints `label=value\n` for an I64 result.
+fun print_label_line(label: &[U8], value: I64) impure Result(Unit, Collections.Error)
+  val string = try string_from_slice(label)
+  print(&string)
+  string_free(string)
+
+  try print_byte_string(EQUALS)
+  try print_int_newline(value)
+  return Ok(Unit)
+end
+
+#! Prints `label=1` or `label=0` for a Bool result.
+fun print_bool_line(label: &[U8], cond: Bool) impure Result(Unit, Collections.Error)
+  val string = try string_from_slice(label)
+  print(&string)
+  string_free(string)
+
+  try print_byte_string(EQUALS)
+  if cond
+    try print_byte_string(0x31)
+  else
+    try print_byte_string(0x30)
+  end
+  try print_byte_string(0x0A)
+  return Ok(Unit)
+end
+
+fun check_u8_wrap() impure Result(Unit, Collections.Error)
+  val x: U8 = 255
+  val label: [U8; 6] = [0x75, 0x38, 0x77, 0x72, 0x61, 0x70]
+  try print_label_line(&label, I64.from(x + 1))
+  return Ok(Unit)
+end
+
+fun check_i8_wrap() impure Result(Unit, Collections.Error)
+  val x: I8 = 127
+  val label: [U8; 6] = [0x69, 0x38, 0x77, 0x72, 0x61, 0x70]
+  try print_label_line(&label, I64.from(x + 1))
+  return Ok(Unit)
+end
+
+fun check_u16_wrap() impure Result(Unit, Collections.Error)
+  val x: U16 = 65535
+  val label: [U8; 7] = [0x75, 0x31, 0x36, 0x77, 0x72, 0x61, 0x70]
+  try print_label_line(&label, I64.from(x + 1))
+  return Ok(Unit)
+end
+
+fun check_i16_wrap() impure Result(Unit, Collections.Error)
+  val x: I16 = 32767
+  val label: [U8; 7] = [0x69, 0x31, 0x36, 0x77, 0x72, 0x61, 0x70]
+  try print_label_line(&label, I64.from(x + 1))
+  return Ok(Unit)
+end
+
+fun check_u32_wrap() impure Result(Unit, Collections.Error)
+  val x: U32 = 0xFFFFFFFF
+  val label: [U8; 7] = [0x75, 0x33, 0x32, 0x77, 0x72, 0x61, 0x70]
+  try print_label_line(&label, I64.from(x + 1))
+  return Ok(Unit)
+end
+
+fun check_i32_wrap() impure Result(Unit, Collections.Error)
+  val x: I32 = 2147483647
+  val label: [U8; 7] = [0x69, 0x33, 0x32, 0x77, 0x72, 0x61, 0x70]
+  try print_label_line(&label, I64.from(x + 1))
+  return Ok(Unit)
+end
+
+fun check_u64_wrap() impure Result(Unit, Collections.Error)
+  val x: U64 = 0xFFFFFFFFFFFFFFFF
+  val label: [U8; 7] = [0x75, 0x36, 0x34, 0x77, 0x72, 0x61, 0x70]
+  try print_label_line(&label, I64.from(x + 1))
+  return Ok(Unit)
+end
+
+fun check_i64_wrap() impure Result(Unit, Collections.Error)
+  val x: I64 = 9223372036854775807
+  val label: [U8; 7] = [0x69, 0x36, 0x34, 0x77, 0x72, 0x61, 0x70]
+  try print_label_line(&label, x + 1)
+  return Ok(Unit)
+end
+
+fun check_usize_wrap() impure Result(Unit, Collections.Error)
+  val x: Usize = 0xFFFFFFFFFFFFFFFF
+  val label: [U8; 9] = [0x75, 0x73, 0x69, 0x7A, 0x65, 0x77, 0x72, 0x61, 0x70]
+  try print_label_line(&label, I64.from(x + 1))
+  return Ok(Unit)
+end
+
+fun check_isize_wrap() impure Result(Unit, Collections.Error)
+  val x: Isize = 9223372036854775807
+  val label: [U8; 9] = [0x69, 0x73, 0x69, 0x7A, 0x65, 0x77, 0x72, 0x61, 0x70]
+  try print_label_line(&label, I64.from(x + 1))
+  return Ok(Unit)
+end
+
+fun check_u8_cmp() impure Result(Unit, Collections.Error)
+  val hi: U8 = 255
+  val lo: U8 = 200
+  val label: [U8; 5] = [0x75, 0x38, 0x63, 0x6D, 0x70]
+  try print_bool_line(&label, hi > lo)
+  return Ok(Unit)
+end
+
+fun check_i8_cmp() impure Result(Unit, Collections.Error)
+  val neg: I8 = -1
+  val one: I8 = 1
+  val label: [U8; 5] = [0x69, 0x38, 0x63, 0x6D, 0x70]
+  try print_bool_line(&label, neg < one)
+  return Ok(Unit)
+end
+
+fun check_u64_cmp() impure Result(Unit, Collections.Error)
+  val max: U64 = 0xFFFFFFFFFFFFFFFF
+  val one: U64 = 1
+  val label: [U8; 6] = [0x75, 0x36, 0x34, 0x63, 0x6D, 0x70]
+  try print_bool_line(&label, max > one)
+  return Ok(Unit)
+end
+
+fun check_i64_cmp() impure Result(Unit, Collections.Error)
+  val neg: I64 = -1
+  val zero: I64 = 0
+  val label: [U8; 6] = [0x69, 0x36, 0x34, 0x63, 0x6D, 0x70]
+  try print_bool_line(&label, neg < zero)
+  return Ok(Unit)
+end
+
+fun check_u8_shift() impure Result(Unit, Collections.Error)
+  val one: U8 = 1
+  val label: [U8; 7] = [0x75, 0x38, 0x73, 0x68, 0x69, 0x66, 0x74]
+  try print_label_line(&label, I64.from(one << 8))
+  return Ok(Unit)
+end
+
+fun check_i8_shift() impure Result(Unit, Collections.Error)
+  val min: I8 = -128
+  val label: [U8; 7] = [0x69, 0x38, 0x73, 0x68, 0x69, 0x66, 0x74]
+  try print_label_line(&label, I64.from(min >> 1))
+  return Ok(Unit)
+end
+
+fun check_u16_shift() impure Result(Unit, Collections.Error)
+  val one: U16 = 1
+  val label: [U8; 8] = [0x75, 0x31, 0x36, 0x73, 0x68, 0x69, 0x66, 0x74]
+  try print_label_line(&label, I64.from(one << 16))
+  return Ok(Unit)
+end
+
+fun check_i16_shift() impure Result(Unit, Collections.Error)
+  val one: I16 = 1
+  val label: [U8; 8] = [0x69, 0x31, 0x36, 0x73, 0x68, 0x69, 0x66, 0x74]
+  try print_label_line(&label, I64.from(one << 16))
+  return Ok(Unit)
+end
+
+fun check_u32_shift() impure Result(Unit, Collections.Error)
+  val one: U32 = 1
+  val label: [U8; 8] = [0x75, 0x33, 0x32, 0x73, 0x68, 0x69, 0x66, 0x74]
+  try print_label_line(&label, I64.from(one << 32))
+  return Ok(Unit)
+end
+
+fun check_i32_shift() impure Result(Unit, Collections.Error)
+  val one: I32 = 1
+  val label: [U8; 8] = [0x69, 0x33, 0x32, 0x73, 0x68, 0x69, 0x66, 0x74]
+  try print_label_line(&label, I64.from(one << 32))
+  return Ok(Unit)
+end
+
+fun check_u64_shift() impure Result(Unit, Collections.Error)
+  val one: U64 = 1
+  val label: [U8; 8] = [0x75, 0x36, 0x34, 0x73, 0x68, 0x69, 0x66, 0x74]
+  try print_label_line(&label, I64.from(one << 64))
+  return Ok(Unit)
+end
+
+fun check_i64_shift() impure Result(Unit, Collections.Error)
+  val one: I64 = 1
+  val label: [U8; 8] = [0x69, 0x36, 0x34, 0x73, 0x68, 0x69, 0x66, 0x74]
+  try print_label_line(&label, one << 64)
+  return Ok(Unit)
+end
+
+fun check_u8_band() impure Result(Unit, Collections.Error)
+  val a: U8 = 0xF0
+  val b: U8 = 0x0F
+  val label: [U8; 6] = [0x75, 0x38, 0x62, 0x61, 0x6E, 0x64]
+  try print_label_line(&label, I64.from(a & b))
+  return Ok(Unit)
+end
+
+fun check_u8_bor() impure Result(Unit, Collections.Error)
+  val a: U8 = 0xF0
+  val b: U8 = 0x0F
+  val label: [U8; 5] = [0x75, 0x38, 0x62, 0x6F, 0x72]
+  try print_label_line(&label, I64.from(a | b))
+  return Ok(Unit)
+end
+
+fun check_u8_bxor() impure Result(Unit, Collections.Error)
+  val a: U8 = 0xFF
+  val b: U8 = 0x0F
+  val label: [U8; 6] = [0x75, 0x38, 0x62, 0x78, 0x6F, 0x72]
+  try print_label_line(&label, I64.from(a ^ b))
+  return Ok(Unit)
+end
+
+fun check_trunc8() impure Result(Unit, Collections.Error)
+  val label: [U8; 6] = [0x74, 0x72, 0x75, 0x6E, 0x63, 0x38]
+  try print_label_line(&label, I64.from(I8.from(255)))
+  return Ok(Unit)
+end
+
+fun check_trunc16() impure Result(Unit, Collections.Error)
+  val label: [U8; 7] = [0x74, 0x72, 0x75, 0x6E, 0x63, 0x31, 0x36]
+  try print_label_line(&label, I64.from(I16.from(0xFFFF)))
+  return Ok(Unit)
+end
+
+fun check_zext16() impure Result(Unit, Collections.Error)
+  val label: [U8; 6] = [0x7A, 0x65, 0x78, 0x74, 0x31, 0x36]
+  try print_label_line(&label, I64.from(U16.from(255)))
+  return Ok(Unit)
+end
+
+fun check_sext16() impure Result(Unit, Collections.Error)
+  val label: [U8; 6] = [0x73, 0x65, 0x78, 0x74, 0x31, 0x36]
+  try print_label_line(&label, I64.from(I16.from(-1)))
+  return Ok(Unit)
+end
+
+fun check_zext64() impure Result(Unit, Collections.Error)
+  val label: [U8; 6] = [0x7A, 0x65, 0x78, 0x74, 0x36, 0x34]
+  try print_label_line(&label, I64.from(U64.from(255)))
+  return Ok(Unit)
+end
+
+fun check_udiv() impure Result(Unit, Collections.Error)
+  val x: U8 = 250
+  val q = match x / 3
+    Ok(qv) => qv
+    Err(DivByZero) => 0
+  end
+  val label: [U8; 4] = [0x75, 0x64, 0x69, 0x76]
+  try print_label_line(&label, I64.from(q))
+  return Ok(Unit)
+end
+
+fun check_urem() impure Result(Unit, Collections.Error)
+  val x: U8 = 250
+  val r = match x % 3
+    Ok(rv) => rv
+    Err(DivByZero) => 0
+  end
+  val label: [U8; 4] = [0x75, 0x72, 0x65, 0x6D]
+  try print_label_line(&label, I64.from(r))
+  return Ok(Unit)
+end
+
+fun check_sdiv() impure Result(Unit, Collections.Error)
+  val x: I8 = -10
+  val q = match x / 3
+    Ok(qv) => qv
+    Err(DivByZero) => 0
+  end
+  val label: [U8; 4] = [0x73, 0x64, 0x69, 0x76]
+  try print_label_line(&label, I64.from(q))
+  return Ok(Unit)
+end
+
+fun check_srem() impure Result(Unit, Collections.Error)
+  val x: I8 = -10
+  val r = match x % 3
+    Ok(rv) => rv
+    Err(DivByZero) => 0
+  end
+  val label: [U8; 4] = [0x73, 0x72, 0x65, 0x6D]
+  try print_label_line(&label, I64.from(r))
+  return Ok(Unit)
+end
+
+fun run_all() impure Result(Unit, Collections.Error)
+  try check_u8_wrap()
+  try check_i8_wrap()
+  try check_u16_wrap()
+  try check_i16_wrap()
+  try check_u32_wrap()
+  try check_i32_wrap()
+  try check_u64_wrap()
+  try check_i64_wrap()
+  try check_usize_wrap()
+  try check_isize_wrap()
+  try check_u8_cmp()
+  try check_i8_cmp()
+  try check_u64_cmp()
+  try check_i64_cmp()
+  try check_u8_shift()
+  try check_i8_shift()
+  try check_u16_shift()
+  try check_i16_shift()
+  try check_u32_shift()
+  try check_i32_shift()
+  try check_u64_shift()
+  try check_i64_shift()
+  try check_u8_band()
+  try check_u8_bor()
+  try check_u8_bxor()
+  try check_trunc8()
+  try check_trunc16()
+  try check_zext16()
+  try check_sext16()
+  try check_zext64()
+  try check_udiv()
+  try check_urem()
+  try check_sdiv()
+  try check_srem()
+  return Ok(Unit)
+end
+
+pub fun main() impure ExitCode
+  match run_all()
+    Ok(Unit) => return ExitSuccess
+    Err(error) => return ExitFailure
+  end
+end

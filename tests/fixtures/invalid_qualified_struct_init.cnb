@@ -2,7 +2,7 @@ pub fun test_func() Unit
   val p = Memory.Block(x: 10)
 end
 
-pub fun main() Int
+pub fun main() I64
   test_func()
   return 0
 end

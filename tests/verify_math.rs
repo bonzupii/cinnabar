@@ -153,6 +153,63 @@ fn euclid_div(a: i64, b: i64) -> i64 {
     (a - euclid_rem(a, b)) / b
 }
 
+fn bool01(value: bool) -> i64 {
+    if value {
+        1
+    } else {
+        0
+    }
+}
+
+// Recomputes every `label=value` line printed by int_widths.cnb with
+// independent Rust wrapping arithmetic, explicit shift-count masking, and
+// explicit truncation/extension casts, so the fixture output is verified
+// against a second implementation of the width semantics.
+fn int_widths_oracle() -> String {
+    let mut out = String::new();
+    // Per-width two's-complement wraparound at the top of the range.
+    out.push_str(&format!("u8wrap={}\n", 255u8.wrapping_add(1) as i64));
+    out.push_str(&format!("i8wrap={}\n", 127i8.wrapping_add(1) as i64));
+    out.push_str(&format!("u16wrap={}\n", 65535u16.wrapping_add(1) as i64));
+    out.push_str(&format!("i16wrap={}\n", 32767i16.wrapping_add(1) as i64));
+    out.push_str(&format!("u32wrap={}\n", u32::MAX.wrapping_add(1) as i64));
+    out.push_str(&format!("i32wrap={}\n", i32::MAX.wrapping_add(1) as i64));
+    out.push_str(&format!("u64wrap={}\n", u64::MAX.wrapping_add(1) as i64));
+    out.push_str(&format!("i64wrap={}\n", i64::MAX.wrapping_add(1)));
+    out.push_str(&format!("usizewrap={}\n", usize::MAX.wrapping_add(1) as i64));
+    out.push_str(&format!("isizewrap={}\n", isize::MAX.wrapping_add(1) as i64));
+    // Signed vs unsigned comparison.
+    out.push_str(&format!("u8cmp={}\n", bool01(255u8 > 200u8)));
+    out.push_str(&format!("i8cmp={}\n", bool01((-1i8) < 1i8)));
+    out.push_str(&format!("u64cmp={}\n", bool01(u64::MAX > 1)));
+    out.push_str(&format!("i64cmp={}\n", bool01(-1i64 < 0i64)));
+    // Shift counts mask by width - 1; signed right shift is arithmetic.
+    out.push_str(&format!("u8shift={}\n", (1u64 << (8 % 8)) as i64));
+    out.push_str(&format!("i8shift={}\n", -128i64 >> 1));
+    out.push_str(&format!("u16shift={}\n", (1u64 << (16 % 16)) as i64));
+    out.push_str(&format!("i16shift={}\n", (1u64 << (16 % 16)) as i64));
+    out.push_str(&format!("u32shift={}\n", (1u64 << (32 % 32)) as i64));
+    out.push_str(&format!("i32shift={}\n", (1u64 << (32 % 32)) as i64));
+    out.push_str(&format!("u64shift={}\n", (1u64 << (64 % 64)) as i64));
+    out.push_str(&format!("i64shift={}\n", (1u64 << (64 % 64)) as i64));
+    // Bitwise ops.
+    out.push_str(&format!("u8band={}\n", (0xF0u8 & 0x0Fu8) as i64));
+    out.push_str(&format!("u8bor={}\n", (0xF0u8 | 0x0Fu8) as i64));
+    out.push_str(&format!("u8bxor={}\n", (0xFFu8 ^ 0x0Fu8) as i64));
+    // T.from conversions: truncate / zero-extend / sign-extend.
+    out.push_str(&format!("trunc8={}\n", 255u8 as i8 as i64));
+    out.push_str(&format!("trunc16={}\n", 0xFFFFu16 as i16 as i64));
+    out.push_str(&format!("zext16={}\n", 255u16 as i64));
+    out.push_str(&format!("sext16={}\n", (-1i16) as i64));
+    out.push_str(&format!("zext64={}\n", 255u64 as i64));
+    // Euclidean division/modulo at a non-64-bit width (I8/U8 operands).
+    out.push_str(&format!("udiv={}\n", (250u8 / 3u8) as i64));
+    out.push_str(&format!("urem={}\n", (250u8 % 3u8) as i64));
+    out.push_str(&format!("sdiv={}\n", euclid_div(-10, 3)));
+    out.push_str(&format!("srem={}\n", euclid_rem(-10, 3)));
+    out
+}
+
 struct MemoryBlock {
     bytes: Vec<Option<u8>>,
 }
@@ -456,6 +513,77 @@ fn euclid_div_fixture_output_matches_oracle() {
         }
         Err(err) => {
             eprintln!("spawn euclid_div binary failed: {}", err);
+        }
+    }
+
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => {}
+        Err(err) => eprintln!("temp cleanup failed: {}", err),
+    }
+}
+
+#[test]
+fn int_widths_fixture_output_matches_oracle() {
+    let cinnabar = env!("CARGO_BIN_EXE_cinnabar");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root
+        .join("tests")
+        .join("fixtures")
+        .join("verify_math")
+        .join("int_widths.cnb");
+    let dir = std::env::temp_dir().join(format!(
+        "cinnabar_verify_math_widths_{}",
+        std::process::id()
+    ));
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => {}
+        Err(err) => {
+            eprintln!("cannot create temp dir: {}", err);
+            return;
+        }
+    }
+    let bin = dir.join("int_widths_bin");
+
+    let compile = std::process::Command::new(cinnabar)
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&bin)
+        .output();
+    match compile {
+        Ok(out) => {
+            assert!(
+                out.status.success(),
+                "int_widths.cnb failed to compile (exit {:?}):\n{}\n{}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Err(err) => {
+            eprintln!("spawn cinnabar failed: {}", err);
+            return;
+        }
+    }
+
+    let run = std::process::Command::new(&bin).output();
+    match run {
+        Ok(out) => {
+            assert!(
+                out.status.success(),
+                "int_widths binary failed (exit {:?}):\nstdout:\n{}\nstderr:\n{}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            let expected = int_widths_oracle();
+            assert_eq!(
+                stdout, expected,
+                "int_widths.cnb runtime output must match the oracle line by line"
+            );
+        }
+        Err(err) => {
+            eprintln!("spawn int_widths binary failed: {}", err);
         }
     }
 

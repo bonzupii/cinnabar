@@ -51,7 +51,7 @@ pub const B_90: U8 = 0x90  # continuation pushing 4-byte values over the limit
 pub const B_F4: U8 = 0xF4  # 4-byte lead; F4 90..BF exceeds U+10FFFF
 
 #! A Usize-typed zero for comparing payloads against (a bare literal
-#! would infer as Int), and an impossible value for consuming the
+#! would infer as I64), and an impossible value for consuming the
 #! unreachable numeric payloads below.
 pub const ZERO_USIZE: Usize = 0
 pub const SENTINEL_USIZE: Usize = 999999
@@ -90,7 +90,7 @@ fun ok_and_free(string: Collections.String) impure Bool
   return true
 end
 
-pub fun main() impure Int
+pub fun main() impure I64
   #! Valid sequences must be accepted.
   val ascii = [B_43, B_69, B_6E, B_21]
   if !utf8_ok(&ascii)

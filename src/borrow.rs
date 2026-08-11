@@ -5,6 +5,9 @@ const ST_LIVE: i64 = 1;
 const ST_MOVED: i64 = 2;
 const ST_PARTIAL: i64 = 3;
 
+const C_EMPTY: i64 = 0;
+const C_MAY: i64 = 1;
+
 const OP_READ: i64 = 0;
 const OP_MOVE: i64 = 1;
 const OP_BORROW: i64 = 2;
@@ -13,6 +16,9 @@ const OP_ASSIGN: i64 = 4;
 const OP_BIND: i64 = 5;
 const OP_EXIT: i64 = 6;
 const OP_RET_REF: i64 = 7;
+const OP_CONT_EMPTY: i64 = 8;
+const OP_CONT_MAY: i64 = 9;
+const OP_CONT_FREE: i64 = 10;
 
 const EX_RETURN: i64 = 0;
 const EX_BREAK: i64 = 1;
@@ -55,6 +61,12 @@ type B = (
     i64,
     i64,
     i64,
+    // (extraction result binding, container binding): the match consuming an
+    // extraction result marks the container drained on its error arm.
+    Vec<(i64, i64)>,
+    // Bindings whose initializer is a native create call (vec_new / hash_map_new):
+    // the container bound from them is provably empty.
+    Vec<i64>,
 );
 
 type Ctx<'a> = (
@@ -64,6 +76,8 @@ type Ctx<'a> = (
     &'a mut Vec<Diag>,
 
     &'a mut Vec<(i64, Vec<i64>)>,
+    i64, // the interned "Err" variant name id of the seeded Result enum
+    i64, // the interned "Ok" variant name id of the seeded Result enum
 );
 
 fn ref_origin(binding: i64) -> i64 {
@@ -212,6 +226,162 @@ fn is_linear_key(ctx: &mut Ctx, key: i64) -> i64 {
         1
     } else {
         0
+    }
+}
+
+fn key_args_of_key(nodes: &[i64], key: i64) -> i64 {
+    let row = find_tyinfo(nodes, key);
+    if row == NONE {
+        NONE
+    } else {
+        node_d(nodes, row)
+    }
+}
+
+// A native type holding type arguments is a container: it carries element
+// types (Vec(T), HashMap(K, V)); a plain handle (Block, String) has none.
+fn is_container_key(nodes: &[i64], key: i64) -> bool {
+    ty_kind_of(nodes, key) == TYD_NATIVE && key_args_of_key(nodes, key) != NONE
+}
+
+// A container holds linear elements when its typechecker-attached flag says
+// so; the flag covers every type argument (HashMap(K, V): the key counts
+// too).  Read here instead of re-deriving linearity over the argument list
+// (Single-Fact Rule).
+fn container_has_linear_elem(ctx: &mut Ctx, key: i64) -> bool {
+    is_container_key(ctx.1, key) && tyinfo_has_linear_elems(ctx.1, key) == 1
+}
+
+// The native opcode of the callee of `expr`, or NONE for non-native calls.
+fn native_op_of(ctx: &mut Ctx, expr: i64) -> i64 {
+    let callee = node_b(ctx.1, expr);
+    if node_tag(ctx.1, callee) != NODE_EXPR || node_a(ctx.1, callee) != EXPR_PATH {
+        return NONE;
+    }
+    let sym = expr_sym_of(ctx.1, callee);
+    if sym == NONE || node_a(ctx.1, sym) != SYM_NATIVE_FUN {
+        return NONE;
+    }
+    sym_native_op(ctx.1, sym)
+}
+
+fn call_is_create(ctx: &mut Ctx, expr: i64) -> bool {
+    if node_tag(ctx.1, expr) != NODE_EXPR || node_a(ctx.1, expr) != EXPR_CALL {
+        return false;
+    }
+    let op = native_op_of(ctx, expr);
+    op == NAT_VEC_NEW || op == NAT_HASH_MAP_NEW
+}
+
+// A literal `true` loop condition can never fall through: the loop's only
+// exit is a `break`, so the exit block joins state from break paths only.
+fn is_const_true(ctx: &Ctx, expr: i64) -> bool {
+    node_tag(ctx.1, expr) == NODE_EXPR && node_a(ctx.1, expr) == EXPR_LIT && node_b(ctx.1, expr) == LIT_TRUE
+}
+
+// The value of `expr` is a provably-empty container when it came from a
+// native create call: a direct call, a path to a binding created by one
+// (`b.9`), or a match whose scrutinee is such a value.  One
+// implementation feeds both the pattern binds of a match on the value
+// and the let-binding of the value itself, so the container state can
+// never drift between the two consumers.
+fn create_provenance(ctx: &mut Ctx, b: &B, expr: i64) -> i64 {
+    if call_is_create(ctx, expr) {
+        return 1;
+    }
+    let root = path_root_binding_of(ctx, b, expr);
+    if root != NONE && list_has(&b.9, root) {
+        return 1;
+    }
+    if node_tag(ctx.1, expr) == NODE_EXPR && node_a(ctx.1, expr) == EXPR_MATCH {
+        return create_provenance(ctx, b, node_b(ctx.1, expr));
+    }
+    0
+}
+
+// The root binding of a call argument naming a container, unwrapping the
+// `&`/`&mut` layer (`&mut v` and `v` both resolve to the binding of `v`).
+fn container_binding_of(b: &B, ctx: &Ctx, arg: i64) -> i64 {
+    if node_tag(ctx.1, arg) != NODE_EXPR {
+        return NONE;
+    }
+    let kind = node_a(ctx.1, arg);
+    if kind == EXPR_UNARY {
+        let op = node_b(ctx.1, arg);
+        if op == UN_REF || op == UN_REF_MUT {
+            return container_binding_of(b, ctx, node_c(ctx.1, arg));
+        }
+        return NONE;
+    }
+    if kind == EXPR_PATH {
+        let segs = node_b(ctx.1, arg);
+        return lookup_name(b, list_first(ctx.2, segs));
+    }
+    NONE
+}
+
+fn extraction_container_of_binding(entries: &[(i64, i64)], binding: i64) -> i64 {
+    let mut idx = 0usize;
+    while idx < entries.len() {
+        match entries.get(idx) {
+            Some(pair) => {
+                if pair.0 == binding {
+                    return pair.1;
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    NONE
+}
+
+// Passing a linear-element container by &mut may fill it (an insertion native
+// or any callee could push), so the container state rises to MayContain.
+fn fill_container_if_mut_arg(f: &mut F, b: &mut B, ctx: &mut Ctx, arg: i64) {
+    let binding = container_binding_of(b, ctx, arg);
+    if binding < 0 {
+        return;
+    }
+    let row = binding_at(f, binding);
+    if container_has_linear_elem(ctx, row.1) {
+        emit_op(f, OP_CONT_MAY, binding, NONE, (0, 0, 0), expr_span(ctx.1, arg));
+    }
+}
+
+// The arm that stands for the error variant of an extraction match, read
+// from attached facts only (Single-Fact Rule): the pattern's resolved
+// variant symbol (`pat_sym_of`) is compared against the scrutinee enum's
+// error-variant symbol looked up in the typechecker's variant-fact table.
+// A binding arm is the error arm exactly when it is the second arm of a
+// 2-arm match whose first arm matches the Ok variant — exhaustiveness then
+// forces the binding to cover Err.  A bare binding with no Ok arm covers
+// both variants and proves nothing, so it is not the error arm.
+fn arm_is_result_err(ctx: &mut Ctx, scrut_key: i64, pat: i64, arms: i64, idx: i64) -> bool {
+    if node_tag(ctx.1, pat) != NODE_PAT {
+        return false;
+    }
+    if ty_kind_of(ctx.1, scrut_key) != TYD_ENUM {
+        return false;
+    }
+    let kind = node_a(ctx.1, pat);
+    if kind == PAT_VARIANT {
+        let pat_sym = pat_sym_of(ctx.1, pat);
+        let err_sym = find_varfact(ctx.1, scrut_key, ctx.5);
+        pat_sym != NONE && pat_sym == err_sym
+    } else if kind == PAT_BIND {
+        if idx != 1 || list_len(ctx.2, arms) != 2 {
+            return false;
+        }
+        let first_pat = node_a(ctx.1, list_get(ctx.2, arms, 0));
+        if node_tag(ctx.1, first_pat) != NODE_PAT || node_a(ctx.1, first_pat) != PAT_VARIANT {
+            return false;
+        }
+        let ok_sym = find_varfact(ctx.1, scrut_key, ctx.6);
+        let first_sym = pat_sym_of(ctx.1, first_pat);
+        first_sym != NONE && first_sym == ok_sym
+    } else {
+        false
     }
 }
 
@@ -427,6 +597,12 @@ fn build_fn(f: &mut F, b: &mut B, ctx: &mut Ctx, fn_node: i64) -> bool {
         } else {
             emit_op(f, OP_BIND, binding, NONE, (0, 1, 0), span);
         }
+        // A by-value container parameter arrives with unknown provenance and
+        // may hold linear elements, so it starts MayContain; only a drain
+        // inside the callee can prove it empty before a free.
+        if flags.1 == 0 && container_has_linear_elem(ctx, key) {
+            emit_op(f, OP_CONT_MAY, binding, NONE, (0, 0, 0), span);
+        }
         idx += 1;
     }
 
@@ -461,6 +637,8 @@ fn build_fn(f: &mut F, b: &mut B, ctx: &mut Ctx, fn_node: i64) -> bool {
 fn build_list(f: &mut F, b: &mut B, ctx: &mut Ctx, list: i64, out: i64, ret: i64, prod: &mut Vec<i64>) -> i64 {
     let scope_start = b.2.len();
     let name_start = b.0.len();
+    let cont_start = b.8.len();
+    let empty_start = b.9.len();
     let count = list_len(ctx.2, list);
     if count == 0 {
         let stub = new_block(f, b, BLK_JOIN, NONE, block_span_at(f, out));
@@ -504,6 +682,12 @@ fn build_list(f: &mut F, b: &mut B, ctx: &mut Ctx, list: i64, out: i64, ret: i64
     while b.0.len() > name_start {
         b.0.pop();
     }
+    while b.8.len() > cont_start {
+        b.8.pop();
+    }
+    while b.9.len() > empty_start {
+        b.9.pop();
+    }
     entry
 }
 
@@ -532,6 +716,26 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         if has_init == 1 && (flags.1 == 1 || !prod.is_empty()) {
             set_op_loans(f, op, &prod);
         }
+        if has_init == 1 && create_provenance(ctx, b, init) == 1 {
+            b.9.push(binding);
+        }
+        if has_init == 1 && node_a(ctx.1, init) == EXPR_CALL && node_c(ctx.1, init) != NONE {
+            let container = lookup_name(b, node_c(ctx.1, init));
+            if container >= 0 {
+                b.8.push((binding, container));
+            }
+        }
+        // A container binding is empty only when its value has empty
+        // provenance (a native create call, or a match on one); any other
+        // provenance (a user function, an arbitrary match) may carry
+        // linear elements.
+        if container_has_linear_elem(ctx, binding_key) {
+            if has_init == 1 && create_provenance(ctx, b, init) == 1 {
+                emit_op(f, OP_CONT_EMPTY, binding, NONE, (0, 0, 0), span);
+            } else {
+                emit_op(f, OP_CONT_MAY, binding, NONE, (0, 0, 0), span);
+            }
+        }
         return (block, cont, prod);
     }
     if kind == STMT_ASSIGN {
@@ -556,12 +760,26 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         let scope_start = b.2.len() as i64;
         b.1.push((block, join, scope_start));
         let cont = expr_effects(f, b, ctx, cond, MODE_VALUE, ret, &mut Vec::new());
-        add_edge(f, block, cont);
+        let const_true = is_const_true(ctx, cond);
         let body_entry = build_list(f, b, ctx, body, block, ret, &mut Vec::new());
         b.1.pop();
-        add_edge(f, cont, body_entry);
-        add_edge(f, cont, join);
-        add_edge(f, join, out);
+        // A literal-true condition emits no condition block, so `cont` IS
+        // `join`: the loop has no false path and exits only via `break`, and
+        // the join merges only break-path state.  Routing the header into the
+        // join would smuggle the pre-loop state (container still C_MAY, value
+        // still LIVE) onto the exit path, defeating the `while true` drain
+        // proof.  The join-to-out edge belongs to the enclosing list's
+        // sequencing (build_list), not here, so a mid-list loop cannot feed
+        // its exit state past the statements that follow it.
+        if const_true && cont == join {
+            add_edge(f, block, body_entry);
+        } else {
+            add_edge(f, block, cont);
+            add_edge(f, cont, body_entry);
+            if !const_true {
+                add_edge(f, cont, join);
+            }
+        }
         return (block, join, Vec::new());
     }
     if kind == STMT_IF {
@@ -580,7 +798,10 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         } else {
             add_edge(f, cont, join);
         }
-        add_edge(f, join, out);
+        // The join-to-out edge belongs to the enclosing list's sequencing
+        // (build_list): an if mid-list must not feed its exit state past the
+        // statements that follow it, or a linear value consumed after the if
+        // would be falsely reported live at the function exit.
         return (block, join, Vec::new());
     }
     if kind == STMT_RETURN {
@@ -1023,63 +1244,15 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
     emit_op(f, OP_READ, binding, NONE, (0, 0, 0), span);
 }
 
+// The typechecker attached one fact row per (canonical struct key, field
+// name) carrying the substituted field key; no ITEM_STRUCT re-walk and no
+// re-run of generic substitution here (Single-Fact Rule).
 fn field_key_of(ctx: &mut Ctx, key: i64, field: i64) -> i64 {
-    let sym = ty_sym_of(ctx.1, key);
-    if sym == NONE {
-        return NONE;
-    }
-    let decl = node_c(ctx.1, sym);
-    if decl == NONE || node_a(ctx.1, decl) != ITEM_STRUCT {
-        return NONE;
-    }
-    let fields = node_e(ctx.1, decl);
-    let count = list_len(ctx.2, fields);
-    let mut idx = 0i64;
-    while idx < count {
-        let fnode = list_get(ctx.2, fields, idx);
-        if node_a(ctx.1, fnode) == field {
-            let declared = ty_key_of(ctx.1, node_b(ctx.1, fnode));
-            return subst_declared(ctx, decl, key, declared);
-        }
-        idx += 1;
-    }
-    NONE
-}
-
-fn subst_declared(ctx: &mut Ctx, decl: i64, key: i64, declared: i64) -> i64 {
-    if declared == NONE {
-        return declared;
-    }
-    let params = node_f(ctx.1, decl);
-    let args = ty_args_of(ctx.1, key);
-    let pcount = list_len(ctx.2, params);
-    let acount = list_len(ctx.2, args);
-    if pcount == 0 || pcount != acount {
-        return declared;
-    }
-    let mut from: Vec<i64> = Vec::new();
-    let mut to: Vec<i64> = Vec::new();
-    let mut idx = 0i64;
-    while idx < pcount {
-        let param = list_get(ctx.2, params, idx);
-        if node_tag(ctx.1, param) == NODE_TY && node_a(ctx.1, param) == TY_PARAM {
-            from.push(ty_key_of(ctx.1, param));
-            to.push(list_get(ctx.2, args, idx));
-        }
-        idx += 1;
-    }
-    if from.is_empty() {
-        return declared;
-    }
-    subst_key(ctx.1, ctx.2, declared, &from, &to)
-}
-
-fn ty_args_of(nodes: &[i64], key: i64) -> i64 {
-    let row = find_tyinfo(nodes, key);
+    let row = find_fieldkey(ctx.1, key, field);
     if row == NONE {
         NONE
     } else {
-        node_d(nodes, row)
+        fieldkey_key_of(ctx.1, row)
     }
 }
 
@@ -1318,41 +1491,26 @@ fn binary_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod
     expr_effects(f, b, ctx, rhs, MODE_VALUE, ret, prod)
 }
 
+// The typechecker attached the trait method's fn node to the dispatch row
+// when it created it; no ITEM_TRAIT method-list re-search (Single-Fact
+// Rule).
 fn trait_method_of(ctx: &mut Ctx, expr: i64) -> i64 {
     let trow = find_trait_call(ctx.1, expr);
     if trow == NONE {
-        return NONE;
+        NONE
+    } else {
+        trait_call_method_node(ctx.1, trow)
     }
-    let trait_sym = trait_call_trait(ctx.1, trow);
-    let method_name = trait_call_method(ctx.1, trow);
-    if trait_sym == NONE || method_name == NONE {
-        return NONE;
-    }
-    let trait_item = node_c(ctx.1, trait_sym);
-    if trait_item == NONE || node_tag(ctx.1, trait_item) != NODE_ITEM || node_a(ctx.1, trait_item) != ITEM_TRAIT {
-        return NONE;
-    }
-    let methods = node_e(ctx.1, trait_item);
-    let count = list_len(ctx.2, methods);
-    let mut idx = 0i64;
-    while idx < count {
-        let method = list_get(ctx.2, methods, idx);
-        if node_tag(ctx.1, method) == NODE_FN && node_a(ctx.1, method) == method_name {
-            return method;
-        }
-        idx += 1;
-    }
-    NONE
 }
 
+// The typechecker attached the canonical key to every parameter type node
+// (trait method signatures included), so the mode reads the key's kind
+// instead of re-deriving it from raw NODE_TY tags (Single-Fact Rule).
 fn param_mode_of(nodes: &[i64], ty_node: i64) -> i64 {
-    if node_tag(nodes, ty_node) != NODE_TY {
-        return MODE_VALUE;
-    }
-    let kind = node_a(nodes, ty_node);
-    if kind == TY_REF {
+    let kind = ty_kind_of(nodes, ty_key_of(nodes, ty_node));
+    if kind == TYD_REF {
         MODE_BORROW
-    } else if kind == TY_REF_MUT {
+    } else if kind == TYD_REF_MUT {
         MODE_MUT
     } else {
         MODE_VALUE
@@ -1360,11 +1518,8 @@ fn param_mode_of(nodes: &[i64], ty_node: i64) -> i64 {
 }
 
 fn ret_is_ref_node(nodes: &[i64], ty_node: i64) -> i64 {
-    if node_tag(nodes, ty_node) != NODE_TY {
-        return 0;
-    }
-    let kind = node_a(nodes, ty_node);
-    if kind == TY_REF || kind == TY_REF_MUT || kind == TY_SLICE {
+    let kind = ty_kind_of(nodes, ty_key_of(nodes, ty_node));
+    if kind == TYD_REF || kind == TYD_REF_MUT || kind == TYD_SLICE {
         1
     } else {
         0
@@ -1408,6 +1563,7 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
     let inst = expr_sym_of(ctx.1, expr);
     let args = node_d(ctx.1, expr);
     let argc = list_len(ctx.2, args);
+    let op = native_op_of(ctx, expr);
     if node_tag(ctx.1, inst) != NODE_INST {
         let method = trait_method_of(ctx, expr);
         if method == NONE {
@@ -1429,6 +1585,9 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
             let mode = param_mode_of(ctx.1, pty);
             let mut arg_prod: Vec<i64> = Vec::new();
             expr_effects(f, b, ctx, arg, mode, ret, &mut arg_prod);
+            if mode == MODE_MUT {
+                fill_container_if_mut_arg(f, b, ctx, arg);
+            }
             arg_prods.push(arg_prod);
             idx += 1;
         }
@@ -1455,6 +1614,9 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
         };
         let mut arg_prod: Vec<i64> = Vec::new();
         expr_effects(f, b, ctx, arg, mode, ret, &mut arg_prod);
+        if mode == MODE_MUT {
+            fill_container_if_mut_arg(f, b, ctx, arg);
+        }
         arg_prods.push(arg_prod);
         idx += 1;
     }
@@ -1463,6 +1625,12 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
         call_origin_of(ctx, Some(inst_fn_of(ctx.1, inst)), &arg_prods, prod);
     } else {
         prod.clear();
+    }
+    if op == NAT_VEC_FREE || op == NAT_HASH_MAP_FREE {
+        let container = container_binding_of(b, ctx, list_first(ctx.2, args));
+        if container >= 0 {
+            emit_op(f, OP_CONT_FREE, container, NONE, (0, 0, 0), expr_span(ctx.1, expr));
+        }
     }
     cur(b)
 }
@@ -1511,6 +1679,15 @@ fn match_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod:
     let mut scrut_prod: Vec<i64> = Vec::new();
     let cont = expr_effects(f, b, ctx, scrutinee, MODE_VALUE, ret, &mut scrut_prod);
     let scrut_root = path_root_binding_of(ctx, b, scrutinee);
+    let scrut_key = expr_ty_of(ctx.1, scrutinee);
+    let known_empty = create_provenance(ctx, b, scrutinee);
+    let extr_container = if node_a(ctx.1, scrutinee) == EXPR_CALL && node_c(ctx.1, scrutinee) != NONE {
+        lookup_name(b, node_c(ctx.1, scrutinee))
+    } else if scrut_root != NONE {
+        extraction_container_of_binding(&b.8, scrut_root)
+    } else {
+        NONE
+    };
     let join = new_block(f, b, BLK_JOIN, NONE, span);
     let count = list_len(ctx.2, arms);
     let mut idx = 0i64;
@@ -1520,7 +1697,13 @@ fn match_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod:
         let body_stmt = node_b(ctx.1, arm);
         let arm_entry = new_block(f, b, BLK_STMT, arm, span);
         let scrut = (&scrut_prod[..], scrut_root);
-        pattern_effects(f, b, ctx, pat, scrut);
+        pattern_effects(f, b, ctx, pat, scrut, known_empty);
+        // The empty/error arm of an extraction match proves the container
+        // drained: vec_pop errors only on an empty vector, and the surface
+        // contract treats the remove KeyNotFound arm the same way.
+        if extr_container != NONE && arm_is_result_err(ctx, scrut_key, pat, arms, idx) {
+            emit_op(f, OP_CONT_EMPTY, extr_container, NONE, (0, 0, 0), span);
+        }
         let body = wrap_stmt_list(ctx.2, body_stmt);
         let body_entry = build_list(f, b, ctx, body, join, ret, prod);
         add_edge(f, arm_entry, body_entry);
@@ -1531,7 +1714,7 @@ fn match_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod:
     join
 }
 
-fn pattern_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, pat: i64, scrut: (&[i64], i64)) {
+fn pattern_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, pat: i64, scrut: (&[i64], i64), known_empty: i64) {
     if node_tag(ctx.1, pat) != NODE_PAT {
         return;
     }
@@ -1540,7 +1723,7 @@ fn pattern_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, pat: i64, scrut: (&[i64]
     if kind == PAT_BIND {
         let name = node_b(ctx.1, pat);
         let key = pat_ty_of(ctx.1, pat);
-        bind_pattern_name(f, b, ctx, name, key, span, scrut);
+        bind_pattern_name(f, b, ctx, (name, key), span, scrut, known_empty);
         return;
     }
     if kind == PAT_VARIANT {
@@ -1548,7 +1731,7 @@ fn pattern_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, pat: i64, scrut: (&[i64]
         let count = list_len(ctx.2, payloads);
         let mut idx = 0i64;
         while idx < count {
-            pattern_effects(f, b, ctx, list_get(ctx.2, payloads, idx), scrut);
+            pattern_effects(f, b, ctx, list_get(ctx.2, payloads, idx), scrut, known_empty);
             idx += 1;
         }
         return;
@@ -1558,18 +1741,19 @@ fn pattern_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, pat: i64, scrut: (&[i64]
         let count = list_len(ctx.2, elems);
         let mut idx = 0i64;
         while idx < count {
-            pattern_effects(f, b, ctx, list_get(ctx.2, elems, idx), scrut);
+            pattern_effects(f, b, ctx, list_get(ctx.2, elems, idx), scrut, known_empty);
             idx += 1;
         }
         let rest = node_c(ctx.1, pat);
         if rest != NONE {
             let rest_key = pat_rest_key_of(ctx.1, pat);
-            bind_pattern_name(f, b, ctx, rest, rest_key, span, scrut);
+            bind_pattern_name(f, b, ctx, (rest, rest_key), span, scrut, known_empty);
         }
     }
 }
 
-fn bind_pattern_name(f: &mut F, b: &mut B, ctx: &mut Ctx, name: i64, key: i64, span: (i64, i64, i64), scrut: (&[i64], i64)) {
+fn bind_pattern_name(f: &mut F, b: &mut B, ctx: &mut Ctx, binding: (i64, i64), span: (i64, i64, i64), scrut: (&[i64], i64), known_empty: i64) {
+    let (name, key) = binding;
     let flags = (is_linear_key(ctx, key), if is_ref_key(ctx.1, key) { 1 } else { 0 }, 0, 0);
     let binding = bind_var(f, b, ctx, name, key, flags, span);
     let op = emit_op(f, OP_BIND, binding, NONE, (flags.1, 1, 0), span);
@@ -1588,6 +1772,15 @@ fn bind_pattern_name(f: &mut F, b: &mut B, ctx: &mut Ctx, name: i64, key: i64, s
             loans.push(loan);
         }
         set_op_loans(f, op, &loans);
+    }
+    // A container bound from a match is empty only when the scrutinee is a
+    // native create call; every other provenance may carry linear elements.
+    if container_has_linear_elem(ctx, key) {
+        if known_empty == 1 {
+            emit_op(f, OP_CONT_EMPTY, binding, NONE, (0, 0, 0), span);
+        } else {
+            emit_op(f, OP_CONT_MAY, binding, NONE, (0, 0, 0), span);
+        }
     }
 }
 
@@ -1694,8 +1887,10 @@ pub fn borrow_check(
                             Vec::new(),
                             Vec::new(),
                         );
-                        let mut b: B = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), NONE, NONE, NONE, NONE);
-                        let mut ctx: Ctx = (names, nodes, lists, &mut scratch, &mut summaries);
+                        let mut b: B = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), NONE, NONE, NONE, NONE, Vec::new(), Vec::new());
+                        let err_id = find_name(names, "Err");
+                        let ok_id = find_name(names, "Ok");
+                        let mut ctx: Ctx = (names, nodes, lists, &mut scratch, &mut summaries, err_id, ok_id);
                         if build_fn(&mut f, &mut b, &mut ctx, *fn_node) {
                             compute_summary(&f, &mut ctx, 0)
                         } else {
@@ -1799,8 +1994,10 @@ fn check_fn(
         Vec::new(),
         Vec::new(),
     );
-    let mut b: B = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), NONE, NONE, NONE, NONE);
-    let mut ctx: Ctx = (names, nodes, lists, errors, summaries);
+    let mut b: B = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), NONE, NONE, NONE, NONE, Vec::new(), Vec::new());
+    let err_id = find_name(names, "Err");
+    let ok_id = find_name(names, "Ok");
+    let mut ctx: Ctx = (names, nodes, lists, errors, summaries, err_id, ok_id);
     if !build_fn(&mut f, &mut b, &mut ctx, fn_node) {
         return;
     }
@@ -1812,7 +2009,8 @@ fn analyze_fn(f: &mut F, ctx: &mut Ctx, entry: i64) {
     let live_after = compute_liveness(f, ctx);
     let (entry_state, inconsistencies) = linear_fixpoint(f, ctx, entry);
     let entry_origins = origin_fixpoint(f, ctx, entry);
-    report(f, ctx, &live_after, &entry_state, &inconsistencies, &entry_origins);
+    let entry_cont = container_fixpoint(f, ctx, entry);
+    report(f, ctx, &live_after, &entry_state, &inconsistencies, &entry_origins, &entry_cont);
 }
 
 fn same_set(a: &[i64], b: &[i64]) -> bool {
@@ -2301,6 +2499,149 @@ fn linear_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> (Vec<Vec<i64>>, Vec<(i64
         }
     }
     (entry_state, inconsistencies)
+}
+
+fn cont_get(cont: &[i64], binding: i64) -> i64 {
+    match cont.get(binding as usize) {
+        Some(value) => *value,
+        None => C_EMPTY,
+    }
+}
+
+fn cont_set(cont: &mut [i64], binding: i64, value: i64) {
+    if binding < 0 {
+        return;
+    }
+    if let Some(cell) = cont.get_mut(binding as usize) {
+        *cell = value;
+    }
+}
+
+fn empty_cont(nbind: i64) -> Vec<i64> {
+    let mut out: Vec<i64> = Vec::new();
+    let mut idx = 0i64;
+    while idx < nbind {
+        out.push(C_EMPTY);
+        idx += 1;
+    }
+    out
+}
+
+fn same_cont(a: &[i64], b: &[i64]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut idx = 0usize;
+    while idx < a.len() {
+        match a.get(idx) {
+            Some(va) => match b.get(idx) {
+                Some(vb) => {
+                    if va != vb {
+                        return false;
+                    }
+                }
+                None => return false,
+            },
+            None => break,
+        }
+        idx += 1;
+    }
+    true
+}
+
+fn join_cont(inn: &mut [i64], pout: &[i64]) {
+    let mut idx = 0usize;
+    while idx < inn.len() {
+        let a = match inn.get(idx) {
+            Some(value) => *value,
+            None => break,
+        };
+        let b = match pout.get(idx) {
+            Some(value) => *value,
+            None => break,
+        };
+        if b > a
+            && let Some(cell) = inn.get_mut(idx)
+        {
+            *cell = b;
+        }
+        idx += 1;
+    }
+}
+
+fn apply_block_container(f: &F, block: i64, cont: &mut [i64]) {
+    let (first, last) = block_op_range(f, block);
+    let mut op = first;
+    while op <= last {
+        let row = op_at(f, op);
+        let kind = row.0;
+        if kind == OP_CONT_EMPTY {
+            cont_set(cont, row.1, C_EMPTY);
+        } else if kind == OP_CONT_MAY {
+            cont_set(cont, row.1, C_MAY);
+        }
+        op += 1;
+    }
+}
+
+// The per-container-binding drain lattice (EmptyOrDrained < MayContain) is
+// joined with the least upper bound at block entries, so every cell changes
+// at most once and the fixpoint converges monotonically over loops.
+fn container_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> Vec<Vec<i64>> {
+    let nblocks = f.6.len() as i64;
+    let nbind = f.0.len() as i64;
+    let mut entry_cont: Vec<Vec<i64>> = Vec::new();
+    let mut exit_cont: Vec<Vec<i64>> = Vec::new();
+    let mut blk = 0i64;
+    while blk < nblocks {
+        entry_cont.push(empty_cont(nbind));
+        exit_cont.push(empty_cont(nbind));
+        blk += 1;
+    }
+    let cap = nblocks * nbind * 2 + 1;
+    let mut guard = 0usize;
+    loop {
+        guard += 1;
+        if guard > cap as usize {
+            push_internal(ctx.3, "internal: container-drain analysis did not converge");
+            break;
+        }
+        let mut changed = false;
+        let mut blk = 0i64;
+        while blk < nblocks {
+            let mut inn = empty_cont(nbind);
+            if blk != entry {
+                let preds = pred_of(f, blk);
+                let mut pi = 0usize;
+                while pi < preds.len() {
+                    match preds.get(pi) {
+                        Some(p) => {
+                            if let Some(list) = exit_cont.get(*p as usize) {
+                                join_cont(&mut inn, list);
+                            }
+                        }
+                        None => break,
+                    }
+                    pi += 1;
+                }
+            }
+            let mut out = inn.clone();
+            apply_block_container(f, blk, &mut out);
+            if !same_cont(&entry_cont[blk as usize], &inn) {
+                entry_cont[blk as usize] = inn;
+                changed = true;
+            }
+            if !same_cont(&exit_cont[blk as usize], &out) {
+                exit_cont[blk as usize] = out;
+                changed = true;
+            }
+            blk += 1;
+        }
+        if !changed {
+            break;
+        }
+    }
+    entry_cont
 }
 
 fn empty_origins(nbind: i64) -> Vec<Vec<i64>> {
@@ -2817,6 +3158,7 @@ fn report(
     entry_state: &[Vec<i64>],
     inconsistencies: &[(i64, i64)],
     entry_origins: &[Vec<Vec<i64>>],
+    entry_cont: &[Vec<i64>],
 ) {
     let mut idx = 0usize;
     while idx < inconsistencies.len() {
@@ -2859,6 +3201,10 @@ fn report(
             Some(list) => list.clone(),
             None => Vec::new(),
         };
+        let mut cont = match entry_cont.get(blk as usize) {
+            Some(list) => list.clone(),
+            None => Vec::new(),
+        };
         let (first, last) = block_op_range(f, blk);
         let mut op = first;
         while op <= last {
@@ -2895,6 +3241,20 @@ fn report(
                     Some(sources) => append_prod_unique(&mut fn_ret_sources, &sources),
                     None => fn_ret_errored = true,
                 }
+            } else if kind == OP_CONT_EMPTY {
+                cont_set(&mut cont, binding, C_EMPTY);
+            } else if kind == OP_CONT_MAY {
+                cont_set(&mut cont, binding, C_MAY);
+            } else if kind == OP_CONT_FREE
+                && cont_get(&cont, binding) == C_MAY
+            {
+                push_error(
+                    ctx.3,
+                    "cannot free container holding linear elements: drain the container (pop all elements) before freeing",
+                    row.6,
+                    row.7,
+                    row.8,
+                );
             }
             op += 1;
         }

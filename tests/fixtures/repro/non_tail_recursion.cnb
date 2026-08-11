@@ -1,0 +1,33 @@
+#! non_tail_recursion (EXPECT_REJECTED): the O(1) call-stack guarantee
+#! makes non-tail self-recursion a compile-time error.  A self-recursive
+#! call must be in strict tail position — the direct expression value of
+#! a `return`, or the non-diverging result expression of a match arm in
+#! tail position.  Any other position (an operand of a larger expression,
+#! a binding initializer, a bare statement) grows the CPU call stack per
+#! frame, so the compiler rejects it with:
+#!
+#!   non-tail recursive call to '<fn>' is forbidden: self-recursion must
+#!   be in tail position (rewrite using an accumulator or an explicit
+#!   work stack)
+
+# Non-tail: the recursive call is an operand of the multiplication.
+fun fact(n: I64) I64
+  if n <= 1
+    return 1
+  end
+  return n * fact(n - 1)
+end
+
+# Non-tail: the recursive call feeds a binding, and the return happens
+# only after the call has returned.
+fun count_down(n: I64) I64
+  if n <= 0
+    return 0
+  end
+  val rest = count_down(n - 1)
+  return rest + 1
+end
+
+pub fun main() I64
+  return fact(5)
+end

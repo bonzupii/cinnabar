@@ -3,17 +3,17 @@
 # element indices exactly like the cross-statement liveness check.
 # (EXPECT_OK 30.)
 pub type P
-  pub x: Int
-  pub y: Int
+  pub x: I64
+  pub y: I64
 end
 
-fun touch_both(a: &mut P, b: &mut P) Int
+fun touch_both(a: &mut P, b: &mut P) I64
   a.x = 10
   b.y = 20
   return a.x + b.y
 end
 
-pub fun main() Int
+pub fun main() I64
   var pts: [P; 2] = [P(x: 1, y: 2), P(x: 3, y: 4)]
   return touch_both(&mut pts[0], &mut pts[1])
 end

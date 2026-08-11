@@ -1,10 +1,20 @@
-fun fact(n: Int) Int
+# The O(1) call-stack guarantee rejects non-tail self-recursion
+# (`return n * fact(n - 1)` is a compile error), so factorial is written
+# as a tail-recursive accumulator: fact(n) = fact_acc(n, 1), each step
+# folding n into the accumulator before recursing.  main returns 120,
+# unchanged from the original non-tail form.
+
+fun fact_acc(n: I64, acc: I64) I64
   if n <= 1
-    return 1
+    return acc
   end
-  return n * fact(n - 1)
+  return fact_acc(n - 1, acc * n)
 end
 
-pub fun main() Int
+fun fact(n: I64) I64
+  return fact_acc(n, 1)
+end
+
+pub fun main() I64
   return fact(5)
 end

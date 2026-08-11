@@ -1,15 +1,15 @@
-const OP_LOAD: Int = 0
-const OP_HALT: Int = 7
+const OP_LOAD: I64 = 0
+const OP_HALT: I64 = 7
 
-pub const PROG: Int = (0x01) | (0x70 << 8)
+pub const PROG: I64 = (0x01) | (0x70 << 8)
 
-fun fetch(prog: Int, pc: Int) Int
+fun fetch(prog: I64, pc: I64) I64
   return (prog >> (pc * 8)) & 0xFF
 end
 
-pub fun main() Int
-  var acc: Int = 0
-  var pc: Int = 0
+pub fun main() I64
+  var acc: I64 = 0
+  var pc: I64 = 0
   var running: Bool = true
 
   while running

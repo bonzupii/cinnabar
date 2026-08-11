@@ -1,13 +1,13 @@
-pub const ZERO_INT: Int = 0
+pub const ZERO_INT: I64 = 0
 
-pub fun sum_to(limit: Int) Int
-  var total: Int = ZERO_INT
-  var i: Int = ZERO_INT
+pub fun sum_to(limit: I64) I64
+  var total: I64 = ZERO_INT
+  var i: I64 = ZERO_INT
   total = total + i
   i = i + 1
   return total
 end
 
-pub fun main() Int
+pub fun main() I64
   return sum_to(3)
 end

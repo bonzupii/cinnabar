@@ -19,32 +19,32 @@ use Collections.vec_new
 use Collections.vec_view
 use Collections.vec_free
 
-fun choose_ref(a: &Collections.Vec(Int), b: &Collections.Vec(Int)) &[Int]
+fun choose_ref(a: &Collections.Vec(I64), b: &Collections.Vec(I64)) &[I64]
   if a_len(a) < b_len(b)
     return vec_view(a)
   end
   return vec_view(b)
 end
 
-fun a_len(v: &Collections.Vec(Int)) Int
+fun a_len(v: &Collections.Vec(I64)) I64
   return 1
 end
 
-fun b_len(v: &Collections.Vec(Int)) Int
+fun b_len(v: &Collections.Vec(I64)) I64
   return 2
 end
 
-fun fail_with_x(x: Collections.Vec(Int)) impure Int
+fun fail_with_x(x: Collections.Vec(I64)) impure I64
   vec_free(x)
   return 1
 end
 
-pub fun main() impure Int
-  val x = match vec_new[Int]()
+pub fun main() impure I64
+  val x = match vec_new[I64]()
     Ok(v) => v
     Err(error) => return 1
   end
-  val y = match vec_new[Int]()
+  val y = match vec_new[I64]()
     Ok(v) => v
     Err(error) => return fail_with_x(x)
   end

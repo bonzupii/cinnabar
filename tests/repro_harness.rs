@@ -13,7 +13,7 @@ const EXPECT_OK: &[(&str, i32)] = &[
     ("idx10e_same_expr_disjoint", 30),
     ("rec_test", 120),
     ("tail_rec", 64),
-    ("mem_probe", 70),
+    ("mem_probe", 0),
     ("hanoi", 255),
     ("head", 10),
     ("enum_test", 0),
@@ -50,6 +50,8 @@ const EXPECT_OK: &[(&str, i32)] = &[
     ("ret_borrow_shared_twice", 0),
     ("ret_borrow_single_origin", 0),
     ("slice_test", 0),
+    ("vec_pop_drain", 0),
+    ("hash_map_remove_drain", 0),
 ];
 
 const EXPECT_REJECTED: &[&str] = &[
@@ -79,6 +81,19 @@ const EXPECT_REJECTED: &[&str] = &[
     "idx10g_element_double_move",
     "b3_two_mut",
     "b4_mut_shared",
+    "int_literal_range",
+    "int_unsigned_neg",
+    "non_tail_recursion",
+    "vec_no_extraction",
+    "vec_undrained_free",
+    "vec_pop_unconsumed",
+    "hash_map_undrained_free",
+    "hash_map_linear_key_undrained_free",
+    "unresolved_call_cascade",
+    "non_struct_field_cascade",
+    "undeclared_const_cascade",
+    "const_div_zero_cascade",
+    "malformed_type_cascade",
 ];
 
 const RECORD_ONLY: &[&str] = &[

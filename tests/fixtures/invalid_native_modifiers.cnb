@@ -1,5 +1,5 @@
 # 1. Native on const
-nat const BAD_NATIVE_CONST: Int = 1
+nat const BAD_NATIVE_CONST: I64 = 1
 
 # 2. Native on mod
 nat mod BadNativeMod
@@ -13,9 +13,9 @@ nat trait BadNativeTrait
 end
 
 # 5. Native on impl
-nat impl BadNativeTrait for Int
+nat impl BadNativeTrait for I64
 end
 
-pub fun main() Int
+pub fun main() I64
   return 0
 end

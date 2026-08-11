@@ -1,16 +1,16 @@
 # Snake case violation
-pub fun camelCaseFunction() Int
+pub fun camelCaseFunction() I64
   return 1
 end
 
 # SCREAMING_SNAKE_CASE violation
-pub const Bad_Const_Name: Int = 2
+pub const Bad_Const_Name: I64 = 2
 
 # PascalCase violation
 pub type bad_type_name
   pub ValidVariant
 end
 
-pub fun main() Int
+pub fun main() I64
   return 0
 end

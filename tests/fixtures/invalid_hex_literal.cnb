@@ -1,7 +1,7 @@
 pub const BAD_HEX: U32 = 0xG123
-pub const TOO_BIG_HEX: Int = 0xFFFFFFFFFFFFFFFF
-pub const UNEXPECTED_CHAR: Int = $100
+pub const TOO_BIG_HEX: I64 = 0xFFFFFFFFFFFFFFFF
+pub const UNEXPECTED_CHAR: I64 = $100
 
-pub fun main() Int
+pub fun main() I64
   return 0
 end

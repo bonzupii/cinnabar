@@ -2,19 +2,19 @@ pub const OOB_INDEX: Usize = 9
 pub const ONE_USIZE: Usize = 1
 
 pub type Pair
-  pub x: Int
-  pub y: Int
+  pub x: I64
+  pub y: I64
 end
 
-fun pair_sum(value: &Pair) Int
+fun pair_sum(value: &Pair) I64
   return value.x + value.y
 end
 
-fun read_mut(value: &mut Pair) Int
+fun read_mut(value: &mut Pair) I64
   return value.x + value.y
 end
 
-fun oob_score(index: Usize, length: Usize) Int
+fun oob_score(index: Usize, length: Usize) I64
   if index == OOB_INDEX && length == ONE_USIZE
     return 0
   end
@@ -22,7 +22,7 @@ fun oob_score(index: Usize, length: Usize) Int
   return 1
 end
 
-fun check_borrowed(p0: Pair, rest: &[Pair], shared_sum: Int, mut_sum: Int) Int
+fun check_borrowed(p0: Pair, rest: &[Pair], shared_sum: I64, mut_sum: I64) I64
   # Dynamic index into a slice: Result(&Pair, IndexError), with the
   # borrowed element carried in the Ok payload.  rest is arr[1..], so
   # rest[0] is Pair(3, 4) and the index 9 is out of bounds.
@@ -43,7 +43,7 @@ fun check_borrowed(p0: Pair, rest: &[Pair], shared_sum: Int, mut_sum: Int) Int
   return 1
 end
 
-pub fun main() Int
+pub fun main() I64
   val arr = [Pair(x: 1, y: 2), Pair(x: 3, y: 4)]
 
   # Constant in-range indices: &arr[i] and &mut arr[i] borrow the element.

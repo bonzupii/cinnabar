@@ -1,0 +1,7 @@
+#! Bug proof: field access on a scalar inside a typed `val` initializer
+#! must produce exactly one diagnostic (the non-struct field error), not
+#! a secondary "cannot assign '?' to 'I64'" cascade from the dropped type.
+pub fun main() I64
+  val x: I64 = 42.some_field
+  return 0
+end

@@ -5,13 +5,13 @@
 # stack (and now the recursion guard) long before finishing.  The exit
 # status is 1000000 mod 256 = 64.
 
-fun tail_recurse(n: Int, acc: Int) Int
+fun tail_recurse(n: I64, acc: I64) I64
   if n <= 0
     return acc
   end
   return tail_recurse(n - 1, acc + 1)
 end
 
-pub fun main() Int
+pub fun main() I64
   return tail_recurse(1000000, 0)
 end

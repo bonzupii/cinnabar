@@ -1,0 +1,9 @@
+#! Bug proof: a constant initializer referencing a name that is not
+#! declared must produce exactly one diagnostic, not a secondary
+#! "constant initializer type mismatch: expected 'I64', found '?'"
+#! cascade from the dropped declared type.
+pub const A: I64 = UNDECLARED_CONST
+
+pub fun main() I64
+  return 0
+end

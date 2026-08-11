@@ -6,7 +6,7 @@
 |#
 
 pub const SERVER_PORT: Usize = 4067
-pub const MAX_REQUESTS: Int = 1000
+pub const MAX_REQUESTS: I64 = 1000
 
 # ===== HTTP/1.1 200 OK response header =====
 pub const H_00: U8 = 0x48
@@ -864,7 +864,7 @@ pub const B_746: U8 = 0x0A
 
 pub mod Net
   pub type Error
-    pub SystemFault(Int)
+    pub SystemFault(I64)
   end
 
   pub nat type Socket
@@ -1078,25 +1078,25 @@ fun build_response() impure Result(Collections.Vec(U8), Collections.Error)
   return Ok(vec)
 end
 
-fun fail_start(vec: Collections.Vec(U8), error: Net.Error) impure Int
+fun fail_start(vec: Collections.Vec(U8), error: Net.Error) impure I64
   vec_free(vec)
   return 2
 end
 
-fun fail_serve(listener: Net.Socket, vec: Collections.Vec(U8), error: Net.Error) impure Int
+fun fail_serve(listener: Net.Socket, vec: Collections.Vec(U8), error: Net.Error) impure I64
   close(listener)
   vec_free(vec)
   return 3
 end
 
-fun fail_conn(listener: Net.Socket, conn: Net.Socket, vec: Collections.Vec(U8), error: Net.Error) impure Int
+fun fail_conn(listener: Net.Socket, conn: Net.Socket, vec: Collections.Vec(U8), error: Net.Error) impure I64
   close(conn)
   close(listener)
   vec_free(vec)
   return 4
 end
 
-pub fun main() impure Int
+pub fun main() impure I64
   val response = match build_response()
     Ok(v) => v
     Err(error) => return 1

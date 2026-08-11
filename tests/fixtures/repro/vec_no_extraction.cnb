@@ -1,0 +1,52 @@
+#! The Resolvability Rule (MANIFESTO Principle 7): a native container may
+#! hold linear elements only when its surface provides a by-value
+#! extraction function.  This Collections declares vec_push but no
+#! vec_pop, so pushing the linear Block must be rejected with "cannot
+#! store linear element in container: container provides no native
+#! extraction surface".
+
+pub mod Collections
+  pub nat type Vec(T)
+
+  pub type Error
+    pub AllocationFailed(Usize)
+  end
+
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_push<T>(vec: &mut Vec(T), value: T) impure Result(Unit, Error)
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
+end
+
+pub mod Memory
+  pub nat type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+  end
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+end
+
+use Collections.vec_new
+use Collections.vec_push
+use Collections.vec_free
+use Collections.Vec
+use Memory.allocate
+
+pub fun main() impure I64
+  val vec = match vec_new[Memory.Block]()
+    Ok(v) => v
+    Err(error) => return 1
+  end
+
+  val block = match allocate(64)
+    Ok(b) => b
+    Err(error) => return 2
+  end
+
+  match vec_push(&mut vec, block)
+    Ok(v) => v
+    Err(error) => return 3
+  end
+  vec_free(vec)
+  return 0
+end

@@ -18,14 +18,14 @@ use Memory.deallocate
 
 pub type Holder
   pub block: Memory.Block
-  pub tag: Int
+  pub tag: I64
 end
 
 fun steal_block_falloff(r: &mut Holder) impure Unit
   deallocate(r.block)
 end
 
-pub fun main() impure Int
+pub fun main() impure I64
   val block = match allocate(1)
     Ok(value) => value
     Err(error) => return 1

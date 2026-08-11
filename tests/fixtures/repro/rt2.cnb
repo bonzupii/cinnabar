@@ -9,8 +9,8 @@ end
 
 use Collections.vec_new
 
-pub fun main() impure Int
-  val vec = match vec_new[Int]()
+pub fun main() impure I64
+  val vec = match vec_new[I64]()
     Ok(v) => v
     Err(error) => return 1
   end

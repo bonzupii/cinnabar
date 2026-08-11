@@ -4,11 +4,19 @@ end
 
 use Slice.len as slice_len
 
-fun slice_sum(view: &[U8]) Usize
+# The O(1) call-stack guarantee rejects non-tail self-recursion
+# (`Usize.from(first) + slice_sum(rest)` recurses as an operand of `+`),
+# so the sum is a tail-recursive accumulator folding each first byte
+# into the accumulator before recursing on the rest.
+fun slice_sum_acc(view: &[U8], acc: Usize) Usize
   match view
-    [] => return 0
-    [first, rest @ ..] => return Usize.from_u8(first) + slice_sum(rest)
+    [] => return acc
+    [first, rest @ ..] => return slice_sum_acc(rest, acc + Usize.from(first))
   end
+end
+
+fun slice_sum(view: &[U8]) Usize
+  return slice_sum_acc(view, 0)
 end
 
 pub const MAGIC_BYTE_0: U8 = 0x0D
@@ -24,7 +32,7 @@ fun array_as_slice() Usize
   return slice_sum(&bytes)
 end
 
-pub fun main() Int
+pub fun main() I64
   if array_as_slice() == EXPECTED_SUM
     return 0
   end

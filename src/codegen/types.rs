@@ -110,16 +110,20 @@ fn key_kind_of(nodes: &[i64], key: i64) -> i64 {
 }
 
 fn builtin_llvm<'ctx>(context: &'ctx Context, sub: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
-    if sub == BUILTIN_U8 {
-        return Ok(context.i8_type().into());
-    }
-    if sub == BUILTIN_U32 {
-        return Ok(context.i32_type().into());
-    }
     if sub == BUILTIN_BOOL {
         return Ok(context.bool_type().into());
     }
-    if sub == BUILTIN_INT || sub == BUILTIN_USIZE {
+    let width = builtin_int_width(sub);
+    if width == 8 {
+        return Ok(context.i8_type().into());
+    }
+    if width == 16 {
+        return Ok(context.i16_type().into());
+    }
+    if width == 32 {
+        return Ok(context.i32_type().into());
+    }
+    if width == 64 {
         return Ok(context.i64_type().into());
     }
     Err(builder_error(span.0, span.1, span.2, "unsupported builtin type"))

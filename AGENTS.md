@@ -2,6 +2,7 @@
 
 ## Tool use
 - Use the built-in tools (Read, Grep, Glob, Edit, Write). Do NOT substitute shell commands (`grep`, `cat`, `head`, `tail`, `rg`, `sed`, `awk`, `wc`) for them — the user finds arbitrary shell usage intrusive. Only run a shell command when it is genuinely required (the prescribed build gate below), never as a convenience substitute for a built-in tool. NEVER run git, rm or any other potentally destructive commands without explicit directives from the user; if directed to use these commands keep it simple and tightly scoped, run commands exactly as directed and do not overstep or do anything stupid or dangerous.
+- (STRICT) `rm` IS STRICTLY PROHIBITED AT ALL TIMES FOR ANY REASON. PERIOD.
 - (STRICT) After any code change, verify with exactly: `nix develop --command ./pre_commit_check.sh`. Results are truncated into `pre_commit.log` (gitignored); read it with the Read tool, not `tail`/`head`. Never modify `pre_commit_check.sh`. This check pipeline guarantees that tests are never run against stale binaries on build failure.
 - `cargo build`/`cargo clippy` outside `nix develop` fails (no `llvm-config`/llc/clang on host PATH).
 - **Semgrep File Restriction (STRICT)**: You are strictly forbidden from reading, searching, inspecting, or editing `.semgrep.yml` or any semgrep rule files under any circumstances. Semgrep is an opaque, black-box verification gate in `pre_commit_check.sh`—fix code structurally rather than analyzing rules to evade detection.

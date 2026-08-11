@@ -10,13 +10,13 @@
 use NonExistentModule.some_func
 
 # 2. Duplicate symbol declaration in scope
-pub const DUPLICATE_CONST: Int = 10
-pub const DUPLICATE_CONST: Int = 20
+pub const DUPLICATE_CONST: I64 = 10
+pub const DUPLICATE_CONST: I64 = 20
 
 # Declarations for type checking
 pub type Point
-  pub x: Int
-  pub y: Int
+  pub x: I64
+  pub y: I64
 end
 
 pub type Option(T)
@@ -32,26 +32,26 @@ end
 # --- TypeChecker: Item-Level & Constant Errors ---
 
 # 3. Constant initializer type mismatch
-pub const BAD_CONST: Int = true
+pub const BAD_CONST: I64 = true
 
 # --- TypeChecker: Statement & Assignment Errors ---
 
 pub fun test_statement_errors() Unit
   # 4. Local val type mismatch
-  val bad_val: Int = true
+  val bad_val: I64 = true
 
   # 5. Local var type mismatch
-  var bad_var: Int = true
+  var bad_var: I64 = true
 
   # 6. Assignment to undeclared variable
   undeclared_var = 100
 
   # 7. Assignment requires var (val is immutable)
-  val immutable_val: Int = 10
+  val immutable_val: I64 = 10
   immutable_val = 20
 
   # 8. Assignment type mismatch
-  var mutable_var: Int = 10
+  var mutable_var: I64 = 10
   mutable_var = true
 
   # 9. While condition non-Bool
@@ -79,29 +79,29 @@ end
 # --- TypeChecker: Control Flow & Try Operator Errors ---
 
 # 14. Return type mismatch
-pub fun test_return_mismatch() Int
+pub fun test_return_mismatch() I64
   return true
 end
 
 # 15. Empty return type mismatch
-pub fun test_empty_return_mismatch() Int
+pub fun test_empty_return_mismatch() I64
   return
 end
 
 # 16. 'try' on Result in function returning non-Result
-pub fun test_try_result_in_int_func() Int
+pub fun test_try_result_in_int_func() I64
   val x = try Ok(10)
   return x
 end
 
 # 17. 'try' on Option in function returning non-Option
-pub fun test_try_option_in_int_func() Int
+pub fun test_try_option_in_int_func() I64
   val x = try Some(10)
   return x
 end
 
 # 18. 'try' on non-Result/Option type
-pub fun test_try_on_int() Option(Int)
+pub fun test_try_on_int() Option(I64)
   val x = try 100
   return Some(x)
 end
@@ -109,13 +109,13 @@ end
 # --- TypeChecker: Pattern Matching & If Errors ---
 
 # 19. Empty match expression
-pub fun test_empty_match(target: Int) Int
+pub fun test_empty_match(target: I64) I64
   return match target
   end
 end
 
-# 20. Match arm type mismatch (arm 0 evaluates to Int, arm 1 evaluates to Bool)
-pub fun test_match_arm_mismatch(target: Int) Int
+# 20. Match arm type mismatch (arm 0 evaluates to I64, arm 1 evaluates to Bool)
+pub fun test_match_arm_mismatch(target: I64) I64
   return match target
     1 => 100
     2 => true
@@ -138,7 +138,7 @@ end
 
 # --- Resolver: Unknown Symbols and Paths ---
 
-pub fun test_resolver_unknown_symbols() Int
+pub fun test_resolver_unknown_symbols() I64
   # 23. Unknown variable reference
   val x = unknown_variable_name
 
@@ -148,6 +148,6 @@ pub fun test_resolver_unknown_symbols() Int
   return x
 end
 
-pub fun main() Int
+pub fun main() I64
   return 0
 end

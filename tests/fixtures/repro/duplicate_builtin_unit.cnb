@@ -3,9 +3,9 @@
 # names the builtin, never a bare 'duplicate symbol'.
 
 pub type Unit
-  pub x: Int
+  pub x: I64
 end
 
-pub fun main() Int
+pub fun main() I64
   return 0
 end

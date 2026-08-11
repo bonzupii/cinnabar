@@ -1,0 +1,8 @@
+#! Bug proof: a call to an unknown function inside a typed `val`
+#! initializer must produce exactly one diagnostic (the unknown-function
+#! error), not a secondary "call result type mismatch: expected 'I64',
+#! found '?'" cascade from the dropped type.
+pub fun main() I64
+  val x: I64 = non_existent_function()
+  return 0
+end

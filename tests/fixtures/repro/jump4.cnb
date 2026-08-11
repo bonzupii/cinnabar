@@ -1,9 +1,9 @@
-pub const PROG: Int = (0x00) | (0x12 << 8) | (0x65 << 16) | (0x30 << 24) | (0x52 << 32) | (0x70 << 40)
+pub const PROG: I64 = (0x00) | (0x12 << 8) | (0x65 << 16) | (0x30 << 24) | (0x52 << 32) | (0x70 << 40)
 
-pub fun main() Int
-  var pc: Int = 0
+pub fun main() I64
+  var pc: I64 = 0
   var running: Bool = true
-  var count: Int = 0
+  var count: I64 = 0
 
   while running
     val code = (PROG >> (pc * 8)) & 0xFF

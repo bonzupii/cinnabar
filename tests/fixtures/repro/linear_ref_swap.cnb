@@ -18,15 +18,15 @@ use Memory.deallocate
 
 pub type Holder
   pub block: Memory.Block
-  pub tag: Int
+  pub tag: I64
 end
 
-fun fail_alloc() Int
+fun fail_alloc() I64
   return 1
 end
 
 #! Error path: consume the whole holder so the early return is legal.
-fun fail_consume(holder: Holder) impure Int
+fun fail_consume(holder: Holder) impure I64
   deallocate(holder.block)
   return 1
 end
@@ -39,7 +39,7 @@ fun replace_block(holder: &mut Holder, replacement: Memory.Block) impure Unit
   return Unit
 end
 
-pub fun main() impure Int
+pub fun main() impure I64
   val original = match allocate(1)
     Ok(value) => value
     Err(error) => return fail_alloc()

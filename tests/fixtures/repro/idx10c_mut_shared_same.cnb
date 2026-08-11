@@ -3,11 +3,11 @@
 # shared read overlapping an exclusive write of the same element must be
 # rejected.  (EXPECT_REJECTED.)
 pub type P
-  pub x: Int
-  pub y: Int
+  pub x: I64
+  pub y: I64
 end
 
-pub fun main() Int
+pub fun main() I64
   var pts: [P; 2] = [P(x: 1, y: 2), P(x: 3, y: 4)]
   val a = &mut pts[0]
   val s = &pts[0]
