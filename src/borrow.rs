@@ -2017,10 +2017,10 @@ fn check_fn(
 
 fn analyze_fn(f: &mut F, ctx: &mut Ctx, entry: i64) {
     let live_after = compute_liveness(f, ctx);
-    let (entry_state, exit_states, inconsistencies) = linear_fixpoint(f, ctx, entry);
+    let flow = linear_fixpoint(f, ctx, entry);
     let entry_origins = origin_fixpoint(f, ctx, entry);
     let entry_cont = container_fixpoint(f, ctx, entry);
-    report(f, ctx, &live_after, &entry_state, &exit_states, &inconsistencies, &entry_origins, &entry_cont);
+    report(f, ctx, &live_after, &flow, &entry_origins, &entry_cont);
 }
 
 fn same_set(a: &[i64], b: &[i64]) -> bool {
@@ -2446,7 +2446,10 @@ fn apply_block_linear(f: &F, block: i64, state: &mut [i64], report: bool, ctx: &
     }
 }
 
-fn linear_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> (Vec<Vec<i64>>, Vec<Vec<i64>>, Vec<(i64, i64)>) {
+// (per-block entry states, per-block exit states, inconsistent joins).
+type LinearFlow = (Vec<Vec<i64>>, Vec<Vec<i64>>, Vec<(i64, i64)>);
+
+fn linear_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> LinearFlow {
     let nblocks = f.6.len() as i64;
     let npaths = f.2.len() as i64;
     let mut entry_state: Vec<Vec<i64>> = Vec::new();
@@ -3269,12 +3272,11 @@ fn report(
     f: &F,
     ctx: &mut Ctx,
     live_after: &[Vec<i64>],
-    entry_state: &[Vec<i64>],
-    exit_states: &[Vec<i64>],
-    inconsistencies: &[(i64, i64)],
+    flow: &LinearFlow,
     entry_origins: &[Vec<Vec<i64>>],
     entry_cont: &[Vec<i64>],
 ) {
+    let (entry_state, exit_states, inconsistencies) = flow;
     let mut idx = 0usize;
     while idx < inconsistencies.len() {
         match inconsistencies.get(idx) {

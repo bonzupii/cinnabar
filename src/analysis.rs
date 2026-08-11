@@ -153,10 +153,7 @@ pub fn offset_to_position(text: &str, offset: i64) -> (i64, i64) {
     };
     let mut col16 = 0i64;
     let mut byte_pos = line_start;
-    let tail = match text.get(line_start as usize..) {
-        Some(rest) => rest,
-        None => "",
-    };
+    let tail: &str = text.get(line_start as usize..).unwrap_or_default();
     for ch in tail.chars() {
         if byte_pos >= clamped {
             break;
@@ -178,10 +175,7 @@ pub fn position_to_offset(text: &str, line: i64, character: i64) -> i64 {
         Some(start) => *start,
         None => return text.len() as i64,
     };
-    let tail = match text.get(line_start as usize..) {
-        Some(rest) => rest,
-        None => "",
-    };
+    let tail: &str = text.get(line_start as usize..).unwrap_or_default();
     let mut col16 = 0i64;
     let mut byte_pos = line_start;
     for ch in tail.chars() {

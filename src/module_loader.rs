@@ -3,7 +3,13 @@ use std::path::Path;
 
 type Loaded = (i64, Vec<(i64, i64)>);
 
-type Loader = (Vec<(String, String)>, Vec<(i64, i64)>, Vec<(String, i64)>);
+// (loaded files, external modules, worklist, unsaved-buffer overlay).
+type Loader<'a> = (
+    Vec<(String, String)>,
+    Vec<(i64, i64)>,
+    Vec<(String, i64)>,
+    &'a [(String, String)],
+);
 
 pub fn load(
     names: &mut Vec<String>,
@@ -32,14 +38,14 @@ pub fn load_with_overlay(
         Some(text) => text,
         None => return (None, Vec::new()),
     };
-    let mut loader: Loader = (Vec::new(), Vec::new(), Vec::new());
+    let mut loader: Loader = (Vec::new(), Vec::new(), Vec::new(), overlay);
     loader.0.push((entry_path.to_string(), source.clone()));
     if !parse_file(names, nodes, lists, errors, &source, 0, root) {
         return (None, loader.0);
     }
     loader.2.push((entry_path.to_string(), root));
     while let Some((path, list)) = loader.2.pop() {
-        process_imports(names, nodes, lists, errors, &path, list, overlay, &mut loader);
+        process_imports(names, nodes, lists, errors, &path, list, &mut loader);
     }
     let files = loader.0;
     let ext_mods = loader.1;
@@ -86,7 +92,6 @@ fn process_imports(
     errors: &mut Vec<Diag>,
     path: &str,
     list: i64,
-    overlay: &[(String, String)],
     loader: &mut Loader,
 ) {
     let declared = declared_module_names(nodes, lists, list);
@@ -96,9 +101,9 @@ fn process_imports(
     while let Some(pair) = uses.get(idx) {
         if !name_in(&declared, pair.0)
             && !loaded_name(&loader.1, pair.0)
-            && let Some(module) = sibling_module(&dir, names, overlay, pair.0)
+            && let Some(module) = sibling_module(&dir, names, loader.3, pair.0)
         {
-            load_sibling(names, nodes, lists, errors, module, pair.1, overlay, loader);
+            load_sibling(names, nodes, lists, errors, module, pair.1, loader);
         }
         idx += 1;
     }
@@ -116,11 +121,10 @@ fn load_sibling(
     errors: &mut Vec<Diag>,
     module: (String, i64),
     use_item: i64,
-    overlay: &[(String, String)],
     loader: &mut Loader,
 ) {
     let (mod_path, mod_name) = module;
-    let source = read_source_at(&mod_path, overlay, errors, node_file(nodes, use_item), node_start(nodes, use_item), node_end(nodes, use_item));
+    let source = read_source_at(&mod_path, loader.3, errors, node_file(nodes, use_item), node_start(nodes, use_item), node_end(nodes, use_item));
     let mod_source = match source {
         Some(text) => text,
         None => return,
