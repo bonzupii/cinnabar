@@ -309,13 +309,13 @@ The default `full` profile preserves exhaustive gate coverage. For quicker local
 nix develop --command cargo test --quiet
 
 # Routine local iteration
-nix develop --command env CINNABAR_TEST_PROFILE=balanced cargo test --quiet
+nix develop --command cargo test --quiet --features test-profile-balanced
 
 # Fastest structural feedback
-nix develop --command env CINNABAR_TEST_PROFILE=smoke cargo test --quiet
+nix develop --command cargo test --quiet --features test-profile-smoke
 ```
 
-Individual budgets can be overridden when a profile is still broader or narrower than needed:
+Individual budgets can be overridden when a reduced profile is still broader or narrower than needed. The full profile ignores these variables, so an exported local override cannot silently reduce `pre_commit_check.sh` coverage:
 
 | Environment variable | Controls |
 | --- | --- |

@@ -8,27 +8,18 @@ pub enum TestProfile {
 }
 
 pub fn test_profile() -> TestProfile {
-    match std::env::var("CINNABAR_TEST_PROFILE") {
-        Ok(value) => match value.as_str() {
-            "full" => TestProfile::Full,
-            "balanced" => TestProfile::Balanced,
-            "smoke" => TestProfile::Smoke,
-            invalid => {
-                assert!(
-                    false,
-                    "CINNABAR_TEST_PROFILE must be full, balanced, or smoke; got '{}'",
-                    invalid
-                );
-                TestProfile::Full
-            }
-        },
-        Err(error) => match error {
-            VarError::NotPresent => TestProfile::Full,
-            VarError::NotUnicode(value) => {
-                assert!(false, "CINNABAR_TEST_PROFILE is not Unicode: {:?}", value);
-                TestProfile::Full
-            }
-        },
+    let balanced = cfg!(feature = "test-profile-balanced");
+    let smoke = cfg!(feature = "test-profile-smoke");
+    assert!(
+        !(balanced && smoke),
+        "test-profile-balanced and test-profile-smoke cannot be enabled together"
+    );
+    if balanced {
+        TestProfile::Balanced
+    } else if smoke {
+        TestProfile::Smoke
+    } else {
+        TestProfile::Full
     }
 }
 
@@ -64,6 +55,14 @@ pub fn usize_control(name: &str, default: usize) -> usize {
                 default
             }
         },
+    }
+}
+
+pub fn reduced_usize_control(profile: TestProfile, name: &str, default: usize) -> usize {
+    match profile {
+        TestProfile::Full => default,
+        TestProfile::Balanced => usize_control(name, default),
+        TestProfile::Smoke => usize_control(name, default),
     }
 }
 

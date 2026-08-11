@@ -3,7 +3,9 @@ mod test_controls;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use test_controls::{evenly_selected, profile_name, profile_usize, test_profile, usize_control};
+use test_controls::{
+    evenly_selected, profile_name, profile_usize, reduced_usize_control, test_profile,
+};
 
 const EXPECT_OK: &[(&str, i32)] = &[
     ("hello", 0),
@@ -210,8 +212,10 @@ fn repro_config() -> ReproConfig {
         BALANCED_RECORD_CASES,
         SMOKE_RECORD_CASES,
     );
-    let run_cases = usize_control("CINNABAR_REPRO_RUN_CASES", run_default);
-    let record_cases = usize_control("CINNABAR_REPRO_RECORD_CASES", record_default);
+    let run_cases =
+        reduced_usize_control(profile, "CINNABAR_REPRO_RUN_CASES", run_default);
+    let record_cases =
+        reduced_usize_control(profile, "CINNABAR_REPRO_RECORD_CASES", record_default);
     assert!(
         run_cases <= EXPECT_OK.len(),
         "CINNABAR_REPRO_RUN_CASES ({}) cannot exceed the {} expected-success fixtures",
@@ -229,8 +233,20 @@ fn repro_config() -> ReproConfig {
         test_controls::TestProfile::Balanced => false,
         test_controls::TestProfile::Smoke => false,
     };
-    let link_compile_only = bool_control("CINNABAR_REPRO_LINK_COMPILE_ONLY", link_default);
-    let run_timeout = usize_control("CINNABAR_TEST_RUN_TIMEOUT_SECS", DEFAULT_RUN_TIMEOUT_SECS);
+    let link_compile_only = match profile {
+        test_controls::TestProfile::Full => link_default,
+        test_controls::TestProfile::Balanced => {
+            bool_control("CINNABAR_REPRO_LINK_COMPILE_ONLY", link_default)
+        }
+        test_controls::TestProfile::Smoke => {
+            bool_control("CINNABAR_REPRO_LINK_COMPILE_ONLY", link_default)
+        }
+    };
+    let run_timeout = reduced_usize_control(
+        profile,
+        "CINNABAR_TEST_RUN_TIMEOUT_SECS",
+        DEFAULT_RUN_TIMEOUT_SECS,
+    );
     assert!(run_timeout > 0, "CINNABAR_TEST_RUN_TIMEOUT_SECS must be greater than zero");
     ReproConfig {
         profile,

@@ -16,8 +16,9 @@
 //! execution tests completely new trees.  Set CINNABAR_FUZZ_SEED to replay a
 //! specific run.  Any failure saves the generated source to
 //! tests/fixtures/repro/fuzz_fail_<seed>.cnb and prints the seed to stderr.
-//! CINNABAR_TEST_PROFILE selects full (default), balanced, or smoke coverage;
-//! the CINNABAR_FUZZ_* controls can override individual corpus budgets.
+//! Cargo features select balanced or smoke coverage; without either feature,
+//! the full gate profile ignores local budget environment variables.  The
+//! CINNABAR_FUZZ_* controls can override reduced-profile corpus budgets.
 
 #[path = "support/test_controls.rs"]
 mod test_controls;
@@ -25,7 +26,9 @@ mod test_controls;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use test_controls::{evenly_selected, profile_name, profile_usize, test_profile, usize_control};
+use test_controls::{
+    evenly_selected, profile_name, profile_usize, reduced_usize_control, test_profile,
+};
 
 const DEFAULT_POSITIVE_CASES: usize = 80;
 const DEFAULT_NEGATIVE_CASES: usize = 80;
@@ -63,23 +66,36 @@ fn fuzz_config() -> FuzzConfig {
         BALANCED_NEGATIVE_CASES,
         SMOKE_NEGATIVE_CASES,
     );
-    let positive_cases = usize_control("CINNABAR_FUZZ_POSITIVE_CASES", positive_default);
-    let negative_cases = usize_control("CINNABAR_FUZZ_NEGATIVE_CASES", negative_default);
+    let positive_cases = reduced_usize_control(
+        profile,
+        "CINNABAR_FUZZ_POSITIVE_CASES",
+        positive_default,
+    );
+    let negative_cases = reduced_usize_control(
+        profile,
+        "CINNABAR_FUZZ_NEGATIVE_CASES",
+        negative_default,
+    );
     let run_default = profile_usize(
         profile,
         positive_cases,
         positive_cases.min(BALANCED_RUN_CASES),
         positive_cases.min(SMOKE_RUN_CASES),
     );
-    let run_cases = usize_control("CINNABAR_FUZZ_RUN_CASES", run_default);
+    let run_cases = reduced_usize_control(profile, "CINNABAR_FUZZ_RUN_CASES", run_default);
     assert!(
         run_cases <= positive_cases,
         "CINNABAR_FUZZ_RUN_CASES ({}) cannot exceed CINNABAR_FUZZ_POSITIVE_CASES ({})",
         run_cases,
         positive_cases
     );
-    let run_timeout = usize_control("CINNABAR_TEST_RUN_TIMEOUT_SECS", DEFAULT_RUN_TIMEOUT_SECS);
-    let compile_timeout = usize_control(
+    let run_timeout = reduced_usize_control(
+        profile,
+        "CINNABAR_TEST_RUN_TIMEOUT_SECS",
+        DEFAULT_RUN_TIMEOUT_SECS,
+    );
+    let compile_timeout = reduced_usize_control(
+        profile,
         "CINNABAR_TEST_COMPILE_TIMEOUT_SECS",
         DEFAULT_COMPILE_TIMEOUT_SECS,
     );
