@@ -58,6 +58,11 @@ fn main() -> Result<(), String> {
     log_message(&connection, &format!("cinnabar-lsp ready for {}", client))?;
     let mut state = ServerState { docs: Vec::new(), published: Vec::new() };
     main_loop(&connection, &mut state)?;
+    // The transport threads terminate when every channel endpoint is gone.
+    // Release the server-side endpoints before waiting for those threads;
+    // otherwise a clean shutdown deadlocks with the writer waiting on the
+    // still-live sender held by `connection`.
+    drop(connection);
     io_threads.join().map_err(|err| format!("io threads: {}", err))?;
     Ok(())
 }
@@ -593,5 +598,31 @@ fn path_to_uri(path: &str) -> String {
         format!("file://{}", percent_encode_path(&normalized))
     } else {
         format!("file:///{}", percent_encode_path(&normalized))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{path_to_uri, uri_to_path};
+
+    #[test]
+    fn windows_file_uri_roundtrips_reserved_characters() {
+        let path = "C:\\Users\\Cinnabar Dev\\source#one.cnb";
+        let uri = path_to_uri(path);
+        assert_eq!(uri, "file:///C:/Users/Cinnabar%20Dev/source%23one.cnb");
+        assert_eq!(uri_to_path(&uri), Some("C:/Users/Cinnabar Dev/source#one.cnb".to_string()));
+    }
+
+    #[test]
+    fn posix_file_uri_roundtrips_reserved_characters() {
+        let path = "/tmp/Cinnabar Dev/source#one.cnb";
+        let uri = path_to_uri(path);
+        assert_eq!(uri, "file:///tmp/Cinnabar%20Dev/source%23one.cnb");
+        assert_eq!(uri_to_path(&uri), Some(path.to_string()));
+    }
+
+    #[test]
+    fn remote_file_authority_is_not_treated_as_local() {
+        assert_eq!(uri_to_path("file://server/share/source.cnb"), None);
     }
 }
