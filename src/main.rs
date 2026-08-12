@@ -1,10 +1,11 @@
 use cinnabar::ast::*;
-use cinnabar::{borrow, codegen, module_loader, resolver, typecheck};
+use cinnabar::{advanced_tools, analysis, borrow, codegen, docs, module_loader, native_stub, project, resolver, typecheck};
 use ariadne::{Color, FnCache, Label, Report, ReportKind, Source};
 use clap::builder::PathBufValueParser;
 use clap::{Arg, ArgAction, Command as ClapCommand};
 use cinnabar::codegen::error::codegen_error_message;
 use cinnabar::codegen::{compile_and_link, compile_to_ir, compile_to_object};
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -14,16 +15,47 @@ struct CliArgs {
     dump_ast: bool,
     dump_typed_ast: bool,
     print_layout: bool,
-    explain_borrow: bool,
+    explain_borrow: Option<String>,
     run: bool,
     opt_level: String,
     emit_llvm: bool,
     emit_obj: bool,
+    format_check: Option<bool>,
+    check_only: bool,
+    tool_command: Option<ToolCommand>,
+}
+
+enum ToolCommand {
+    Doc(Option<PathBuf>),
+    Book(String),
+    Build(String),
+    Run(String),
+    Check,
+    Test(bool),
+    Init,
+    NativeStub,
+    Inspect,
+    Targets,
+    MushlingsInit,
+    MushlingsVerify,
+    FuzzReplay,
+    FuzzMinimize,
+    Soundness,
+    Playground(String),
+}
+
+fn project_path_arg() -> Arg {
+    Arg::new("project_path")
+        .value_name("PATH")
+        .default_value(".")
+        .value_parser(PathBufValueParser::new())
+        .help("Project directory, build.cnb, or source path within the project")
 }
 
 fn parse_args() -> Option<CliArgs> {
     let matches = ClapCommand::new("cinnabar")
         .about("Cinnabar compiler")
+        .subcommand_negates_reqs(true)
         .arg(
             Arg::new("input")
                 .value_name("FILE")
@@ -55,8 +87,11 @@ fn parse_args() -> Option<CliArgs> {
         .arg(
             Arg::new("explain_borrow")
                 .long("explain-borrow")
-                .action(ArgAction::SetTrue)
-                .help("Attach secondary labels to borrow/linearity errors explaining which paths consume a value, where it was bound, and where it was previously moved"),
+                .num_args(0..=1)
+                .require_equals(true)
+                .default_missing_value("human")
+                .value_parser(clap::builder::PossibleValuesParser::new(["human", "json"]))
+                .help("Explain borrow/linearity errors with secondary labels, or emit structured diagnostics with --explain-borrow=json"),
         )
         .arg(
             Arg::new("print_layout")
@@ -93,7 +128,183 @@ fn parse_args() -> Option<CliArgs> {
                 .action(ArgAction::SetTrue)
                 .help("Optimize and assemble to a relocatable object file, skipping the link; default output is the input path with .o"),
         )
+        .arg(
+            Arg::new("check_only")
+                .long("check-only")
+                .hide(true)
+                .action(ArgAction::SetTrue)
+                .conflicts_with_all(["dump_ast", "dump_typed_ast", "print_layout", "emit_llvm", "emit_obj", "run"]),
+        )
+        .subcommand(
+            ClapCommand::new("fmt")
+                .about("Format Cinnabar source in place")
+                .arg(
+                    Arg::new("fmt_input")
+                        .value_name("FILE")
+                        .required(true)
+                        .value_parser(PathBufValueParser::new())
+                        .help("Cinnabar source file to format"),
+                )
+                .arg(
+                    Arg::new("check")
+                        .long("check")
+                        .action(ArgAction::SetTrue)
+                        .help("Exit unsuccessfully if the file is not canonically formatted"),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("doc")
+                .about("Generate HTML documentation for public Cinnabar declarations")
+                .arg(project_path_arg())
+                .arg(
+                    Arg::new("doc_output")
+                        .short('o')
+                        .long("output")
+                        .value_name("DIR")
+                        .value_parser(PathBufValueParser::new())
+                        .help("Documentation output directory (default: target/doc)"),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("book")
+                .about("Serve version-pinned Cinnabook documentation locally")
+                .arg(project_path_arg())
+                .arg(
+                    Arg::new("address")
+                        .long("address")
+                        .default_value("127.0.0.1:7878")
+                        .help("Local address to bind"),
+                ),
+        )
+        .subcommand(ClapCommand::new("build").about("Build the current Cinnabar project").arg(project_path_arg()).arg(target_arg()))
+        .subcommand(ClapCommand::new("run").about("Build and run the current Cinnabar project").arg(project_path_arg()).arg(target_arg()))
+        .subcommand(ClapCommand::new("check").about("Run the compiler front-end without code generation").arg(project_path_arg()))
+        .subcommand(
+            ClapCommand::new("test")
+                .about("Discover and run project tests")
+                .arg(project_path_arg())
+                .arg(
+                    Arg::new("update_snapshots")
+                        .long("update-snapshots")
+                        .action(ArgAction::SetTrue)
+                        .help("Replace diagnostic .stderr snapshots for rejection tests"),
+                ),
+        )
+        .subcommand(ClapCommand::new("init").about("Scaffold a Cinnabar project").arg(project_path_arg()))
+        .subcommand(
+            ClapCommand::new("native-stub")
+                .about("Generate a typed Cinnabar native surface from the constrained native IDL")
+                .arg(Arg::new("project_path").value_name("IDL").required(true).value_parser(PathBufValueParser::new()))
+                .arg(Arg::new("output").short('o').long("output").value_name("FILE").required(true).value_parser(PathBufValueParser::new())),
+        )
+        .subcommand(ClapCommand::new("inspect").about("Build and inspect layouts, sections, symbols, and disassembly").arg(project_path_arg()).arg(Arg::new("output").short('o').long("output").value_name("FILE").value_parser(PathBufValueParser::new())))
+        .subcommand(ClapCommand::new("targets").about("List code-generation targets and their availability"))
+        .subcommand(
+            ClapCommand::new("mushlings").about("Interactive compiler-learning exercises")
+                .subcommand_required(true)
+                .subcommand(ClapCommand::new("init").arg(project_path_arg()))
+                .subcommand(ClapCommand::new("verify").arg(project_path_arg())),
+        )
+        .subcommand(
+            ClapCommand::new("fuzz").about("Replay and minimize saved fuzz artifacts")
+                .subcommand_required(true)
+                .subcommand(ClapCommand::new("replay").arg(Arg::new("project_path").value_name("FILE").required(true).value_parser(PathBufValueParser::new())))
+                .subcommand(ClapCommand::new("minimize").arg(Arg::new("project_path").value_name("FILE").required(true).value_parser(PathBufValueParser::new())).arg(Arg::new("output").short('o').long("output").value_name("FILE").value_parser(PathBufValueParser::new()))),
+        )
+        .subcommand(ClapCommand::new("soundness").about("Emit machine-checkable front-end soundness evidence").arg(project_path_arg()).arg(Arg::new("output").short('o').long("output").value_name("FILE").value_parser(PathBufValueParser::new())))
+        .subcommand(ClapCommand::new("playground").about("Serve a loopback-only local Cinnabar playground").arg(Arg::new("address").long("address").default_value("127.0.0.1:7879")))
         .get_matches();
+    if let Some(format_matches) = matches.subcommand_matches("fmt") {
+        let input = {
+            let path = format_matches.get_one::<PathBuf>("fmt_input")?;
+            path.clone()
+        };
+        return Some(CliArgs {
+            input,
+            output: None,
+            dump_ast: false,
+            dump_typed_ast: false,
+            print_layout: false,
+            explain_borrow: None,
+            run: false,
+            opt_level: "2".to_string(),
+            emit_llvm: false,
+            emit_obj: false,
+            format_check: Some(format_matches.get_flag("check")),
+            check_only: false,
+            tool_command: None,
+        });
+    }
+    let subcommands = ["doc", "book", "build", "run", "check", "test", "init", "native-stub", "inspect", "soundness"];
+    for subcommand_name in subcommands {
+        if let Some(subcommand_matches) = matches.subcommand_matches(subcommand_name) {
+            let input = subcommand_matches.get_one::<PathBuf>("project_path")?.clone();
+            let tool_command = if subcommand_name == "doc" {
+                ToolCommand::Doc(subcommand_matches.get_one::<PathBuf>("doc_output").cloned())
+            } else if subcommand_name == "book" {
+                let address = subcommand_matches.get_one::<String>("address")?.clone();
+                ToolCommand::Book(address)
+            } else if subcommand_name == "build" {
+                ToolCommand::Build(subcommand_matches.get_one::<String>("target")?.clone())
+            } else if subcommand_name == "run" {
+                ToolCommand::Run(subcommand_matches.get_one::<String>("target")?.clone())
+            } else if subcommand_name == "check" {
+                ToolCommand::Check
+            } else if subcommand_name == "test" {
+                ToolCommand::Test(subcommand_matches.get_flag("update_snapshots"))
+            } else if subcommand_name == "init" {
+                ToolCommand::Init
+            } else if subcommand_name == "native-stub" {
+                ToolCommand::NativeStub
+            } else if subcommand_name == "inspect" {
+                ToolCommand::Inspect
+            } else {
+                ToolCommand::Soundness
+            };
+            let tool_output = if subcommand_name == "native-stub" || subcommand_name == "inspect" || subcommand_name == "soundness" {
+                subcommand_matches.get_one::<PathBuf>("output").cloned()
+            } else {
+                None
+            };
+            return Some(CliArgs {
+                input,
+                output: tool_output,
+                dump_ast: false,
+                dump_typed_ast: false,
+                print_layout: false,
+                explain_borrow: None,
+                run: false,
+                opt_level: "2".to_string(),
+                emit_llvm: false,
+                emit_obj: false,
+                format_check: None,
+                check_only: false,
+                tool_command: Some(tool_command),
+            });
+        }
+    }
+    if matches.subcommand_matches("targets").is_some() {
+        return Some(tool_args(PathBuf::from("."), ToolCommand::Targets, None));
+    }
+    if let Some(mushlings) = matches.subcommand_matches("mushlings") {
+        if let Some(init) = mushlings.subcommand_matches("init") {
+            return Some(tool_args(init.get_one::<PathBuf>("project_path")?.clone(), ToolCommand::MushlingsInit, None));
+        }
+        if let Some(verify) = mushlings.subcommand_matches("verify") {
+            return Some(tool_args(verify.get_one::<PathBuf>("project_path")?.clone(), ToolCommand::MushlingsVerify, None));
+        }
+    }
+    if let Some(fuzz) = matches.subcommand_matches("fuzz") {
+        if let Some(replay) = fuzz.subcommand_matches("replay") {
+            return Some(tool_args(replay.get_one::<PathBuf>("project_path")?.clone(), ToolCommand::FuzzReplay, None));
+        }
+        if let Some(minimize) = fuzz.subcommand_matches("minimize") {
+            return Some(tool_args(minimize.get_one::<PathBuf>("project_path")?.clone(), ToolCommand::FuzzMinimize, minimize.get_one::<PathBuf>("output").cloned()));
+        }
+    }
+    if let Some(playground) = matches.subcommand_matches("playground") {
+        return Some(tool_args(PathBuf::from("."), ToolCommand::Playground(playground.get_one::<String>("address")?.clone()), None));
+    }
     let input = {
         let path = matches.get_one::<PathBuf>("input")?;
         path.clone()
@@ -109,12 +320,23 @@ fn parse_args() -> Option<CliArgs> {
         dump_ast: matches.get_flag("dump_ast"),
         dump_typed_ast: matches.get_flag("dump_typed_ast"),
         print_layout: matches.get_flag("print_layout"),
-        explain_borrow: matches.get_flag("explain_borrow"),
+        explain_borrow: matches.get_one::<String>("explain_borrow").cloned(),
         run: matches.get_flag("run"),
         opt_level,
         emit_llvm: matches.get_flag("emit_llvm"),
         emit_obj: matches.get_flag("emit_obj"),
+        format_check: None,
+        check_only: matches.get_flag("check_only"),
+        tool_command: None,
     })
+}
+
+fn target_arg() -> Arg {
+    Arg::new("target").long("target").default_value("host").help("Compilation target; only host is available until the AArch64 runtime/backend lands")
+}
+
+fn tool_args(input: PathBuf, tool_command: ToolCommand, output: Option<PathBuf>) -> CliArgs {
+    CliArgs { input, output, dump_ast: false, dump_typed_ast: false, print_layout: false, explain_borrow: None, run: false, opt_level: "2".to_string(), emit_llvm: false, emit_obj: false, format_check: None, check_only: false, tool_command: Some(tool_command) }
 }
 
 fn main() -> ExitCode {
@@ -122,6 +344,12 @@ fn main() -> ExitCode {
         Some(args) => args,
         None => return ExitCode::FAILURE,
     };
+    if let Some(check) = args.format_check {
+        return format_file(&args.input, check);
+    }
+    if let Some(tool_command) = args.tool_command {
+        return run_tool_command(&args.input, args.output.as_deref(), tool_command);
+    }
     let mut names: Vec<String> = Vec::new();
     let mut nodes: Vec<i64> = Vec::new();
     let mut lists: Vec<Vec<i64>> = Vec::new();
@@ -145,11 +373,22 @@ fn main() -> ExitCode {
         return finish_with_diagnostics(&errors, &[], &files);
     }
     if !borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods) {
-        let shown_notes: &[Note] = if args.explain_borrow { &notes } else { &[] };
+        if args.explain_borrow.as_deref() == Some("json") {
+            return finish_with_diagnostics_json(&errors, &notes, &files);
+        }
+        let shown_notes: &[Note] = if args.explain_borrow.as_deref() == Some("human") {
+            &notes
+        } else {
+            &[]
+        };
         return finish_with_diagnostics(&errors, shown_notes, &files);
     }
     if args.dump_typed_ast {
         print!("{}", cinnabar::inspect::dump_typed_arena(&names, &nodes, &lists));
+        return ExitCode::SUCCESS;
+    }
+    if args.check_only {
+        println!("{} passed all front-end checks.", entry);
         return ExitCode::SUCCESS;
     }
     if args.print_layout {
@@ -196,6 +435,390 @@ fn main() -> ExitCode {
     }
     println!("Successfully compiled {} to '{}'.", entry, out.display());
     ExitCode::SUCCESS
+}
+
+fn format_file(path: &Path, check: bool) -> ExitCode {
+    let source = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(read_err) => {
+            let message = format!("cannot read source file '{}': {}", path.display(), read_err);
+            if render_source_less(&message).is_err() {
+                return ExitCode::FAILURE;
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+    let formatted = cinnabar::format::format_source(&source);
+    if check {
+        if formatted == source {
+            return ExitCode::SUCCESS;
+        }
+        eprintln!("{} is not canonically formatted", path.display());
+        return ExitCode::FAILURE;
+    }
+    if formatted == source {
+        println!("{} is already formatted.", path.display());
+        return ExitCode::SUCCESS;
+    }
+    match std::fs::write(path, formatted) {
+        Ok(()) => {
+            println!("Formatted {}.", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(write_err) => {
+            let message = format!("cannot write source file '{}': {}", path.display(), write_err);
+            if render_source_less(&message).is_err() {
+                return ExitCode::FAILURE;
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_tool_command(path: &Path, output: Option<&Path>, command: ToolCommand) -> ExitCode {
+    match command {
+        ToolCommand::Doc(output) => generate_documentation(path, output.as_deref(), false, None),
+        ToolCommand::Book(address) => generate_documentation(path, None, true, Some(&address)),
+        ToolCommand::Build(target) => run_project_compiler(path, false, false, &target),
+        ToolCommand::Run(target) => run_project_compiler(path, true, false, &target),
+        ToolCommand::Check => run_project_compiler(path, false, true, "host"),
+        ToolCommand::Test(update_snapshots) => run_project_tests(path, update_snapshots),
+        ToolCommand::Init => initialize_project(path),
+        ToolCommand::NativeStub => generate_native_stub(path, output),
+        ToolCommand::Inspect => inspect_binary(path, output),
+        ToolCommand::Targets => {
+            println!("host\tavailable\t{}", advanced_tools::host_target());
+            println!("aarch64\tplanned\trequires the Milestone 6 AArch64 backend and runtime");
+            ExitCode::SUCCESS
+        }
+        ToolCommand::MushlingsInit => initialize_mushlings(path),
+        ToolCommand::MushlingsVerify => verify_mushlings(path),
+        ToolCommand::FuzzReplay => replay_fuzz(path),
+        ToolCommand::FuzzMinimize => minimize_fuzz(path, output),
+        ToolCommand::Soundness => emit_soundness(path, output),
+        ToolCommand::Playground(address) => run_playground(&address),
+    }
+}
+
+fn generate_native_stub(input: &Path, output: Option<&Path>) -> ExitCode {
+    let destination = match output {
+        Some(path) => path,
+        None => return source_less_failure("native-stub requires an output path"),
+    };
+    match native_stub::generate_file(input, destination) {
+        Ok(()) => {
+            println!("Generated native surface at '{}'.", destination.display());
+            ExitCode::SUCCESS
+        }
+        Err(message) => source_less_failure(&message),
+    }
+}
+
+fn current_executable() -> Result<PathBuf, String> {
+    std::env::current_exe().map_err(|current_error| format!("cannot locate cinnabar executable: {}", current_error))
+}
+
+fn inspect_binary(path: &Path, output: Option<&Path>) -> ExitCode {
+    let (root, entry) = match project_or_source(path) {
+        Ok(value) => value,
+        Err(message) => return source_less_failure(&message),
+    };
+    let analyzed = analysis::analyze(&entry.to_string_lossy(), &[]);
+    if !analyzed.errors.is_empty() {
+        return finish_with_diagnostics(&analyzed.errors, &analyzed.notes, &analyzed.files);
+    }
+    let mut inspected_nodes = analyzed.nodes;
+    let mut inspected_lists = analyzed.lists;
+    let layouts = match codegen::layout::render_layouts(&analyzed.names, &mut inspected_nodes, &mut inspected_lists) {
+        Ok(text) => text,
+        Err(codegen_error) => return finish_with_codegen_error(&codegen_error, &analyzed.files),
+    };
+    let target_dir = root.join("target").join("inspect");
+    if let Err(create_error) = std::fs::create_dir_all(&target_dir) {
+        return source_less_failure(&format!("cannot create inspection directory: {}", create_error));
+    }
+    let stem = match entry.file_stem() {
+        Some(value) => value,
+        None => return source_less_failure("inspection entry has no file stem"),
+    };
+    let binary = target_dir.join(stem);
+    let executable = match current_executable() {
+        Ok(value) => value,
+        Err(message) => return source_less_failure(&message),
+    };
+    let compile_status = Command::new(executable).arg(&entry).arg("-o").arg(&binary).status();
+    match compile_status {
+        Ok(status) => {
+            if !status.success() {
+                return ExitCode::FAILURE;
+            }
+        }
+        Err(spawn_error) => return source_less_failure(&format!("cannot launch compiler: {}", spawn_error)),
+    }
+    let report = match advanced_tools::binary_report(&binary, &layouts) {
+        Ok(text) => text,
+        Err(message) => return source_less_failure(&message),
+    };
+    match output {
+        Some(destination) => match std::fs::write(destination, report) {
+            Ok(()) => {
+                println!("Wrote binary inspection to '{}'.", destination.display());
+                ExitCode::SUCCESS
+            }
+            Err(write_error) => source_less_failure(&format!("cannot write inspection report: {}", write_error)),
+        },
+        None => {
+            print!("{}", report);
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+fn initialize_mushlings(path: &Path) -> ExitCode {
+    match advanced_tools::initialize_mushlings(path) {
+        Ok(()) => {
+            println!("Initialized Mushlings in '{}'.", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(message) => source_less_failure(&message),
+    }
+}
+
+fn verify_mushlings(path: &Path) -> ExitCode {
+    let executable = match current_executable() {
+        Ok(value) => value,
+        Err(message) => return source_less_failure(&message),
+    };
+    match advanced_tools::verify_mushlings(path, &executable) {
+        Ok((solved, pending, progress)) => {
+            for line in progress {
+                println!("{}", line);
+            }
+            println!("Mushlings: {} solved, {} pending.", solved, pending);
+            ExitCode::SUCCESS
+        }
+        Err(message) => source_less_failure(&message),
+    }
+}
+
+fn replay_fuzz(path: &Path) -> ExitCode {
+    let executable = match current_executable() {
+        Ok(value) => value,
+        Err(message) => return source_less_failure(&message),
+    };
+    match advanced_tools::replay_fuzz(&executable, path) {
+        Ok((passed, diagnostic)) => {
+            print!("{}", diagnostic);
+            if passed {
+                println!("Artifact no longer reproduces a failure.");
+                ExitCode::SUCCESS
+            } else {
+                println!("Artifact deterministically reproduced the failure.");
+                ExitCode::FAILURE
+            }
+        }
+        Err(message) => source_less_failure(&message),
+    }
+}
+
+fn minimize_fuzz(path: &Path, output: Option<&Path>) -> ExitCode {
+    let executable = match current_executable() {
+        Ok(value) => value,
+        Err(message) => return source_less_failure(&message),
+    };
+    let default_destination = advanced_tools::default_minimized_path(path);
+    let destination = match output {
+        Some(value) => value,
+        None => &default_destination,
+    };
+    match advanced_tools::minimize_fuzz(&executable, path, destination) {
+        Ok(lines) => {
+            println!("Minimized artifact to {} lines at '{}'.", lines, destination.display());
+            ExitCode::SUCCESS
+        }
+        Err(message) => source_less_failure(&message),
+    }
+}
+
+fn emit_soundness(path: &Path, output: Option<&Path>) -> ExitCode {
+    let (root, entry) = match project_or_source(path) {
+        Ok(value) => value,
+        Err(message) => return source_less_failure(&message),
+    };
+    let analyzed = analysis::analyze(&entry.to_string_lossy(), &[]);
+    if !analyzed.errors.is_empty() {
+        return finish_with_diagnostics(&analyzed.errors, &analyzed.notes, &analyzed.files);
+    }
+    let evidence = advanced_tools::soundness_evidence(&entry, &analyzed.nodes, analyzed.errors.len());
+    let default_destination = root.join("target").join("soundness-evidence.json");
+    let destination = match output {
+        Some(value) => value,
+        None => &default_destination,
+    };
+    if let Some(parent) = destination.parent()
+        && let Err(create_error) = std::fs::create_dir_all(parent)
+    {
+        return source_less_failure(&format!("cannot create evidence directory: {}", create_error));
+    }
+    match std::fs::write(destination, evidence) {
+        Ok(()) => {
+            println!("Wrote soundness evidence to '{}'.", destination.display());
+            ExitCode::SUCCESS
+        }
+        Err(write_error) => source_less_failure(&format!("cannot write soundness evidence: {}", write_error)),
+    }
+}
+
+fn run_playground(address: &str) -> ExitCode {
+    let executable = match current_executable() {
+        Ok(value) => value,
+        Err(message) => return source_less_failure(&message),
+    };
+    println!("Cinnabar playground is available at http://{}", address);
+    match advanced_tools::serve_playground(address, &executable) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => source_less_failure(&message),
+    }
+}
+
+fn project_or_source(path: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let is_source = path.is_file()
+        && path.file_name().and_then(|name| name.to_str()) != Some(project::MANIFEST_FILE)
+        && path.extension().and_then(|extension| extension.to_str()) == Some("cnb");
+    if is_source {
+        let root = match path.parent() {
+            Some(parent) => parent.to_path_buf(),
+            None => return Err(format!("cannot determine source directory for '{}'", path.display())),
+        };
+        return Ok((root, path.to_path_buf()));
+    }
+    let manifest = project::discover(path)?;
+    Ok((manifest.root, manifest.entry))
+}
+
+fn generate_documentation(path: &Path, output: Option<&Path>, serve: bool, address: Option<&str>) -> ExitCode {
+    let (root, entry) = match project_or_source(path) {
+        Ok(value) => value,
+        Err(message) => return source_less_failure(&message),
+    };
+    let entry_text = entry.to_string_lossy().to_string();
+    let analyzed = analysis::analyze(&entry_text, &[]);
+    if !analyzed.errors.is_empty() {
+        return finish_with_diagnostics(&analyzed.errors, &analyzed.notes, &analyzed.files);
+    }
+    let api_html = docs::render_api_docs(&analyzed.names, &analyzed.nodes, &analyzed.lists, analyzed.root);
+    if serve {
+        let bind_address = match address {
+            Some(value) => value,
+            None => return source_less_failure("Cinnabook server address is missing"),
+        };
+        let page = docs::render_cinnabook(&api_html);
+        println!("Cinnabook {} is available at http://{}", env!("CARGO_PKG_VERSION"), bind_address);
+        return match docs::serve_cinnabook(bind_address, &page) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(message) => source_less_failure(&message),
+        };
+    }
+    let output_dir = match output {
+        Some(directory) => directory.to_path_buf(),
+        None => root.join("target").join("doc"),
+    };
+    if let Err(create_error) = std::fs::create_dir_all(&output_dir) {
+        return source_less_failure(&format!("cannot create documentation directory '{}': {}", output_dir.display(), create_error));
+    }
+    let index = output_dir.join("index.html");
+    match std::fs::write(&index, api_html) {
+        Ok(()) => {
+            println!("Generated documentation at '{}'.", index.display());
+            ExitCode::SUCCESS
+        }
+        Err(write_error) => source_less_failure(&format!("cannot write documentation '{}': {}", index.display(), write_error)),
+    }
+}
+
+fn initialize_project(path: &Path) -> ExitCode {
+    match project::initialize(path) {
+        Ok(()) => {
+            println!("Initialized Cinnabar project in '{}'.", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(message) => source_less_failure(&message),
+    }
+}
+
+fn run_project_compiler(path: &Path, run: bool, check: bool, target: &str) -> ExitCode {
+    if let Err(message) = advanced_tools::validate_target(target) {
+        return source_less_failure(&message);
+    }
+    let manifest = match project::discover(path) {
+        Ok(value) => value,
+        Err(message) => return source_less_failure(&message),
+    };
+    let executable = match std::env::current_exe() {
+        Ok(value) => value,
+        Err(current_error) => return source_less_failure(&format!("cannot locate cinnabar executable: {}", current_error)),
+    };
+    let mut invocation = Command::new(executable);
+    invocation.arg(&manifest.entry);
+    if check {
+        invocation.arg("--check-only");
+    } else {
+        let output_dir = manifest.root.join("target");
+        if let Err(create_error) = std::fs::create_dir_all(&output_dir) {
+            return source_less_failure(&format!("cannot create build directory '{}': {}", output_dir.display(), create_error));
+        }
+        let binary_name = match manifest.entry.file_stem() {
+            Some(name) => name,
+            None => return source_less_failure(&format!("entry '{}' has no file name", manifest.entry.display())),
+        };
+        invocation.arg("-o").arg(output_dir.join(binary_name));
+        if run {
+            invocation.arg("--run");
+        }
+    }
+    match invocation.status() {
+        Ok(status) => exit_code_from_status(status),
+        Err(spawn_error) => source_less_failure(&format!("cannot launch compiler: {}", spawn_error)),
+    }
+}
+
+fn run_project_tests(path: &Path, update_snapshots: bool) -> ExitCode {
+    let manifest = match project::discover(path) {
+        Ok(value) => value,
+        Err(message) => return source_less_failure(&message),
+    };
+    let executable = match std::env::current_exe() {
+        Ok(value) => value,
+        Err(current_error) => return source_less_failure(&format!("cannot locate cinnabar executable: {}", current_error)),
+    };
+    let summary = match project::run_tests(&executable, &manifest, update_snapshots) {
+        Ok(value) => value,
+        Err(message) => return source_less_failure(&message),
+    };
+    for failure in &summary.failed {
+        eprintln!("FAIL: {}", failure);
+    }
+    println!("{} passed; {} failed; {} discovered", summary.passed, summary.failed.len(), summary.discovered);
+    if summary.failed.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn exit_code_from_status(status: std::process::ExitStatus) -> ExitCode {
+    if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn source_less_failure(message: &str) -> ExitCode {
+    if let Err(render_error) = render_source_less(message) {
+        eprintln!("{}", render_error);
+    }
+    ExitCode::FAILURE
 }
 
 fn emit_out_path(args: &CliArgs, ext: &str) -> PathBuf {
@@ -350,6 +973,73 @@ fn finish_with_diagnostics(errors: &[Diag], notes: &[Note], files: &[(String, St
         let detail = format!("failed to render diagnostic: {}", message);
         if render_source_less(&detail).is_err() {
             return ExitCode::FAILURE;
+        }
+    }
+    ExitCode::FAILURE
+}
+
+fn source_json(files: &[(String, String)], file: i64, start: i64, end: i64) -> Value {
+    if file == NO_FILE {
+        return Value::Null;
+    }
+    match files.get(file as usize) {
+        Some(entry) => json!({
+            "file_id": file,
+            "path": entry.0,
+            "start": start,
+            "end": end
+        }),
+        None => json!({
+            "file_id": file,
+            "path": Value::Null,
+            "start": start,
+            "end": end
+        }),
+    }
+}
+
+fn finish_with_diagnostics_json(errors: &[Diag], notes: &[Note], files: &[(String, String)]) -> ExitCode {
+    let mut diagnostics: Vec<Value> = Vec::new();
+    let mut error_idx = 0usize;
+    while error_idx < errors.len() {
+        let error = match errors.get(error_idx) {
+            Some(value) => value,
+            None => break,
+        };
+        let mut explanations: Vec<Value> = Vec::new();
+        let mut note_idx = 0usize;
+        while note_idx < notes.len() {
+            match notes.get(note_idx) {
+                Some(note) => {
+                    if note.0 == error_idx as i64 {
+                        explanations.push(json!({
+                            "message": note.1,
+                            "source": source_json(files, note.2, note.3, note.4)
+                        }));
+                    }
+                }
+                None => break,
+            }
+            note_idx += 1;
+        }
+        diagnostics.push(json!({
+            "severity": "error",
+            "message": error.0,
+            "source": source_json(files, error.1, error.2, error.3),
+            "explanations": explanations
+        }));
+        error_idx += 1;
+    }
+    let report = json!({
+        "format": "cinnabar.borrow-explanations.v1",
+        "diagnostics": diagnostics
+    });
+    match serde_json::to_string_pretty(&report) {
+        Ok(rendered) => println!("{}", rendered),
+        Err(render_err) => {
+            if render_source_less(&format!("failed to serialize borrow explanations: {}", render_err)).is_err() {
+                return ExitCode::FAILURE;
+            }
         }
     }
     ExitCode::FAILURE

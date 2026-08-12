@@ -1,0 +1,153 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Cinnabar",
+  "scopeName": "source.cinnabar",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#builtins"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#operators"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.documentation.cinnabar",
+          "begin": "#!\\|",
+          "end": "\\|#"
+        },
+        {
+          "name": "comment.block.cinnabar",
+          "begin": "#\\|",
+          "end": "\\|#"
+        },
+        {
+          "name": "comment.line.documentation.cinnabar",
+          "match": "#!(?!\\|).*$"
+        },
+        {
+          "name": "comment.line.number-sign.cinnabar",
+          "match": "#(?![!|]).*$"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(fun)\\s+([a-z][a-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.function.cinnabar"
+            },
+            "2": {
+              "name": "entity.name.function.cinnabar"
+            }
+          }
+        },
+        {
+          "match": "\\b(mod|type|trait)\\s+([A-Z][A-Za-z0-9]*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.cinnabar"
+            },
+            "2": {
+              "name": "entity.name.type.cinnabar"
+            }
+          }
+        },
+        {
+          "match": "\\b(const)\\s+([A-Z][A-Z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.cinnabar"
+            },
+            "2": {
+              "name": "entity.name.constant.cinnabar"
+            }
+          }
+        },
+        {
+          "match": "\\b(val|var)\\s+([a-z][a-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.cinnabar"
+            },
+            "2": {
+              "name": "variable.other.readwrite.cinnabar"
+            }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.cinnabar",
+          "match": "\\b(?:if|elif|else|while|match|return|break|continue|try|end)\\b"
+        },
+        {
+          "name": "keyword.declaration.cinnabar",
+          "match": "\\b(?:fun|val|var|const|type|trait|impl|mod|use|as|for)\\b"
+        },
+        {
+          "name": "storage.modifier.cinnabar",
+          "match": "\\b(?:pub|impure|nat|mut)\\b"
+        },
+        {
+          "name": "constant.language.boolean.cinnabar",
+          "match": "\\b(?:true|false)\\b"
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.cinnabar",
+          "match": "\\b(?:Unit|Bool|I8|I16|I32|I64|Isize|U8|U16|U32|U64|Usize|Result|Option|DivError|IndexError)\\b"
+        },
+        {
+          "name": "constant.language.cinnabar",
+          "match": "\\b(?:Unit|None|DivByZero)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.cinnabar",
+          "match": "\\b0[xX][0-9A-Fa-f]+\\b"
+        },
+        {
+          "name": "constant.numeric.decimal.cinnabar",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.cinnabar",
+          "match": "==|!=|<=|>=|&&|\\|\\||<<|>>|[+\\-*/%&|^<>=!]"
+        },
+        {
+          "name": "punctuation.accessor.cinnabar",
+          "match": "\\."
+        }
+      ]
+    }
+  }
+}

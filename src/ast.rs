@@ -48,6 +48,7 @@ pub const NODE_SYM: i64 = 11;
 pub const NODE_TYINFO: i64 = 12;
 pub const NODE_INST: i64 = 13;
 pub const NODE_CONSTVAL: i64 = 14;
+pub const NODE_DOC: i64 = 20;
 
 // Token rows.  (tag=NODE_TOKEN, a=kind, b=name, c=value).
 
@@ -57,6 +58,11 @@ pub const TOK_HEX: i64 = 2; // hexadecimal literal (0x...)
 pub const TOK_EOF: i64 = 3;
 pub const TOK_NL: i64 = 4; // newline (statement boundary)
 pub const TOK_SYM: i64 = 5; // operator or punctuation symbol, by interned name
+pub const TOK_DOC: i64 = 6; // documentation comment body, by interned name
+
+// Documentation attachment rows. (tag=NODE_DOC, a=target node, b=doc name-id list).
+// The lexer records comment bodies once and the parser attaches each consecutive
+// group to the declaration it precedes. Consumers never rescan source comments.
 
 // Item rows.  (tag=NODE_ITEM, a=kind, b=is_pub, c=sym, d..f kind-specific).
 
@@ -587,14 +593,10 @@ pub fn alloc_tyinfo(nodes: &mut Vec<i64>, key: i64, kind: i64, sym: i64, args: i
 }
 
 pub fn find_tyinfo(nodes: &[i64], key: i64) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_TYINFO && node_a(nodes, idx) == key {
-            return idx;
-        }
-        idx += 1;
+    if key < 0 || node_tag(nodes, key) != NODE_TYINFO || node_a(nodes, key) != key {
+        return NONE;
     }
-    NONE
+    key
 }
 
 pub fn tyinfo_is_linear(nodes: &[i64], key: i64) -> i64 {
@@ -930,18 +932,6 @@ fn list_eq(lists: &[Vec<i64>], a: i64, b: i64) -> bool {
     true
 }
 
-fn count_tyinfo(nodes: &[i64]) -> i64 {
-    let mut count = 0i64;
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_TYINFO {
-            count += 1;
-        }
-        idx += 1;
-    }
-    count
-}
-
 pub fn find_tyinfo_by(nodes: &[i64], lists: &[Vec<i64>], kind: i64, sym: i64, args: i64, elem: i64, len: i64) -> i64 {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
@@ -964,7 +954,7 @@ pub fn canon_tyinfo(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], kind: i64, sym
     if existing != NONE {
         return node_a(nodes, existing);
     }
-    let key = count_tyinfo(nodes);
+    let key = nodes.len() as i64 / NODE_STRIDE;
     alloc_tyinfo(nodes, key, kind, sym, args, elem, len);
     key
 }
@@ -1169,5 +1159,50 @@ mod tests {
             Some(items) => assert_eq!(items.len(), 2),
             None => assert!(false),
         }
+    }
+
+    #[test]
+    fn canonical_type_key_is_descriptor_row() {
+        let mut nodes: Vec<i64> = Vec::new();
+        let mut lists: Vec<Vec<i64>> = Vec::new();
+        let source = alloc_node(
+            &mut nodes,
+            &[NODE_EXPR, 0, 0, 1, EXPR_LIT, LIT_INT, 0, NONE, NONE, NONE],
+        );
+        assert_eq!(source, 0);
+
+        let unknown = canon_tyinfo(&mut nodes, &mut lists, TYD_UNKNOWN, NONE, NONE, NONE, NONE);
+        assert_eq!(unknown, 1);
+        assert_eq!(find_tyinfo(&nodes, unknown), unknown);
+
+        let later_source = alloc_node(
+            &mut nodes,
+            &[NODE_EXPR, 0, 1, 2, EXPR_LIT, LIT_INT, 1, NONE, NONE, NONE],
+        );
+        assert_eq!(later_source, 2);
+
+        let builtin = canon_tyinfo(
+            &mut nodes,
+            &mut lists,
+            TYD_BUILTIN,
+            NONE,
+            NONE,
+            NONE,
+            BUILTIN_I64,
+        );
+        assert_eq!(builtin, 3);
+        assert_eq!(find_tyinfo(&nodes, builtin), builtin);
+        assert_eq!(find_tyinfo(&nodes, source), NONE);
+
+        let same_builtin = canon_tyinfo(
+            &mut nodes,
+            &mut lists,
+            TYD_BUILTIN,
+            NONE,
+            NONE,
+            NONE,
+            BUILTIN_I64,
+        );
+        assert_eq!(same_builtin, builtin);
     }
 }

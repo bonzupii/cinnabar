@@ -1,0 +1,78 @@
+{
+  "name": "cinnabar-language-support",
+  "displayName": "Cinnabar Language Support",
+  "description": "Syntax highlighting and attached-facts language-server support for Cinnabar.",
+  "version": "0.1.0",
+  "publisher": "cinnabar-lang",
+  "license": "Apache-2.0 WITH LLVM-exception",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./extension.js",
+  "files": [
+    "extension.js",
+    "lsp-launcher.js",
+    "language-configuration.json",
+    "syntaxes",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "package:dry-run": "npm pack --dry-run"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "cinnabar",
+        "aliases": [
+          "Cinnabar",
+          "cinnabar"
+        ],
+        "extensions": [
+          ".cnb"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "cinnabar",
+        "scopeName": "source.cinnabar",
+        "path": "./syntaxes/cinnabar.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Cinnabar",
+      "properties": {
+        "cinnabar.server.mode": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "installed",
+            "path",
+            "docker-compose"
+          ],
+          "enumDescriptions": [
+            "Use cinnabar.server.path when it is set; otherwise run cinnabar-lsp from PATH.",
+            "Always run cinnabar-lsp from PATH.",
+            "Run the executable configured in cinnabar.server.path.",
+            "Run the repository development server through Docker Compose."
+          ],
+          "description": "Selects how the Cinnabar Language Server is launched."
+        },
+        "cinnabar.server.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the cinnabar-lsp executable used by auto mode when set, or required by path mode."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

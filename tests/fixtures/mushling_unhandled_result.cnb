@@ -1,0 +1,5 @@
+fun main() I64
+  val numerator: I64 = 4
+  numerator / 2
+  return 0
+end

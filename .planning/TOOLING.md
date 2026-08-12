@@ -24,23 +24,34 @@ Most languages need tooling to paper over implicit behavior (lifetimes, coercion
 | **`--emit-llvm` / `--emit-obj`** | `src/codegen/mod.rs` | Stop after IR or object emission |
 | **`--explain-borrow`** | `src/borrow.rs` + `src/ast.rs` (`Note`) | Secondary labels on borrow/linearity errors |
 | **`cinnabar::analysis`** | `src/analysis.rs` | Hover, go-to-def, references, completion, signature help over attached facts; unsaved-buffer overlay |
-| **`cinnabar-lsp`** | `src/bin/cinnabar_lsp.rs` | JSON-RPC LSP shell: diagnostics, hover, definition, references, completion, signature help |
+| **`cinnabar-lsp`** | `src/bin/cinnabar_lsp.rs` | Diagnostics and attached-facts queries; debounced single-flight analysis, stale-result suppression, multi-root graph reconciliation, borrow code lenses |
+| **Structured borrow explanations** | `src/main.rs` | `--explain-borrow=json` emits versioned diagnostics and checker-produced path notes with real source spans |
+| **VS Code / Cursor package** | `editors/vscode/` | Launches `cinnabar-lsp`, registers `.cnb`, language configuration, and the canonical TextMate grammar |
+| **`cinnabar fmt`** | `src/format.rs` | Canonical, idempotent indentation and blank-line formatting; `--check` mode for automation |
+| **Documentation pipeline** | `src/lexer.rs`, `src/parser.rs`, `src/docs.rs` | Attached doc facts, public API HTML, and version-pinned Cinnabook server |
+| **Project commands** | `src/project.rs`, `src/main.rs` | `build.cnb` discovery plus `build`, `run`, `check`, `test`, and `init` |
+| **Diagnostic snapshots** | `src/project.rs` | `.reject.cnb` discovery, exact `.stderr` snapshots, and `.exit` status expectations |
 | **Fixture harness** | `pre_commit_check.sh`, `tests/repro_harness.rs` | Positive/negative compile-and-run tests |
 | **Property fuzzer** | `tests/fuzz_generalization.rs` | Random well-typed programs + linearity rejection corpus |
 
 ### Not yet implemented
 
-- `cinnabar check` (front-end only, no codegen — today `--dump-typed-ast` / `--print-layout` run the front-end but are debug dumps, not a dedicated check mode)
-- `build.cnb` project manifest and `cinnabar build` / `cinnabar test` / `cinnabar init`
-- Milestone 6 multi-label diagnostics and suggestion engine
-- Doc comment attachment to AST + `cinnabar doc` / Cinnabook
-- Mushlings (interactive exercises)
-- Formatter (`cinnabar fmt`)
-- Editor syntax highlighting extension (TextMate / Tree-sitter)
-- Incremental re-check in LSP (full pipeline re-run per change today)
-- FFI / native stub generator
-- Cross-target build driver
-- Diagnostic snapshot testing tool
+- Milestone 6 structurally attached suggestion engine and code actions
+- Incremental compiler pipeline reuse in the LSP (edits are debounced and coalesced, but each accepted generation still runs the full pipeline)
+- Additional cross-target backends and runtimes beyond the implemented host target driver
+
+### End-to-end verification
+
+All capabilities described as **implemented**, **done**, **delivered**, or **complete** in this
+document are exercised through the real CLI, compiler pipeline, LSP stdio protocol, or local HTTP
+servers. The verification matrix and evidence are recorded in
+[`TOOLING-UAT.md`](TOOLING-UAT.md). The latest required repository gate passed on 2026-08-11,
+including the complete Cargo suite and CLI fixture suite; the VS Code / Cursor extension also
+passes `npm pack --dry-run`.
+
+This verification does not relabel roadmap work as delivered. Structurally attached suggestions,
+incremental LSP pipeline reuse, additional target backends/runtimes, sanitizer-gate expansion, and
+the mechanized progress/preservation proof remain explicitly deferred where this document says so.
 
 ---
 
@@ -50,38 +61,46 @@ These unlock everything else and are tracked in [`ROADMAP.md`](../ROADMAP.md):
 
 | Tool | Milestone | Why it matters |
 |------|-----------|----------------|
-| **`cinnabar check`** | 5 | Dedicated fast feedback without LLVM/clang; natural default for IDE save hooks |
-| **`build.cnb` + `build`/`run`/`test`** | 5 | Project roots, entry points, test discovery — today the CLI takes a single file path |
-| **Rich diagnostics + suggestions** | 6 | Multi-label Ariadne (error site + definition), hedged "did you mean" — primary UX in a no-warnings language |
-| **Cinnabook + Mushlings** | 8 | Docs server + rustlings-style exercises from real compiler errors |
+| **`cinnabar check`** | 5 — delivered | Dedicated feedback without LLVM/clang; natural default for IDE save hooks |
+| **`build.cnb` + `build`/`run`/`test`** | 5 — delivered | Project roots, entry points, recursive test discovery, rejection snapshots, and expected exit statuses |
+| **Rich diagnostics + suggestions** | 6 — diagnostics delivered, suggestions pending | Multi-label Ariadne notes are implemented; structurally attached suggestions and code actions remain future work |
+| **Cinnabook + Mushlings** | 8 — delivered early | Docs server plus exercises sourced from real compiler errors |
 | **Sanitizer gate** | 7 | ASan/UBSan/Valgrind over all fixtures — verification tooling for the Crucible Rule |
 
 ---
 
-## Tier 1 — Extend the attached-facts stack
+## Tier 1 — Extend the attached-facts stack (COMPLETE)
 
-Most of Tier 1 is **started**; remaining work is polish, performance, and IDE packaging.
+Tier 1 is complete. Every language-aware answer comes from resolver, typechecker, or borrow-checker
+attachments; scheduling and packaging add no parallel name, type, or borrow semantics.
 
-### Language Server (`cinnabar-lsp`) — in progress
+### Language Server (`cinnabar-lsp`) — done
 
-**Done:** hover, go-to-definition, find references, completion (locals, keywords, fields after `.`), signature help, diagnostics with borrow `Note`s as `relatedInformation`, full-document sync with unsaved overlay.
+Hover, go-to-definition, find references, completion (locals, keywords, fields after `.`), signature
+help, diagnostics with borrow `Note`s as `relatedInformation`, borrow explanation code lenses, and
+full-document sync with unsaved overlay are implemented.
 
-**Next:**
+Edits use a debounced, generation-tagged, single-flight scheduler: rapid edits coalesce, obsolete
+results are never published, and sustained editing cannot accumulate compiler threads. Multiple
+open entry graphs are supported and secondary module buffers are reconciled using the module
+loader's actual analyzed file set, including reverse open order.
 
-- Debounced incremental analysis (same pipeline, smarter scheduling)
-- Workspace root / multi-root project discovery once `build.cnb` exists
-- Publish VS Code / Cursor extension that launches `cinnabar-lsp` and registers the grammar
-- Code actions only when they are structurally correct (no "suppress" or stub suggestions — per Milestone 6)
+The VS Code / Cursor package in `editors/vscode/` launches `cinnabar-lsp` and registers the
+language and grammar. Project-manifest root discovery remains in Tier 4 because `build.cnb` must
+define the entry graph first. Code actions remain deliberately unadvertised until Milestone 6
+attaches typed, structurally valid fixes to diagnostics; deriving edits from diagnostic strings
+would violate the Single-Fact Rule.
 
-### Borrow / linearity explainer — partially done
+### Borrow / linearity explainer — done
 
-**Done:** `Note` rows on join inconsistencies, unconsumed-at-exit, use-after-move; CLI `--explain-borrow`; LSP always sends related information.
+`Note` rows cover inconsistent join predecessors (consumed vs live branch ends), binding sites with
+their attached linear types, same-block prior move sites, unconsumed exits, and invalid container
+free guidance. CLI `--explain-borrow` renders secondary labels; `--explain-borrow=json` exposes the
+same facts through the versioned `cinnabar.borrow-explanations.v1` schema; the LSP sends related
+information and code lenses.
 
-**Next:**
-
-- Richer path-sensitive notes (which branch left a linear value live)
-- Optional structured `--explain-borrow=json` for tooling/tests
-- Mushlings exercises keyed to exact diagnostic + note text
+Mushlings consumption of exact diagnostic and note text belongs to Tier 6, where the exercise
+runner is defined; the compiler-facing explanation surface it will consume is complete here.
 
 ### Low-level inspection — done
 
@@ -89,13 +108,16 @@ Most of Tier 1 is **started**; remaining work is polish, performance, and IDE pa
 
 ---
 
-## Tier 2 — Editor and syntax layer
+## Tier 2 — Editor and syntax layer (COMPLETE)
 
-### TextMate / Tree-sitter grammar
+### TextMate grammar — done
 
-Newline-separated statements, four comment forms, no semicolons. Cheapest way to make the language feel real in editors before deeper LSP integration.
+The canonical grammar is `editors/vscode/syntaxes/cinnabar.tmLanguage.json`, packaged with the
+VS Code / Cursor extension. It covers newline-separated syntax, all four comment forms,
+declarations and casing classes, builtins, numeric literals, and operators. Language configuration
+provides block/comment pairs, brackets, and `end`-based indentation.
 
-### Formatter (`cinnabar fmt`)
+### Formatter (`cinnabar fmt`) — done
 
 Casing is lexical (enforced by the lexer/resolver), not formattable. A formatter's job is narrow:
 
@@ -104,63 +126,95 @@ Casing is lexical (enforced by the lexer/resolver), not formattable. A formatter
 - Optional normalization of `use` ordering
 
 One canonical style, no configurability — aligned with "errors only, no lint configuration."
+`cinnabar fmt FILE` formats in place; `cinnabar fmt --check FILE` is non-mutating and exits
+unsuccessfully when formatting would change the file. The formatter handles nested declaration and
+control-flow blocks, `elif`/`else`, multiline match arms, delimiter continuations, native
+declarations, and bodyless trait signatures. It preserves tokens and comment contents, collapses
+repeated blank lines, is idempotent, and the formatted reference program is run back through the
+full front-end in the tooling tests.
 
 ---
 
-## Tier 3 — Documentation pipeline
+## Tier 3 — Documentation pipeline (COMPLETE)
 
-Doc comments (`#!`, `#!|`) are recognized by the lexer but **not yet attached** to the following item in the AST (see [`ARCHITECTURE.md`](../ARCHITECTURE.md) Stage 2).
+Doc comments (`#!`, `#!|`) are preserved as `TOK_DOC` rows and attached by the parser to the
+following declaration through `NODE_DOC` rows. Items, fields, variants, and trait/impl methods all
+use the same representation. Documentation consumers read this attached fact instead of rescanning
+source comments.
 
-Build order:
+`cinnabar doc [PATH]` runs the shared front end and writes `target/doc/index.html` by default. It
+includes only `pub` items and public members and fails on compiler errors. `cinnabar book [PATH]
+--address 127.0.0.1:7878` serves the generated API documentation alongside the bundled manifesto.
+The page displays `CARGO_PKG_VERSION`, pinning its content to the installed compiler version.
 
-1. Attach doc strings during parse/lex (per `MANIFESTO.md` comment semantics)
-2. **`cinnabar doc`** — HTML from `pub` items + attached docs
-3. **Cinnabook** (roadmap) — local server bundling docs + manifesto sections, version-pinned to the installed compiler
-
-Strict visibility (`pub` required, private by default) keeps doc generation simple.
+Coverage verifies public/private filtering, attachment consumption, HTML escaping, version
+pinning, and project-level documentation generation.
 
 ---
 
-## Tier 4 — Project and test tooling
+## Tier 4 — Project and test tooling (COMPLETE)
+
+`build.cnb` is a small declarative project file rather than executable Cinnabar source. This keeps
+path configuration separate from language constant semantics while string literals remain
+unimplemented. It has two project-root-confined relative fields:
+
+```text
+entry = main.cnb
+tests = tests
+```
+
+`entry` is required; `tests` defaults to `tests`. Absolute paths and parent traversal are rejected.
+All project commands discover `build.cnb` from the supplied path upward. The LSP uses the same
+manifest reader to select the declared entry graph when any project source is opened.
+
+### `cinnabar build`, `run`, and `check`
+
+`build` emits the declared entry under `target/`; `run` builds and executes it; `check` runs the
+shared resolver/typechecker/borrow-checker pipeline without LLVM or linker work.
 
 ### `cinnabar test`
 
-Discover and run `.cnb` test files. The existing harness (`pre_commit_check.sh`, `EXPECT_OK` / `EXPECT_REJECTED` in repro fixtures) is the prototype — promote into the compiler CLI once `build.cnb` defines entry points.
+Recursively discovers `.cnb` files under the manifest's tests directory. Ordinary tests must
+compile and exit zero; a neighboring `.exit` file specifies another expected status. Files ending
+in `.reject.cnb` must fail compilation. A neighboring `.stderr` file compares the complete
+normalized diagnostic output, and `--update-snapshots` explicitly replaces those snapshots.
 
 ### `cinnabar init`
 
-Scaffold `main.cnb`, `build.cnb`, test layout. Depends on Milestone 5 manifest format (compile-time string representation TBD in roadmap).
+Scaffolds `main.cnb`, `build.cnb`, and `tests/smoke.cnb`. Initialization refuses to overwrite any
+existing target file.
 
 ### Diagnostic snapshot testing
 
-The repro corpus (`tests/fixtures/repro/`) is a gold mine. A tool that compiles expecting rejection and snapshots exact diagnostic text + span labels protects Milestone 6 work and makes Mushlings trivial to maintain.
+Implemented by the `.reject.cnb` / `.stderr` conventions in `cinnabar test`. Snapshot comparison
+uses the compiler process's rendered diagnostics, including source paths, text, and span labels.
 
 ---
 
-## Tier 5 — Systems-programming-specific tools
+## Tier 5 — Systems-programming-specific tools (COMPLETE FOR CURRENT BACKEND)
 
-### Native surface / FFI stub generator
+### Native surface / FFI stub generator — done
 
-Explicit `nat fun` / `nat type` declarations. A tool reading C headers (or a minimal IDL) and emitting Cinnabar native stubs reduces boilerplate for syscall wrappers — aligned with Milestone 4's direct-syscall philosophy.
+`cinnabar native-stub INPUT -o OUTPUT` reads a deliberately constrained, typed line-oriented IDL and emits a public Cinnabar module containing `nat fun` and `nat type` declarations. The IDL preserves parameter, return, borrow, mutability, generic, and effect information instead of guessing ownership from C headers. Generated declarations still require a corresponding host/backend implementation.
 
-### Binary inspection
+### Binary inspection — done
 
-After compile: disassembly wrapper with source correlation (when debug info exists); per-function / per-type size report.
+`cinnabar inspect PATH [-o REPORT]` analyzes the source, consumes the code generator's canonical type-layout report, builds the binary, and adds LLVM section sizes, size-sorted symbols, and disassembly. The report truthfully marks source correlation unavailable because the current backend does not emit debug line tables.
 
-### Cross-target driver
+### Cross-target driver — interface complete; additional targets gated by backend
 
-When AArch64 lands (roadmap mentions it for syscalls): `cinnabar build --target …` wrapper around existing `llc` + `clang -nostdinc` pipeline.
+`cinnabar build --target host` and `cinnabar run --target host` provide the stable target-driver interface, while `cinnabar targets` reports availability. Unsupported targets are rejected before compilation because the current runtime and embedded musl are host-specific. AArch64 is intentionally not advertised as working until that backend and runtime land.
 
 ---
 
-## Tier 6 — Learning and verification (longer horizon)
+## Tier 6 — Learning and verification (TOOLING COMPLETE; FORMAL PROOF REMAINS MILESTONE 7)
 
 | Tool | Role |
 |------|------|
-| **Mushlings** (planned) | Interactive fixes for linearity, unhandled `Result`, tail-recursion, borrow ambiguity — all real error classes with fixtures today |
-| **Fuzz replay UI** | Fuzzer saves `fuzz_fail_<seed>.cnb`; CLI to replay/minimize seeds |
-| **Type soundness artifact** | Milestone 7 — Coq in `flake.nix` hints at formal verification aspirations |
-| **Playground** | Compile-and-run in browser — only after self-hosting or WASM port |
+| **Mushlings** — done | `cinnabar mushlings init/verify` installs seven exercises sourced from real rejection fixtures, including linearity, unhandled `Result`, tail recursion, and borrow ambiguity, and distinguishes solved programs, expected diagnostics, and unexpected regressions. |
+| **Fuzz replay and minimization** — done | `cinnabar fuzz replay FILE` deterministically reruns a saved artifact; `cinnabar fuzz minimize FILE` performs line-level reduction while preserving the diagnostic signature. |
+| **Type soundness evidence** — done; proof deferred | `cinnabar soundness PATH` emits versioned JSON from the successfully resolved, typechecked, and borrow-checked attributed arena. It explicitly declares `formal_proof: false`; a mechanized progress/preservation proof remains Milestone 7 work. |
+| **Local playground** — done | `cinnabar playground` serves a loopback-only editor that compiles and executes source with the native compiler/runtime, enforces a one-MiB request cap, and terminates programs exceeding five seconds. A public untrusted-code service still requires stronger process isolation or a WASM port. |
 
 ---
 

@@ -5,12 +5,17 @@
 // flat node arena for every later consumer to read (Single-Fact Rule).
 
 pub mod analysis;
+pub mod advanced_tools;
 pub mod ast;
 pub mod borrow;
 pub mod codegen;
+pub mod docs;
+pub mod format;
 pub mod inspect;
 pub mod lexer;
 pub mod module_loader;
+pub mod native_stub;
 pub mod parser;
+pub mod project;
 pub mod resolver;
 pub mod typecheck;

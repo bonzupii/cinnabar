@@ -2,3 +2,5 @@
 pre_commit.log
 /scratch
 /container/local/
+node_modules/
+**/target/

@@ -8,6 +8,12 @@ use cinnabar::analysis::{
     references, signature_help,
 };
 use cinnabar::ast::NO_FILE;
+use cinnabar::format::format_source;
+use serde_json::Value;
+use std::error::Error;
+use std::path::PathBuf;
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn fixture(rel: &str) -> String {
     format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), rel)
@@ -279,6 +285,41 @@ fn borrow_notes_explain_inconsistent_paths() {
 }
 
 #[test]
+fn borrow_explanations_have_a_stable_json_surface() -> Result<(), Box<dyn Error>> {
+    let output = Command::new(env!("CARGO_BIN_EXE_cinnabar"))
+        .arg(fixture("explain_leak.cnb"))
+        .arg("--explain-borrow=json")
+        .output()?;
+    assert!(!output.status.success(), "borrow-invalid input unexpectedly succeeded");
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        report.get("format").and_then(Value::as_str),
+        Some("cinnabar.borrow-explanations.v1")
+    );
+    let diagnostics = report
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .ok_or("JSON borrow report had no diagnostics array")?;
+    assert!(!diagnostics.is_empty(), "JSON borrow report was empty");
+    let has_path_notes = diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .get("explanations")
+            .and_then(Value::as_array)
+            .is_some_and(|explanations| explanations.len() >= 2)
+    });
+    assert!(has_path_notes, "JSON borrow report omitted path explanations: {}", report);
+    let every_source_is_real = diagnostics.iter().all(|diagnostic| {
+        diagnostic
+            .get("source")
+            .and_then(|source| source.get("path"))
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.ends_with("explain_leak.cnb"))
+    });
+    assert!(every_source_is_real, "JSON report contained a fabricated source: {}", report);
+    Ok(())
+}
+
+#[test]
 fn overlay_buffers_shadow_the_file_system() {
     let entry = fixture("multi_file/main.cnb");
     let broken = "use Math.add\n\npub fun main() I64\n  return add(10)\nend\n";
@@ -291,4 +332,83 @@ fn overlay_buffers_shadow_the_file_system() {
     // The same entry with the on-disk (valid) content stays clean.
     let clean = analyze(&entry, &[]);
     assert!(clean.errors.is_empty(), "on-disk fixture should be clean: {:?}", clean.errors);
+}
+
+#[test]
+fn formatter_is_idempotent_and_preserves_the_reference_program() -> Result<(), Box<dyn Error>> {
+    let entry = fixture("spec.cnb");
+    let source = std::fs::read_to_string(&entry)?;
+    let formatted = format_source(&source);
+    assert_eq!(format_source(&formatted), formatted, "formatter was not idempotent");
+    let overlay = [(entry.clone(), formatted)];
+    let analysis = analyze(&entry, &overlay);
+    assert!(analysis.resolved, "formatted source did not resolve: {:?}", analysis.errors);
+    assert!(analysis.typechecked, "formatted source did not typecheck: {:?}", analysis.errors);
+    assert!(analysis.errors.is_empty(), "formatting changed program validity: {:?}", analysis.errors);
+    Ok(())
+}
+
+fn unique_project_directory() -> PathBuf {
+    let timestamp = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_nanos(),
+        Err(time_error) => time_error.duration().as_nanos(),
+    };
+    std::env::temp_dir().join(format!(
+        "cinnabar_tooling_project_{}_{}",
+        std::process::id(),
+        timestamp
+    ))
+}
+
+#[test]
+fn project_and_documentation_commands_work_end_to_end() -> Result<(), Box<dyn Error>> {
+    let compiler = env!("CARGO_BIN_EXE_cinnabar");
+    let project = unique_project_directory();
+    let initialized = Command::new(compiler).arg("init").arg(&project).output()?;
+    assert!(
+        initialized.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+
+    std::fs::write(
+        project.join("main.cnb"),
+        "#! Project entry documentation\npub fun main() I64\n  return 0\nend\n",
+    )?;
+    let checked = Command::new(compiler).arg("check").arg(&project).output()?;
+    assert!(checked.status.success(), "check failed: {}", String::from_utf8_lossy(&checked.stderr));
+
+    let documented = Command::new(compiler).arg("doc").arg(&project).output()?;
+    assert!(
+        documented.status.success(),
+        "doc failed: {}",
+        String::from_utf8_lossy(&documented.stderr)
+    );
+    let html = std::fs::read_to_string(project.join("target").join("doc").join("index.html"))?;
+    assert!(html.contains("Project entry documentation"));
+    assert!(html.contains("main"));
+
+    let built = Command::new(compiler).arg("build").arg(&project).output()?;
+    assert!(built.status.success(), "build failed: {}", String::from_utf8_lossy(&built.stderr));
+    let ran = Command::new(compiler).arg("run").arg(&project).output()?;
+    assert!(ran.status.success(), "run failed: {}", String::from_utf8_lossy(&ran.stderr));
+
+    std::fs::write(
+        project.join("tests").join("invalid.reject.cnb"),
+        "pub fun main() I64\n  return unknown_value\nend\n",
+    )?;
+    let updated = Command::new(compiler)
+        .arg("test")
+        .arg(&project)
+        .arg("--update-snapshots")
+        .output()?;
+    assert!(
+        updated.status.success(),
+        "snapshot update failed: {}",
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    assert!(project.join("tests").join("invalid.reject.cnb.stderr").is_file());
+    let tested = Command::new(compiler).arg("test").arg(&project).output()?;
+    assert!(tested.status.success(), "test failed: {}", String::from_utf8_lossy(&tested.stderr));
+    Ok(())
 }

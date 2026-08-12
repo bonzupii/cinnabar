@@ -33,7 +33,7 @@ fn lex_byte(
         push_newline(nodes, pos, file);
         pos + 1
     } else if byte == b'#' {
-        lex_comment(bytes, pos, file, errors)
+        lex_comment(names, nodes, bytes, pos, source, file, errors)
     } else if is_ident_start(byte) {
         lex_ident(names, nodes, bytes, pos, file, source, errors)
     } else if is_digit(byte) {
@@ -130,14 +130,44 @@ fn comment_body_start(bytes: &[u8], pos: usize) -> usize {
     }
 }
 
-fn lex_comment(bytes: &[u8], pos: usize, file: i64, errors: &mut Vec<Diag>) -> usize {
+fn lex_comment(
+    names: &mut Vec<String>,
+    nodes: &mut Vec<i64>,
+    bytes: &[u8],
+    pos: usize,
+    source: &str,
+    file: i64,
+    errors: &mut Vec<Diag>,
+) -> usize {
     if is_block_opener(bytes, pos) {
         let body = comment_body_start(bytes, pos);
-        lex_block_comment(bytes, body, pos, file, errors)
+        let end = lex_block_comment(bytes, body, pos, file, errors);
+        if is_doc_comment(bytes, pos) && end >= body + 2 {
+            push_doc_token(names, nodes, source, body..end - 2, pos..end, file, errors);
+        }
+        end
     } else if is_doc_comment(bytes, pos) {
-        lex_line_comment(bytes, pos + 2)
+        let body = pos + 2;
+        let end = lex_line_comment(bytes, body);
+        push_doc_token(names, nodes, source, body..end, pos..end, file, errors);
+        end
     } else {
         lex_line_comment(bytes, pos + 1)
+    }
+}
+
+fn push_doc_token(
+    names: &mut Vec<String>,
+    nodes: &mut Vec<i64>,
+    source: &str,
+    body_range: std::ops::Range<usize>,
+    token_range: std::ops::Range<usize>,
+    file: i64,
+    errors: &mut Vec<Diag>,
+) {
+    if let Some(body) = slice_text(source, body_range.start, body_range.end, errors) {
+        let name = intern(names, body);
+        push_token(nodes, TOK_DOC, name, NONE, token_range.start as i64, token_range.end as i64, file);
     }
 }
 
