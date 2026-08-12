@@ -1,0 +1,5 @@
+.git
+target
+pre_commit.log
+scratch
+container/local

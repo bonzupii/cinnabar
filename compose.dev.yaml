@@ -1,0 +1,39 @@
+name: cinnabar-dev
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: container/Containerfile
+    init: true
+    working_dir: /workspace
+    command: ["sleep", "infinity"]
+    environment:
+      NIX_CONFIG: "experimental-features = nix-command flakes"
+      RUST_BACKTRACE: "full"
+    volumes:
+      - type: bind
+        source: ${CINNABAR_WORKTREE:?set CINNABAR_WORKTREE}
+        target: /workspace
+      - type: volume
+        source: nix-store
+        target: /nix
+      - type: volume
+        source: nix-cache
+        target: /root/.cache/nix
+      - type: volume
+        source: cargo-home
+        target: /root/.cargo
+      - type: volume
+        source: rust-target
+        target: /workspace/target
+
+volumes:
+  nix-store:
+    name: cinnabar-nix
+  nix-cache:
+    name: cinnabar-nix-cache
+  cargo-home:
+    name: cinnabar-cargo
+  rust-target:
+    name: cinnabar-target-${CINNABAR_CACHE_KEY:?set CINNABAR_CACHE_KEY}

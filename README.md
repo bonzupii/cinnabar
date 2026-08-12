@@ -199,6 +199,12 @@ cargo build --release
 
 Outside of `nix develop`, `cargo build`/`cargo clippy` will fail unless you have a matching LLVM 21 toolchain and `MUSL_LIBC_A` (pointing at a static `libc.a`) configured yourself — see [`build.rs`](build.rs) and [`flake.nix`](flake.nix) for the exact discovery logic and paths.
 
+### Docker Desktop and Windows worktrees
+
+Windows contributors can run the same Nix environment in one reusable Docker Compose service. Its named Nix and Cargo caches survive branch changes, while every worktree receives an isolated Rust `target` volume. The setup also includes the linked-worktree Git mounts needed by Nix and a rust-analyzer wrapper that runs inside `nix develop`.
+
+See [`CONTAINER_DEVELOPMENT.md`](CONTAINER_DEVELOPMENT.md) for setup, VS Code attachment, worktree switching, and verification commands. Native Linux development remains Nix-first and does not require Docker.
+
 ## Using the compiler
 
 ```
