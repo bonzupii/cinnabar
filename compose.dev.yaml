@@ -1,7 +1,8 @@
-name: cinnabar-dev
+name: cinnabar
 
 services:
   dev:
+    container_name: dev
     build:
       context: .
       dockerfile: container/Containerfile

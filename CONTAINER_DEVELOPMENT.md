@@ -81,7 +81,7 @@ The main checkout needs no proxy: its real `.git` directory arrives with the `/w
 
 ## VS Code
 
-Start the selected service, then use **Dev Containers: Attach to Running Container...**, choose the `cinnabar-dev` `dev` service, and open `/workspace`. A name-level attached-container configuration can keep the editor setup across service recreation:
+Start the selected service, then use **Dev Containers: Attach to Running Container...**, choose the `dev` container in the `cinnabar` stack, and open `/workspace`. A name-level attached-container configuration can keep the editor setup across service recreation:
 
 ```json
 {
