@@ -178,7 +178,19 @@ default to `Int`, and explicit-width types are used wherever a width matters.
 
 ---
 
-## Milestone 7 — Verification
+## Milestone 7 — Cinnabook and Mushlings
+- `cinna burn`: local web server, static content, bundled at compile time, matching the exact
+  installed compiler version.
+- Mushlings: rustlings-style broken/diagnostic/fixed exercises. Source directly from the failure
+  classes already found (dropped `pub`, mixed struct/enum body, unhandled `Result`/`Option`,
+  discard patterns, unconsumed linear value, ambiguous returned borrow, compile-time-zero division,
+  and the fixed-width overflow/range cases from Milestone 1) — each already has a real compiler
+  diagnostic; use it verbatim rather than writing new exercise text from scratch.
+- Depends on Milestone 6 (diagnostic rendering) and a stable language surface.
+
+---
+
+## Milestone 8 — Verification
 - Type soundness: progress + preservation, checked against monomorphization, trait dispatch, and
   nested sum-type destructuring.
 - AST/type fuzzer generating random well-typed programs, asserting the typechecker/borrow checker
@@ -188,18 +200,6 @@ default to `Int`, and explicit-width types are used wherever a width matters.
   static/syscall-direct, build a separate instrumented target for the sanitizer gate (dynamically
   linked against sanitizer runtimes, as UBSan/ASan require) rather than relaxing the static-only
   rule for shipped output. The sanitizer build is test infrastructure, not a release artifact.
-
----
-
-## Milestone 8 — Cinnabook and Mushlings
-- `cinna burn`: local web server, static content, bundled at compile time, matching the exact
-  installed compiler version.
-- Mushlings: rustlings-style broken/diagnostic/fixed exercises. Source directly from the failure
-  classes already found (dropped `pub`, mixed struct/enum body, unhandled `Result`/`Option`,
-  discard patterns, unconsumed linear value, ambiguous returned borrow, compile-time-zero division,
-  and the fixed-width overflow/range cases from Milestone 1) — each already has a real compiler
-  diagnostic; use it verbatim rather than writing new exercise text from scratch.
-- Depends on Milestone 6 (diagnostic rendering) and a stable language surface.
 
 ---
 
