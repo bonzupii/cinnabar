@@ -1,0 +1,14 @@
+services:
+  dev:
+    volumes:
+      - type: bind
+        source: ${CINNABAR_GIT_COMMON:?set CINNABAR_GIT_COMMON}
+        target: /git-common
+      - type: bind
+        source: ${CINNABAR_GIT_POINTER:?set CINNABAR_GIT_POINTER}
+        target: /workspace/.git
+        read_only: true
+      - type: bind
+        source: ${CINNABAR_GIT_BACKLINK:?set CINNABAR_GIT_BACKLINK}
+        target: /git-common/worktrees/${CINNABAR_GIT_ADMIN:?set CINNABAR_GIT_ADMIN}/gitdir
+        read_only: true
