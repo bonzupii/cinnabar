@@ -20,6 +20,7 @@ use cinnabar::ast::{
     NO_FILE, SYM_CONST, SYM_ENUM, SYM_FUN, SYM_IMPL_METHOD, SYM_MODULE, SYM_NATIVE_FUN,
     SYM_STRUCT, SYM_TRAIT, SYM_TRAIT_METHOD, SYM_TYPE, SYM_VARIANT,
 };
+use cinnabar::project;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde_json::{json, Value};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -54,6 +55,10 @@ struct ServerState {
     running_path: Option<String>,
     analysis_tx: Sender<AnalysisResult>,
     analysis_rx: Receiver<AnalysisResult>,
+    // The one authoritative attached-fact snapshot for each root's current
+    // generation. Positional requests consume this analysis; they never
+    // invoke the compiler themselves.
+    completed: Vec<AnalysisResult>,
 }
 
 // A fatal transport failure surfaces through main's Result: there is no
@@ -93,6 +98,7 @@ fn main() -> Result<(), String> {
         running_path: None,
         analysis_tx,
         analysis_rx,
+        completed: Vec::new(),
     };
     main_loop(&connection, &mut state)?;
     // The transport threads terminate when every channel endpoint is gone.
@@ -199,18 +205,18 @@ fn send_ok(connection: &Connection, id: RequestId, result: Value) -> Result<(), 
 
 // The (path, file id, byte offset, analysis) behind a positional request,
 // or None when the params don't name a file this server can analyze.
-fn positional(state: &ServerState, params: &Value) -> Option<(Analysis, i64, i64)> {
+fn positional<'state>(state: &'state ServerState, params: &Value) -> Option<(&'state Analysis, i64, i64)> {
     let uri = params.get("textDocument")?.get("uri")?.as_str()?;
     let path = uri_to_path(uri)?;
     let line = params.get("position")?.get("line")?.as_i64()?;
     let character = params.get("position")?.get("character")?.as_i64()?;
     let entry = entry_of_doc(state, &path);
-    let analysis = analyze(&entry, &state.docs);
-    let file = file_id_of(&analysis, &path);
+    let analysis = completed_analysis(state, &entry)?;
+    let file = file_id_of(analysis, &path);
     if file == NONE_ID {
         return None;
     }
-    let text = file_text_of(&analysis, file);
+    let text = file_text_of(analysis, file);
     let offset = position_to_offset(&text, line, character);
     Some((analysis, file, offset))
 }
@@ -238,10 +244,10 @@ fn on_hover(state: &ServerState, params: &Value) -> Value {
         Some(found) => found,
         None => return Value::Null,
     };
-    match hover(&analysis, file, offset) {
+    match hover(analysis, file, offset) {
         Some((markdown, span)) => json!({
             "contents": { "kind": "markdown", "value": markdown },
-            "range": range_json(&analysis, span.0, span.1, span.2)
+            "range": range_json(analysis, span.0, span.1, span.2)
         }),
         None => Value::Null,
     }
@@ -252,8 +258,8 @@ fn on_definition(state: &ServerState, params: &Value) -> Value {
         Some(found) => found,
         None => return Value::Null,
     };
-    match definition(&analysis, file, offset) {
-        Some(span) => match location_json(&analysis, span.0, span.1, span.2) {
+    match definition(analysis, file, offset) {
+        Some(span) => match location_json(analysis, span.0, span.1, span.2) {
             Some(location) => location,
             None => Value::Null,
         },
@@ -266,13 +272,13 @@ fn on_references(state: &ServerState, params: &Value) -> Value {
         Some(found) => found,
         None => return Value::Null,
     };
-    let spans = references(&analysis, file, offset);
+    let spans = references(analysis, file, offset);
     let mut out: Vec<Value> = Vec::new();
     let mut idx = 0usize;
     while idx < spans.len() {
         match spans.get(idx) {
             Some(span) => {
-                if let Some(location) = location_json(&analysis, span.0, span.1, span.2) {
+                if let Some(location) = location_json(analysis, span.0, span.1, span.2) {
                     out.push(location);
                 }
             }
@@ -317,7 +323,7 @@ fn on_completion(state: &ServerState, params: &Value) -> Value {
         Some(found) => found,
         None => return Value::Null,
     };
-    let items = completions(&analysis, file, offset);
+    let items = completions(analysis, file, offset);
     let mut out: Vec<Value> = Vec::new();
     let mut idx = 0usize;
     while idx < items.len() {
@@ -338,7 +344,7 @@ fn on_signature_help(state: &ServerState, params: &Value) -> Value {
         Some(found) => found,
         None => return Value::Null,
     };
-    match signature_help(&analysis, file, offset) {
+    match signature_help(analysis, file, offset) {
         Some(info) => {
             let mut params_json: Vec<Value> = Vec::new();
             let mut idx = 0usize;
@@ -373,8 +379,11 @@ fn on_code_lens(state: &ServerState, params: &Value) -> Value {
         None => return Value::Array(Vec::new()),
     };
     let entry = entry_of_doc(state, &path);
-    let analysis = analyze(&entry, &state.docs);
-    let file = file_id_of(&analysis, &path);
+    let analysis = match completed_analysis(state, &entry) {
+        Some(value) => value,
+        None => return Value::Array(Vec::new()),
+    };
+    let file = file_id_of(analysis, &path);
     if file == NONE_ID {
         return Value::Array(Vec::new());
     }
@@ -385,7 +394,7 @@ fn on_code_lens(state: &ServerState, params: &Value) -> Value {
             Some(note) => {
                 if note.2 == file {
                     lenses.push(json!({
-                        "range": range_json(&analysis, note.2, note.3, note.4),
+                        "range": range_json(analysis, note.2, note.3, note.4),
                         "command": {
                             "title": note.1,
                             "command": "cinnabar.showExplanation",
@@ -516,6 +525,14 @@ fn register_document(state: &mut ServerState, path: &str) -> String {
     }
     if state.roots.contains(&path.to_string()) {
         return path.to_string();
+    }
+    if let Some(entry_path) = project::entry_for_source(std::path::Path::new(path)) {
+        let entry = entry_path.to_string_lossy().to_string();
+        state.doc_entries.push((path.to_string(), entry.clone()));
+        if !state.roots.contains(&entry) {
+            state.roots.push(entry.clone());
+        }
+        return entry;
     }
     let uri = path_to_uri(path);
     let mut idx = 0usize;
@@ -691,6 +708,57 @@ fn current_generation(state: &ServerState, path: &str) -> i64 {
     0
 }
 
+// A completed analysis is valid only for the same root generation that
+// produced it. Document edits advance that generation before scheduling the
+// next worker, so stale compiler facts can never answer a positional request.
+fn completed_analysis<'state>(state: &'state ServerState, path: &str) -> Option<&'state Analysis> {
+    let generation = current_generation(state, path);
+    let mut idx = 0usize;
+    while idx < state.completed.len() {
+        match state.completed.get(idx) {
+            Some(result) => {
+                if result.path == path && result.generation == generation {
+                    return Some(&result.analysis);
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn retain_completed_analysis(state: &mut ServerState, result: AnalysisResult) {
+    let mut idx = 0usize;
+    while idx < state.completed.len() {
+        let matches_path = match state.completed.get(idx) {
+            Some(existing) => existing.path == result.path,
+            None => false,
+        };
+        if matches_path {
+            state.completed.remove(idx);
+            break;
+        }
+        idx += 1;
+    }
+    state.completed.push(result);
+}
+
+fn discard_completed_analysis(state: &mut ServerState, path: &str) {
+    let mut idx = 0usize;
+    while idx < state.completed.len() {
+        let matches_path = match state.completed.get(idx) {
+            Some(existing) => existing.path == path,
+            None => false,
+        };
+        if matches_path {
+            state.completed.remove(idx);
+            return;
+        }
+        idx += 1;
+    }
+}
+
 fn advance_generation(state: &mut ServerState, path: &str) -> i64 {
     let mut idx = 0usize;
     while idx < state.generations.len() {
@@ -712,6 +780,7 @@ fn advance_generation(state: &mut ServerState, path: &str) -> i64 {
 
 fn invalidate_analysis(state: &mut ServerState, path: &str) {
     advance_generation(state, path);
+    discard_completed_analysis(state, path);
     let mut idx = 0usize;
     while idx < state.pending.len() {
         let matches_path = match state.pending.get(idx) {
@@ -778,7 +847,8 @@ fn publish_completed(connection: &Connection, state: &mut ServerState) -> Result
             state.running_path = None;
         }
         if current_generation(state, &result.path) == result.generation {
-            publish_analysis(connection, state, &result.path, result.analysis)?;
+            publish_analysis(connection, state, &result.path, &result.analysis)?;
+            retain_completed_analysis(state, result);
         }
     }
     Ok(())
@@ -820,9 +890,9 @@ fn publish_analysis(
     connection: &Connection,
     state: &mut ServerState,
     entry_path: &str,
-    analysis: Analysis,
+    analysis: &Analysis,
 ) -> Result<(), String> {
-    reconcile_root_graph(state, entry_path, &analysis);
+    reconcile_root_graph(state, entry_path, analysis);
     let mut fresh: Vec<String> = Vec::new();
     let mut file = 0i64;
     while (file as usize) < analysis.files.len() {
@@ -831,7 +901,7 @@ fn publish_analysis(
             None => break,
         };
         let uri = path_to_uri(&path);
-        let diags = file_diagnostics(&analysis, file);
+        let diags = file_diagnostics(analysis, file);
         send_diagnostics(connection, &uri, diags)?;
         fresh.push(uri);
         file += 1;
@@ -1048,6 +1118,7 @@ mod tests {
             running_path: None,
             analysis_tx,
             analysis_rx,
+            completed: Vec::new(),
         };
 
         start_due_analyses(&mut state);

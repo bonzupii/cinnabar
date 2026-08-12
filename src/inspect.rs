@@ -122,6 +122,9 @@ fn row_detail(names: &[String], nodes: &[i64], lists: &[Vec<i64>], id: i64, tag:
     if tag == NODE_CONSTVAL {
         return format!("constval sym=#{} value={}", node_a(nodes, id), node_b(nodes, id));
     }
+    if tag == NODE_DOC {
+        return format!("doc target=#{} parts=list#{}", node_a(nodes, id), node_b(nodes, id));
+    }
     if tag == NODE_TRAIT {
         return format!(
             "trait-dispatch call=#{} trait-sym=#{} method='{}'",
@@ -157,6 +160,9 @@ fn token_detail(names: &[String], nodes: &[i64], id: i64) -> String {
     }
     if kind == TOK_SYM {
         return format!("tok SYM '{}'", name_text(names, node_b(nodes, id)));
+    }
+    if kind == TOK_DOC {
+        return format!("tok DOC '{}'", name_text(names, node_b(nodes, id)));
     }
     if kind == TOK_INT {
         return format!("tok INT {}", node_c(nodes, id));
@@ -291,6 +297,8 @@ fn tag_name(tag: i64) -> &'static str {
         "INST"
     } else if tag == NODE_CONSTVAL {
         "CONSTVAL"
+    } else if tag == NODE_DOC {
+        "DOC"
     } else if tag == NODE_TRAIT {
         "TRAIT"
     } else if tag == NODE_VARFACT {

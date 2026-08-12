@@ -211,6 +211,8 @@ See [`CONTAINER_DEVELOPMENT.md`](CONTAINER_DEVELOPMENT.md) for setup, VS Code at
 cinnabar <FILE> [-o|--output PATH] [--dump-ast] [--dump-typed-ast] [--print-layout]
                 [--emit-llvm] [--emit-obj] [--explain-borrow] [--run]
                 [-O|--opt-level {0,1,2,3,s,z}]
+cinnabar fmt [--check] <FILE>
+cinnabar {build|run|check|test|doc|book|init} [PATH]
 ```
 
 | Flag | Description |
@@ -233,6 +235,20 @@ cargo run -- tests/fixtures/spec.cnb                 # compiles spec.cnb -> test
 cargo run -- tests/fixtures/multi_file/main.cnb --run # compiles and runs, following `use Math.add`
 cargo run -- my_program.cnb --dump-ast                # inspect the parsed AST
 ```
+
+Projects use a `build.cnb` manifest with root-confined relative paths:
+
+```text
+entry = main.cnb
+tests = tests
+```
+
+`cinnabar init [PATH]` creates this manifest, `main.cnb`, and `tests/smoke.cnb`. `build`, `run`, and
+`check` discover the manifest upward from the supplied path. `test` recursively runs `.cnb` files:
+`.reject.cnb` files must be rejected, `.stderr` sidecars snapshot complete diagnostics, and `.exit`
+sidecars specify nonzero expected statuses. Use `test --update-snapshots` to deliberately refresh
+diagnostic snapshots. `doc` writes public API HTML to `target/doc`, while `book` serves those docs
+with the bundled manifesto and exact installed compiler version.
 
 On success, the compiler prints `Successfully compiled <input> to '<output>'.` and exits `0`. Any lex, parse, resolve, typecheck, borrow-check, or codegen failure is rendered as one or more source-located diagnostics (via [`ariadne`](https://github.com/zesterer/ariadne)) and exits non-zero.
 
@@ -277,6 +293,8 @@ src/
   typecheck.rs      Type checking, canonical type keys, linearity inference
   borrow.rs         Flow-sensitive borrow/linearity checker (CFG dataflow, explainer notes)
   analysis.rs       IDE queries over attached facts (hover, definition, references, ...)
+  docs.rs           Attached-doc HTML generation and local Cinnabook server
+  project.rs        build.cnb discovery, initialization, tests, and snapshots
   inspect.rs        --dump-typed-ast arena serialization
   codegen/          LLVM IR generation (via inkwell), layout report, native linking
 tests/
@@ -338,7 +356,7 @@ Case budgets use an even sample across each ordered corpus instead of taking onl
 
 ## Status
 
-Cinnabar is under active early development. See [`ROADMAP.md`](ROADMAP.md) for what's resolved and what's planned next (the fixed-width integer suite, string literals, native OS surfaces, a project manifest format, diagnostic quality improvements, and formal verification work). Self-hosting — Cinnabar compiling itself — is a long-term goal and completeness test, not a gate for any individual feature.
+Cinnabar is under active early development. See [`ROADMAP.md`](ROADMAP.md) for what's resolved and what's planned next (string literals, native OS surfaces, diagnostic quality improvements, and formal verification work). Self-hosting — Cinnabar compiling itself — is a long-term goal and completeness test, not a gate for any individual feature.
 
 ## License
 

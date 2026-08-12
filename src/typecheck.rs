@@ -18,6 +18,7 @@ type State<'a> = (
     i64,
     i64,
     i64,
+    &'a mut Vec<bool>,
 );
 
 pub fn typecheck(
@@ -38,6 +39,7 @@ pub fn typecheck(
     let mut vars: Vec<(i64, i64)> = Vec::new();
     let mut origins: Vec<(i64, i64, i64)> = Vec::new();
     let mut env: Vec<Vec<i64>> = Vec::new();
+    let mut local_fact_sources = vec![false; nodes.len() / NODE_STRIDE as usize];
     push_scope(&mut env);
     let mut state: State = (
         names,
@@ -55,6 +57,7 @@ pub fn typecheck(
         index_err_sym,
         0,
         0,
+        &mut local_fact_sources,
     );
 
     collect_types(&mut state, root);
@@ -264,13 +267,22 @@ fn lookup(env: &[Vec<i64>], name: i64) -> (i64, i64) {
 }
 
 fn attach_local_facts(state: &mut State, source: i64) {
-    let node_total = state.1.len() as i64 / NODE_STRIDE;
-    let mut node_idx = 0i64;
-    while node_idx < node_total {
-        if node_tag(state.1, node_idx) == NODE_LOCALFACT && node_a(state.1, node_idx) == source {
-            return;
+    if source < 0 {
+        return;
+    }
+    let already_attached = match state.15.get_mut(source as usize) {
+        Some(attached) => {
+            if *attached {
+                true
+            } else {
+                *attached = true;
+                false
+            }
         }
-        node_idx += 1;
+        None => return,
+    };
+    if already_attached {
+        return;
     }
     let mut facts: Vec<(i64, i64, i64)> = Vec::new();
     let mut depth = state.4.len();

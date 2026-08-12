@@ -9,18 +9,21 @@ pub fn parse(
     token_start: i64,
 ) -> bool {
     let mut pos = token_start;
-    skip_nl(nodes, &mut pos);
     while !at_eof(nodes, pos) {
+        let docs = take_doc_comments(nodes, lists, &mut pos);
+        if at_eof(nodes, pos) {
+            break;
+        }
         let before = pos;
         match parse_item(&mut pos, names, nodes, lists, errors) {
             Some(item) => {
                 list_push(lists, root, item);
+                attach_docs(nodes, item, docs);
             }
             None => {
                 recover_line(nodes, &mut pos);
             }
         }
-        skip_nl(nodes, &mut pos);
         if pos <= before {
             pos += 1;
         }
@@ -53,10 +56,60 @@ fn is_block_open(nodes: &[i64], names: &[String], pos: i64) -> bool {
         || is_name(nodes, names, pos, "while")
         || is_name(nodes, names, pos, "if")
         || is_name(nodes, names, pos, "match")
-}fn skip_nl(nodes: &[i64], pos: &mut i64) {
+}
+
+fn skip_nl(nodes: &[i64], pos: &mut i64) {
     while node_a(nodes, *pos) == TOK_NL {
         *pos += 1;
     }
+}
+
+fn take_doc_comments(nodes: &[i64], lists: &mut Vec<Vec<i64>>, pos: &mut i64) -> i64 {
+    let mut docs = NONE;
+    loop {
+        skip_nl(nodes, pos);
+        if node_tag(nodes, *pos) != NODE_TOKEN || node_a(nodes, *pos) != TOK_DOC {
+            break;
+        }
+        if docs == NONE {
+            docs = alloc_list(lists);
+        }
+        list_push(lists, docs, node_b(nodes, *pos));
+        *pos += 1;
+    }
+    docs
+}
+
+fn skip_statement_layout(nodes: &[i64], pos: &mut i64) {
+    loop {
+        skip_nl(nodes, pos);
+        if node_tag(nodes, *pos) == NODE_TOKEN && node_a(nodes, *pos) == TOK_DOC {
+            *pos += 1;
+        } else {
+            break;
+        }
+    }
+}
+
+fn attach_docs(nodes: &mut Vec<i64>, target: i64, docs: i64) {
+    if docs == NONE {
+        return;
+    }
+    alloc_node(
+        nodes,
+        &[
+            NODE_DOC,
+            node_file(nodes, target),
+            node_start(nodes, target),
+            node_end(nodes, target),
+            target,
+            docs,
+            NONE,
+            NONE,
+            NONE,
+            NONE,
+        ],
+    );
 }
 
 fn tok_text_is(nodes: &[i64], names: &[String], pos: i64, text: &str) -> bool {
@@ -291,17 +344,20 @@ fn parse_module(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &m
     *pos += 1;
     let name = expect_word(pos, nodes, errors)?;
     let children = alloc_list(lists);
-    skip_nl(nodes, pos);
-    while !is_name(nodes, names, *pos, "end") && !at_eof(nodes, *pos) {
+    loop {
+        let docs = take_doc_comments(nodes, lists, pos);
+        if is_name(nodes, names, *pos, "end") || at_eof(nodes, *pos) {
+            break;
+        }
         match parse_item(pos, names, nodes, lists, errors) {
             Some(item) => {
                 list_push(lists, children, item);
+                attach_docs(nodes, item, docs);
             }
             None => {
                 recover_line(nodes, pos);
             }
         }
-        skip_nl(nodes, pos);
     }
     let end = expect_end(pos, names, nodes, errors)?;
     Some(alloc_item(nodes, ITEM_MODULE, file, start, end, is_pub, &[name, children, NONE]))
@@ -328,8 +384,11 @@ fn parse_type_decl(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists:
     let type_params = parse_type_params(pos, names, nodes, lists, errors)?;
     let fields = alloc_list(lists);
     let variants = alloc_list(lists);
-    skip_nl(nodes, pos);
-    while !is_name(nodes, names, *pos, "end") && !at_eof(nodes, *pos) {
+    loop {
+        let docs = take_doc_comments(nodes, lists, pos);
+        if is_name(nodes, names, *pos, "end") || at_eof(nodes, *pos) {
+            break;
+        }
         let member_pub = if accept(nodes, names, pos, "pub") { 1 } else { 0 };
         let member_name = expect_word(pos, nodes, errors)?;
         let member_start = node_start(nodes, *pos - 1);
@@ -338,16 +397,18 @@ fn parse_type_decl(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists:
             let ty = parse_type(pos, names, nodes, lists, errors)?;
             let field = alloc_field(nodes, member_name, member_file, member_start, node_end(nodes, ty), ty, member_pub);
             list_push(lists, fields, field);
+            attach_docs(nodes, field, docs);
         } else if is_sym(nodes, names, *pos, "(") {
             let payload = parse_payload_types(pos, names, nodes, lists, errors)?;
             let variant = alloc_variant(nodes, member_name, member_file, member_start, node_end(nodes, *pos - 1), payload, member_pub);
             list_push(lists, variants, variant);
+            attach_docs(nodes, variant, docs);
         } else {
             let payload = alloc_list(lists);
             let variant = alloc_variant(nodes, member_name, member_file, member_start, node_end(nodes, *pos - 1), payload, member_pub);
             list_push(lists, variants, variant);
+            attach_docs(nodes, variant, docs);
         }
-        skip_nl(nodes, pos);
     }
     let end = expect_end(pos, names, nodes, errors)?;
     if list_len(lists, fields) > 0 && list_len(lists, variants) > 0 {
@@ -386,8 +447,11 @@ fn parse_trait(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mu
     *pos += 1;
     let name = expect_word(pos, nodes, errors)?;
     let methods = alloc_list(lists);
-    skip_nl(nodes, pos);
-    while !is_name(nodes, names, *pos, "end") && !at_eof(nodes, *pos) {
+    loop {
+        let docs = take_doc_comments(nodes, lists, pos);
+        if is_name(nodes, names, *pos, "end") || at_eof(nodes, *pos) {
+            break;
+        }
         accept(nodes, names, pos, "pub");
         if !expect(nodes, names, pos, "fun", errors) {
             recover_line(nodes, pos);
@@ -396,12 +460,12 @@ fn parse_trait(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mu
         match parse_fun_body_or_sig(pos, names, nodes, lists, errors, 0) {
             Some(fn_id) => {
                 list_push(lists, methods, fn_id);
+                attach_docs(nodes, fn_id, docs);
             }
             None => {
                 recover_line(nodes, pos);
             }
         }
-        skip_nl(nodes, pos);
     }
     let end = expect_end(pos, names, nodes, errors)?;
     Some(alloc_item(nodes, ITEM_TRAIT, file, start, end, is_pub, &[name, methods, NONE]))
@@ -417,8 +481,11 @@ fn parse_impl(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut
     }
     let for_ty = parse_type(pos, names, nodes, lists, errors)?;
     let methods = alloc_list(lists);
-    skip_nl(nodes, pos);
-    while !is_name(nodes, names, *pos, "end") && !at_eof(nodes, *pos) {
+    loop {
+        let docs = take_doc_comments(nodes, lists, pos);
+        if is_name(nodes, names, *pos, "end") || at_eof(nodes, *pos) {
+            break;
+        }
         accept(nodes, names, pos, "pub");
         if !expect(nodes, names, pos, "fun", errors) {
             recover_line(nodes, pos);
@@ -427,12 +494,12 @@ fn parse_impl(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut
         match parse_fun_body_or_sig(pos, names, nodes, lists, errors, 1) {
             Some(fn_id) => {
                 list_push(lists, methods, fn_id);
+                attach_docs(nodes, fn_id, docs);
             }
             None => {
                 recover_line(nodes, pos);
             }
         }
-        skip_nl(nodes, pos);
     }
     let end = expect_end(pos, names, nodes, errors)?;
     Some(alloc_item(nodes, ITEM_IMPL, file, start, end, is_pub, &[trait_segs, for_ty, methods]))
@@ -693,7 +760,7 @@ fn parse_named_type(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists
 
 fn parse_block(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, terminators: &[&str]) -> Option<i64> {
     let list = alloc_list(lists);
-    skip_nl(nodes, pos);
+    skip_statement_layout(nodes, pos);
     while !at_terminator(nodes, names, *pos, terminators) && !at_eof(nodes, *pos) {
         let before = *pos;
         match parse_stmt(pos, names, nodes, lists, errors) {
@@ -704,7 +771,7 @@ fn parse_block(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mu
                 recover_line(nodes, pos);
             }
         }
-        skip_nl(nodes, pos);
+        skip_statement_layout(nodes, pos);
         if *pos <= before {
             *pos += 1;
         }

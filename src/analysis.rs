@@ -263,11 +263,15 @@ fn smallest_with_tags(analysis: &Analysis, file: i64, offset: i64, tags: &[i64])
     best
 }
 
-/// The smallest expression, pattern, or type node covering (file, offset).
-/// When the offset sits just past a node (the cursor at the end of an
-/// identifier), the position one byte back is also tried.
+/// The smallest expression, pattern, type, item, or variant node covering
+/// (file, offset). Item and variant nodes let the cursor land on a
+/// declaration's own name (e.g. hovering `SERVER_PORT` in its `const`
+/// declaration) and still resolve a symbol, matching the coverage
+/// `references` already scans for. When the offset sits just past a node
+/// (the cursor at the end of an identifier), the position one byte back is
+/// also tried.
 pub fn node_at(analysis: &Analysis, file: i64, offset: i64) -> i64 {
-    let tags = [NODE_EXPR, NODE_PAT, NODE_TY];
+    let tags = [NODE_EXPR, NODE_PAT, NODE_TY, NODE_ITEM, NODE_VARIANT];
     let found = smallest_with_tags(analysis, file, offset, &tags);
     if found != NONE {
         return found;
@@ -289,6 +293,12 @@ fn sym_of_node(analysis: &Analysis, id: i64) -> i64 {
     if tag == NODE_TY {
         return crate::ast::ty_sym_of(&analysis.nodes, id);
     }
+    if tag == NODE_ITEM {
+        return item_sym_of(&analysis.nodes, id);
+    }
+    if tag == NODE_VARIANT {
+        return variant_sym_of(&analysis.nodes, id);
+    }
     NONE
 }
 
@@ -302,6 +312,13 @@ fn ty_key_of_node(analysis: &Analysis, id: i64) -> i64 {
     }
     if tag == NODE_TY {
         return ty_key_of(&analysis.nodes, id);
+    }
+    if tag == NODE_ITEM && node_a(&analysis.nodes, id) == ITEM_CONST {
+        let ty_node = node_e(&analysis.nodes, id);
+        if ty_node == NONE {
+            return NONE;
+        }
+        return ty_key_of(&analysis.nodes, ty_node);
     }
     NONE
 }

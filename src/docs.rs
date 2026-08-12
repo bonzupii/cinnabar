@@ -1,0 +1,239 @@
+use crate::ast::*;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+
+pub fn render_api_docs(names: &[String], nodes: &[i64], lists: &[Vec<i64>], root: i64) -> String {
+    let mut body = String::new();
+    render_item_list(names, nodes, lists, root, 1, &mut body);
+    page("Cinnabar API documentation", &body)
+}
+
+pub fn render_cinnabook(api_html: &str) -> String {
+    let manifesto = escape_html(include_str!("../MANIFESTO.md"));
+    let mut api = api_html;
+    if let Some(body_start) = api_html.find("<body>")
+        && let Some(body_end) = api_html.rfind("</body>")
+        && body_start + "<body>".len() <= body_end
+    {
+        api = &api_html[body_start + "<body>".len()..body_end];
+    }
+    let body = format!(
+        "<h1>Cinnabook</h1><p class=version>Compiler version {}</p>\
+         <nav><a href=#language>Language manifesto</a> · <a href=#api>API documentation</a></nav>\
+         <section id=language><h2>Language manifesto</h2><pre>{}</pre></section>\
+         <section id=api><h2>API documentation</h2><div class=embedded>{}</div></section>",
+        env!("CARGO_PKG_VERSION"),
+        manifesto,
+        api
+    );
+    page("Cinnabook", &body)
+}
+
+pub fn serve_cinnabook(address: &str, page_text: &str) -> Result<(), String> {
+    let listener = TcpListener::bind(address)
+        .map_err(|bind_error| format!("cannot bind Cinnabook server to '{}': {}", address, bind_error))?;
+    for incoming in listener.incoming() {
+        let mut stream = incoming.map_err(|accept_error| format!("cannot accept Cinnabook connection: {}", accept_error))?;
+        let mut request = [0u8; 2048];
+        let bytes_read = stream
+            .read(&mut request)
+            .map_err(|read_error| format!("cannot read Cinnabook request: {}", read_error))?;
+        if bytes_read == 0 {
+            continue;
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            page_text.len(),
+            page_text
+        );
+        stream
+            .write_all(response.as_bytes())
+            .map_err(|write_error| format!("cannot write Cinnabook response: {}", write_error))?;
+    }
+    Ok(())
+}
+
+fn render_item_list(
+    names: &[String],
+    nodes: &[i64],
+    lists: &[Vec<i64>],
+    item_list: i64,
+    depth: usize,
+    output: &mut String,
+) {
+    let mut idx = 0i64;
+    while idx < list_len(lists, item_list) {
+        let item = list_get(lists, item_list, idx);
+        if node_tag(nodes, item) == NODE_ITEM && node_b(nodes, item) == 1 {
+            render_item(names, nodes, lists, item, depth, output);
+        }
+        idx += 1;
+    }
+}
+
+fn render_item(
+    names: &[String],
+    nodes: &[i64],
+    lists: &[Vec<i64>],
+    item: i64,
+    depth: usize,
+    output: &mut String,
+) {
+    let kind = node_a(nodes, item);
+    let (label, name) = item_label_and_name(names, nodes, item);
+    let heading = usize::min(depth + 1, 6);
+    output.push_str(&format!("<article class=item><h{heading}>{} <code>{}</code></h{heading}>", label, escape_html(&name)));
+    render_attached_docs(names, nodes, lists, item, output);
+    if kind == ITEM_STRUCT {
+        render_members(names, nodes, lists, node_e(nodes, item), "Field", output);
+    } else if kind == ITEM_ENUM {
+        render_members(names, nodes, lists, node_e(nodes, item), "Variant", output);
+    } else if kind == ITEM_TRAIT {
+        render_methods(names, nodes, lists, node_e(nodes, item), output);
+    } else if kind == ITEM_MODULE {
+        render_item_list(names, nodes, lists, node_e(nodes, item), depth + 1, output);
+    } else if kind == ITEM_USE
+        || kind == ITEM_IMPL
+        || kind == ITEM_FUN
+        || kind == ITEM_NATIVE_FUN
+        || kind == ITEM_CONST
+        || kind == ITEM_NATIVE_TYPE
+    {
+    }
+    output.push_str("</article>");
+}
+
+fn item_label_and_name(names: &[String], nodes: &[i64], item: i64) -> (&'static str, String) {
+    let kind = node_a(nodes, item);
+    if kind == ITEM_MODULE {
+        ("Module", name_text(names, node_d(nodes, item)))
+    } else if kind == ITEM_USE {
+        ("Re-export", "public import".to_string())
+    } else if kind == ITEM_STRUCT {
+        ("Type", name_text(names, node_d(nodes, item)))
+    } else if kind == ITEM_ENUM {
+        ("Enum", name_text(names, node_d(nodes, item)))
+    } else if kind == ITEM_TRAIT {
+        ("Trait", name_text(names, node_d(nodes, item)))
+    } else if kind == ITEM_IMPL {
+        ("Implementation", "trait implementation".to_string())
+    } else if kind == ITEM_FUN {
+        ("Function", name_text(names, node_a(nodes, node_d(nodes, item))))
+    } else if kind == ITEM_NATIVE_FUN {
+        ("Native function", name_text(names, node_a(nodes, node_d(nodes, item))))
+    } else if kind == ITEM_CONST {
+        ("Constant", name_text(names, node_d(nodes, item)))
+    } else if kind == ITEM_NATIVE_TYPE {
+        ("Native type", name_text(names, node_d(nodes, item)))
+    } else {
+        ("Declaration", "unknown".to_string())
+    }
+}
+
+fn render_members(
+    names: &[String],
+    nodes: &[i64],
+    lists: &[Vec<i64>],
+    members: i64,
+    label: &str,
+    output: &mut String,
+) {
+    let mut idx = 0i64;
+    while idx < list_len(lists, members) {
+        let member = list_get(lists, members, idx);
+        if node_c(nodes, member) == 1 {
+            output.push_str(&format!("<section class=member><h6>{} <code>{}</code></h6>", label, escape_html(&name_text(names, node_a(nodes, member)))));
+            render_attached_docs(names, nodes, lists, member, output);
+            output.push_str("</section>");
+        }
+        idx += 1;
+    }
+}
+
+fn render_methods(names: &[String], nodes: &[i64], lists: &[Vec<i64>], methods: i64, output: &mut String) {
+    let mut idx = 0i64;
+    while idx < list_len(lists, methods) {
+        let method = list_get(lists, methods, idx);
+        output.push_str(&format!("<section class=member><h6>Method <code>{}</code></h6>", escape_html(&name_text(names, node_a(nodes, method)))));
+        render_attached_docs(names, nodes, lists, method, output);
+        output.push_str("</section>");
+        idx += 1;
+    }
+}
+
+fn render_attached_docs(names: &[String], nodes: &[i64], lists: &[Vec<i64>], target: i64, output: &mut String) {
+    let mut node = 0i64;
+    let count = nodes.len() as i64 / NODE_STRIDE;
+    while node < count {
+        if node_tag(nodes, node) == NODE_DOC && node_a(nodes, node) == target {
+            let docs = node_b(nodes, node);
+            let mut idx = 0i64;
+            while idx < list_len(lists, docs) {
+                let text = name_text(names, list_get(lists, docs, idx));
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    output.push_str(&format!("<p>{}</p>", escape_html(trimmed).replace('\n', "<br>")));
+                }
+                idx += 1;
+            }
+        }
+        node += 1;
+    }
+}
+
+fn name_text(names: &[String], id: i64) -> String {
+    match names.get(id as usize) {
+        Some(text) => text.clone(),
+        None => "unknown".to_string(),
+    }
+}
+
+fn page(title: &str, body: &str) -> String {
+    format!(
+        "<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>{}</title>\
+         <style>body{{max-width:72rem;margin:2rem auto;padding:0 1.5rem;font:16px/1.55 system-ui;color:#241b18;background:#fffaf5}}code,pre{{font-family:ui-monospace,monospace}}\
+         article{{border-left:3px solid #b4472f;padding-left:1rem;margin:1.5rem 0}}.member{{margin-left:1rem}}pre{{white-space:pre-wrap;background:#f3e9df;padding:1rem;overflow:auto}}\
+         nav{{position:sticky;top:0;background:#fffaf5;padding:.75rem 0}}a{{color:#8f2f20}}.version{{color:#6d5a52}}</style><body>{}</body></html>",
+        escape_html(title),
+        body
+    )
+}
+
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{lexer, parser};
+
+    #[test]
+    fn public_docs_come_from_parser_attachments() {
+        let source = "#! Public API\npub fun visible() I64\n  return 1\nend\n#! Private API\nfun hidden() I64\n  return 2\nend\n";
+        let mut names = Vec::new();
+        let mut nodes = Vec::new();
+        let mut lists = Vec::new();
+        let mut errors = Vec::new();
+        let root = alloc_list(&mut lists);
+        assert!(lexer::lex(&mut names, &mut nodes, source, 0, &mut errors));
+        assert!(parser::parse(&mut names, &mut nodes, &mut lists, &mut errors, root, 0));
+        let html = render_api_docs(&names, &nodes, &lists, root);
+        assert!(html.contains("Public API"));
+        assert!(html.contains("visible"));
+        assert!(!html.contains("Private API"));
+        assert!(!html.contains("hidden"));
+    }
+
+    #[test]
+    fn book_is_version_pinned_and_escapes_manifesto() {
+        let page_text = render_cinnabook("<p>API</p>");
+        assert!(page_text.contains(env!("CARGO_PKG_VERSION")));
+        assert!(page_text.contains("Cinnabook"));
+        assert!(page_text.contains("The Cinnabar Manifesto"));
+    }
+}
