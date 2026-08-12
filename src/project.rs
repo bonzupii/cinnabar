@@ -46,10 +46,12 @@ pub fn entry_for_source(source: &Path) -> Option<PathBuf> {
 pub fn load_manifest(path: &Path) -> Result<ProjectManifest, String> {
     let source = fs::read_to_string(path)
         .map_err(|read_error| format!("cannot read project manifest '{}': {}", path.display(), read_error))?;
-    let root = match path.parent() {
-        Some(parent) => parent.to_path_buf(),
+    let root_source = match path.parent() {
+        Some(parent) => parent,
         None => return Err(format!("manifest '{}' has no project directory", path.display())),
     };
+    let root = fs::canonicalize(root_source)
+        .map_err(|resolve_error| format!("cannot resolve project root '{}': {}", root_source.display(), resolve_error))?;
     let mut entry: Option<PathBuf> = None;
     let mut tests: Option<PathBuf> = None;
     for (line_index, raw_line) in source.lines().enumerate() {
@@ -84,7 +86,7 @@ pub fn load_manifest(path: &Path) -> Result<ProjectManifest, String> {
             return Err(format!("{}:{}: unknown manifest field '{}'", path.display(), line_index + 1, key));
         }
     }
-    let entry_path = match entry {
+    let entry_source = match entry {
         Some(relative) => root.join(relative),
         None => return Err(format!("{}: missing required entry field", path.display())),
     };
@@ -92,10 +94,58 @@ pub fn load_manifest(path: &Path) -> Result<ProjectManifest, String> {
         Some(relative) => root.join(relative),
         None => root.join("tests"),
     };
+    let entry_path = canonicalize_confined_existing(&root, &entry_source, "project entry")?;
     if !entry_path.is_file() {
-        return Err(format!("project entry '{}' does not exist", entry_path.display()));
+        return Err(format!("project entry '{}' is not a file", entry_path.display()));
     }
     Ok(ProjectManifest { root, entry: entry_path, tests: tests_path })
+}
+
+fn canonicalize_confined_existing(root: &Path, path: &Path, role: &str) -> Result<PathBuf, String> {
+    let resolved = fs::canonicalize(path)
+        .map_err(|resolve_error| format!("cannot resolve {} '{}': {}", role, path.display(), resolve_error))?;
+    if !resolved.starts_with(root) {
+        return Err(format!("{} '{}' resolves outside project root '{}'", role, path.display(), root.display()));
+    }
+    Ok(resolved)
+}
+
+fn validate_confined_sidecar(root: &Path, path: &Path, role: &str) -> Result<(), String> {
+    if sidecar_present(path, role)? {
+        let resolved = canonicalize_confined_existing(root, path, role)?;
+        if !resolved.is_file() {
+            return Err(format!("{} '{}' is not a file", role, path.display()));
+        }
+        return Ok(());
+    }
+    let parent = match path.parent() {
+        Some(value) => value,
+        None => return Err(format!("{} '{}' has no parent directory", role, path.display())),
+    };
+    let resolved_parent = canonicalize_confined_existing(root, parent, role)?;
+    if !resolved_parent.is_dir() {
+        return Err(format!("{} parent '{}' is not a directory", role, parent.display()));
+    }
+    Ok(())
+}
+
+fn sidecar_present(path: &Path, role: &str) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            let recognized_path = metadata.is_file() || metadata.is_symlink() || metadata.is_dir();
+            if !recognized_path {
+                return Err(format!("cannot classify {} '{}'", role, path.display()));
+            }
+            Ok(true)
+        }
+        Err(inspect_error) => {
+            if inspect_error.kind() == std::io::ErrorKind::NotFound {
+                Ok(false)
+            } else {
+                Err(format!("cannot inspect {} '{}': {}", role, path.display(), inspect_error))
+            }
+        }
+    }
 }
 
 fn validate_relative_path(value: &str, manifest: &Path, line: usize) -> Result<PathBuf, String> {
@@ -150,11 +200,12 @@ pub fn initialize(directory: &Path) -> Result<(), String> {
 }
 
 pub fn discover_tests(manifest: &ProjectManifest) -> Result<Vec<PathBuf>, String> {
-    if !manifest.tests.is_dir() {
-        return Err(format!("test directory '{}' does not exist", manifest.tests.display()));
+    let tests_root = canonicalize_confined_existing(&manifest.root, &manifest.tests, "test directory")?;
+    if !tests_root.is_dir() {
+        return Err(format!("test directory '{}' is not a directory", tests_root.display()));
     }
     let mut tests = Vec::new();
-    collect_tests(&manifest.tests, &mut tests)?;
+    collect_tests(&tests_root, &mut tests)?;
     tests.sort();
     Ok(tests)
 }
@@ -184,6 +235,7 @@ fn collect_tests(directory: &Path, tests: &mut Vec<PathBuf>) -> Result<(), Strin
 }
 
 pub fn run_tests(executable: &Path, manifest: &ProjectManifest, update_snapshots: bool) -> Result<TestSummary, String> {
+    let tests_root = canonicalize_confined_existing(&manifest.root, &manifest.tests, "test directory")?;
     let tests = discover_tests(manifest)?;
     let output_dir = manifest.root.join("target").join("cinnabar-tests");
     fs::create_dir_all(&output_dir)
@@ -193,7 +245,7 @@ pub fn run_tests(executable: &Path, manifest: &ProjectManifest, update_snapshots
     for test in &tests {
         let project_relative = test.strip_prefix(&manifest.root)
             .map_err(|prefix_error| format!("cannot relativize test '{}': {}", test.display(), prefix_error))?;
-        let test_relative = test.strip_prefix(&manifest.tests)
+        let test_relative = test.strip_prefix(&tests_root)
             .map_err(|prefix_error| format!("cannot relativize test '{}': {}", test.display(), prefix_error))?;
         let binary_name = test_relative.to_string_lossy().replace(['/', '\\'], "__");
         let binary = output_dir.join(binary_name).with_extension("bin");
@@ -205,11 +257,11 @@ pub fn run_tests(executable: &Path, manifest: &ProjectManifest, update_snapshots
             .output()
             .map_err(|spawn_error| format!("cannot run compiler for '{}': {}", test.display(), spawn_error))?;
         let snapshot = snapshot_path(test);
-        let rejection = is_rejection_test(test) || snapshot.is_file();
+        let rejection = is_rejection_test(test) || sidecar_present(&snapshot, "diagnostic snapshot")?;
         let result = if rejection {
-            check_rejection(test, &snapshot, &compile, update_snapshots)
+            check_rejection(&manifest.root, test, &snapshot, &compile, update_snapshots)
         } else {
-            check_success(test, &binary, &compile)
+            check_success(&manifest.root, test, &binary, &compile)
         };
         match result {
             Ok(()) => passed += 1,
@@ -241,17 +293,19 @@ fn exit_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.exit", path.display()))
 }
 
-fn check_rejection(test: &Path, snapshot: &Path, compile: &Output, update_snapshots: bool) -> Result<(), String> {
+fn check_rejection(root: &Path, test: &Path, snapshot: &Path, compile: &Output, update_snapshots: bool) -> Result<(), String> {
     if compile.status.success() {
         return Err(format!("{}: expected rejection but compilation succeeded", test.display()));
     }
     let actual = normalize_text(&String::from_utf8_lossy(&compile.stderr));
     if update_snapshots {
+        validate_confined_sidecar(root, snapshot, "diagnostic snapshot")?;
         fs::write(snapshot, &actual)
             .map_err(|write_error| format!("cannot update snapshot '{}': {}", snapshot.display(), write_error))?;
         return Ok(());
     }
-    if snapshot.is_file() {
+    if sidecar_present(snapshot, "diagnostic snapshot")? {
+        validate_confined_sidecar(root, snapshot, "diagnostic snapshot")?;
         let expected = fs::read_to_string(snapshot)
             .map_err(|read_error| format!("cannot read snapshot '{}': {}", snapshot.display(), read_error))?;
         if normalize_text(&expected) != actual {
@@ -261,7 +315,7 @@ fn check_rejection(test: &Path, snapshot: &Path, compile: &Output, update_snapsh
     Ok(())
 }
 
-fn check_success(test: &Path, binary: &Path, compile: &Output) -> Result<(), String> {
+fn check_success(root: &Path, test: &Path, binary: &Path, compile: &Output) -> Result<(), String> {
     if !compile.status.success() {
         return Err(format!("{}: compilation failed\n{}", test.display(), String::from_utf8_lossy(&compile.stderr)));
     }
@@ -272,15 +326,16 @@ fn check_success(test: &Path, binary: &Path, compile: &Output) -> Result<(), Str
         })
         .status()
         .map_err(|spawn_error| format!("cannot run test '{}': {}", test.display(), spawn_error))?;
-    let expected = expected_exit(test)?;
+    let expected = expected_exit(root, test)?;
     status_matches(run_status, expected, test)
 }
 
-fn expected_exit(test: &Path) -> Result<i32, String> {
+fn expected_exit(root: &Path, test: &Path) -> Result<i32, String> {
     let path = exit_path(test);
-    if !path.is_file() {
+    if !sidecar_present(&path, "expected exit sidecar")? {
         return Ok(0);
     }
+    validate_confined_sidecar(root, &path, "expected exit sidecar")?;
     let text = fs::read_to_string(&path)
         .map_err(|read_error| format!("cannot read expected exit '{}': {}", path.display(), read_error))?;
     text.trim()
@@ -336,5 +391,62 @@ mod tests {
         };
         assert_eq!(manifest.entry, root.join("main.cnb"));
         assert!(validate_relative_path("../escape", &root.join(MANIFEST_FILE), 1).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_test_directory_symlink_outside_project() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_directory("test_symlink_project");
+        let outside = test_directory("test_symlink_outside");
+        assert!(fs::create_dir_all(&root).is_ok());
+        assert!(fs::create_dir_all(&outside).is_ok());
+        assert!(fs::write(root.join("main.cnb"), "pub fun main() I64\n  return 0\nend\n").is_ok());
+        assert!(fs::write(outside.join("escape.cnb"), "pub fun main() I64\n  return 0\nend\n").is_ok());
+        assert!(symlink(&outside, root.join("tests")).is_ok());
+        assert!(fs::write(root.join(MANIFEST_FILE), "entry = main.cnb\ntests = tests\n").is_ok());
+
+        let manifest = match load_manifest(&root.join(MANIFEST_FILE)) {
+            Ok(value) => value,
+            Err(message) => {
+                assert!(message.is_empty(), "{}", message);
+                return;
+            }
+        };
+        let result = discover_tests(&manifest);
+        assert!(result.is_err());
+        let message = match result {
+            Ok(paths) => {
+                assert!(paths.is_empty());
+                return;
+            }
+            Err(value) => value,
+        };
+        assert!(message.contains("resolves outside project root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_snapshot_symlink_outside_project() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_directory("snapshot_symlink_project");
+        let outside = test_directory("snapshot_symlink_outside");
+        assert!(fs::create_dir_all(root.join("tests")).is_ok());
+        assert!(fs::create_dir_all(&outside).is_ok());
+        let external_snapshot = outside.join("captured.stderr");
+        assert!(fs::write(&external_snapshot, "outside\n").is_ok());
+        let snapshot = root.join("tests").join("case.reject.cnb.stderr");
+        assert!(symlink(&external_snapshot, &snapshot).is_ok());
+
+        let result = validate_confined_sidecar(&root, &snapshot, "diagnostic snapshot");
+        assert!(result.is_err());
+
+        let dangling_snapshot = root.join("tests").join("dangling.reject.cnb.stderr");
+        let absent_external = outside.join("absent.stderr");
+        assert!(symlink(&absent_external, &dangling_snapshot).is_ok());
+        let dangling_result = validate_confined_sidecar(&root, &dangling_snapshot, "diagnostic snapshot");
+        assert!(dangling_result.is_err());
     }
 }

@@ -169,34 +169,29 @@ pub fn format_source(source: &str) -> String {
 
     for raw_line in normalized.lines() {
         let text = raw_line.trim_end();
-        if in_block_comment {
-            out.push_str(text);
-            out.push('\n');
-            let mut idx = 0usize;
-            let bytes = text.as_bytes();
-            while idx < bytes.len() {
-                let closes = bytes.get(idx).is_some_and(|byte| *byte == b'|')
-                    && bytes.get(idx + 1).is_some_and(|byte| *byte == b'#');
-                if closes {
-                    in_block_comment = false;
-                    break;
-                }
-                idx += 1;
-            }
-            previous_blank = false;
-            continue;
-        }
         if text.trim().is_empty() {
-            if !previous_blank {
+            if in_block_comment {
+                out.push_str(text);
+                out.push('\n');
+                previous_blank = false;
+            } else if !previous_blank {
                 out.push('\n');
                 previous_blank = true;
             }
             continue;
         }
 
-        let mut line_block_comment = false;
+        let started_in_block_comment = in_block_comment;
+        let mut line_block_comment = in_block_comment;
         let code = comment_free_code(text, &mut line_block_comment);
         let trimmed_code = code.trim();
+        if started_in_block_comment && trimmed_code.is_empty() {
+            out.push_str(text);
+            out.push('\n');
+            in_block_comment = line_block_comment;
+            previous_blank = false;
+            continue;
+        }
         let is_end = starts_with_word(trimmed_code, "end");
         let is_branch = starts_with_word(trimmed_code, "elif")
             || starts_with_word(trimmed_code, "else");
@@ -245,9 +240,7 @@ pub fn format_source(source: &str) -> String {
             }
         }
 
-        if line_block_comment {
-            in_block_comment = true;
-        }
+        in_block_comment = line_block_comment;
     }
 
     while out.ends_with("\n\n") {
@@ -283,5 +276,13 @@ mod tests {
         let source = "fun main() I64 #| comment starts here\nend and match are comment text\n|#\nreturn 0\nend\n";
         let expected = "fun main() I64 #| comment starts here\nend and match are comment text\n|#\n  return 0\nend\n";
         assert_eq!(format_source(source), expected);
+    }
+
+    #[test]
+    fn formats_code_after_multiline_comment_closer() {
+        let source = "fun main() I64\n#|\ncomment text\n|# if true\nreturn 1\nend\nreturn 0\nend\n";
+        let expected = "fun main() I64\n  #|\ncomment text\n  |# if true\n    return 1\n  end\n  return 0\nend\n";
+        assert_eq!(format_source(source), expected);
+        assert_eq!(format_source(expected), expected);
     }
 }
