@@ -1,13 +1,13 @@
 use std::env::VarError;
 
 #[derive(Clone, Copy)]
-pub enum TestProfile {
+pub(crate) enum TestProfile {
     Full,
     Balanced,
     Smoke,
 }
 
-pub fn test_profile() -> TestProfile {
+pub(crate) fn test_profile() -> TestProfile {
     let balanced = cfg!(feature = "test-profile-balanced");
     let smoke = cfg!(feature = "test-profile-smoke");
     assert!(
@@ -23,7 +23,7 @@ pub fn test_profile() -> TestProfile {
     }
 }
 
-pub fn profile_name(profile: TestProfile) -> &'static str {
+pub(crate) fn profile_name(profile: TestProfile) -> &'static str {
     match profile {
         TestProfile::Full => "full",
         TestProfile::Balanced => "balanced",
@@ -31,7 +31,12 @@ pub fn profile_name(profile: TestProfile) -> &'static str {
     }
 }
 
-pub fn profile_usize(profile: TestProfile, full: usize, balanced: usize, smoke: usize) -> usize {
+pub(crate) fn profile_usize(
+    profile: TestProfile,
+    full: usize,
+    balanced: usize,
+    smoke: usize,
+) -> usize {
     match profile {
         TestProfile::Full => full,
         TestProfile::Balanced => balanced,
@@ -39,7 +44,7 @@ pub fn profile_usize(profile: TestProfile, full: usize, balanced: usize, smoke: 
     }
 }
 
-pub fn usize_control(name: &str, default: usize) -> usize {
+pub(crate) fn usize_control(name: &str, default: usize) -> usize {
     match std::env::var(name) {
         Ok(value) => match value.parse::<usize>() {
             Ok(parsed) => parsed,
@@ -58,7 +63,11 @@ pub fn usize_control(name: &str, default: usize) -> usize {
     }
 }
 
-pub fn reduced_usize_control(profile: TestProfile, name: &str, default: usize) -> usize {
+pub(crate) fn reduced_usize_control(
+    profile: TestProfile,
+    name: &str,
+    default: usize,
+) -> usize {
     match profile {
         TestProfile::Full => default,
         TestProfile::Balanced => usize_control(name, default),
@@ -68,7 +77,7 @@ pub fn reduced_usize_control(profile: TestProfile, name: &str, default: usize) -
 
 // Selects exactly `budget` cases, spread across the entire ordered corpus,
 // rather than taking a prefix that could systematically miss later shapes.
-pub fn evenly_selected(index: usize, total: usize, budget: usize) -> bool {
+pub(crate) fn evenly_selected(index: usize, total: usize, budget: usize) -> bool {
     if index >= total {
         return false;
     }
