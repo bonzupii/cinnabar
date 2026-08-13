@@ -6,7 +6,6 @@
 |#
 
 pub const SERVER_PORT: Usize = 4067
-pub const MAX_REQUESTS: I64 = 1000
 
 # ===== HTTP/1.1 200 OK response header =====
 pub const H_00: U8 = 0x48
@@ -112,7 +111,6 @@ pub const H_99: U8 = 0x0A
 
 # ===== ./index.html body (747 bytes) =====
 pub const BODY_LEN: Usize = 747
-pub const HEADER_LEN: Usize = 100
 pub const B_000: U8 = 0x3C
 pub const B_001: U8 = 0x21
 pub const B_002: U8 = 0x44

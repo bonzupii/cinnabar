@@ -27,9 +27,6 @@ const OP_JMP: I64 = 5
 const OP_JZC: I64 = 6
 const OP_HALT: I64 = 7
 
-const FACTORIAL: I64 = 5
-const LOOP_START: I64 = 2
-const HALT_POS: I64 = 6
 
 #! prog: LOAD 1; MOVC 5; JZC 6; ACCM; DECC; JMP 2; HALT
 pub const PROG: I64 = (0x01) | (0x15 << 8) | (0x66 << 16) | (0x40 << 24) | (0x20 << 32) | (0x52 << 40) | (0x70 << 48)

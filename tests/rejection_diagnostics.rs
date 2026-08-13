@@ -88,6 +88,13 @@ const BUNDLES: &[Bundle] = &[
         path: "tests/fixtures/repro/const_div_zero_cascade.cnb",
         diagnostics: &["division by zero in constant", "modulo by zero in constant"],
     },
+    // Reachability applies to public and private items alike, so both the
+    // function and the constant must be reported. Losing either would leave
+    // the fixture still failing on its sibling.
+    Bundle {
+        path: "tests/fixtures/dead_code.cnb",
+        diagnostics: &["unused function 'unused_helper'", "unused constant 'UNUSED_CONST'"],
+    },
     // The type-checking cases the bundle above can never reach, in a file
     // the resolver accepts. Some of these are consequences of others — the
     // `Option(?)` pair follows from `try` on an integer, and the inference

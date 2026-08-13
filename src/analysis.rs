@@ -86,7 +86,15 @@ pub fn analyze(entry_path: &str, overlay: &[(String, String)]) -> Analysis {
             };
         }
     };
-    let resolved = resolver::resolve(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods);
+    let mut deferred: Vec<Diag> = Vec::new();
+    let resolved = resolver::resolve(
+        &mut names,
+        &mut nodes,
+        &mut lists,
+        resolver::Diagnostics { errors: &mut errors, notes: &mut notes, deferred: &mut deferred },
+        root,
+        &ext_mods,
+    );
     let mut typechecked = false;
     let mut impls_list = NONE;
     if resolved {
@@ -96,6 +104,12 @@ pub fn analyze(entry_path: &str, overlay: &[(String, String)]) -> Analysis {
         if ok {
             borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods);
         }
+    }
+    // Unused items are reported only once the stages that can explain a
+    // broken program have run. A file with a type error is told about the
+    // type error, not that the functions containing it are unreachable.
+    if errors.is_empty() {
+        errors.append(&mut deferred);
     }
     Analysis {
         names,

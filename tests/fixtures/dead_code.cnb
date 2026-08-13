@@ -1,22 +1,20 @@
 #!|
   A private function and a private constant, both declared and never used.
 
-  This compiles. MANIFESTO.md lists what must be checked at compile time —
-  exhaustive matching, linear consumption, borrow exclusivity, visibility,
-  casing, *unused imports*, unhandled Result/Option, constant division by
-  zero, type mismatches, effect purity — and an unused import is on that
-  list where an unused declaration is not.
+  This is rejected. Reachability is required of every item — public and
+  private alike, functions, constants, types, and native declarations — and
+  an item nothing reachable from `main` needs has no reason to have been
+  written.
 
-  The fixture exists to keep it that way. An unused-declaration rejection
-  was written once and taken back out, because the only remedy it left was
-  to mark demonstration code `pub` — which says an item is public API in
-  order to stop the compiler complaining, exactly the local bandaid
-  Milestone 6 forbids a diagnostic from steering anyone towards. It also
-  had to be absorbed by the random-program generator, which is meant to
-  emit valid programs and would otherwise have been emitting rejected ones.
+  `pub` is not an exemption. Exempting it would make one word the way to
+  silence this diagnostic, and Cinnabar grants no mechanism to bypass,
+  suppress, weaken, or defer an invariant. That is why an earlier attempt at
+  this check was reverted: it exempted `pub`, and the only remedy it left
+  anyone was to mark demonstration code public until the compiler stopped
+  objecting.
 
-  Reintroducing it is a language change: state it in MANIFESTO.md, and
-  design a remedy that is not `pub`, before this fixture starts failing.
+  Both diagnostics are asserted in `tests/rejection_diagnostics.rs`, so
+  losing either one fails rather than passing on its sibling.
 |#
 
 fun unused_helper() I64

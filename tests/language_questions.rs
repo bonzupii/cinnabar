@@ -1,10 +1,15 @@
-//! The two open language questions, pinned at their current answer.
+//! The open language question, pinned at its current answer.
 //!
-//! `MANIFESTO.md` does not settle either one, and these tests exist so that
-//! settling them is a deliberate act rather than a side effect. Both were,
-//! at some point, answered accidentally by an implementation before anyone
-//! decided them, and both implementations were reverted. What is left is
-//! the behaviour as it stands — not an endorsement of it.
+//! `MANIFESTO.md` does not settle it, and this test exists so that settling
+//! it is a deliberate act rather than a side effect. It was, at some point,
+//! answered accidentally by an implementation before anyone decided it, and
+//! that implementation was reverted. What is left is the behaviour as it
+//! stands — not an endorsement of it.
+//!
+//! The other question that lived here — whether an unused declaration is an
+//! error — has been answered: it is, for public and private items alike.
+//! Its fixture moved to `tests/rejection_diagnostics.rs`, where the two
+//! diagnostics it must produce are asserted individually.
 //!
 //! Each is asserted on the compiler's **exit status** rather than on the
 //! absence of a particular word, so it fails whatever a future rejection
@@ -108,22 +113,4 @@ fn the_discard_record_runs_and_agrees_with_itself() {
         Ok(()) => {}
         Err(err) => eprintln!("discard record cleanup failed: {}", err),
     }
-}
-
-/// **Open question: is an unused private declaration an error?** Today it is not.
-///
-/// `MANIFESTO.md`'s list of compile-time invariants names unused *imports*,
-/// not unused declarations. A rejection was implemented and removed: its only
-/// remedy was to mark demonstration code `pub`, which is the local bandaid
-/// Milestone 6 forbids a diagnostic from steering anyone towards, and it
-/// forced the random-program generator — which exists to emit valid programs
-/// — to emit `pub` everywhere instead.
-#[test]
-fn an_unused_private_declaration_still_compiles() {
-    let path = fixture("dead_code.cnb");
-    assert!(
-        accepts(&path),
-        "an unused private declaration was rejected: {}",
-        compiler_output(&path)
-    );
 }

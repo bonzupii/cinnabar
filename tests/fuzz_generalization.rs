@@ -2361,22 +2361,26 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
     g.push(&format!("var {}: I64 = 0", total));
     g.total = total.clone();
     add_int(&mut g.state, &total, 0);
+    // Everything this generator declares is used, unconditionally.
+    //
+    // Reachability is now a language rule: an item nothing reachable from
+    // `main` needs is a compile error. A generator whose job is to emit
+    // *valid* programs therefore cannot leave a declaration unreferenced on
+    // a coin flip. The variety stays in what these blocks contain — the
+    // gates only ever decided whether a declared thing was mentioned.
     gen_struct_block(&mut g, 0);
-    if struct_count == 2 && g.rng.below(2) == 0 {
+    if struct_count == 2 {
         gen_struct_block(&mut g, 1);
     }
-    if g.rng.below(2) == 0 {
-        gen_enum_match(&mut g);
-    }
-    if g.rng.below(2) == 0 {
-        gen_bounded_call(&mut g);
-    }
+    gen_enum_match(&mut g);
+    gen_bounded_call(&mut g);
     let body_stmts = 3 + g.rng.below(5) as i32;
     let mut b = 0i32;
     while b < body_stmts {
         gen_stmt(&mut g, 1);
         b += 1;
     }
+    exercise_declarations(&mut g);
     if use_array {
         gen_array_block(&mut g);
     } else {
@@ -2386,6 +2390,81 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
     g.push("end");
     *rng = g.rng;
     g.src
+}
+
+/// References every helper and every enum this program declares.
+///
+/// Reachability is a language rule: an item nothing reachable from `main`
+/// needs is a compile error. A generator whose contract is to emit *valid*
+/// programs therefore cannot leave a declaration unreferenced on a coin
+/// flip. The randomness stays in what each declaration contains; only the
+/// fact that it is mentioned becomes certain.
+///
+/// Results are bound and not read. Folding them into the running total would
+/// change the value the harness predicts for the program, and the point here
+/// is to reference the declarations without altering what the program
+/// computes. An unused *local* is not an item, so it is not dead code.
+fn exercise_declarations(g: &mut Gen) {
+    let unary: Vec<String> = g.unary_helpers.iter().map(|helper| helper.0.clone()).collect();
+    let binary: Vec<String> = g.binary_helpers.iter().map(|helper| helper.0.clone()).collect();
+    let bools: Vec<String> = g.bool_helpers.iter().map(|helper| helper.0.clone()).collect();
+    let shared: Vec<String> = g.shared_helpers.iter().map(|helper| helper.0.clone()).collect();
+    let mutable: Vec<String> = g.mut_helpers.iter().map(|helper| helper.0.clone()).collect();
+    for name in unary {
+        let binding = g.fresh_snake();
+        g.push(&format!("val {} = {}(1)", binding, name));
+    }
+    for name in binary {
+        let binding = g.fresh_snake();
+        g.push(&format!("val {} = {}(1, 2)", binding, name));
+    }
+    for name in bools {
+        let binding = g.fresh_snake();
+        g.push(&format!("val {} = {}(1)", binding, name));
+    }
+    if !shared.is_empty() || !mutable.is_empty() {
+        let values: Vec<i64> = match g.structs.first() {
+            Some(def) => def.fields.iter().map(|_field| 1i64).collect(),
+            None => Vec::new(),
+        };
+        if !values.is_empty() {
+            let subject = g.fresh_snake();
+            let literal = struct_literal_text(g, 0, &values);
+            g.push(&format!("var {} = {}", subject, literal));
+            for name in shared {
+                let binding = g.fresh_snake();
+                g.push(&format!("val {} = {}(&{})", binding, name, subject));
+            }
+            for name in mutable {
+                let binding = g.fresh_snake();
+                g.push(&format!("val {} = {}(&mut {})", binding, name, subject));
+            }
+        }
+    }
+    // Constructing a variant reaches its enum, which is what keeps every
+    // declared enum alive rather than only the one a match happened to pick.
+    let enums: Vec<(String, usize)> = g
+        .enums
+        .iter()
+        .filter_map(|def| def.variants.first().cloned())
+        .collect();
+    for (variant, arity) in enums {
+        let binding = g.fresh_snake();
+        let mut call = variant.clone();
+        if arity > 0 {
+            call.push('(');
+            let mut p = 0usize;
+            while p < arity {
+                if p > 0 {
+                    call.push_str(", ");
+                }
+                call.push('1');
+                p += 1;
+            }
+            call.push(')');
+        }
+        g.push(&format!("val {} = {}", binding, call));
+    }
 }
 
 fn generate_negative(rng: &mut Rng, shape: usize) -> (String, &'static str) {

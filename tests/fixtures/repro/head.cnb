@@ -54,97 +54,29 @@
   This is a block documentation comment.
 |#
 
-pub const SENTINEL_INT: I64 = 999999 # Trailing comments may follow any line of code.
 pub const ZERO_INT: I64 = 0
 
-pub const GOOD_RANGE_INPUT: I64 = 21
-pub const SMALL_RANGE_INPUT: I64 = -1
-pub const LARGE_RANGE_INPUT: I64 = 101
-pub const GOOD_RANGE_OUTPUT: I64 = 42
-pub const MAX_RANGE: I64 = 100
 
-pub const GOOD_PORT: I64 = 8080
-pub const BAD_PORT: I64 = 0
-pub const MIN_PORT: I64 = 1
-pub const MAX_PORT: I64 = 65535
 
-pub const EVEN_TWO: I64 = 2
-pub const EVEN_FOUR: I64 = 4
-pub const HALF_TWO: I64 = 1
-pub const HALF_FOUR: I64 = 2
 
 pub const LOOP_LIMIT: I64 = 5
-pub const LOOP_EXPECTED: I64 = 10
-pub const BREAK_CONTINUE_EXPECTED: I64 = 13
-pub const OPTION_TRY_EXPECTED: I64 = 3
 
-pub const POINT_DX: I64 = 3
-pub const POINT_DY: I64 = 4
 
-pub const FLAG_ACTIVE: I64 = 1
-pub const FLAG_ADMIN: I64 = 2
 
-pub const MAGIC_U32: U32 = 0x0BADF00D
-pub const SENTINEL_U32: U32 = 0xFFFFFFFF
 
-pub const MAGIC_BYTE_0: U8 = 0x0D
-pub const MAGIC_BYTE_1: U8 = 0xF0
-pub const MAGIC_BYTE_2: U8 = 0xAD
-pub const MAGIC_BYTE_3: U8 = 0x0B
 
-pub const STRING_BYTE_0: U8 = 0x43 # UTF-8 'C'
-pub const STRING_BYTE_1: U8 = 0x69 # UTF-8 'i'
-pub const STRING_BYTE_2: U8 = 0x6E # UTF-8 'n'
-pub const STRING_BYTE_3: U8 = 0x21 # UTF-8 '!'
 
-pub const MEMORY_BYTE: U8 = 0xA5
-pub const MEMORY_SIZE: Usize = 1
-pub const ZERO_USIZE: Usize = 0
-pub const SENTINEL_USIZE: Usize = 999999
 
-pub const EXPECTED_REST_LEN: Usize = 3
-pub const EXPECTED_STRING_LEN: Usize = 4
 
-pub const HEADER_KIND: U32 = 7
-pub const HEADER_FLAGS: U32 = 3
-pub const TAG_VALUE: U32 = 0x5A
 pub const CHECKSUM_SALT: U32 = 0x0F
 
-#! Expected checksum for Header(kind: HEADER_KIND, flags: HEADER_FLAGS).
-pub const EXPECTED_HEADER_CHECKSUM: U32 = 0x00070304
 
-#! Expected checksum for Tag(value: TAG_VALUE).
-pub const EXPECTED_TAG_CHECKSUM: U32 = 0x00000055
 
-# Core algebraic types.
-pub type ExitCode
-  pub ExitSuccess
-  pub ExitFailure
-  pub ExitDiagnostic(I64)
-end
 
-pub type RangeError
-  pub TooSmall(I64)
-  pub TooLarge(I64)
-end
 
-pub type PortError
-  pub PortInvalid(I64)
-end
 
-pub type AppError
-  pub AppRange(RangeError)
-  pub AppPort(PortError)
-end
 
-pub type Port
-  pub Port(I64)
-end
 
-pub type Point
-  pub x: I64
-  pub y: I64
-end
 
 pub type Header
   pub kind: U32
@@ -161,23 +93,8 @@ pub type MagicHeader
   pub expected: U32
 end
 
-#! Groups memory test parameters that are always used together.
-pub type MemoryPlan
-  pub size: Usize
-  pub byte: U8
-end
 
-#! Groups expected trait-check digests that are always compared together.
-pub type ChecksumExpectation
-  pub header: U32
-  pub tag: U32
-end
 
-#! Groups the first byte of a slice and the length of the remaining slice.
-pub type SplitFirst
-  pub first: U8
-  pub rest_len: Usize
-end
 
 #! Runtime is a public mod.
 pub mod Runtime
@@ -376,122 +293,17 @@ pub impl Checksum for Tag
   end
 end
 
-#! Compiler error if T does not implement Checksum:
-#! implement Checksum for T.
-fun checksum_value<T: Checksum>(value: &T) U32
-  return Checksum.checksum(value)
-end
 
-#! Groups magic bytes and expected magic value.
-fun magic_header() MagicHeader
-  return MagicHeader(
-    bytes: [MAGIC_BYTE_0, MAGIC_BYTE_1, MAGIC_BYTE_2, MAGIC_BYTE_3],
-    expected: MAGIC_U32
-  )
-end
 
-#! Groups memory test parameters.
-fun memory_plan() MemoryPlan
-  return MemoryPlan(
-    size: MEMORY_SIZE,
-    byte: MEMORY_BYTE
-  )
-end
 
-#! Groups expected checksum digests.
-fun checksum_expectation() ChecksumExpectation
-  return ChecksumExpectation(
-    header: EXPECTED_HEADER_CHECKSUM,
-    tag: EXPECTED_TAG_CHECKSUM
-  )
-end
 
-#! Validates an I64 and constructs a nominal Port.
-#! Compiler errors:
-#! - using I64 where Port is expected: call port_from_int and handle Result
-#! - discarding this Result: use try or match both variants
-fun port_from_int(value: I64) Result(Port, PortError)
-  if value < MIN_PORT
-    return Err(PortInvalid(value))
-  end
 
-  if value > MAX_PORT
-    return Err(PortInvalid(value))
-  end
 
-  return Ok(Port(value))
-end
 
-fun port_value(port: Port) I64
-  match port
-    Port(value) => return value
-  end
-end
 
-fun normalize(value: I64) Result(I64, RangeError)
-  if value < ZERO_INT
-    return Err(TooSmall(value))
-  end
 
-  if value > MAX_RANGE
-    return Err(TooLarge(value))
-  end
 
-  return Ok(value)
-end
 
-fun double_positive(value: I64) Result(I64, RangeError)
-  if value < ZERO_INT
-    return Err(TooSmall(value))
-  end
-
-  return Ok(value + value)
-end
-
-#! Compiler error if normalize or double_positive Result is discarded:
-#! use try or match both variants.
-fun range_workflow(input: I64) Result(I64, RangeError)
-  val normalized = try normalize(input)
-  val doubled = try double_positive(normalized)
-  return Ok(doubled)
-end
-
-#! Explicit error conversion.
-#! Compiler error if a RangeError branch is missing: match must be exhaustive.
-fun range_to_app(error: RangeError) AppError
-  match error
-    TooSmall(value) => return AppRange(TooSmall(value))
-    TooLarge(value) => return AppRange(TooLarge(value))
-  end
-end
-
-#! Compiler error if RangeError is returned where AppError is expected:
-#! convert explicitly with range_to_app.
-fun app_workflow(input: I64) Result(I64, AppError)
-  val normalized = match normalize(input)
-    Ok(value) => value
-    Err(error) => return Err(range_to_app(error))
-  end
-
-  val doubled = match double_positive(normalized)
-    Ok(value) => value
-    Err(error) => return Err(range_to_app(error))
-  end
-
-  return Ok(doubled)
-end
-
-fun half_if_even(value: I64) Option(I64)
-  if value == EVEN_TWO
-    return Some(HALF_TWO)
-  end
-
-  if value == EVEN_FOUR
-    return Some(HALF_FOUR)
-  end
-
-  return None
-end
 
 #! Demonstrates var for mutable local state.
 #! Compiler error if total or i is val: assignment requires var.

@@ -286,7 +286,15 @@ Cinnabar must be able to compile itself. The language's own data structures, con
 Memory safety without garbage collection. Resource safety without RAII magic. Concurrency safety without mutexes (message passing and linear handles). The language must be suitable for writing kernels, embedded firmware, network stacks, and compilers — domains where GC pauses, implicit allocations, and runtime overhead are unacceptable.
 
 ### Compile-Time Correctness
-Every invariant that can be checked at compile time must be checked at compile time. Exhaustive matching. Linear consumption. Borrow exclusivity. Visibility. Casing. Unused imports. Unhandled `Result`/`Option` values. Constant division by zero. Type mismatches. Effect purity. If the compiler accepts a program, the program satisfies all stated invariants — and, by the Crucible Rule, runs without crashing. Runtime checks exist only for genuinely dynamic conditions (bounds checking on native surfaces, UTF-8 validation on string construction).
+Every invariant that can be checked at compile time must be checked at compile time. Exhaustive matching. Linear consumption. Borrow exclusivity. Visibility. Casing. Unused imports. Reachability. Unhandled `Result`/`Option` values. Constant division by zero. Type mismatches. Effect purity. If the compiler accepts a program, the program satisfies all stated invariants — and, by the Crucible Rule, runs without crashing. Runtime checks exist only for genuinely dynamic conditions (bounds checking on native surfaces, UTF-8 validation on string construction).
+
+### Reachability
+
+Every declared item must be reachable from `main`: functions, constants, structs, enums, traits, and native declarations alike. An item nothing reachable needs is a compile error, not a warning and not a lint.
+
+`pub` is not an exemption. It describes who may name a thing, not whether anything does — and exempting it would make one word the way to silence this diagnostic, which is the suppression mechanism this language does not have. A public function nobody calls is dead in exactly the way a private one is.
+
+Two consequences follow. A compilation unit with no `main` — a module on its own, or a `build.cnb` manifest — is not a whole program, so the rule does not apply to it; nothing that can be built into a binary escapes that way. And a diagnostic about reachability is reported only after type and borrow checking have run, because a program that does not type-check should be told what is wrong with it rather than which of its functions nothing calls.
 
 ### Minimal Surface Area
 Every feature must justify its existence against the needs of general-purpose systems programming — kernels, firmware, network stacks, runtimes, and compilers. Features that exist only for ergonomics, convention, or compatibility with other languages are rejected. The language is small because the problem domain demands precision, not expressiveness.

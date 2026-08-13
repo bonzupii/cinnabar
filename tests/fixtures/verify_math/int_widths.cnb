@@ -195,30 +195,7 @@ fun append_int(vec: &mut Collections.Vec(U8), value: I64) impure Result(Unit, Co
   return Ok(Unit)
 end
 
-#! Owns the vec in straight-line code only: build, view, string, print.
-fun print_int_inline(value: I64) impure Result(Unit, Collections.Error)
-  val vec = try vec_new[U8]()
-
-  val build_result = append_int(&mut vec, value)
-  match build_result
-    Ok(Unit) => Unit
-    Err(error) => return fail_free_vec(vec, error)
-  end
-
-  val view = vec_view(&vec)
-  val string = match string_from_slice(view)
-    Ok(s) => s
-    Err(error) => return fail_free_vec(vec, error)
-  end
-
-  print(&string)
-
-  string_free(string)
-  vec_free(vec)
-  return Ok(Unit)
-end
-
-#! Like `print_int_inline`, but ends with a newline.
+#! Builds the digits into a vec, prints them, and ends with a newline.
 fun print_int_newline(value: I64) impure Result(Unit, Collections.Error)
   val vec = try vec_new[U8]()
 

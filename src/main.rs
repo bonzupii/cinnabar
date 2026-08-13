@@ -81,6 +81,25 @@ fn project_path_arg() -> Arg {
 fn parse_args() -> Option<CliArgs> {
     let matches = ClapCommand::new("cinnabar")
         .about("Cinnabar compiler")
+        .long_about(
+            "Cinnabar compiler.\n\n\
+             There are two ways to invoke it. Given a source FILE, it runs the whole \
+             pipeline — lex, parse, load modules, resolve, typecheck, borrow-check, \
+             generate code, link — and writes a static binary. Given a subcommand, it \
+             acts on the project whose 'build.cnb' manifest is discovered by walking \
+             upward from the supplied path.\n\n\
+             Diagnostics are errors only. There is no warning severity, no suppression \
+             pragma, and no flag that turns a check off: a program either compiles \
+             cleanly or is rejected with a source-located diagnostic.",
+        )
+        .after_help(
+            "Examples:\n  \
+             cinnabar main.cnb -o main        Compile one file to a static binary\n  \
+             cinnabar main.cnb --run          Compile it and execute the result\n  \
+             cinnabar build                   Build the project containing the current directory\n  \
+             cinnabar test                    Run the project's test suite\n\n\
+             Run 'cinnabar <COMMAND> --help' for the full description of a command.",
+        )
         .subcommand_negates_reqs(true)
         .arg(
             Arg::new("input")
@@ -167,11 +186,22 @@ fn parse_args() -> Option<CliArgs> {
                 .long("check-only")
                 .hide(true)
                 .action(ArgAction::SetTrue)
-                .conflicts_with_all(["dump_ast", "dump_typed_ast", "print_layout", "emit_llvm", "emit_obj", "run"]),
+                .conflicts_with_all(["dump_ast", "dump_typed_ast", "print_layout", "emit_llvm", "emit_obj", "run"])
+                .help("Stop after the front end without generating code; how 'cinnabar check' drives this binary"),
         )
         .subcommand(
             ClapCommand::new("fmt")
                 .about("Format Cinnabar source in place")
+                .long_about(
+                    "Rewrite FILE into canonical Cinnabar formatting.\n\n\
+                     The formatter takes no style options. Canonical form is one fixed \
+                     shape, so there is nothing to configure and nothing left to argue \
+                     about in review. The file is rewritten in place, and a file that is \
+                     already canonical is left untouched and reported as such.\n\n\
+                     With --check nothing is written. An already-canonical file exits 0; \
+                     any other file is named on stderr and exits nonzero, which is the \
+                     shape a CI job or a pre-commit hook wants.",
+                )
                 .arg(
                     Arg::new("fmt_input")
                         .value_name("FILE")
@@ -189,6 +219,19 @@ fn parse_args() -> Option<CliArgs> {
         .subcommand(
             ClapCommand::new("doc")
                 .about("Generate HTML documentation for public Cinnabar declarations")
+                .long_about(
+                    "Render every public declaration reachable from the entry source into \
+                     a single HTML page.\n\n\
+                     The prose comes from the doc comments the parser attached to each \
+                     item, and visibility is the 'pub' the resolver already established. \
+                     This command does not re-scan source for comment syntax and does not \
+                     re-decide what is public, so what appears is exactly what the \
+                     compiler saw. A declaration that is not 'pub' is absent, and so is \
+                     its documentation.\n\n\
+                     PATH may be a project directory, a 'build.cnb', or a '.cnb' source \
+                     file to document on its own. The page is written to \
+                     <project>/target/doc/index.html unless -o names another directory.",
+                )
                 .arg(project_path_arg())
                 .arg(
                     Arg::new("doc_output")
@@ -202,6 +245,17 @@ fn parse_args() -> Option<CliArgs> {
         .subcommand(
             ClapCommand::new("burn")
                 .about("Serve version-pinned Cinnabook documentation locally")
+                .long_about(
+                    "Serve the Cinnabook — this project's API documentation folded \
+                     together with the language manifesto — over HTTP.\n\n\
+                     The page is pinned to the version of the compiler serving it, so \
+                     what it says about the language is what this binary actually \
+                     implements rather than what the latest published documentation \
+                     says. That is the whole reason the manifesto is served from the \
+                     compiler instead of linked from it.\n\n\
+                     Nothing is written to disk; the page is rendered per request. The \
+                     server runs until interrupted.",
+                )
                 .arg(project_path_arg())
                 .arg(
                     Arg::new("address")
@@ -210,12 +264,75 @@ fn parse_args() -> Option<CliArgs> {
                         .help("Local address to bind"),
                 ),
         )
-        .subcommand(ClapCommand::new("build").about("Build the current Cinnabar project").arg(project_path_arg()).arg(target_arg()))
-        .subcommand(ClapCommand::new("run").about("Build and run the current Cinnabar project").arg(project_path_arg()).arg(target_arg()))
-        .subcommand(ClapCommand::new("check").about("Run the compiler front-end without code generation").arg(project_path_arg()))
+        .subcommand(
+            ClapCommand::new("build")
+                .about("Build the current Cinnabar project")
+                .long_about(
+                    "Compile the project's entry source into a static binary.\n\n\
+                     The manifest is found by walking upward from PATH to the nearest \
+                     'build.cnb', so any path inside a project works and the default of \
+                     '.' builds the project you are standing in.\n\n\
+                     The artifact is named by the manifest's NAME field, not by whichever \
+                     file happens to be ENTRY — a project that renames its entry source \
+                     has not renamed itself — and is written to <project>/target/<NAME>.\n\n\
+                     A build is all or nothing. A failure in any stage is reported as a \
+                     source-located diagnostic and no artifact is written.",
+                )
+                .arg(project_path_arg())
+                .arg(target_arg()),
+        )
+        .subcommand(
+            ClapCommand::new("run")
+                .about("Build and run the current Cinnabar project")
+                .long_about(
+                    "Build the project exactly as 'cinnabar build' does, then execute the \
+                     resulting binary.\n\n\
+                     The program inherits this terminal, so its output and input are its \
+                     own. Its exit status is reported rather than forwarded: 'run' exits 0 \
+                     when the program exited 0 and nonzero otherwise, so a program whose \
+                     specific status code matters should be executed directly from \
+                     <project>/target/<NAME>.",
+                )
+                .arg(project_path_arg())
+                .arg(target_arg()),
+        )
+        .subcommand(
+            ClapCommand::new("check")
+                .about("Run the compiler front-end without code generation")
+                .long_about(
+                    "Run the front end over the project — load, resolve, typecheck, \
+                     borrow-check — and stop before code generation.\n\n\
+                     Everything that decides whether a program is legal Cinnabar has \
+                     happened by then: name resolution, casing, types, match \
+                     exhaustiveness, and the borrow and linearity rules. So this is the \
+                     fast answer to 'is this program valid', and it neither optimizes nor \
+                     links.\n\n\
+                     It is not a laxer build. The stages it runs are the same stages \
+                     'build' runs and reach the same verdicts; it simply stops once the \
+                     front end has established everything it can establish without \
+                     emitting code.",
+                )
+                .arg(project_path_arg()),
+        )
         .subcommand(
             ClapCommand::new("test")
                 .about("Discover and run project tests")
+                .long_about(
+                    "Compile and run every '.cnb' file under the manifest's TESTS \
+                     directory, recursively.\n\n\
+                     A test file's name states what is expected of it:\n\n  \
+                     case.cnb                must compile, link, and exit 0\n  \
+                     case.cnb.exit           the nonzero status 'case.cnb' must exit with\n  \
+                     case.reject.cnb         must be rejected; compiling it is a failure\n  \
+                     case.reject.cnb.stderr  the exact diagnostic that rejection must produce\n\n\
+                     A '.stderr' sidecar makes its test a rejection test whether or not the \
+                     name says '.reject', and the snapshot is compared in full rather than \
+                     searched for a substring: a diagnostic is part of what the compiler \
+                     promises, so a change to its wording is a change to be reviewed.\n\n\
+                     --update-snapshots rewrites those sidecars from what the compiler \
+                     currently prints. It is for deliberately accepting a diagnostic you \
+                     have read the diff of, never for making a red run go green.",
+                )
                 .arg(project_path_arg())
                 .arg(
                     Arg::new("update_snapshots")
@@ -224,29 +341,193 @@ fn parse_args() -> Option<CliArgs> {
                         .help("Replace diagnostic .stderr snapshots for rejection tests"),
                 ),
         )
-        .subcommand(ClapCommand::new("init").about("Scaffold a Cinnabar project").arg(project_path_arg()))
+        .subcommand(
+            ClapCommand::new("init")
+                .about("Scaffold a Cinnabar project")
+                .long_about(
+                    "Write a new project into PATH: a 'build.cnb' manifest, a 'main.cnb' \
+                     that returns 0, and 'tests/smoke.cnb'.\n\n\
+                     The manifest is Cinnabar source, not a configuration format. It is \
+                     read back through the compiler's own front end, so it obeys the same \
+                     casing, typing, and literal rules as any other program:\n\n  \
+                     pub const NAME: &[U8] = \"<directory name>\"\n  \
+                     pub const ENTRY: &[U8] = \"main.cnb\"\n  \
+                     pub const TESTS: &[U8] = \"tests\"\n\n\
+                     NAME names the built artifact and must be a single path component. \
+                     ENTRY and TESTS are relative paths confined to the project root. \
+                     TESTS may be omitted and then defaults to 'tests'.\n\n\
+                     Nothing is ever overwritten: if any of the three files already \
+                     exists, init refuses and writes none of them.",
+                )
+                .arg(project_path_arg()),
+        )
         .subcommand(
             ClapCommand::new("native-stub")
                 .about("Generate a typed Cinnabar native surface from the constrained native IDL")
-                .arg(Arg::new("project_path").value_name("IDL").required(true).value_parser(PathBufValueParser::new()))
-                .arg(Arg::new("output").short('o').long("output").value_name("FILE").required(true).value_parser(PathBufValueParser::new())),
+                .long_about(
+                    "Translate a native IDL description into the 'nat type' and 'nat fun' \
+                     declarations that expose it to Cinnabar code.\n\n\
+                     The generated surface is opaque by construction: a native type \
+                     becomes a handle, never a pointer user code can see through. \
+                     Generating it is what keeps the declarations and the runtime from \
+                     drifting apart, so the output is meant to be regenerated rather than \
+                     hand-edited.",
+                )
+                .arg(
+                    Arg::new("project_path")
+                        .value_name("IDL")
+                        .required(true)
+                        .value_parser(PathBufValueParser::new())
+                        .help("Native IDL description to translate"),
+                )
+                .arg(
+                    Arg::new("output")
+                        .short('o')
+                        .long("output")
+                        .value_name("FILE")
+                        .required(true)
+                        .value_parser(PathBufValueParser::new())
+                        .help("Cinnabar source file to write the generated surface to"),
+                ),
         )
-        .subcommand(ClapCommand::new("inspect").about("Build and inspect layouts, sections, symbols, and disassembly").arg(project_path_arg()).arg(Arg::new("output").short('o').long("output").value_name("FILE").value_parser(PathBufValueParser::new())))
-        .subcommand(ClapCommand::new("targets").about("List code-generation targets and their availability"))
+        .subcommand(
+            ClapCommand::new("inspect")
+                .about("Build and inspect layouts, sections, symbols, and disassembly")
+                .long_about(
+                    "Build the project, then report what was actually produced: the ABI \
+                     size, alignment, and field offsets the compiler computed, alongside \
+                     the linked binary's sections, symbols, and disassembly.\n\n\
+                     This is the answer to 'what did my declarations become', and it reads \
+                     the real artifact rather than predicting it. The report is printed \
+                     unless -o names a file to write it to.",
+                )
+                .arg(project_path_arg())
+                .arg(
+                    Arg::new("output")
+                        .short('o')
+                        .long("output")
+                        .value_name("FILE")
+                        .value_parser(PathBufValueParser::new())
+                        .help("Write the report to FILE instead of standard output"),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("targets")
+                .about("List code-generation targets and their availability")
+                .long_about(
+                    "List each code-generation target and say plainly whether this binary \
+                     can build for it.\n\n\
+                     A target is listed as available only when it is; a planned target \
+                     names what it is still waiting on. Nothing here silently degrades to \
+                     the host.",
+                ),
+        )
         .subcommand(
             ClapCommand::new("mushlings").about("Interactive compiler-learning exercises")
+                .long_about(
+                    "Interactive exercises that teach the language through its own \
+                     diagnostics.\n\n\
+                     Each exercise is a program that does not compile. You fix it, and the \
+                     real compiler decides whether you were right — there is no separate \
+                     answer key that could disagree with the compiler. Exercises exist \
+                     only where the language has a settled rule and a real diagnostic to \
+                     teach it with.",
+                )
                 .subcommand_required(true)
-                .subcommand(ClapCommand::new("init").arg(project_path_arg()))
-                .subcommand(ClapCommand::new("verify").arg(project_path_arg())),
+                .subcommand(
+                    ClapCommand::new("init")
+                        .about("Write the exercise set into PATH")
+                        .arg(project_path_arg()),
+                )
+                .subcommand(
+                    ClapCommand::new("verify")
+                        .about("Recompile the exercises in PATH and report which are solved")
+                        .arg(project_path_arg()),
+                ),
         )
         .subcommand(
             ClapCommand::new("fuzz").about("Replay and minimize saved fuzz artifacts")
+                .long_about(
+                    "Work with the source artifacts saved by a fuzzing run.\n\n\
+                     'replay' answers whether an artifact still reproduces its failure. \
+                     'minimize' shrinks one to the smallest source that reproduces the \
+                     same failure — the same failure specifically, since a smaller program \
+                     that fails for a new reason has stopped being evidence about the bug \
+                     being minimized.",
+                )
                 .subcommand_required(true)
-                .subcommand(ClapCommand::new("replay").arg(Arg::new("project_path").value_name("FILE").required(true).value_parser(PathBufValueParser::new())))
-                .subcommand(ClapCommand::new("minimize").arg(Arg::new("project_path").value_name("FILE").required(true).value_parser(PathBufValueParser::new())).arg(Arg::new("output").short('o').long("output").value_name("FILE").value_parser(PathBufValueParser::new()))),
+                .subcommand(
+                    ClapCommand::new("replay")
+                        .about("Recompile a saved artifact and report whether it still fails")
+                        .arg(
+                            Arg::new("project_path")
+                                .value_name("FILE")
+                                .required(true)
+                                .value_parser(PathBufValueParser::new())
+                                .help("Saved fuzz artifact to replay"),
+                        ),
+                )
+                .subcommand(
+                    ClapCommand::new("minimize")
+                        .about("Shrink an artifact to the smallest source with the same failure")
+                        .arg(
+                            Arg::new("project_path")
+                                .value_name("FILE")
+                                .required(true)
+                                .value_parser(PathBufValueParser::new())
+                                .help("Saved fuzz artifact to minimize"),
+                        )
+                        .arg(
+                            Arg::new("output")
+                                .short('o')
+                                .long("output")
+                                .value_name("FILE")
+                                .value_parser(PathBufValueParser::new())
+                                .help("Where to write the minimized artifact (default: alongside the input)"),
+                        ),
+                ),
         )
-        .subcommand(ClapCommand::new("soundness").about("Emit machine-checkable front-end soundness evidence").arg(project_path_arg()).arg(Arg::new("output").short('o').long("output").value_name("FILE").value_parser(PathBufValueParser::new())))
-        .subcommand(ClapCommand::new("playground").about("Serve a loopback-only local Cinnabar playground").arg(Arg::new("address").long("address").default_value("127.0.0.1:7879")))
+        .subcommand(
+            ClapCommand::new("soundness")
+                .about("Emit machine-checkable front-end soundness evidence")
+                .long_about(
+                    "Emit, as JSON, what the front end actually established about a \
+                     program: how much of it was resolved, typed, and borrow-checked, and \
+                     how many diagnostics that produced.\n\n\
+                     This is evidence, not a proof. The report states 'formal_proof: \
+                     false' and scopes itself explicitly, because it counts checks the \
+                     compiler ran — it is not a mechanized preservation and progress \
+                     argument, and must not be read as one.\n\n\
+                     Written to <project>/target/soundness-evidence.json unless -o says \
+                     otherwise.",
+                )
+                .arg(project_path_arg())
+                .arg(
+                    Arg::new("output")
+                        .short('o')
+                        .long("output")
+                        .value_name("FILE")
+                        .value_parser(PathBufValueParser::new())
+                        .help("Write the evidence to FILE instead of target/soundness-evidence.json"),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("playground")
+                .about("Serve a loopback-only local Cinnabar playground")
+                .long_about(
+                    "Serve a local page that compiles and runs submitted Cinnabar source.\n\n\
+                     It compiles and executes arbitrary code, so it is deliberately a \
+                     local tool: it binds a loopback address only, caps the size of a \
+                     submission, and runs each program under a wall-clock limit. Do not \
+                     put it behind a public address.",
+                )
+                .arg(
+                    Arg::new("address")
+                        .long("address")
+                        .default_value("127.0.0.1:7879")
+                        .help("Loopback address to bind"),
+                ),
+        )
         .get_matches();
     if let Some(format_matches) = matches.subcommand_matches("fmt") {
         let input = {
@@ -392,6 +673,7 @@ fn main() -> ExitCode {
     let mut lists: Vec<Vec<i64>> = Vec::new();
     let mut errors: Vec<Diag> = Vec::new();
     let mut notes: Vec<Note> = Vec::new();
+    let mut deferred: Vec<Diag> = Vec::new();
     let entry = args.input.to_string_lossy().to_string();
     let (loaded, files) = module_loader::load(&mut names, &mut nodes, &mut lists, &mut errors, &entry);
     let (root, ext_mods) = match loaded {
@@ -402,7 +684,12 @@ fn main() -> ExitCode {
         dump_program(&names, &nodes, &lists, root);
         return ExitCode::SUCCESS;
     }
-    if !resolver::resolve(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods) {
+    let resolver_diagnostics = resolver::Diagnostics {
+        errors: &mut errors,
+        notes: &mut notes,
+        deferred: &mut deferred,
+    };
+    if !resolver::resolve(&mut names, &mut nodes, &mut lists, resolver_diagnostics, root, &ext_mods) {
         return finish_with_diagnostics(&errors, &notes, &files);
     }
     let (ok, impls_list) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods);
@@ -419,6 +706,13 @@ fn main() -> ExitCode {
             &[]
         };
         return finish_with_diagnostics(&errors, shown_notes, &files);
+    }
+    // Unused items are reported here rather than from the resolver. A file
+    // with a type or borrow error is told about that error; reporting
+    // reachability first would stop the pipeline and answer a broken program
+    // with a list of things nothing calls.
+    if !deferred.is_empty() {
+        return finish_with_diagnostics(&deferred, &[], &files);
     }
     if args.dump_typed_ast {
         print!("{}", cinnabar::inspect::dump_typed_arena(&names, &nodes, &lists));
