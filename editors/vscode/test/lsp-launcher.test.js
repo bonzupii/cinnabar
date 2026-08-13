@@ -14,8 +14,14 @@ const environmentFile = path.join(
   "worktree.env"
 );
 
+const serverBinary = path.join(repositoryRoot, "target", "debug", "cinnabar-lsp");
+
 function repositoryPathExists(candidate) {
   return candidate === composeFile || candidate === environmentFile;
+}
+
+function builtRepositoryPathExists(candidate) {
+  return repositoryPathExists(candidate) || candidate === serverBinary;
 }
 
 test("auto mode uses the installed cinnabar-lsp command without a configured path", () => {
@@ -72,7 +78,8 @@ test("Docker Compose mode finds the repository above a nested workspace and uses
       mode: "docker-compose",
       serverPath: "",
       workspaceFolders: [path.join(repositoryRoot, "editors", "vscode")],
-      pathExists: repositoryPathExists
+      pathExists: repositoryPathExists,
+      env: {}
     }),
     {
       command: "docker",
@@ -99,7 +106,67 @@ test("Docker Compose mode rejects workspaces without the repository-owned launch
         mode: "docker-compose",
         serverPath: "",
         workspaceFolders: [path.join(path.sep, "workspace", "other")],
-        pathExists: () => false
+        pathExists: () => false,
+        env: {}
+      }),
+    /Docker Compose mode requires a workspace/
+  );
+});
+
+test("Docker Compose mode runs the server directly when the editor is attached to the dev container", () => {
+  assert.deepEqual(
+    createLaunchPlan({
+      mode: "docker-compose",
+      serverPath: "",
+      workspaceFolders: [path.join(repositoryRoot, "editors", "vscode")],
+      pathExists: builtRepositoryPathExists,
+      env: { CINNABAR_IN_DEV_CONTAINER: "1" }
+    }),
+    {
+      command: serverBinary,
+      args: [],
+      options: { cwd: repositoryRoot }
+    }
+  );
+});
+
+test("the rebuilding wrapper is preferred over the raw binary when present", () => {
+  const wrapper = path.join(repositoryRoot, "container", "bin", "cinnabar-lsp-nix");
+  assert.deepEqual(
+    createLaunchPlan({
+      mode: "docker-compose",
+      serverPath: "",
+      workspaceFolders: [path.join(repositoryRoot, "editors", "vscode")],
+      pathExists: (candidate) => builtRepositoryPathExists(candidate) || candidate === wrapper,
+      env: { CINNABAR_IN_DEV_CONTAINER: "1" },
+    }),
+    { command: wrapper, args: [], options: { cwd: repositoryRoot } }
+  );
+});
+
+test("an unbuilt server in the container names the binary and the build command", () => {
+  assert.throws(
+    () =>
+      createLaunchPlan({
+        mode: "docker-compose",
+        serverPath: "",
+        workspaceFolders: [path.join(repositoryRoot, "editors", "vscode")],
+        pathExists: repositoryPathExists,
+        env: { CINNABAR_IN_DEV_CONTAINER: "1" }
+      }),
+    /No language server at .*cinnabar-lsp.*cargo build --bin cinnabar-lsp/s
+  );
+});
+
+test("the in-container shortcut still requires a resolvable repository root", () => {
+  assert.throws(
+    () =>
+      createLaunchPlan({
+        mode: "docker-compose",
+        serverPath: "",
+        workspaceFolders: [path.join(path.sep, "workspace", "other")],
+        pathExists: () => false,
+        env: { CINNABAR_IN_DEV_CONTAINER: "1" }
       }),
     /Docker Compose mode requires a workspace/
   );

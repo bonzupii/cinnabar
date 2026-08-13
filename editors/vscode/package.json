@@ -17,7 +17,8 @@
     "lsp-launcher.js",
     "language-configuration.json",
     "syntaxes",
-    "README.md"
+    "README.md",
+    "node_modules"
   ],
   "scripts": {
     "test": "node --test",
