@@ -27,7 +27,7 @@ struct CliArgs {
 
 enum ToolCommand {
     Doc(Option<PathBuf>),
-    Book(String),
+    Burn(String),
     Build(String),
     Run(String),
     Check,
@@ -166,7 +166,7 @@ fn parse_args() -> Option<CliArgs> {
                 ),
         )
         .subcommand(
-            ClapCommand::new("book")
+            ClapCommand::new("burn")
                 .about("Serve version-pinned Cinnabook documentation locally")
                 .arg(project_path_arg())
                 .arg(
@@ -235,15 +235,15 @@ fn parse_args() -> Option<CliArgs> {
             tool_command: None,
         });
     }
-    let subcommands = ["doc", "book", "build", "run", "check", "test", "init", "native-stub", "inspect", "soundness"];
+    let subcommands = ["doc", "burn", "build", "run", "check", "test", "init", "native-stub", "inspect", "soundness"];
     for subcommand_name in subcommands {
         if let Some(subcommand_matches) = matches.subcommand_matches(subcommand_name) {
             let input = subcommand_matches.get_one::<PathBuf>("project_path")?.clone();
             let tool_command = if subcommand_name == "doc" {
                 ToolCommand::Doc(subcommand_matches.get_one::<PathBuf>("doc_output").cloned())
-            } else if subcommand_name == "book" {
+            } else if subcommand_name == "burn" {
                 let address = subcommand_matches.get_one::<String>("address")?.clone();
-                ToolCommand::Book(address)
+                ToolCommand::Burn(address)
             } else if subcommand_name == "build" {
                 ToolCommand::Build(subcommand_matches.get_one::<String>("target")?.clone())
             } else if subcommand_name == "run" {
@@ -478,7 +478,7 @@ fn format_file(path: &Path, check: bool) -> ExitCode {
 fn run_tool_command(path: &Path, output: Option<&Path>, command: ToolCommand) -> ExitCode {
     match command {
         ToolCommand::Doc(output) => generate_documentation(path, output.as_deref(), false, None),
-        ToolCommand::Book(address) => generate_documentation(path, None, true, Some(&address)),
+        ToolCommand::Burn(address) => generate_documentation(path, None, true, Some(&address)),
         ToolCommand::Build(target) => run_project_compiler(path, false, false, &target),
         ToolCommand::Run(target) => run_project_compiler(path, true, false, &target),
         ToolCommand::Check => run_project_compiler(path, false, true, "host"),

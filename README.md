@@ -212,7 +212,7 @@ cinnabar <FILE> [-o|--output PATH] [--dump-ast] [--dump-typed-ast] [--print-layo
                 [--emit-llvm] [--emit-obj] [--explain-borrow] [--run]
                 [-O|--opt-level {0,1,2,3,s,z}]
 cinnabar fmt [--check] <FILE>
-cinnabar {build|run|check|test|doc|book|init} [PATH]
+cinnabar {build|run|check|test|doc|burn|init} [PATH]
 ```
 
 | Flag | Description |
@@ -247,7 +247,7 @@ tests = tests
 `check` discover the manifest upward from the supplied path. `test` recursively runs `.cnb` files:
 `.reject.cnb` files must be rejected, `.stderr` sidecars snapshot complete diagnostics, and `.exit`
 sidecars specify nonzero expected statuses. Use `test --update-snapshots` to deliberately refresh
-diagnostic snapshots. `doc` writes public API HTML to `target/doc`, while `book` serves those docs
+diagnostic snapshots. `doc` writes public API HTML to `target/doc`, while `burn` serves those docs
 with the bundled manifesto and exact installed compiler version.
 
 On success, the compiler prints `Successfully compiled <input> to '<output>'.` and exits `0`. Any lex, parse, resolve, typecheck, borrow-check, or codegen failure is rendered as one or more source-located diagnostics (via [`ariadne`](https://github.com/zesterer/ariadne)) and exits non-zero.

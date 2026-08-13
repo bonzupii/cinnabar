@@ -172,18 +172,18 @@ fn documentation_and_playground_servers_work_over_http() -> Result<(), Box<dyn E
     std::fs::write(&fixture_path, "#! Playground documentation\npub fun main() I32\n  return 0\nend\n")?;
     let fixture = path_text(&fixture_path);
 
-    let book_address = free_address()?;
-    let mut book = Command::new(compiler)
-        .args(["book", &fixture, "--address", &book_address])
+    let burn_address = free_address()?;
+    let mut burn = Command::new(compiler)
+        .args(["burn", &fixture, "--address", &burn_address])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    let book_result = request(&book_address, b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-    stop_server(&mut book)?;
-    let book_response = book_result?;
-    assert!(book_response.contains("200 OK"));
-    assert!(book_response.contains("Cinnabook"));
-    assert!(book_response.contains(env!("CARGO_PKG_VERSION")));
+    let burn_result = request(&burn_address, b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    stop_server(&mut burn)?;
+    let burn_response = burn_result?;
+    assert!(burn_response.contains("200 OK"));
+    assert!(burn_response.contains("Cinnabook"));
+    assert!(burn_response.contains(env!("CARGO_PKG_VERSION")));
 
     let playground_address = free_address()?;
     let mut playground = Command::new(compiler)
