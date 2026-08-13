@@ -21,8 +21,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while idx < STAGE_NAMES.len() {
         match STAGE_NAMES.get(idx) {
             Some(name) => {
-                // The rustc sysroot keeps the crt start objects in a
-                // `self-contained` subdirectory next to libc.a.
+                // The rustc sysroot keeps libc.a and the crt start objects in a
+                // `self-contained` subdirectory of the target lib dir; musl's
+                // own layout keeps them at the top level.
                 let mut from = lib_dir.join(name);
                 if !from.is_file() {
                     from = lib_dir.join("self-contained").join(name);
@@ -74,13 +75,21 @@ fn find_musl_lib_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let mut idx = 0usize;
     while idx < dirs.len() {
         if let Some(dir) = dirs.get(idx)
-            && dir.join("libc.a").is_file()
+            && holds_libc_a(dir)
         {
             return Ok(dir.clone());
         }
         idx += 1;
     }
     Err("no musl libc.a found: set MUSL_LIBC_A, install musl, or add a rust musl target".into())
+}
+
+// A directory counts as a musl lib dir when it holds libc.a either directly
+// (musl's own layout, as installed by nix or a host package) or under the
+// `self-contained` subdirectory that rustup uses for its musl targets.  The
+// staging loop resolves each archive against the same two locations.
+fn holds_libc_a(dir: &Path) -> bool {
+    dir.join("libc.a").is_file() || dir.join("self-contained").join("libc.a").is_file()
 }
 
 // Every `/nix/store/<hash>-musl-*/lib` directory that contains libc.a.
@@ -97,7 +106,7 @@ fn nix_store_dirs(dirs: &mut Vec<PathBuf>) {
             && entry.file_name().to_string_lossy().contains("-musl-")
         {
             let lib = entry.path().join("lib");
-            if lib.join("libc.a").is_file() {
+            if holds_libc_a(&lib) {
                 dirs.push(lib);
             }
         }
@@ -127,7 +136,7 @@ fn rustc_sysroot_dirs(dirs: &mut Vec<PathBuf>) {
             .join("rustlib")
             .join(target)
             .join("lib");
-        if lib.join("libc.a").is_file() {
+        if holds_libc_a(&lib) {
             dirs.push(lib);
         }
     }
