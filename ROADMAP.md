@@ -527,35 +527,41 @@ match names no candidate and falls back to the neutral message, and no suggestio
 toward a local bandaid. That wording contract is asserted directly:
 each suggestion carries a hedge, none carries bandaid vocabulary, and a tie stays silent.
 
-### Dead code is not part of it, and the attempt is worth recording
-An unused-declaration rejection was written and taken back out. The spec does not ask for it:
-`MANIFESTO.md` lists unused *imports* among the compile-time invariants, not unused
-declarations, and this milestone names dead code as something the suggestion engine speaks about
-rather than a new class of rejected program.
+### Dead code is a rejection
 
-What it cost is the argument against it. Seven existing fixtures had to change to keep compiling — nine
-functions in a teaching file marked `pub` so the compiler would stop objecting, which is
-declaring something public API in order to silence a check, exactly the local bandaid above. The
-random-program generator, whose job is to emit *valid* programs, had to be changed to emit `pub`
-everywhere; when a check rejects the output of a valid-program generator, the reading that the
-generator was wrong is the one needing evidence.
+An item nothing reachable from `main` needs is a compile error — functions,
+constants, structs, enums, traits and native declarations alike, public and
+private without distinction.
 
-`tests/fixtures/dead_code.cnb` pins the current answer, asserted on exit status so it fails
-whatever a future rejection is called. Reintroducing this is a language change: state it in
-`MANIFESTO.md`, and find a remedy that is not `pub`, first.
+`pub` is not an exemption. It says who may name a thing, not whether anything
+does, and exempting it would make one word the way to silence this diagnostic.
+That is what was wrong with the first attempt at this check: it spared `pub`,
+so the only remedy it left anyone was to mark demonstration code public until
+the compiler stopped objecting — the local bandaid this milestone forbids a
+diagnostic from steering toward.
+
+Reachability is a graph walk from `main`, taken to a fixpoint, so two dead
+functions that call each other are still dead. It is reported after type and
+borrow checking: a program that does not type-check is told what is wrong with
+it, not which of its functions nothing calls. Reported from the resolver it
+would stop the pipeline first, which is the shadowing that left
+`invalid_resolver_and_typechecker.cnb` asserting four of its twenty-four cases.
+
+A unit with no `main` is exempt, because it is not a whole program: a module
+compiled alone, and `build.cnb`. Nothing that can be built into a binary
+escapes that way, since codegen requires `main`.
 
 ### Carried forward
-- **Dead-code suggestions.** The milestone names dead code as one of the two things the
-  suggestion engine speaks about. Only unresolved names are covered. What a dead-code
-  suggestion should *say*, given that dead code is not an error, is open — and it is the same
-  question as the one above.
-- **Definition-site labels do not yet cover every type mismatch.** Return-type and
-  constant-initializer mismatches carry one; variant-value and call-result mismatches do not.
-  Nothing structural stands in the way — the declaring node is already resolved at both sites.
+- **Dead-code suggestions.** The rejection exists; what the suggestion engine
+  should *say* alongside it does not.
+- **Definition-site labels do not yet cover every type mismatch.** Return-type
+  and constant-initializer mismatches carry one; variant-value and call-result
+  mismatches do not. Nothing structural stands in the way — the declaring node
+  is already resolved at both sites.
 
 ---
 
-## Milestone 7 — Cinnabook and Mushlings (PARTIAL)
+## Milestone 7 — Cinnabook and Mushlings (COMPLETE)
 - `cinnabar burn`: local web server, static content, bundled at compile time, matching the exact
   installed compiler version. There is one binary and it is called `cinnabar`; no shortened
   `cinna` is shipped, aliased, or packaged.
@@ -571,22 +577,21 @@ diagnostic: mixed struct/enum body, unconsumed linear value, unhandled `Result`,
 returned borrow, compile-time-zero division, fixed-width literal range, non-tail recursion, and
 dropped `pub`.
 
-### Discard patterns have no exercise, because they have no diagnostic
-This entry used to list discard patterns among the classes to source from, on the basis that
-each already had a diagnostic to use verbatim. That is not true of this one. A bare underscore
-as a match arm, as a binding, and as the prefix of one all compile today and exit zero.
+### Discards are rejected, and the exercise teaches that
 
-The match-arm case is the consequential one: a catch-all makes any match trivially exhaustive,
-so adding a variant to an enum stops forcing anyone to handle it.
+This entry once listed discard patterns among the classes to source an
+exercise from, on the basis that each already had a diagnostic to use
+verbatim. That was not true of this one: a bare underscore as a match arm, as
+a binding, and as the prefix of one all compiled. The exercise written from it
+taught a casing rule while claiming to teach discards, and was withdrawn.
 
-`MANIFESTO.md` does not ban discards either. That prohibition lives in `AGENTS.md`, which
-governs this compiler's own Rust source rather than the language it compiles; the two were
-conflated when this entry was written. `tests/fixtures/09_discard_patterns.cnb` keeps the forms
-as the record and as the program to check once the question is settled.
+The rule now exists. An identifier may not be a lone underscore and may not
+begin with one, in any position, enforced in the lexer where casing is — so it
+holds in a file that would fail later for other reasons. The match arm is the
+consequential case: a catch-all makes any match trivially exhaustive, so adding
+a variant to an enum would stop forcing anyone to handle it.
 
-**Open question:** does Cinnabar reject discard patterns? It is a language decision and belongs
-in `MANIFESTO.md` before an exercise teaches it — writing the exercise first is what produced
-one that taught a casing rule while claiming to teach this.
+Exercise 09 is restored and teaches the rule it names.
 
 ---
 
@@ -612,11 +617,26 @@ bytes must fail the same runner, or the gate is running without objecting to any
 The gate lives in `cargo test`, which `pre_commit_check.sh` already invokes, rather than as a
 new step in that script.
 
+### Undefined behaviour, proven rather than instrumented
+UBSan's checks are emitted by Clang's front end while lowering C, so there is no pass to run over
+a Cinnabar module — and almost every class it checks is one this language designed out rather than
+left unchecked. Arithmetic wraps per width and the emitter carries no `nsw` or `nuw` to say
+otherwise; shift counts mask by `width - 1`; division returns `Result`; a constant index out of
+range is a compile error and a dynamic one returns `Result`; the raw memory surface bounds-checks;
+there is no dereference operator.
+
+Adding runtime checks for those would be checking conditions the language does not admit, so the
+property asserted is the stronger static one: **the compiler does not emit IR whose behaviour is
+undefined**. It holds for every program the compiler can produce rather than only the ones a
+corpus executes. Scanned across the whole expected-success corpus: no overflow flag on any
+arithmetic instruction, no `exact`, no `poison`, and `unreachable` only in control-flow joins that
+every path diverges out of — the not-taken edge of a match's last pattern test, which
+exhaustiveness proves cannot be taken, and the join after a branch whose arms all return.
+
+A second test keeps the scan from being vacuous: it must match arithmetic in a fixture exercising
+every width and operator, since a scanner matching nothing would pass every fixture in silence.
+
 ### Carried forward
-- **UBSan.** Its checks are emitted by Clang's front end while lowering C, not by a pass over
-  finished IR, so there is nothing to run over a Cinnabar module. Covering it means the emitter
-  emitting the checks itself — emitter work, not gate configuration. Not claimed until something
-  performs it.
 - **ASan.** The runtime links and works in the dev shell, but the instrumentation is an IR pass
   that has to run between `opt` and `llc` in the compiler's own pipeline. Valgrind covers the
   heap errors and leaks that motivated the milestone; ASan would widen it to stack and global
