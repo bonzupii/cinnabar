@@ -58,8 +58,11 @@
 mod test_controls;
 #[path = "support/repro_corpus.rs"]
 mod repro_corpus;
+#[path = "support/stream_cases.rs"]
+mod stream_cases;
 
-use repro_corpus::{EXPECT_OK, STREAM_CASES};
+use repro_corpus::EXPECT_OK;
+use stream_cases::STREAM_CASES;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;

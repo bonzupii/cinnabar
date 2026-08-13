@@ -22,11 +22,14 @@
 mod test_controls;
 #[path = "support/repro_corpus.rs"]
 mod repro_corpus;
+#[path = "support/stream_cases.rs"]
+mod stream_cases;
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use repro_corpus::{StreamCase, EXPECT_OK, STREAM_CASES};
+use repro_corpus::EXPECT_OK;
+use stream_cases::{StreamCase, STREAM_CASES};
 use test_controls::{
     evenly_selected, profile_name, profile_usize, reduced_usize_control, test_profile,
 };
