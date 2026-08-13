@@ -36,13 +36,15 @@
 //! - **No `exact` on division or shifts**, which would make a non-exact
 //!   result undefined.
 //! - **No `poison` values.**
-//! - **`unreachable` only where exhaustiveness proves it.** A `match` lowers
-//!   its last pattern test as a branch, and the not-taken edge is
-//!   unreachable precisely because the type checker proved the match
-//!   exhaustive. That is a statically proven invariant, not a runtime
-//!   assumption, so it needs no check — `MANIFESTO.md` keeps runtime checks
-//!   for genuinely dynamic conditions. An `unreachable` anywhere else would
-//!   be a real "cannot happen" and is what this assertion is looking for.
+//! - **`unreachable` only in a control-flow join every path diverges out
+//!   of.** A `match` lowers its last pattern test as a branch, and the
+//!   not-taken edge is unreachable precisely because the type checker proved
+//!   the match exhaustive; the join after a branch whose arms all return is
+//!   unreachable for the same kind of reason. Both are statically proven
+//!   rather than assumed at runtime, so neither needs a check —
+//!   `MANIFESTO.md` keeps runtime checks for genuinely dynamic conditions.
+//!   An `unreachable` anywhere else would be a real "cannot happen" with
+//!   nothing proving it, and is what this assertion is looking for.
 
 #[path = "support/test_controls.rs"]
 mod test_controls;
@@ -115,21 +117,20 @@ fn emit_ir(dir: &Path, name: &str) -> String {
     }
 }
 
-/// Whether `line` defines an instruction of one of the arithmetic opcodes
-/// whose overflow behaviour the language pins.
+/// The instructions whose overflow behaviour the language pins.
+const ARITHMETIC_OPCODES: [&str; 4] = ["add", "sub", "mul", "shl"];
+
+/// Whether `line` defines an instruction of one of those opcodes.
 fn arithmetic_opcode(line: &str) -> Option<&'static str> {
     let value = match line.split_once(" = ") {
         Some(pair) => pair.1.trim(),
         None => return None,
     };
-    for opcode in ["add", "sub", "mul", "shl"] {
+    // The opcodes are already the strings this returns, so there is nothing
+    // to map them through — and nothing for a wildcard arm to swallow.
+    for opcode in ARITHMETIC_OPCODES {
         if value.starts_with(opcode) {
-            return Some(match opcode {
-                "add" => "add",
-                "sub" => "sub",
-                "mul" => "mul",
-                _ => "shl",
-            });
+            return Some(opcode);
         }
     }
     None

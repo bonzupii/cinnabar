@@ -2424,7 +2424,7 @@ fn exercise_declarations(g: &mut Gen) {
     }
     if !shared.is_empty() || !mutable.is_empty() {
         let values: Vec<i64> = match g.structs.first() {
-            Some(def) => def.fields.iter().map(|_field| 1i64).collect(),
+            Some(def) => std::iter::repeat(1i64).take(def.fields.len()).collect(),
             None => Vec::new(),
         };
         if !values.is_empty() {
