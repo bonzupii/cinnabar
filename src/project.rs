@@ -1,3 +1,5 @@
+use crate::analysis;
+use crate::ast::*;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Output};
@@ -6,6 +8,7 @@ pub const MANIFEST_FILE: &str = "build.cnb";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectManifest {
+    pub name: String,
     pub root: PathBuf,
     pub entry: PathBuf,
     pub tests: PathBuf,
@@ -44,51 +47,84 @@ pub fn entry_for_source(source: &Path) -> Option<PathBuf> {
 }
 
 pub fn load_manifest(path: &Path) -> Result<ProjectManifest, String> {
-    let source = fs::read_to_string(path)
-        .map_err(|read_error| format!("cannot read project manifest '{}': {}", path.display(), read_error))?;
     let root_source = match path.parent() {
         Some(parent) => parent,
         None => return Err(format!("manifest '{}' has no project directory", path.display())),
     };
     let root = fs::canonicalize(root_source)
         .map_err(|resolve_error| format!("cannot resolve project root '{}': {}", root_source.display(), resolve_error))?;
+    let manifest_path = path.to_string_lossy().to_string();
+    let analyzed = analysis::analyze(&manifest_path, &[]);
+    if !analyzed.errors.is_empty() {
+        return Err(render_manifest_diagnostics(&analyzed.errors, &analyzed.files));
+    }
+    let manifest_file = analysis::file_id_of(&analyzed, &manifest_path);
+    if manifest_file == NONE {
+        return Err(format!("manifest '{}' was not present in its front-end analysis", path.display()));
+    }
+    let manifest_source = analysis::file_text_of(&analyzed, manifest_file);
+    let manifest_span = (manifest_file, 0i64, manifest_source.len() as i64);
+    let mut name: Option<String> = None;
     let mut entry: Option<PathBuf> = None;
     let mut tests: Option<PathBuf> = None;
-    for (line_index, raw_line) in source.lines().enumerate() {
-        let content = match raw_line.split_once('#') {
-            Some((before_comment, comment)) => {
-                if comment.contains('\0') {
-                    return Err(format!("{}:{}: comment contains a null byte", path.display(), line_index + 1));
-                }
-                before_comment.trim()
-            }
-            None => raw_line.trim(),
-        };
-        if content.is_empty() {
+    let item_count = list_len(&analyzed.lists, analyzed.root);
+    let mut item_index = 0i64;
+    while item_index < item_count {
+        let item = list_get(&analyzed.lists, analyzed.root, item_index);
+        if node_file(&analyzed.nodes, item) == NO_FILE {
+            item_index += 1;
             continue;
         }
-        let (key, value) = match content.split_once('=') {
-            Some((raw_key, raw_value)) => (raw_key.trim(), raw_value.trim()),
-            None => return Err(format!("{}:{}: expected 'key = relative/path'", path.display(), line_index + 1)),
-        };
-        let relative = validate_relative_path(value, path, line_index + 1)?;
-        if key == "entry" {
-            if entry.is_some() {
-                return Err(format!("{}:{}: duplicate entry field", path.display(), line_index + 1));
-            }
-            entry = Some(relative);
-        } else if key == "tests" {
-            if tests.is_some() {
-                return Err(format!("{}:{}: duplicate tests field", path.display(), line_index + 1));
-            }
-            tests = Some(relative);
-        } else {
-            return Err(format!("{}:{}: unknown manifest field '{}'", path.display(), line_index + 1, key));
+        if node_tag(&analyzed.nodes, item) != NODE_ITEM
+            || node_a(&analyzed.nodes, item) != ITEM_CONST
+            || item_is_pub(&analyzed.nodes, item) != 1
+        {
+            return Err(manifest_item_error(
+                &analyzed,
+                item,
+                "manifest items must be pub const declarations",
+            ));
         }
+        let declared_type = ty_key_of(&analyzed.nodes, node_e(&analyzed.nodes, item));
+        if !is_manifest_string_type(&analyzed.nodes, declared_type) {
+            return Err(manifest_item_error(
+                &analyzed,
+                item,
+                "manifest fields must have declared type '&[U8]'",
+            ));
+        }
+        let symbol = item_sym_of(&analyzed.nodes, item);
+        if !has_const_value(&analyzed.nodes, symbol) {
+            return Err(manifest_item_error(&analyzed, item, "manifest field has no folded constant value"));
+        }
+        let folded = find_const_value(&analyzed.nodes, symbol);
+        let value = match analyzed.names.get(folded as usize) {
+            Some(text) => text.clone(),
+            None => return Err(manifest_item_error(&analyzed, item, "manifest field has an invalid folded value")),
+        };
+        let field = name_text(&analyzed.names, node_d(&analyzed.nodes, item));
+        if field == "NAME" {
+            name = Some(value);
+        } else if field == "ENTRY" {
+            entry = Some(validate_relative_path(&value, &analyzed, item)?);
+        } else if field == "TESTS" {
+            tests = Some(validate_relative_path(&value, &analyzed, item)?);
+        } else {
+            return Err(manifest_item_error(
+                &analyzed,
+                item,
+                &format!("unknown manifest field '{}'", field),
+            ));
+        }
+        item_index += 1;
     }
+    let project_name = match name {
+        Some(value) => value,
+        None => return Err(manifest_span_error(&analyzed, manifest_span, "missing required NAME field")),
+    };
     let entry_source = match entry {
         Some(relative) => root.join(relative),
-        None => return Err(format!("{}: missing required entry field", path.display())),
+        None => return Err(manifest_span_error(&analyzed, manifest_span, "missing required ENTRY field")),
     };
     let tests_path = match tests {
         Some(relative) => root.join(relative),
@@ -98,7 +134,73 @@ pub fn load_manifest(path: &Path) -> Result<ProjectManifest, String> {
     if !entry_path.is_file() {
         return Err(format!("project entry '{}' is not a file", entry_path.display()));
     }
-    Ok(ProjectManifest { root, entry: entry_path, tests: tests_path })
+    Ok(ProjectManifest { name: project_name, root, entry: entry_path, tests: tests_path })
+}
+
+fn is_manifest_string_type(nodes: &[i64], key: i64) -> bool {
+    let reference = find_tyinfo(nodes, key);
+    if reference == NONE || node_b(nodes, reference) != TYD_REF {
+        return false;
+    }
+    let slice = find_tyinfo(nodes, node_e(nodes, reference));
+    if slice == NONE || node_b(nodes, slice) != TYD_SLICE {
+        return false;
+    }
+    let byte = find_tyinfo(nodes, node_e(nodes, slice));
+    byte != NONE && node_b(nodes, byte) == TYD_BUILTIN && node_f(nodes, byte) == BUILTIN_U8
+}
+
+fn manifest_item_error(analyzed: &analysis::Analysis, item: i64, message: &str) -> String {
+    manifest_span_error(
+        analyzed,
+        (
+            node_file(&analyzed.nodes, item),
+            node_start(&analyzed.nodes, item),
+            node_end(&analyzed.nodes, item),
+        ),
+        message,
+    )
+}
+
+fn manifest_span_error(analyzed: &analysis::Analysis, span: (i64, i64, i64), message: &str) -> String {
+    let diagnostics = vec![(message.to_string(), span.0, span.1, span.2)];
+    render_manifest_diagnostics(&diagnostics, &analyzed.files)
+}
+
+fn render_manifest_diagnostics(errors: &[Diag], files: &[(String, String)]) -> String {
+    let mut rendered: Vec<String> = Vec::new();
+    for diagnostic in errors {
+        if diagnostic.1 == NO_FILE {
+            rendered.push(diagnostic.0.clone());
+            continue;
+        }
+        let source = match files.get(diagnostic.1 as usize) {
+            Some(value) => value,
+            None => {
+                rendered.push(format!("{} (unknown source file {})", diagnostic.0, diagnostic.1));
+                continue;
+            }
+        };
+        if diagnostic.2 < 0 || diagnostic.3 < diagnostic.2 || diagnostic.3 as usize > source.1.len() {
+            rendered.push(format!("{} (invalid source span for '{}')", diagnostic.0, source.0));
+            continue;
+        }
+        let start = diagnostic.2 as usize;
+        let prefix = match source.1.get(0..start) {
+            Some(value) => value,
+            None => {
+                rendered.push(format!("{} (invalid source boundary for '{}')", diagnostic.0, source.0));
+                continue;
+            }
+        };
+        let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let column = match prefix.rsplit('\n').next() {
+            Some(value) => value.chars().count() + 1,
+            None => 1usize,
+        };
+        rendered.push(format!("{}:{}:{}: {}", source.0, line, column, diagnostic.0));
+    }
+    rendered.join("\n")
 }
 
 fn canonicalize_confined_existing(root: &Path, path: &Path, role: &str) -> Result<PathBuf, String> {
@@ -148,30 +250,34 @@ fn sidecar_present(path: &Path, role: &str) -> Result<bool, String> {
     }
 }
 
-fn validate_relative_path(value: &str, manifest: &Path, line: usize) -> Result<PathBuf, String> {
+fn validate_relative_path(value: &str, analyzed: &analysis::Analysis, item: i64) -> Result<PathBuf, String> {
     if value.is_empty() {
-        return Err(format!("{}:{}: path value cannot be empty", manifest.display(), line));
+        return Err(manifest_item_error(analyzed, item, "path value cannot be empty"));
     }
     let path = PathBuf::from(value);
     if path.is_absolute() {
-        return Err(format!("{}:{}: project paths must be relative", manifest.display(), line));
+        return Err(manifest_item_error(analyzed, item, "project paths must be relative"));
     }
     for component in path.components() {
         match component {
             Component::Normal(name) => {
                 if name.is_empty() {
-                    return Err(format!("{}:{}: empty path component", manifest.display(), line));
+                    return Err(manifest_item_error(analyzed, item, "empty path component"));
                 }
             }
             Component::CurDir => {}
             Component::ParentDir => {
-                return Err(format!("{}:{}: project paths cannot leave the project root", manifest.display(), line));
+                return Err(manifest_item_error(analyzed, item, "project paths cannot leave the project root"));
             }
             Component::RootDir => {
-                return Err(format!("{}:{}: project paths must be relative", manifest.display(), line));
+                return Err(manifest_item_error(analyzed, item, "project paths must be relative"));
             }
             Component::Prefix(prefix) => {
-                return Err(format!("{}:{}: path prefix '{:?}' is not allowed", manifest.display(), line, prefix));
+                return Err(manifest_item_error(
+                    analyzed,
+                    item,
+                    &format!("path prefix '{:?}' is not allowed", prefix),
+                ));
             }
         }
     }
@@ -190,7 +296,15 @@ pub fn initialize(directory: &Path) -> Result<(), String> {
     }
     fs::create_dir_all(&tests_dir)
         .map_err(|create_error| format!("cannot create project directory '{}': {}", tests_dir.display(), create_error))?;
-    fs::write(&manifest, "entry = main.cnb\ntests = tests\n")
+    let project_name = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("cinnabar");
+    let manifest_source = format!(
+        "pub const NAME: &[U8] = \"{}\"\npub const ENTRY: &[U8] = \"main.cnb\"\npub const TESTS: &[U8] = \"tests\"\n",
+        escaped_literal_text(project_name),
+    );
+    fs::write(&manifest, manifest_source)
         .map_err(|write_error| format!("cannot write '{}': {}", manifest.display(), write_error))?;
     fs::write(&main, "pub fun main() I64\n  return 0\nend\n")
         .map_err(|write_error| format!("cannot write '{}': {}", main.display(), write_error))?;
@@ -373,15 +487,28 @@ mod tests {
         std::env::temp_dir().join(format!("cinnabar_project_{}_{}_{}", label, std::process::id(), timestamp))
     }
 
+    fn write_project(root: &Path, manifest_source: &str) {
+        assert!(fs::create_dir_all(root).is_ok());
+        assert!(fs::write(root.join("main.cnb"), "pub fun main() I64\n  return 0\nend\n").is_ok());
+        assert!(fs::write(root.join(MANIFEST_FILE), manifest_source).is_ok());
+    }
+
+    fn rejected_manifest(label: &str, manifest_source: &str) -> String {
+        let root = test_directory(label);
+        write_project(&root, manifest_source);
+        match load_manifest(&root.join(MANIFEST_FILE)) {
+            Ok(manifest) => manifest.name,
+            Err(message) => message,
+        }
+    }
+
     #[test]
-    fn manifest_paths_are_rooted_and_confined() {
+    fn cinnabar_manifest_parses_folded_string_fields() {
         let root = test_directory("manifest");
-        let create_result = fs::create_dir_all(&root);
-        assert!(create_result.is_ok());
-        let main_write = fs::write(root.join("main.cnb"), "pub fun main() I64\n  return 0\nend\n");
-        assert!(main_write.is_ok());
-        let manifest_write = fs::write(root.join(MANIFEST_FILE), "entry = main.cnb\ntests = tests\n");
-        assert!(manifest_write.is_ok());
+        write_project(
+            &root,
+            "pub const NAME: &[U8] = \"cinnabar\"\npub const ENTRY: &[U8] = \"main.cnb\"\npub const TESTS: &[U8] = \"tests\"\n",
+        );
         let manifest = match load_manifest(&root.join(MANIFEST_FILE)) {
             Ok(value) => value,
             Err(message) => {
@@ -389,8 +516,96 @@ mod tests {
                 return;
             }
         };
+        assert_eq!(manifest.name, "cinnabar");
         assert_eq!(manifest.entry, root.join("main.cnb"));
-        assert!(validate_relative_path("../escape", &root.join(MANIFEST_FILE), 1).is_err());
+        assert_eq!(manifest.tests, root.join("tests"));
+    }
+
+    #[test]
+    fn missing_required_manifest_field_has_source_location() {
+        let message = rejected_manifest(
+            "missing_entry",
+            "pub const NAME: &[U8] = \"cinnabar\"\n",
+        );
+        assert!(message.contains("build.cnb:1:1: missing required ENTRY field"), "{}", message);
+    }
+
+    #[test]
+    fn omitted_tests_field_uses_tests_directory() {
+        let root = test_directory("default_tests");
+        write_project(
+            &root,
+            "pub const NAME: &[U8] = \"cinnabar\"\npub const ENTRY: &[U8] = \"main.cnb\"\n",
+        );
+        let manifest = match load_manifest(&root.join(MANIFEST_FILE)) {
+            Ok(value) => value,
+            Err(message) => {
+                assert!(message.is_empty(), "{}", message);
+                return;
+            }
+        };
+        assert_eq!(manifest.tests, root.join("tests"));
+    }
+
+    #[test]
+    fn duplicate_manifest_field_has_source_location() {
+        let message = rejected_manifest(
+            "duplicate_entry",
+            "pub const NAME: &[U8] = \"cinnabar\"\npub const ENTRY: &[U8] = \"main.cnb\"\npub const ENTRY: &[U8] = \"other.cnb\"\n",
+        );
+        assert!(message.contains("build.cnb:3:5: duplicate symbol 'ENTRY'"), "{}", message);
+    }
+
+    #[test]
+    fn wrong_manifest_field_type_has_declaration_location() {
+        let message = rejected_manifest(
+            "wrong_type",
+            "pub const NAME: &[U8] = \"cinnabar\"\npub const ENTRY: I64 = 1\n",
+        );
+        assert!(message.contains("build.cnb:2:5: manifest fields must have declared type '&[U8]'"), "{}", message);
+    }
+
+    #[test]
+    fn manifest_path_cannot_escape_project_root() {
+        let message = rejected_manifest(
+            "escape",
+            "pub const NAME: &[U8] = \"cinnabar\"\npub const ENTRY: &[U8] = \"../outside.cnb\"\n",
+        );
+        assert!(message.contains("build.cnb:2:5: project paths cannot leave the project root"), "{}", message);
+    }
+
+    #[test]
+    fn invalid_cinnabar_manifest_reports_frontend_diagnostic() {
+        let message = rejected_manifest("invalid_source", "entry = main.cnb\n");
+        assert!(message.contains("build.cnb:1:"), "{}", message);
+        assert!(!message.contains("expected 'key = relative/path'"), "{}", message);
+    }
+
+    #[test]
+    fn manifest_rejects_items_that_are_not_public_constants() {
+        let message = rejected_manifest(
+            "private_const",
+            "const NAME: &[U8] = \"cinnabar\"\npub const ENTRY: &[U8] = \"main.cnb\"\n",
+        );
+        assert!(message.contains("build.cnb:1:1: manifest items must be pub const declarations"), "{}", message);
+    }
+
+    #[test]
+    fn initialize_writes_loadable_cinnabar_manifest() {
+        let root = test_directory("initialize");
+        assert!(initialize(&root).is_ok());
+        let source = match fs::read_to_string(root.join(MANIFEST_FILE)) {
+            Ok(value) => value,
+            Err(read_error) => {
+                assert!(read_error.kind() == std::io::ErrorKind::NotFound, "{}", read_error);
+                return;
+            }
+        };
+        assert!(source.contains("pub const NAME: &[U8]"));
+        assert!(source.contains("pub const ENTRY: &[U8] = \"main.cnb\""));
+        assert!(source.contains("pub const TESTS: &[U8] = \"tests\""));
+        let manifest = load_manifest(&root.join(MANIFEST_FILE));
+        assert!(manifest.is_ok(), "{:?}", manifest);
     }
 
     #[cfg(unix)]
@@ -405,7 +620,11 @@ mod tests {
         assert!(fs::write(root.join("main.cnb"), "pub fun main() I64\n  return 0\nend\n").is_ok());
         assert!(fs::write(outside.join("escape.cnb"), "pub fun main() I64\n  return 0\nend\n").is_ok());
         assert!(symlink(&outside, root.join("tests")).is_ok());
-        assert!(fs::write(root.join(MANIFEST_FILE), "entry = main.cnb\ntests = tests\n").is_ok());
+        assert!(fs::write(
+            root.join(MANIFEST_FILE),
+            "pub const NAME: &[U8] = \"cinnabar\"\npub const ENTRY: &[U8] = \"main.cnb\"\npub const TESTS: &[U8] = \"tests\"\n",
+        )
+        .is_ok());
 
         let manifest = match load_manifest(&root.join(MANIFEST_FILE)) {
             Ok(value) => value,
