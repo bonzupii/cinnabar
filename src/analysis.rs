@@ -597,6 +597,10 @@ pub fn completions(analysis: &Analysis, file: i64, offset: i64) -> Vec<(String, 
     if !use_items.is_empty() {
         return use_items;
     }
+    let qualified = qualified_completions(analysis, file, offset);
+    if !qualified.is_empty() {
+        return qualified;
+    }
     scope_completions(analysis, file, offset)
 }
 
@@ -668,6 +672,21 @@ fn use_path_completions(analysis: &Analysis, file: i64, offset: i64) -> Vec<(Str
         return roots;
     }
 
+    dotted_path_completions(analysis, file, offset, &parts)
+}
+
+// Members of the module a dotted path names, filtered by the partial final
+// segment.  Shared by `use` lines and by qualified paths in ordinary code so
+// both resolve through the same scope facts, rather than two lookups that can
+// disagree about what a module exports.
+fn dotted_path_completions(
+    analysis: &Analysis,
+    file: i64,
+    offset: i64,
+    parts: &[&str],
+) -> Vec<(String, i64)> {
+    let scope = scope_at(analysis, file, offset);
+    let count = node_count(analysis);
     let first = match parts.first() {
         Some(value) => *value,
         None => return Vec::new(),
@@ -745,6 +764,54 @@ fn use_path_completions(analysis: &Analysis, file: i64, offset: i64) -> Vec<(Str
     }
     out
 }
+// The dotted path immediately left of the cursor, anywhere an expression or a
+// type may appear: `Memory.` offers that module's members, `Memory.all`
+// narrows them.  Without this, a dot that is not a struct field access falls
+// through to whole-scope completion, which offers keywords like `fun` and
+// `if` in a position where no keyword can legally follow.
+//
+// `use` lines keep their own entry point because a bare `use F` must also
+// suggest module roots, which is meaningless mid-expression.
+fn qualified_completions(analysis: &Analysis, file: i64, offset: i64) -> Vec<(String, i64)> {
+    let text = file_text_of(analysis, file);
+    let end = if offset < 0 {
+        0usize
+    } else if offset as usize > text.len() {
+        text.len()
+    } else {
+        offset as usize
+    };
+    let before = match text.get(0..end) {
+        Some(value) => value,
+        None => return Vec::new(),
+    };
+    // Walk back over path characters only.  Every byte tested is ASCII, so the
+    // resulting index is always on a character boundary.
+    let bytes = before.as_bytes();
+    let mut start = end;
+    while start > 0 {
+        let byte = match bytes.get(start - 1) {
+            Some(value) => *value,
+            None => break,
+        };
+        if byte == b'.' || byte == b'_' || byte.is_ascii_alphanumeric() {
+            start -= 1;
+            continue;
+        }
+        break;
+    }
+    let token = match before.get(start..end) {
+        Some(value) => value,
+        None => return Vec::new(),
+    };
+    // No dot means an unqualified name, which scope completion already covers.
+    if !token.contains('.') {
+        return Vec::new();
+    }
+    let parts: Vec<&str> = token.split('.').collect();
+    dotted_path_completions(analysis, file, offset, &parts)
+}
+
 // Fields of the struct value ending right before the dot, read from the
 // typechecker's NODE_FIELDKEY facts for that struct's canonical key.
 fn field_completions(analysis: &Analysis, file: i64, dot: i64) -> Vec<(String, i64)> {

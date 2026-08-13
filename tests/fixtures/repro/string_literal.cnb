@@ -1,0 +1,127 @@
+#! String literals: a `"..."` evaluates to `&[U8]` — a static byte array
+#! in `.rodata` plus a `{ ptr, len }` slice.  No heap allocation, no owner,
+#! nothing to free, and no runtime UTF-8 validation, because the bytes were
+#! fixed and checked when the literal was lexed.
+#!
+#! Exit code 0 means every check passed; a non-zero code names the check.
+
+pub mod Slice
+  pub nat fun len<T>(view: &[T]) Usize
+end
+
+use Slice.len as slice_len
+
+pub const GREETING: &[U8] = "Cinnabar"
+pub const EMPTY: &[U8] = ""
+
+#! Every escape the language defines, in one literal: newline, tab, NUL,
+#! an escaped quote, and an escaped backslash.  Five bytes.
+pub const ESCAPES: &[U8] = "\n\t\0\"\\"
+
+#! A literal is UTF-8 source text, so a multi-byte character occupies the
+#! bytes of its encoding: 'é' is two bytes, '€' is three, '𝄞' is four.
+pub const MULTIBYTE: &[U8] = "é€𝄞"
+
+pub const BYTE_C: U8 = 0x43
+pub const BYTE_I: U8 = 0x69
+pub const BYTE_TAB: U8 = 0x09
+pub const BYTE_NUL: U8 = 0x00
+pub const BYTE_QUOTE: U8 = 0x22
+pub const BYTE_BACKSLASH: U8 = 0x5C
+pub const BYTE_NEWLINE: U8 = 0x0A
+
+fun byte_at(view: &[U8], index: Usize) I64
+  match view[index]
+    Ok(value) => return I64.from(value)
+    Err(IndexOutOfBounds(idx, length)) => return -1
+  end
+end
+
+#! A literal's length is its byte count, not its character count.
+fun check_lengths() I64
+  if slice_len(GREETING) != 8
+    return 10
+  end
+  if slice_len(EMPTY) != 0
+    return 11
+  end
+  if slice_len(ESCAPES) != 5
+    return 12
+  end
+  if slice_len(MULTIBYTE) != 9
+    return 13
+  end
+  return 0
+end
+
+fun check_bytes() I64
+  if byte_at(GREETING, 0) != I64.from(BYTE_C)
+    return 20
+  end
+  if byte_at(GREETING, 1) != I64.from(BYTE_I)
+    return 21
+  end
+  return 0
+end
+
+#! Each escape decodes to exactly one byte, in source order.
+fun check_escapes() I64
+  if byte_at(ESCAPES, 0) != I64.from(BYTE_NEWLINE)
+    return 30
+  end
+  if byte_at(ESCAPES, 1) != I64.from(BYTE_TAB)
+    return 31
+  end
+  if byte_at(ESCAPES, 2) != I64.from(BYTE_NUL)
+    return 32
+  end
+  if byte_at(ESCAPES, 3) != I64.from(BYTE_QUOTE)
+    return 33
+  end
+  if byte_at(ESCAPES, 4) != I64.from(BYTE_BACKSLASH)
+    return 34
+  end
+  return 0
+end
+
+#! An inline literal is the same value as a constant of the same text: both
+#! resolve to one `.rodata` global, so the bytes must match position for
+#! position.
+fun check_inline_matches_const() I64
+  val inline = "Cinnabar"
+  if slice_len(inline) != slice_len(GREETING)
+    return 40
+  end
+  var i: Usize = 0
+  while i < slice_len(inline)
+    if byte_at(inline, i) != byte_at(GREETING, i)
+      return 41
+    end
+    i = i + 1
+  end
+  return 0
+end
+
+pub fun main() I64
+  val lengths = check_lengths()
+  if lengths != 0
+    return lengths
+  end
+
+  val bytes = check_bytes()
+  if bytes != 0
+    return bytes
+  end
+
+  val escapes = check_escapes()
+  if escapes != 0
+    return escapes
+  end
+
+  val inline = check_inline_matches_const()
+  if inline != 0
+    return inline
+  end
+
+  return 0
+end

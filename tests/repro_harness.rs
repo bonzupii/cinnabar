@@ -20,6 +20,7 @@ const EXPECT_OK: &[(&str, i32)] = &[
     ("rec_test", 120),
     ("tail_rec", 64),
     ("mem_probe", 0),
+    ("mem_byte_access", 0),
     ("hanoi", 255),
     ("head", 10),
     ("enum_test", 0),
@@ -45,10 +46,19 @@ const EXPECT_OK: &[(&str, i32)] = &[
     ("div_runtime", 7),
     ("int_min_neg1", 0),
     ("shift_mask", 0),
+    ("int_width_grid", 0),
+    ("int_literal_context", 0),
+    ("string_literal", 0),
+    ("string_print", 0),
+    ("string_static_borrow", 0),
+    ("file_roundtrip", 0),
+    ("runtime_io", 0),
     ("empty_block", 0),
     ("utf8_validation", 0),
     ("multiline_const", 30),
     ("fib", 155),
+    ("linear_branch_consume", 0),
+    ("linear_loop_consume", 0),
     ("linear_field_reinit", 0),
     ("linear_ref_swap", 0),
     ("linear_field_consume", 0),
@@ -88,6 +98,11 @@ const EXPECT_REJECTED: &[&str] = &[
     "b3_two_mut",
     "b4_mut_shared",
     "int_literal_range",
+    "int_literal_no_peer",
+    "string_bad_escape",
+    "string_not_an_int",
+    "file_unclosed",
+    "borrow_after_move",
     "int_unsigned_neg",
     "non_tail_recursion",
     "vec_no_extraction",
@@ -259,6 +274,13 @@ fn repro_config() -> ReproConfig {
 
 fn run_binary(bin: &Path, timeout_secs: u64) -> i32 {
     let mut child = match Command::new(bin)
+        // A fixture must never read the harness's own standard input.
+        // `Terminal.read_line` blocks until a line or end of input arrives,
+        // so an inherited descriptor would make a fixture's exit code
+        // depend on whether the suite was run from a terminal, a pipe, or
+        // CI. A null stdin is at end of input immediately, which is a
+        // definite state every run agrees on.
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()

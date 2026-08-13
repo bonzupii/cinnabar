@@ -25,6 +25,8 @@ Return types are always declared. No inference of function signatures.
 ### 5. No Lifetime Annotations
 Borrow scopes are flow-sensitive and determined by the compiler. Returned borrows must be unambiguous — if the compiler cannot determine which input a returned reference derives from, it is a compile error. The programmer resolves this by restructuring the API, not by annotating lifetimes. Lifetime annotation syntax (`'a`) does not exist in the language.
 
+A borrow into the program's static data is the one case with no input origin and no error: a string literal, and a `const` of a reference type, borrow bytes that live in the binary's read-only data for the whole run, so the borrow outlives every caller and there is no lifetime question to answer. Returning one is always valid, including through a function that forwards another's static result. This is not an exception to the rule but the rule's premise being absent — there is no caller data whose lifetime could be exceeded.
+
 ### 6. No Dereference Operator
 There is no `*ptr`. There is no `->`. References are accessed through field access, method calls, and pattern matching. The compiler manages indirection internally. This eliminates an entire class of memory safety bugs and makes the borrow checker's job tractable without annotations.
 
@@ -94,6 +96,8 @@ Multi-line expressions are valid: a const initializer, argument list, struct lit
 
 Comments: `#`, `#!`, `#| |#`, `#!| |#`. Block comments do not nest. Trailing comments may follow any line.
 
+String literals are double-quoted and do not span lines: an unescaped newline before the closing quote is a lexical error, so a missing quote cannot swallow the rest of the file. Exactly five escapes exist — `\n`, `\t`, `\0`, `\"`, `\\` — and any other escape is a lexical error rather than a passed-through backslash. There is deliberately no byte escape (`\xNN`); see "String literals" under Types for why.
+
 ### Control Flow
 `if` / `elif` / `else` are all supported. `elif` is a single keyword, not `else if`. An `if` without `else`, an `if` with `else` but no `elif`, and any combination are valid.
 
@@ -106,10 +110,10 @@ The program entry point is `main`. It must return `Unit`, a builtin integer scal
 ### Operators
 Arithmetic: `+`, `-`, `*`, `/`, `%`. Modulo has the same precedence as `*` and `/`.
 Bitwise: `&`, `|`, `^`, `<<`, `>>`.
-Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`.
+Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`. Comparison is a scalar operation: `==` and `!=` compare the ten integer types and `Bool`; the ordering operators compare the integer types, since ordering `Bool` names nothing. A struct, enum, array, slice, reference, or native handle has no comparison — there is no structural equality and no operator overloading, so an aggregate is taken apart with `match` and field access, and comparing two byte slices for content is a loop over the bytes, written explicitly.
 Logical: `&&`, `||`.
 
-All operators require operands of the same type. No implicit widening.
+All operators require operands of the same type. No implicit widening. A bare integer literal is not yet an operand of any type — it adopts the peer operand's type before the sameness rule is applied (see "Literal typing context" under Types); a typed value never adopts anything.
 
 Division `/` and modulo `%` return `Result(T, DivError)`: any compile-time-provable-zero divisor — a literal, a folded const reference, or any arithmetic combination of them (`N / 0`, `5 / 0`, `x / (3 - 3)`) — is a compile-time error, whatever the numerator. A runtime zero produces `Err(DivByZero)`, handled with `try` or `match` like every other fallible operation. Division never traps and is never undefined behavior.
 
@@ -138,9 +142,31 @@ Compiler builtins: `Unit`, `Result(T, E)`, `Option(T)`, `IndexError`, `Bool`, an
 
 The ten integer types form a fixed-width grid: every width supports every operator, and arithmetic and bitwise operations wrap per-width in two's complement. Shift counts mask by `width - 1` (so `1 << 8` on `U8` is `1 << 0`); signed types shift and compare arithmetically, unsigned types logically. Integer literals are non-negative magnitudes that adopt the expected type in a typed context and are range-checked against that type's width (`300` as `U8`, `-1` as `U16`, `0x100` as `U8` are compile errors); untyped literals default to `I64`, and unary `-` on an unsigned type is a compile error. `T.from(value)` converts any integer to `T`, selecting the correct truncation, zero-extension, or sign-extension from the source and destination width and signedness; no implicit conversions exist.
 
+**Literal typing context.** An integer literal has no type of its own until its context gives it one. Two things supply that context, and nothing else does:
+
+(1) The type expected of the position the literal appears in — a `const`'s or local's declared type, a parameter's declared type, a function's declared return type, an array element type, a struct field's type.
+
+(2) The type of the peer operand of a binary operator, when exactly one side is a bare literal expression.
+
+A *bare literal expression* is one built out of nothing but integer literals, unary `-`, and integer-valued binary operators. Such an expression adopts a type through every level at once: in `var x: U8 = 2 * 3 + 4` all four literals adopt `U8`. A literal that adopts a type is range-checked against that type's width, so `narrowed != 300` where `narrowed: U8` is an out-of-range error, not a type mismatch, and `narrowed != -1` is an unsigned-negation error.
+
+Every other expression form — a path, call, index, field access, `match`, `try`, struct literal, array literal — already has a declared or inferred type and never adopts a different one. A `const` reference is a typed value, not a literal. This is what keeps the rule distinct from an implicit conversion: no *value* ever changes width or signedness, so `narrow == wide` with `narrow: U8` and `wide: U16` is a compile error, as is `a + b` across two widths. Only a literal, which had no width to begin with, receives one.
+
+The rule holds identically for constant initializers and for runtime code: the same initializer text types the same way in a `const` and in a `val`/`var`, at every one of the ten widths. `-9223372036854775807 - 1` is `Isize` in `pub const ISIZE_MIN: Isize = ...` and `Isize` in `var min: Isize = ...`; `255 + 1` is `U8` and wraps to `0` in both. A literal reaching neither kind of context defaults to `I64`.
+
 Fixed-size arrays `[T; N]`: indexed with `arr[i]`, `&arr[i]`, and `&mut arr[i]` (see Indexing), and destructured with `match arr [a, b, c] => ...` and rest patterns. Array length is always statically known, so a constant index is proven at compile time.
 
-Slices `&[T]`: produced by `vec_view` or by the sanctioned coercion `&[T; N]` → `&[T]`.
+Slices `&[T]`: produced by `vec_view`, by a string literal, or by the sanctioned array-to-slice coercion. That coercion applies to both borrow forms — `&[T; N]` → `&[T]` and `&mut [T; N]` → `&mut [T]` — since borrowing an array never yields a reference to the array type itself; the length travels in the slice view rather than in the type. A `&mut [T]` is how a caller hands a fixed-size buffer to something that fills it, such as `File.read`.
+
+**String literals.** A string literal has type `&[U8]` and exactly that type; unlike an integer literal it adopts nothing from its context, because its value is a byte sequence whose length and contents are already fixed. It evaluates to a static byte array in the binary's read-only data plus a `{ ptr, len }` slice over it: no heap allocation, no owner, nothing to consume or free, and no lifetime to track, since the bytes live for the whole run. A literal's length is its **byte** count, not its character count — `"é"` is two bytes.
+
+`&[U8]` rather than a distinct string type because the byte slice is the representation the language already has: `Slice.len`, indexing, and `Collections.string_from_slice` all apply to a literal unchanged.
+
+A literal's UTF-8 validity is a compile-time fact, not a runtime `Result`. This follows from the escape set rather than from a validation pass: source text is UTF-8, every unescaped byte is therefore part of a well-formed sequence copied through unchanged, and all five escapes decode to ASCII. A byte escape (`\xNN`) is excluded precisely because it would let a literal name a lone continuation byte and so put runtime validation back on a value that is supposed to be settled at compile time. `Collections.string_from_slice` still validates, because a slice can come from anywhere; a literal needs no such check.
+
+Two occurrences of the same literal text are one value: literals are interned, so equal literals share a single copy of the bytes in the binary. A `const` of type `&[U8]` and an inline literal of the same text resolve to that same copy.
+
+`Terminal.print` and `Terminal.print_line` accept `&[U8]` as well as `&Collections.String`. This is not overloading, which the language does not have: it is one native whose parameter may be declared as either byte-sequence view, with the implementation reading the (data, length) pair out of whichever representation was declared. Printing a literal therefore needs no allocation and no `String` round trip.
 
 References: `&T` (shared), `&mut T` (exclusive mutable).
 
@@ -151,7 +177,9 @@ Enum variant constructors require exactly their declared payload. Using a payloa
 ### Linear Types
 `Memory.Block`, `Collections.Vec(T)`, `Collections.String`, `Collections.HashMap(K, V)` are linear. `Vec(T)` and `HashMap(K, V)` are linear regardless of their element type; they own heap storage requiring an explicit free.
 
-Linear values must be consumed exactly once on every execution path.
+`File.Handle` is linear: an open descriptor must be closed exactly once on every path.
+
+Linear values must be consumed exactly once on every execution path. A moved value cannot be used again — neither moved a second time nor *borrowed*, since a borrow after the move reads a resource the move already released.
 
 Type parameters are conservatively linear: a value of a generic type-parameter type must be consumed exactly once on every path, because its instantiation is unknown at definition time.
 
@@ -174,6 +202,47 @@ Collections.hash_map_remove<K,V>(map: &mut HashMap(K,V), key: K)
   Returns Ok(value) or Err(KeyNotFound) if the key is absent. Popping a
   linear value transfers its linear obligation to the caller's linear
   context.
+
+### Native Surface: Operating System
+
+`Memory`, `Terminal`, and `File` issue Linux system calls directly rather than calling libc. The instruction that leaves user space is visible in the emitted IR, with nothing between the Cinnabar declaration and the kernel. `Collections` and `Net` keep the statically linked musl, because an allocator and a `sockaddr` marshaller are real code rather than thin syscall shims — this is the "where a target genuinely cannot avoid libc" case, and it is never a dynamic link.
+
+`File.Handle` is linear, like every other native handle: an open descriptor must be closed exactly once on every path. A leaked descriptor is a compile error, and so is closing one twice — which would release a number the kernel may since have handed back out, making a later read touch the wrong file.
+
+File.open(path: &[U8], mode: File.Mode) impure Result(File.Handle, File.Error)
+  Opens `path` in one of three modes: `ReadOnly`, `WriteTruncate`, or
+  `WriteAppend`. The mode is an enum, not an integer of flag bits, so a
+  program never writes an operating-system constant. A path longer than
+  the system maximum is an error, not a truncation.
+
+File.read(file: &File.Handle, into: &mut [U8]) impure Result(Usize, File.Error)
+File.write(file: &File.Handle, bytes: &[U8]) impure Result(Usize, File.Error)
+  Transfer bytes and return the count actually transferred, which may be
+  fewer than asked. A short count is information, not a failure: a zero
+  count from `read` is how end of file is observed. Looping until a
+  transfer completes is the caller's decision, made explicitly.
+
+File.close(file: File.Handle) impure Unit
+  Consumes the handle. Returns `Unit`: the descriptor is released either
+  way, and the failures `close` can report concern flushing the program
+  can no longer act on.
+
+Terminal.read_line() impure Result(Collections.String, Collections.Error)
+  Reads one line from standard input, excluding its newline. End of input
+  with nothing read is `Err(EndOfInput)` rather than an empty string, so a
+  blank line and "no more lines" stay distinguishable. Reads are
+  unbuffered and byte-at-a-time by design: a larger read would consume
+  bytes past the newline that an unbuffered descriptor cannot put back.
+  Buffering belongs to a reader the program owns.
+
+Runtime.args() &[Collections.String]
+  The process's command-line arguments, with the program name first. The
+  result is a shared borrow, not an owned collection, because the strings
+  live in memory the kernel set up for the process and last for the whole
+  run — there is no moment at which freeing one would be correct.
+  Linearity enforces this rather than convention: a `String` cannot be
+  moved out of a slice, so a program can read an argument but can never
+  hand one to `string_free`.
 
 ### Visibility
 Private by default. `pub` exposes.
@@ -230,7 +299,7 @@ Dereference operators (`*`, `->`)
 Warning severities or lint configuration
 Macros or metaprogramming
 Operator overloading
-Implicit conversions or coercions (other than the single sanctioned `&[T; N]` → `&[T]` slice coercion)
+Implicit conversions or coercions (other than the sanctioned array-to-slice coercion, `&[T; N]` → `&[T]` and `&mut [T; N]` → `&mut [T]`)
 Glob imports or implicit preludes
 Garbage collection or reference counting
 Mutexes or shared mutable state primitives

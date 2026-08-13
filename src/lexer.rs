@@ -38,6 +38,8 @@ fn lex_byte(
         lex_ident(names, nodes, bytes, pos, file, source, errors)
     } else if is_digit(byte) {
         lex_number(nodes, bytes, pos, file, errors)
+    } else if byte == b'"' {
+        lex_string(names, nodes, bytes, pos, source, file, errors)
     } else {
         lex_symbol(names, nodes, bytes, pos, file, errors)
     }
@@ -370,6 +372,107 @@ fn accumulate_digit(
     }
 }
 
+// Scans a double-quoted string literal and interns its *decoded* bytes.
+//
+// Only the five escapes the language defines are accepted (`\n`, `\t`,
+// `\0`, `\"`, `\\`); every other escape is a lexical error rather than a
+// silently-passed-through backslash, so a literal's byte sequence is fully
+// determined here and no later stage re-scans the source for it.
+//
+// This escape set is also what makes a literal's UTF-8 validity a
+// compile-time fact with no check to perform: the source text arrives as a
+// `&str` (the module loader reads it as UTF-8 or fails), every unescaped
+// byte is therefore part of a well-formed sequence copied through
+// unchanged, and all five escapes decode to ASCII. There is no byte escape
+// (`\xNN`) precisely because one would let a literal name a lone
+// continuation byte and put runtime validation back on the table.
+//
+// A literal does not span lines: an unescaped newline before the closing
+// quote is an error, which keeps a missing quote from swallowing the rest
+// of the file.
+fn lex_string(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, source: &str, file: i64, errors: &mut Vec<Diag>) -> usize {
+    let start = pos;
+    let mut cursor = pos + 1;
+    // Start of the current unescaped run.  Runs are copied out of `source`
+    // as whole `&str` slices rather than byte by byte, so a multi-byte
+    // character passes through as the character it is.
+    let mut run = cursor;
+    let mut text = String::new();
+    while cursor < bytes.len() {
+        let byte = byte_at(bytes, cursor);
+        if byte == b'"' {
+            if !append_run(&mut text, source, run, cursor, errors) {
+                return cursor + 1;
+            }
+            let end = cursor + 1;
+            let name = intern(names, &text);
+            push_token(nodes, TOK_STRING, name, NONE, start as i64, end as i64, file);
+            return end;
+        }
+        if byte == b'\n' {
+            push_error(errors, "unterminated string literal", file, start as i64, cursor as i64);
+            return cursor;
+        }
+        if byte == b'\\' {
+            if !append_run(&mut text, source, run, cursor, errors) {
+                return cursor + 2;
+            }
+            match escape_byte(byte_at(bytes, cursor + 1)) {
+                Some(decoded) => text.push(decoded as char),
+                None => {
+                    // Report the escape and keep scanning the same literal
+                    // rather than bailing out mid-string: bailing would
+                    // leave the closing quote to open a second literal and
+                    // report a spurious "unterminated" on the same line.
+                    push_error(errors, "unknown escape in string literal", file, cursor as i64, (cursor + 2) as i64);
+                }
+            }
+            cursor += 2;
+            run = cursor;
+            continue;
+        }
+        cursor += 1;
+    }
+    push_error(errors, "unterminated string literal", file, start as i64, cursor as i64);
+    cursor
+}
+
+// Appends the source text between two byte offsets of an unescaped run.
+// Both offsets fall on a character boundary: a run begins after the opening
+// quote or after an escape and ends at a quote or a backslash, and every one
+// of those delimiters is ASCII.  `source.get` rather than an index so a
+// broken invariant is an internal diagnostic, never a panic.
+fn append_run(text: &mut String, source: &str, from: usize, to: usize, errors: &mut Vec<Diag>) -> bool {
+    match source.get(from..to) {
+        Some(part) => {
+            text.push_str(part);
+            true
+        }
+        None => {
+            push_internal(errors, "string literal run does not fall on a character boundary");
+            false
+        }
+    }
+}
+
+// The byte a backslash escape denotes, or None when the escape is not one
+// the language defines.
+fn escape_byte(byte: u8) -> Option<u8> {
+    if byte == b'n' {
+        Some(b'\n')
+    } else if byte == b't' {
+        Some(b'\t')
+    } else if byte == b'0' {
+        Some(0)
+    } else if byte == b'"' {
+        Some(b'"')
+    } else if byte == b'\\' {
+        Some(b'\\')
+    } else {
+        None
+    }
+}
+
 fn lex_symbol(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, file: i64, errors: &mut Vec<Diag>) -> usize {
     let byte = byte_at(bytes, pos);
     let next = byte_at(bytes, pos + 1);
@@ -646,6 +749,110 @@ mod tests {
         assert_eq!(errors.len(), 1);
         match errors.get(0) {
             Some(diag) => assert!(diag.0.contains("unterminated")),
+            None => assert!(false),
+        }
+    }
+
+    // The decoded bytes a source line's single string literal interns to.
+    fn lex_string_bytes(source: &str) -> Vec<u8> {
+        let mut names: Vec<String> = Vec::new();
+        let mut nodes: Vec<i64> = Vec::new();
+        let mut errors: Vec<Diag> = Vec::new();
+        let ok = lex(&mut names, &mut nodes, source, 0, &mut errors);
+        assert!(ok, "unexpected lexical errors: {:?}", errors);
+        let mut idx = 0i64;
+        while idx < nodes.len() as i64 / NODE_STRIDE {
+            if node_tag(&nodes, idx) == NODE_TOKEN && node_a(&nodes, idx) == TOK_STRING {
+                let name = node_b(&nodes, idx);
+                return name_text(&names, name).into_bytes();
+            }
+            idx += 1;
+        }
+        assert!(false, "no string token in {:?}", source);
+        Vec::new()
+    }
+
+    #[test]
+    fn decodes_every_defined_escape() {
+        // The five escapes the language defines, each exactly one byte.
+        assert_eq!(lex_string_bytes("\"\\n\\t\\0\\\"\\\\\"\n"), vec![10, 9, 0, 34, 92]);
+    }
+
+    #[test]
+    fn preserves_multibyte_utf8() {
+        // A literal is UTF-8 source text copied through unchanged, so a
+        // multi-byte character keeps the bytes of its encoding rather than
+        // being widened or split. This is what makes a literal's UTF-8
+        // validity a compile-time fact: every unescaped byte comes from
+        // well-formed source and every escape decodes to ASCII, so no
+        // decoding step can introduce a malformed sequence.
+        assert_eq!(
+            lex_string_bytes("\"é€𝄞\"\n"),
+            vec![0xC3, 0xA9, 0xE2, 0x82, 0xAC, 0xF0, 0x9D, 0x84, 0x9E]
+        );
+    }
+
+    #[test]
+    fn interns_equal_literals_to_one_name() {
+        // Equal literals must share one name id, because that identity is
+        // what lets codegen emit a single `.rodata` global per distinct
+        // literal instead of one per occurrence.
+        let mut names: Vec<String> = Vec::new();
+        let mut nodes: Vec<i64> = Vec::new();
+        let mut errors: Vec<Diag> = Vec::new();
+        let ok = lex(&mut names, &mut nodes, "\"same\" \"same\" \"other\"\n", 0, &mut errors);
+        assert!(ok, "unexpected lexical errors: {:?}", errors);
+        let mut ids: Vec<i64> = Vec::new();
+        let mut idx = 0i64;
+        while idx < nodes.len() as i64 / NODE_STRIDE {
+            if node_tag(&nodes, idx) == NODE_TOKEN && node_a(&nodes, idx) == TOK_STRING {
+                ids.push(node_b(&nodes, idx));
+            }
+            idx += 1;
+        }
+        assert_eq!(ids.len(), 3);
+        match (ids.first(), ids.get(1), ids.get(2)) {
+            (Some(first), Some(second), Some(third)) => {
+                assert_eq!(first, second, "equal literals must intern to one name");
+                assert!(first != third, "different literals must intern separately");
+            }
+            (_first, _second, _third) => assert!(false, "expected three string tokens"),
+        }
+    }
+
+    #[test]
+    fn empty_literal_is_zero_bytes() {
+        assert_eq!(lex_string_bytes("\"\"\n"), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn rejects_unknown_escape() {
+        let errors = lex_errors("val x = \"bad \\q escape\"\n");
+        assert_eq!(errors.len(), 1);
+        match errors.get(0) {
+            Some(diag) => assert!(diag.0.contains("unknown escape")),
+            None => assert!(false),
+        }
+    }
+
+    #[test]
+    fn rejects_string_spanning_a_line() {
+        // A literal that runs off its line reports once and stops at the
+        // newline, so a missing quote cannot swallow the rest of the file.
+        let errors = lex_errors("val x = \"no closing quote\nval y = 1\n");
+        assert_eq!(errors.len(), 1);
+        match errors.get(0) {
+            Some(diag) => assert!(diag.0.contains("unterminated string")),
+            None => assert!(false),
+        }
+    }
+
+    #[test]
+    fn rejects_unterminated_string_at_eof() {
+        let errors = lex_errors("val x = \"runs to the end");
+        assert_eq!(errors.len(), 1);
+        match errors.get(0) {
+            Some(diag) => assert!(diag.0.contains("unterminated string")),
             None => assert!(false),
         }
     }

@@ -1,0 +1,198 @@
+#! The `File` native surface: a linear handle, opened by mode, read and
+#! written through byte slices, and closed exactly once.
+#!
+#! Every call here reaches the kernel directly. `open` issues `openat`,
+#! `read` and `write` issue `read`/`write`, and `close` issues `close`;
+#! none of them goes through libc. `openat` rather than `open` because
+#! AArch64's Linux ABI has no `open` at all, so one code path serves both
+#! architectures.
+#!
+#! `File.Handle` is linear: it must be closed on every path out of its
+#! scope. A leaked descriptor is a compile error, and so is closing one
+#! twice — which would release a descriptor the program may since have been
+#! handed again for something else. `file_unclosed.cnb` pins the rejection.
+#!
+#! The mode is an enum rather than an integer of flag bits, so a program
+#! never writes a Linux constant: `File.open(path, WriteTruncate)` says what
+#! it means and the numbers stay inside the compiler.
+#!
+#! Exit code 0 means every check passed; a non-zero code names the check.
+
+pub mod Slice
+  pub nat fun len<T>(view: &[T]) Usize
+end
+
+pub mod File
+  #! A linear open file descriptor.
+  pub nat type Handle
+
+  pub type Mode
+    pub ReadOnly
+    pub WriteTruncate
+    pub WriteAppend
+  end
+
+  pub type Error
+    pub SystemFault(I64)
+  end
+
+  pub nat fun open(path: &[U8], mode: Mode) impure Result(Handle, Error)
+  pub nat fun read(file: &Handle, into: &mut [U8]) impure Result(Usize, Error)
+  pub nat fun write(file: &Handle, bytes: &[U8]) impure Result(Usize, Error)
+  pub nat fun close(file: Handle) impure Unit
+end
+
+use Slice.len as slice_len
+use File.open
+use File.read
+use File.write
+use File.close
+
+pub const PATH: &[U8] = "/tmp/cinnabar_file_roundtrip.txt"
+pub const CONTENT: &[U8] = "cinnabar"
+pub const CONTENT_LEN: Usize = 8
+pub const BUFFER_LEN: Usize = 32
+
+#! Truncating write, then read back, then verify byte for byte.
+fun write_content() impure I64
+  val handle = match open(PATH, File.WriteTruncate)
+    Ok(value) => value
+    Err(File.SystemFault(code)) => return 10
+  end
+  val written = match write(&handle, CONTENT)
+    Ok(count) => count
+    Err(File.SystemFault(code)) => return close_then(handle, 11)
+  end
+  close(handle)
+  if written != CONTENT_LEN
+    return 12
+  end
+  return 0
+end
+
+#! Closes the handle before reporting a failure, so the linear obligation
+#! is met on the error path too.
+fun close_then(handle: File.Handle, code: I64) impure I64
+  close(handle)
+  return code
+end
+
+fun read_content(into: &mut [U8]) impure I64
+  val handle = match open(PATH, File.ReadOnly)
+    Ok(value) => value
+    Err(File.SystemFault(code)) => return 20
+  end
+  val count = match read(&handle, into)
+    Ok(value) => value
+    Err(File.SystemFault(code)) => return close_then(handle, 21)
+  end
+  close(handle)
+  if count != CONTENT_LEN
+    return 22
+  end
+  return 0
+end
+
+fun byte_at(view: &[U8], index: Usize) I64
+  match view[index]
+    Ok(value) => return I64.from(value)
+    Err(IndexOutOfBounds(idx, length)) => return -1
+  end
+end
+
+fun compare(buffer: &[U8]) I64
+  var i: Usize = 0
+  while i < CONTENT_LEN
+    if byte_at(buffer, i) != byte_at(CONTENT, i)
+      return 30
+    end
+    i = i + 1
+  end
+  return 0
+end
+
+#! Appending must add to what is already there rather than replace it, so
+#! the file is twice the content's length afterwards.
+fun append_content() impure I64
+  val handle = match open(PATH, File.WriteAppend)
+    Ok(value) => value
+    Err(File.SystemFault(code)) => return 40
+  end
+  val written = match write(&handle, CONTENT)
+    Ok(count) => count
+    Err(File.SystemFault(code)) => return close_then(handle, 41)
+  end
+  close(handle)
+  if written != CONTENT_LEN
+    return 42
+  end
+  return 0
+end
+
+fun read_length(into: &mut [U8]) impure I64
+  val handle = match open(PATH, File.ReadOnly)
+    Ok(value) => value
+    Err(File.SystemFault(code)) => return -20
+  end
+  val count = match read(&handle, into)
+    Ok(value) => value
+    Err(File.SystemFault(code)) => return close_then(handle, -21)
+  end
+  close(handle)
+  return I64.from(count)
+end
+
+#! Opening a path that does not exist must fail rather than succeed with a
+#! handle to nothing, and the error must carry a real errno.
+fun missing_file_is_an_error() impure I64
+  match open("/tmp/cinnabar_file_definitely_absent_xyz", File.ReadOnly)
+    Ok(value) => return close_then(value, 50)
+    Err(File.SystemFault(code)) => return code_is_positive(code)
+  end
+end
+
+fun code_is_positive(code: I64) I64
+  if code <= 0
+    return 51
+  end
+  return 0
+end
+
+pub fun main() impure I64
+  val wrote = write_content()
+  if wrote != 0
+    return wrote
+  end
+
+  var buffer: [U8; 32] = [0, 0, 0, 0, 0, 0, 0, 0,
+                          0, 0, 0, 0, 0, 0, 0, 0,
+                          0, 0, 0, 0, 0, 0, 0, 0,
+                          0, 0, 0, 0, 0, 0, 0, 0]
+  val read_back = read_content(&mut buffer)
+  if read_back != 0
+    return read_back
+  end
+  if slice_len(&buffer) != BUFFER_LEN
+    return 31
+  end
+  val same = compare(&buffer)
+  if same != 0
+    return same
+  end
+
+  val appended = append_content()
+  if appended != 0
+    return appended
+  end
+  val total = read_length(&mut buffer)
+  if total != 16
+    return 43
+  end
+
+  val missing = missing_file_is_an_error()
+  if missing != 0
+    return missing
+  end
+
+  return 0
+end

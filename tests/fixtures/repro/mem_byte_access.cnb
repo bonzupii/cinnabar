@@ -1,0 +1,234 @@
+#! Memory access width and handle integrity, checked from inside the
+#! language.
+#!
+#! Milestone 3 concerns two reported native-memory defects: `write_u8`
+#! accessing more than one byte, and `deallocate` freeing a garbage
+#! pointer.  Neither is observable with an external memory checker here —
+#! a Cinnabar binary is linked `-static -nostdlib -no-pie` against a
+#! bundled musl, so it has no dynamic section and Valgrind's memcheck
+#! cannot interpose on its allocator (it reports `0 allocs` even at
+#! `-O 0`).  This fixture is the in-language oracle that replaces it, and
+#! `tests/native_memory.rs` asserts the same properties against the
+#! emitted LLVM IR, where an access width is stated literally.
+#!
+#! The access-width oracle is neighbour preservation: the block is filled
+#! with a distinct non-zero value per offset, one offset is overwritten
+#! with a probe byte, and every *other* offset must still hold its fill
+#! value.  A store wider than one byte necessarily lands on an adjacent
+#! offset — lower ones on a big-endian target, higher ones on a
+#! little-endian target — so running the probe at the first, a middle,
+#! and the last offset catches a wide store in either direction.  A read
+#! wider than one byte is caught by the readback, which would return a
+#! neighbouring byte's bits rather than the value just written.
+#!
+#! The handle-integrity oracle is the out-of-bounds error payload: the
+#! block's length is carried in the handle, and `AccessOutOfBounds`
+#! reports it.  Reading the correct length back out of an error raised
+#! after the handle has been borrowed proves the handle survived
+#! construction and borrowing intact — the same field that `deallocate`
+#! reads the data pointer from.
+#!
+#! Exit code 0 means every check passed.  A non-zero code names the check:
+#!   1      allocation failed
+#!   10..12 fill and readback of every offset
+#!   20..23 probe at the first offset
+#!   30..33 probe at a middle offset
+#!   40..43 probe at the last offset
+#!   50..55 bounds rejection and error payload
+
+pub mod Memory
+  pub nat type Block
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub AccessOutOfBounds(Usize, Usize)
+  end
+
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+  pub nat fun write_u8(block: &Block, offset: Usize, value: U8) impure Result(Unit, Error)
+  pub nat fun read_u8(block: &Block, offset: Usize) impure Result(U8, Error)
+end
+
+use Memory.allocate
+use Memory.deallocate
+use Memory.write_u8
+use Memory.read_u8
+
+pub const BLOCK_LEN: Usize = 16
+pub const FIRST_OFFSET: Usize = 0
+pub const MID_OFFSET: Usize = 8
+pub const LAST_OFFSET: Usize = 15
+
+#! A byte that shares no set bit with any fill value (1..16, all below
+#! 0x11), so a neighbouring byte overwritten by a wide store cannot
+#! coincidentally still compare equal to what it should hold.
+pub const PROBE_BYTE: U8 = 0xA5
+pub const PROBE_VALUE: I64 = 0xA5
+
+#! `read_u8` returns a byte; -1 is outside a byte's range and so signals
+#! "the read itself failed" without colliding with any real value.
+pub const READ_FAILED: I64 = -1
+
+#! Fill value for an offset: 1..BLOCK_LEN, distinct and never zero, so a
+#! clobbered neighbour cannot pass by holding a leftover zero.
+fun fill_value(offset: Usize) I64
+  return I64.from(offset) + 1
+end
+
+fun put(block: &Memory.Block, offset: Usize, value: U8) impure Bool
+  match write_u8(block, offset, value)
+    Ok(Unit) => return true
+    Err(error) => return false
+  end
+end
+
+fun get(block: &Memory.Block, offset: Usize) impure I64
+  match read_u8(block, offset)
+    Ok(value) => return I64.from(value)
+    Err(error) => return READ_FAILED
+  end
+end
+
+fun fill(block: &Memory.Block) impure Bool
+  var i: Usize = 0
+  while i < BLOCK_LEN
+    val byte = U8.from(fill_value(i))
+    if !put(block, i, byte)
+      return false
+    end
+    i = i + 1
+  end
+  return true
+end
+
+#! Every offset must read back exactly what was written to it.  A read or
+#! write that touched more than its own byte would leave at least one
+#! offset holding a neighbour's bits.
+fun check_fill(block: &Memory.Block) impure I64
+  if !fill(block)
+    return 10
+  end
+  var i: Usize = 0
+  while i < BLOCK_LEN
+    val seen = get(block, i)
+    if seen == READ_FAILED
+      return 11
+    end
+    if seen != fill_value(i)
+      return 12
+    end
+    i = i + 1
+  end
+  return 0
+end
+
+#! The access-width oracle.  Refills the block, overwrites exactly one
+#! offset, then requires that offset to hold the probe byte and every
+#! other offset to still hold its fill value.
+fun check_probe_at(block: &Memory.Block, offset: Usize, base_code: I64) impure I64
+  if !fill(block)
+    return base_code
+  end
+  if !put(block, offset, PROBE_BYTE)
+    return base_code + 1
+  end
+  if get(block, offset) != PROBE_VALUE
+    return base_code + 2
+  end
+  var i: Usize = 0
+  while i < BLOCK_LEN
+    if i != offset
+      if get(block, i) != fill_value(i)
+        return base_code + 3
+      end
+    end
+    i = i + 1
+  end
+  return 0
+end
+
+#! An out-of-bounds access must report the offset asked for and the
+#! block's own length.  Reading the length back out of the error proves
+#! the handle's length field is intact after construction and borrowing.
+fun oob_payload_code(offset: Usize, length: Usize, expected_offset: Usize, base_code: I64) I64
+  if offset != expected_offset
+    return base_code
+  end
+  if length != BLOCK_LEN
+    return base_code + 1
+  end
+  return 0
+end
+
+fun check_write_oob(block: &Memory.Block) impure I64
+  match write_u8(block, BLOCK_LEN, PROBE_BYTE)
+    Ok(Unit) => return 50
+    Err(error) => return write_oob_error_code(error)
+  end
+end
+
+fun write_oob_error_code(error: Memory.Error) I64
+  match error
+    Memory.AllocationFailed(size) => return 51
+    Memory.AccessOutOfBounds(offset, length) => return oob_payload_code(offset, length, BLOCK_LEN, 52)
+  end
+end
+
+fun check_read_oob(block: &Memory.Block) impure I64
+  match read_u8(block, BLOCK_LEN)
+    Ok(value) => return 53
+    Err(error) => return read_oob_error_code(error)
+  end
+end
+
+fun read_oob_error_code(error: Memory.Error) I64
+  match error
+    Memory.AllocationFailed(size) => return 54
+    Memory.AccessOutOfBounds(offset, length) => return oob_payload_code(offset, length, BLOCK_LEN, 55)
+  end
+end
+
+fun run_checks(block: &Memory.Block) impure I64
+  val filled = check_fill(block)
+  if filled != 0
+    return filled
+  end
+
+  val at_first = check_probe_at(block, FIRST_OFFSET, 20)
+  if at_first != 0
+    return at_first
+  end
+
+  val at_mid = check_probe_at(block, MID_OFFSET, 30)
+  if at_mid != 0
+    return at_mid
+  end
+
+  val at_last = check_probe_at(block, LAST_OFFSET, 40)
+  if at_last != 0
+    return at_last
+  end
+
+  val write_oob = check_write_oob(block)
+  if write_oob != 0
+    return write_oob
+  end
+
+  val read_oob = check_read_oob(block)
+  if read_oob != 0
+    return read_oob
+  end
+
+  return 0
+end
+
+pub fun main() impure I64
+  val block = match allocate(BLOCK_LEN)
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  val code = run_checks(&block)
+  deallocate(block)
+  return code
+end

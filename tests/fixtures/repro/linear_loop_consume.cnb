@@ -1,0 +1,108 @@
+#! A linear value carried across a loop that exits by `break` must still be
+#! accepted, and must not be reported as moved twice.
+#!
+#! `linear_branch_consume.cnb` locks the same boundary for `if`.  The loop
+#! form had its own copy of the defect: the loop-exit join was created before
+#! the condition, so a condition that forms no block of its own -- a bare
+#! `flag`, or any comparison -- left the join as the branch point.  Because
+#! `break` targets that join, every break's exit state flowed back into the
+#! loop body, and a value consumed on the break path was seen again on the
+#! next pass through the body.  `while true` was the only shape the old guard
+#! covered, so no fixture exercised the ordinary conditions.
+#!
+#! Consumption inside a conditionally-entered loop is deliberately NOT used
+#! here: `while flag / deallocate(block) / break / end` leaks whenever `flag`
+#! is false, which is a real linearity error rather than this defect.
+#!
+#! Every item below must be accepted and exit 0.
+#!
+#!   1. `while true`, consumed on the break path.
+#!   2. `while true`, consumed on both arms of an inner branch.
+#!   3. A bare-variable condition, consumed after the loop.
+#!   4. A comparison condition, consumed after the loop.
+
+pub mod Memory
+  pub nat type Block
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub AccessOutOfBounds(Usize, Usize)
+  end
+
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+end
+
+use Memory.allocate
+use Memory.deallocate
+
+pub const SIZE: Usize = 16
+
+fun consume_on_the_break_path(block: Memory.Block) impure I64
+  while true
+    deallocate(block)
+    break
+  end
+  return 0
+end
+
+fun consume_on_both_inner_arms(flag: Bool, block: Memory.Block) impure I64
+  while true
+    if flag
+      deallocate(block)
+      break
+    else
+      deallocate(block)
+      break
+    end
+  end
+  return 0
+end
+
+fun consume_after_a_variable_loop(flag: Bool, block: Memory.Block) impure I64
+  while flag
+    break
+  end
+  deallocate(block)
+  return 0
+end
+
+fun consume_after_a_comparison_loop(limit: I64, block: Memory.Block) impure I64
+  while limit > 0
+    break
+  end
+  deallocate(block)
+  return 0
+end
+
+# Each block is consumed before the next allocation is attempted: holding two
+# live blocks across a fallible `match` would leak the first one on the
+# second one's `Err` path, which is a real linearity error and not what this
+# fixture is here to exercise.
+pub fun main() impure I64
+  val first = match allocate(SIZE)
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  val a = consume_on_the_break_path(first)
+
+  val second = match allocate(SIZE)
+    Ok(value) => value
+    Err(error) => return 2
+  end
+  val b = consume_on_both_inner_arms(true, second)
+
+  val third = match allocate(SIZE)
+    Ok(value) => value
+    Err(error) => return 3
+  end
+  val c = consume_after_a_variable_loop(false, third)
+
+  val fourth = match allocate(SIZE)
+    Ok(value) => value
+    Err(error) => return 4
+  end
+  val d = consume_after_a_comparison_loop(0, fourth)
+
+  return a + b + c + d
+end

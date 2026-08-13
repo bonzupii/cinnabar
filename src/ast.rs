@@ -59,6 +59,7 @@ pub const TOK_EOF: i64 = 3;
 pub const TOK_NL: i64 = 4; // newline (statement boundary)
 pub const TOK_SYM: i64 = 5; // operator or punctuation symbol, by interned name
 pub const TOK_DOC: i64 = 6; // documentation comment body, by interned name
+pub const TOK_STRING: i64 = 7; // string literal, escapes decoded, by interned name
 
 // Documentation attachment rows. (tag=NODE_DOC, a=target node, b=doc name-id list).
 // The lexer records comment bodies once and the parser attaches each consecutive
@@ -112,6 +113,13 @@ pub const LIT_INT: i64 = 0;
 pub const LIT_HEX: i64 = 1;
 pub const LIT_TRUE: i64 = 2;
 pub const LIT_FALSE: i64 = 3;
+// A string literal.  Its `c` slot holds the interned name id of the
+// *decoded* bytes (escapes already applied), not a numeric value: the
+// literal's value is a byte sequence, and the name table is the arena that
+// already stores byte sequences.  Interning also means two identical
+// literals share one id, which is what lets codegen emit one `.rodata`
+// global per distinct literal.
+pub const LIT_STRING: i64 = 4;
 
 pub const UN_NEG: i64 = 0;
 pub const UN_NOT: i64 = 1;
@@ -203,6 +211,34 @@ pub fn name_text(names: &[String], id: i64) -> String {
         Some(text) => text.clone(),
         None => String::new(),
     }
+}
+
+/// Renders a string literal's decoded bytes back into the source form that
+/// would produce them, escaping exactly the five sequences the language
+/// defines.
+///
+/// Every tool that shows a literal goes through this: a decoded literal can
+/// contain a newline or a NUL, which would break a line-oriented dump or
+/// make it non-text, and a reader needs to tell a real newline from the two
+/// characters that produced it.
+pub fn escaped_literal_text(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        if ch == '\n' {
+            out.push_str("\\n");
+        } else if ch == '\t' {
+            out.push_str("\\t");
+        } else if ch == '\0' {
+            out.push_str("\\0");
+        } else if ch == '"' {
+            out.push_str("\\\"");
+        } else if ch == '\\' {
+            out.push_str("\\\\");
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 pub fn find_name(names: &[String], text: &str) -> i64 {
@@ -580,6 +616,56 @@ pub const NAT_NET_SEND: i64 = 26;
 pub const NAT_NET_CLOSE: i64 = 27;
 pub const NAT_VEC_POP: i64 = 28;
 pub const NAT_HASH_MAP_REMOVE: i64 = 29;
+pub const NAT_FILE_OPEN: i64 = 30;
+pub const NAT_FILE_READ: i64 = 31;
+pub const NAT_FILE_WRITE: i64 = 32;
+pub const NAT_FILE_CLOSE: i64 = 33;
+pub const NAT_TERM_READ_LINE: i64 = 34;
+pub const NAT_RUNTIME_ARGS: i64 = 35;
+
+/// The source spelling of a binary operator opcode.  Every stage that names
+/// an operator in a diagnostic reads it from here, so a message from the
+/// typechecker and one from codegen cannot disagree about what `BIN_SHL` is
+/// called.
+pub fn op_text(op: i64) -> &'static str {
+    if op == BIN_ADD {
+        "+"
+    } else if op == BIN_SUB {
+        "-"
+    } else if op == BIN_MUL {
+        "*"
+    } else if op == BIN_DIV {
+        "/"
+    } else if op == BIN_MOD {
+        "%"
+    } else if op == BIN_SHL {
+        "<<"
+    } else if op == BIN_SHR {
+        ">>"
+    } else if op == BIN_BAND {
+        "&"
+    } else if op == BIN_BOR {
+        "|"
+    } else if op == BIN_BXOR {
+        "^"
+    } else if op == BIN_EQ {
+        "=="
+    } else if op == BIN_NE {
+        "!="
+    } else if op == BIN_LT {
+        "<"
+    } else if op == BIN_GT {
+        ">"
+    } else if op == BIN_LE {
+        "<="
+    } else if op == BIN_GE {
+        ">="
+    } else if op == BIN_AND {
+        "&&"
+    } else {
+        "||"
+    }
+}
 
 pub const PRIM_NONE: i64 = 0;
 pub const PRIM_UNIT: i64 = 1;

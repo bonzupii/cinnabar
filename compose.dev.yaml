@@ -12,6 +12,10 @@ services:
     environment:
       NIX_CONFIG: "experimental-features = nix-command flakes"
       RUST_BACKTRACE: "full"
+      # Read by editors/vscode/lsp-launcher.js.  An editor attached to this
+      # container must run the language server directly: there is no Docker
+      # socket or CLI in here to hop back out through Compose with.
+      CINNABAR_IN_DEV_CONTAINER: "1"
     volumes:
       - type: bind
         source: ${CINNABAR_WORKTREE:?set CINNABAR_WORKTREE}
@@ -28,6 +32,12 @@ services:
       - type: volume
         source: rust-target
         target: /workspace/target
+      # Retargeting recreates the container, and the VS Code Server plus its
+      # extensions are ~700 MB per install; keep them out of the container layer
+      # so a worktree switch does not re-download them.
+      - type: volume
+        source: vscode-server
+        target: /root/.vscode-server
 
 volumes:
   nix-store:
@@ -38,3 +48,5 @@ volumes:
     name: cinnabar-cargo
   rust-target:
     name: cinnabar-target-${CINNABAR_CACHE_KEY:?set CINNABAR_CACHE_KEY}
+  vscode-server:
+    name: cinnabar-vscode-server

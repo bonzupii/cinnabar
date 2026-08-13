@@ -1,0 +1,898 @@
+#! Fixed-width integer grid: constant folder vs runtime codegen, at every
+#! width.
+#!
+#! Milestone 1 requires the repro corpus to exercise every one of the ten
+#! integer types across arithmetic, bitwise, comparison, division/modulo,
+#! shifts at the width boundary, and at least one widening and one
+#! narrowing conversion, plus wrap-around at each width's max AND min.
+#! `int_widths.cnb` covers the runtime side against a Rust oracle; this
+#! fixture covers the second implementation of the same semantics — the
+#! width-aware constant folder in `fold_bin` — and asserts the two cannot
+#! drift apart.
+#!
+#! Every `pub const` below is folded at compile time by `fold_bin`, which
+#! sign-extends signed operands, masks unsigned operands, masks shift
+#! counts by the operand width, and stores the width-masked bit pattern.
+#! Every matching value in the check functions is computed at runtime from
+#! `var` operands, so it lowers through `emit_binary` instead. A mismatch
+#! between the two is a divergence bug, not a wrong expectation.
+#!
+#! Exit code 0 means every check passed. A non-zero code names the exact
+#! check that failed; each type owns a block of twelve codes:
+#!
+#!   U8    10..21     I8    30..41     U16   50..61     I16   70..81
+#!   U32   90..101    I32  110..121    U64  130..141    Usize 150..161
+#!   I64  170..181    Isize 190..201
+#!
+#! Within a block the offsets are, in order: +0 wrap at max, +1 wrap at
+#! min, +2 shift-left at the width boundary, +3 shift-right past the
+#! width, +4 bitwise and, +5 bitwise or, +6 bitwise xor, +7 division,
+#! +8 modulo, +9 signed-vs-unsigned comparison, +10 widening conversion,
+#! +11 narrowing conversion.
+
+#! ---------------------------------------------------------------- U8 --
+pub const U8_MAX: U8 = 255
+pub const U8_MIN: U8 = 0
+pub const U8_WRAP_HI: U8 = U8_MAX + 1
+pub const U8_WRAP_LO: U8 = U8_MIN - 1
+pub const U8_SHL: U8 = 1 << 8
+pub const U8_SHR: U8 = 255 >> 9
+pub const U8_BAND: U8 = 0xF0 & 0x0F
+pub const U8_BOR: U8 = 0xF0 | 0x0F
+pub const U8_BXOR: U8 = 0xFF ^ 0x0F
+pub const U8_DIV: U8 = 250 / 3
+pub const U8_MOD: U8 = 250 % 3
+
+#! ---------------------------------------------------------------- I8 --
+pub const I8_MAX: I8 = 127
+pub const I8_MIN: I8 = -128
+pub const I8_WRAP_HI: I8 = I8_MAX + 1
+pub const I8_WRAP_LO: I8 = I8_MIN - 1
+pub const I8_SHL: I8 = 1 << 8
+pub const I8_SHR: I8 = -128 >> 9
+pub const I8_BAND: I8 = 0x70 & 0x0F
+pub const I8_BOR: I8 = 0x70 | 0x0F
+pub const I8_BXOR: I8 = 0x7F ^ 0x0F
+pub const I8_DIV: I8 = -10 / 3
+pub const I8_MOD: I8 = -10 % 3
+pub const I8_NEG_ONE: I8 = -1
+
+#! --------------------------------------------------------------- U16 --
+pub const U16_MAX: U16 = 65535
+pub const U16_MIN: U16 = 0
+pub const U16_WRAP_HI: U16 = U16_MAX + 1
+pub const U16_WRAP_LO: U16 = U16_MIN - 1
+pub const U16_SHL: U16 = 1 << 16
+pub const U16_SHR: U16 = 65535 >> 17
+pub const U16_BAND: U16 = 0xFF00 & 0x00FF
+pub const U16_BOR: U16 = 0xFF00 | 0x00FF
+pub const U16_BXOR: U16 = 0xFFFF ^ 0x00FF
+pub const U16_DIV: U16 = 60000 / 7
+pub const U16_MOD: U16 = 60000 % 7
+pub const U16_LOW_BYTE: U16 = 255
+
+#! --------------------------------------------------------------- I16 --
+pub const I16_MAX: I16 = 32767
+pub const I16_MIN: I16 = -32768
+pub const I16_WRAP_HI: I16 = I16_MAX + 1
+pub const I16_WRAP_LO: I16 = I16_MIN - 1
+pub const I16_SHL: I16 = 1 << 16
+pub const I16_SHR: I16 = -32768 >> 17
+pub const I16_BAND: I16 = 0x7F00 & 0x00FF
+pub const I16_BOR: I16 = 0x7F00 | 0x00FF
+pub const I16_BXOR: I16 = 0x7FFF ^ 0x00FF
+pub const I16_DIV: I16 = -10 / 3
+pub const I16_MOD: I16 = -10 % 3
+pub const I16_NEG_ONE: I16 = -1
+
+#! --------------------------------------------------------------- U32 --
+pub const U32_MAX: U32 = 0xFFFFFFFF
+pub const U32_MIN: U32 = 0
+pub const U32_WRAP_HI: U32 = U32_MAX + 1
+pub const U32_WRAP_LO: U32 = U32_MIN - 1
+pub const U32_SHL: U32 = 1 << 32
+pub const U32_SHR: U32 = 0xFFFFFFFF >> 33
+pub const U32_BAND: U32 = 0xFFFF0000 & 0x0000FFFF
+pub const U32_BOR: U32 = 0xFFFF0000 | 0x0000FFFF
+pub const U32_BXOR: U32 = 0xFFFFFFFF ^ 0x0000FFFF
+pub const U32_DIV: U32 = 4000000000 / 7
+pub const U32_MOD: U32 = 4000000000 % 7
+
+#! --------------------------------------------------------------- I32 --
+pub const I32_MAX: I32 = 2147483647
+pub const I32_MIN: I32 = -2147483648
+pub const I32_WRAP_HI: I32 = I32_MAX + 1
+pub const I32_WRAP_LO: I32 = I32_MIN - 1
+pub const I32_SHL: I32 = 1 << 32
+pub const I32_SHR: I32 = -2147483648 >> 33
+pub const I32_BAND: I32 = 0x7FFF0000 & 0x0000FFFF
+pub const I32_BOR: I32 = 0x7FFF0000 | 0x0000FFFF
+pub const I32_BXOR: I32 = 0x7FFFFFFF ^ 0x0000FFFF
+pub const I32_DIV: I32 = -10 / 3
+pub const I32_MOD: I32 = -10 % 3
+pub const I32_NEG_ONE: I32 = -1
+
+#! --------------------------------------------------------------- U64 --
+pub const U64_MAX: U64 = 0xFFFFFFFFFFFFFFFF
+pub const U64_MIN: U64 = 0
+pub const U64_WRAP_HI: U64 = U64_MAX + 1
+pub const U64_WRAP_LO: U64 = U64_MIN - 1
+pub const U64_SHL: U64 = 1 << 64
+pub const U64_SHR: U64 = 0xFFFFFFFFFFFFFFFF >> 65
+pub const U64_BAND: U64 = 0xFFFFFFFF00000000 & 0x00000000FFFFFFFF
+pub const U64_BOR: U64 = 0xFFFFFFFF00000000 | 0x00000000FFFFFFFF
+pub const U64_BXOR: U64 = 0xFFFFFFFFFFFFFFFF ^ 0x00000000FFFFFFFF
+pub const U64_DIV: U64 = 0xFFFFFFFFFFFFFFFF / 3
+pub const U64_MOD: U64 = 0xFFFFFFFFFFFFFFFF % 3
+
+#! ------------------------------------------------------------- Usize --
+pub const USIZE_MAX: Usize = 0xFFFFFFFFFFFFFFFF
+pub const USIZE_MIN: Usize = 0
+pub const USIZE_WRAP_HI: Usize = USIZE_MAX + 1
+pub const USIZE_WRAP_LO: Usize = USIZE_MIN - 1
+pub const USIZE_SHL: Usize = 1 << 64
+pub const USIZE_SHR: Usize = 0xFFFFFFFFFFFFFFFF >> 65
+pub const USIZE_BAND: Usize = 0xFFFFFFFF00000000 & 0x00000000FFFFFFFF
+pub const USIZE_BOR: Usize = 0xFFFFFFFF00000000 | 0x00000000FFFFFFFF
+pub const USIZE_BXOR: Usize = 0xFFFFFFFFFFFFFFFF ^ 0x00000000FFFFFFFF
+pub const USIZE_DIV: Usize = 0xFFFFFFFFFFFFFFFF / 3
+pub const USIZE_MOD: Usize = 0xFFFFFFFFFFFFFFFF % 3
+
+#! --------------------------------------------------------------- I64 --
+pub const I64_MAX: I64 = 9223372036854775807
+pub const I64_MIN: I64 = -9223372036854775807 - 1
+pub const I64_WRAP_HI: I64 = I64_MAX + 1
+pub const I64_WRAP_LO: I64 = I64_MIN - 1
+pub const I64_SHL: I64 = 1 << 64
+pub const I64_SHR: I64 = I64_MIN >> 65
+pub const I64_BAND: I64 = 0x7FFFFFFF00000000 & 0x00000000FFFFFFFF
+pub const I64_BOR: I64 = 0x7FFFFFFF00000000 | 0x00000000FFFFFFFF
+pub const I64_BXOR: I64 = 0x7FFFFFFFFFFFFFFF ^ 0x00000000FFFFFFFF
+pub const I64_DIV: I64 = -10 / 3
+pub const I64_MOD: I64 = -10 % 3
+
+#! ------------------------------------------------------------- Isize --
+pub const ISIZE_MAX: Isize = 9223372036854775807
+pub const ISIZE_MIN: Isize = -9223372036854775807 - 1
+pub const ISIZE_WRAP_HI: Isize = ISIZE_MAX + 1
+pub const ISIZE_WRAP_LO: Isize = ISIZE_MIN - 1
+pub const ISIZE_SHL: Isize = 1 << 64
+pub const ISIZE_SHR: Isize = ISIZE_MIN >> 65
+pub const ISIZE_BAND: Isize = 0x7FFFFFFF00000000 & 0x00000000FFFFFFFF
+pub const ISIZE_BOR: Isize = 0x7FFFFFFF00000000 | 0x00000000FFFFFFFF
+pub const ISIZE_BXOR: Isize = 0x7FFFFFFFFFFFFFFF ^ 0x00000000FFFFFFFF
+pub const ISIZE_DIV: Isize = -10 / 3
+pub const ISIZE_MOD: Isize = -10 % 3
+
+#! U8: unsigned 8-bit.  255 + 1 wraps to 0, 0 - 1 wraps to 255, shift
+#! counts mask by 7, and `>` is an unsigned compare (a signed compare
+#! would read 255 as -1 and fail the ordering check).
+fun check_u8() I64
+  var max: U8 = 255
+  var min: U8 = 0
+  var one: U8 = 1
+  var hi_mask: U8 = 0xF0
+  var lo_mask: U8 = 0x0F
+  var all: U8 = 0xFF
+  var num: U8 = 250
+  var den: U8 = 3
+
+  if max + 1 != U8_WRAP_HI
+    return 10
+  end
+  if min - 1 != U8_WRAP_LO
+    return 11
+  end
+  if one << 8 != U8_SHL
+    return 12
+  end
+  if max >> 9 != U8_SHR
+    return 13
+  end
+  if hi_mask & lo_mask != U8_BAND
+    return 14
+  end
+  if hi_mask | lo_mask != U8_BOR
+    return 15
+  end
+  if all ^ lo_mask != U8_BXOR
+    return 16
+  end
+
+  val quotient = match num / den
+    Ok(q) => q
+    Err(DivByZero) => 0
+  end
+  if quotient != U8_DIV
+    return 17
+  end
+
+  val remainder = match num % den
+    Ok(r) => r
+    Err(DivByZero) => 0
+  end
+  if remainder != U8_MOD
+    return 18
+  end
+
+  if max <= one
+    return 19
+  end
+
+  val widened = I64.from(num)
+  if widened != 250
+    return 20
+  end
+
+  var wide: I64 = 511
+  val narrowed = U8.from(wide)
+  if narrowed != U8_MAX
+    return 21
+  end
+
+  return 0
+end
+
+#! I8: signed 8-bit.  127 + 1 wraps to -128, -128 - 1 wraps to 127, `>>`
+#! is arithmetic (sign-filling), division is Euclidean (-10 / 3 = -4 with
+#! remainder 2), and `<` is a signed compare.
+fun check_i8() I64
+  var max: I8 = 127
+  var min: I8 = -128
+  var one: I8 = 1
+  var hi_mask: I8 = 0x70
+  var lo_mask: I8 = 0x0F
+  var all: I8 = 0x7F
+  var num: I8 = -10
+  var den: I8 = 3
+  var neg: I8 = -1
+
+  if max + 1 != I8_WRAP_HI
+    return 30
+  end
+  if min - 1 != I8_WRAP_LO
+    return 31
+  end
+  if one << 8 != I8_SHL
+    return 32
+  end
+  if min >> 9 != I8_SHR
+    return 33
+  end
+  if hi_mask & lo_mask != I8_BAND
+    return 34
+  end
+  if hi_mask | lo_mask != I8_BOR
+    return 35
+  end
+  if all ^ lo_mask != I8_BXOR
+    return 36
+  end
+
+  val quotient = match num / den
+    Ok(q) => q
+    Err(DivByZero) => 0
+  end
+  if quotient != I8_DIV
+    return 37
+  end
+
+  val remainder = match num % den
+    Ok(r) => r
+    Err(DivByZero) => 0
+  end
+  if remainder != I8_MOD
+    return 38
+  end
+
+  if neg >= one
+    return 39
+  end
+
+  val widened = I64.from(neg)
+  if widened != -1
+    return 40
+  end
+
+  var wide: I64 = 255
+  val narrowed = I8.from(wide)
+  if narrowed != I8_NEG_ONE
+    return 41
+  end
+
+  return 0
+end
+
+#! U16: unsigned 16-bit.  Shift counts mask by 15, so `1 << 16` is `1`.
+fun check_u16() I64
+  var max: U16 = 65535
+  var min: U16 = 0
+  var one: U16 = 1
+  var hi_mask: U16 = 0xFF00
+  var lo_mask: U16 = 0x00FF
+  var all: U16 = 0xFFFF
+  var num: U16 = 60000
+  var den: U16 = 7
+
+  if max + 1 != U16_WRAP_HI
+    return 50
+  end
+  if min - 1 != U16_WRAP_LO
+    return 51
+  end
+  if one << 16 != U16_SHL
+    return 52
+  end
+  if max >> 17 != U16_SHR
+    return 53
+  end
+  if hi_mask & lo_mask != U16_BAND
+    return 54
+  end
+  if hi_mask | lo_mask != U16_BOR
+    return 55
+  end
+  if all ^ lo_mask != U16_BXOR
+    return 56
+  end
+
+  val quotient = match num / den
+    Ok(q) => q
+    Err(DivByZero) => 0
+  end
+  if quotient != U16_DIV
+    return 57
+  end
+
+  val remainder = match num % den
+    Ok(r) => r
+    Err(DivByZero) => 0
+  end
+  if remainder != U16_MOD
+    return 58
+  end
+
+  if max <= one
+    return 59
+  end
+
+  val widened = I64.from(max)
+  if widened != 65535
+    return 60
+  end
+
+  var wide: I64 = 65791
+  val narrowed = U16.from(wide)
+  if narrowed != U16_LOW_BYTE
+    return 61
+  end
+
+  return 0
+end
+
+#! I16: signed 16-bit.  32767 + 1 wraps to -32768 and `>>` sign-fills.
+fun check_i16() I64
+  var max: I16 = 32767
+  var min: I16 = -32768
+  var one: I16 = 1
+  var hi_mask: I16 = 0x7F00
+  var lo_mask: I16 = 0x00FF
+  var all: I16 = 0x7FFF
+  var num: I16 = -10
+  var den: I16 = 3
+  var neg: I16 = -1
+
+  if max + 1 != I16_WRAP_HI
+    return 70
+  end
+  if min - 1 != I16_WRAP_LO
+    return 71
+  end
+  if one << 16 != I16_SHL
+    return 72
+  end
+  if min >> 17 != I16_SHR
+    return 73
+  end
+  if hi_mask & lo_mask != I16_BAND
+    return 74
+  end
+  if hi_mask | lo_mask != I16_BOR
+    return 75
+  end
+  if all ^ lo_mask != I16_BXOR
+    return 76
+  end
+
+  val quotient = match num / den
+    Ok(q) => q
+    Err(DivByZero) => 0
+  end
+  if quotient != I16_DIV
+    return 77
+  end
+
+  val remainder = match num % den
+    Ok(r) => r
+    Err(DivByZero) => 0
+  end
+  if remainder != I16_MOD
+    return 78
+  end
+
+  if neg >= one
+    return 79
+  end
+
+  val widened = I64.from(neg)
+  if widened != -1
+    return 80
+  end
+
+  var wide: I64 = 65535
+  val narrowed = I16.from(wide)
+  if narrowed != I16_NEG_ONE
+    return 81
+  end
+
+  return 0
+end
+
+#! U32: unsigned 32-bit.  Shift counts mask by 31.
+fun check_u32() I64
+  var max: U32 = 0xFFFFFFFF
+  var min: U32 = 0
+  var one: U32 = 1
+  var hi_mask: U32 = 0xFFFF0000
+  var lo_mask: U32 = 0x0000FFFF
+  var all: U32 = 0xFFFFFFFF
+  var num: U32 = 4000000000
+  var den: U32 = 7
+
+  if max + 1 != U32_WRAP_HI
+    return 90
+  end
+  if min - 1 != U32_WRAP_LO
+    return 91
+  end
+  if one << 32 != U32_SHL
+    return 92
+  end
+  if max >> 33 != U32_SHR
+    return 93
+  end
+  if hi_mask & lo_mask != U32_BAND
+    return 94
+  end
+  if hi_mask | lo_mask != U32_BOR
+    return 95
+  end
+  if all ^ lo_mask != U32_BXOR
+    return 96
+  end
+
+  val quotient = match num / den
+    Ok(q) => q
+    Err(DivByZero) => 0
+  end
+  if quotient != U32_DIV
+    return 97
+  end
+
+  val remainder = match num % den
+    Ok(r) => r
+    Err(DivByZero) => 0
+  end
+  if remainder != U32_MOD
+    return 98
+  end
+
+  if max <= one
+    return 99
+  end
+
+  val widened = I64.from(max)
+  if widened != 4294967295
+    return 100
+  end
+
+  var wide: I64 = 0x1FFFFFFFF
+  val narrowed = U32.from(wide)
+  if narrowed != U32_MAX
+    return 101
+  end
+
+  return 0
+end
+
+#! I32: signed 32-bit.
+fun check_i32() I64
+  var max: I32 = 2147483647
+  var min: I32 = -2147483648
+  var one: I32 = 1
+  var hi_mask: I32 = 0x7FFF0000
+  var lo_mask: I32 = 0x0000FFFF
+  var all: I32 = 0x7FFFFFFF
+  var num: I32 = -10
+  var den: I32 = 3
+  var neg: I32 = -1
+
+  if max + 1 != I32_WRAP_HI
+    return 110
+  end
+  if min - 1 != I32_WRAP_LO
+    return 111
+  end
+  if one << 32 != I32_SHL
+    return 112
+  end
+  if min >> 33 != I32_SHR
+    return 113
+  end
+  if hi_mask & lo_mask != I32_BAND
+    return 114
+  end
+  if hi_mask | lo_mask != I32_BOR
+    return 115
+  end
+  if all ^ lo_mask != I32_BXOR
+    return 116
+  end
+
+  val quotient = match num / den
+    Ok(q) => q
+    Err(DivByZero) => 0
+  end
+  if quotient != I32_DIV
+    return 117
+  end
+
+  val remainder = match num % den
+    Ok(r) => r
+    Err(DivByZero) => 0
+  end
+  if remainder != I32_MOD
+    return 118
+  end
+
+  if neg >= one
+    return 119
+  end
+
+  val widened = I64.from(neg)
+  if widened != -1
+    return 120
+  end
+
+  var wide: I64 = 0xFFFFFFFF
+  val narrowed = I32.from(wide)
+  if narrowed != I32_NEG_ONE
+    return 121
+  end
+
+  return 0
+end
+
+#! U64: unsigned 64-bit.  The comparison check is the one that separates
+#! unsigned from signed at this width: 0xFFFFFFFFFFFFFFFF read as signed
+#! is -1, which would order below 1.
+fun check_u64() I64
+  var max: U64 = 0xFFFFFFFFFFFFFFFF
+  var min: U64 = 0
+  var one: U64 = 1
+  var hi_mask: U64 = 0xFFFFFFFF00000000
+  var lo_mask: U64 = 0x00000000FFFFFFFF
+  var all: U64 = 0xFFFFFFFFFFFFFFFF
+  var den: U64 = 3
+  var small: U64 = 255
+
+  if max + 1 != U64_WRAP_HI
+    return 130
+  end
+  if min - 1 != U64_WRAP_LO
+    return 131
+  end
+  if one << 64 != U64_SHL
+    return 132
+  end
+  if max >> 65 != U64_SHR
+    return 133
+  end
+  if hi_mask & lo_mask != U64_BAND
+    return 134
+  end
+  if hi_mask | lo_mask != U64_BOR
+    return 135
+  end
+  if all ^ lo_mask != U64_BXOR
+    return 136
+  end
+
+  val quotient = match max / den
+    Ok(q) => q
+    Err(DivByZero) => 0
+  end
+  if quotient != U64_DIV
+    return 137
+  end
+
+  val remainder = match max % den
+    Ok(r) => r
+    Err(DivByZero) => 0
+  end
+  if remainder != U64_MOD
+    return 138
+  end
+
+  if max <= one
+    return 139
+  end
+
+  val widened = I64.from(small)
+  if widened != 255
+    return 140
+  end
+
+  val narrowed = U8.from(max)
+  if narrowed != U8_MAX
+    return 141
+  end
+
+  return 0
+end
+
+#! Usize: pointer-sized unsigned.  Same 64-bit semantics as U64, checked
+#! separately because Usize is its own builtin sub-kind.
+fun check_usize() I64
+  var max: Usize = 0xFFFFFFFFFFFFFFFF
+  var min: Usize = 0
+  var one: Usize = 1
+  var hi_mask: Usize = 0xFFFFFFFF00000000
+  var lo_mask: Usize = 0x00000000FFFFFFFF
+  var all: Usize = 0xFFFFFFFFFFFFFFFF
+  var den: Usize = 3
+  var small: Usize = 255
+
+  if max + 1 != USIZE_WRAP_HI
+    return 150
+  end
+  if min - 1 != USIZE_WRAP_LO
+    return 151
+  end
+  if one << 64 != USIZE_SHL
+    return 152
+  end
+  if max >> 65 != USIZE_SHR
+    return 153
+  end
+  if hi_mask & lo_mask != USIZE_BAND
+    return 154
+  end
+  if hi_mask | lo_mask != USIZE_BOR
+    return 155
+  end
+  if all ^ lo_mask != USIZE_BXOR
+    return 156
+  end
+
+  val quotient = match max / den
+    Ok(q) => q
+    Err(DivByZero) => 0
+  end
+  if quotient != USIZE_DIV
+    return 157
+  end
+
+  val remainder = match max % den
+    Ok(r) => r
+    Err(DivByZero) => 0
+  end
+  if remainder != USIZE_MOD
+    return 158
+  end
+
+  if max <= one
+    return 159
+  end
+
+  val widened = I64.from(small)
+  if widened != 255
+    return 160
+  end
+
+  val narrowed = U8.from(max)
+  if narrowed != U8_MAX
+    return 161
+  end
+
+  return 0
+end
+
+#! I64: signed 64-bit, the width integer literals default to.
+fun check_i64() I64
+  var max: I64 = 9223372036854775807
+  var min: I64 = -9223372036854775807 - 1
+  var one: I64 = 1
+  var hi_mask: I64 = 0x7FFFFFFF00000000
+  var lo_mask: I64 = 0x00000000FFFFFFFF
+  var all: I64 = 0x7FFFFFFFFFFFFFFF
+  var num: I64 = -10
+  var den: I64 = 3
+  var neg: I64 = -1
+
+  if max + 1 != I64_WRAP_HI
+    return 170
+  end
+  if min - 1 != I64_WRAP_LO
+    return 171
+  end
+  if one << 64 != I64_SHL
+    return 172
+  end
+  if min >> 65 != I64_SHR
+    return 173
+  end
+  if hi_mask & lo_mask != I64_BAND
+    return 174
+  end
+  if hi_mask | lo_mask != I64_BOR
+    return 175
+  end
+  if all ^ lo_mask != I64_BXOR
+    return 176
+  end
+
+  val quotient = match num / den
+    Ok(q) => q
+    Err(DivByZero) => 0
+  end
+  if quotient != I64_DIV
+    return 177
+  end
+
+  val remainder = match num % den
+    Ok(r) => r
+    Err(DivByZero) => 0
+  end
+  if remainder != I64_MOD
+    return 178
+  end
+
+  if neg >= one
+    return 179
+  end
+
+  val widened = I64.from(neg)
+  if widened != -1
+    return 180
+  end
+
+  val narrowed = U8.from(neg)
+  if narrowed != U8_MAX
+    return 181
+  end
+
+  return 0
+end
+
+#! Isize: pointer-sized signed.  Same 64-bit semantics as I64, checked
+#! separately because Isize is its own builtin sub-kind.
+fun check_isize() I64
+  var max: Isize = ISIZE_MAX
+  var min: Isize = ISIZE_MIN
+  var one: Isize = 1
+  var hi_mask: Isize = 0x7FFFFFFF00000000
+  var lo_mask: Isize = 0x00000000FFFFFFFF
+  var all: Isize = 0x7FFFFFFFFFFFFFFF
+  var num: Isize = -10
+  var den: Isize = 3
+  var neg: Isize = -1
+
+  if max + 1 != ISIZE_WRAP_HI
+    return 190
+  end
+  if min - 1 != ISIZE_WRAP_LO
+    return 191
+  end
+  if one << 64 != ISIZE_SHL
+    return 192
+  end
+  if min >> 65 != ISIZE_SHR
+    return 193
+  end
+  if hi_mask & lo_mask != ISIZE_BAND
+    return 194
+  end
+  if hi_mask | lo_mask != ISIZE_BOR
+    return 195
+  end
+  if all ^ lo_mask != ISIZE_BXOR
+    return 196
+  end
+
+  val quotient = match num / den
+    Ok(q) => q
+    Err(DivByZero) => 0
+  end
+  if quotient != ISIZE_DIV
+    return 197
+  end
+
+  val remainder = match num % den
+    Ok(r) => r
+    Err(DivByZero) => 0
+  end
+  if remainder != ISIZE_MOD
+    return 198
+  end
+
+  if neg >= one
+    return 199
+  end
+
+  val widened = I64.from(neg)
+  if widened != -1
+    return 200
+  end
+
+  val narrowed = U8.from(neg)
+  if narrowed != U8_MAX
+    return 201
+  end
+
+  return 0
+end
+
+pub fun main() I64
+  val r_u8 = check_u8()
+  if r_u8 != 0
+    return r_u8
+  end
+
+  val r_i8 = check_i8()
+  if r_i8 != 0
+    return r_i8
+  end
+
+  val r_u16 = check_u16()
+  if r_u16 != 0
+    return r_u16
+  end
+
+  val r_i16 = check_i16()
+  if r_i16 != 0
+    return r_i16
+  end
+
+  val r_u32 = check_u32()
+  if r_u32 != 0
+    return r_u32
+  end
+
+  val r_i32 = check_i32()
+  if r_i32 != 0
+    return r_i32
+  end
+
+  val r_u64 = check_u64()
+  if r_u64 != 0
+    return r_u64
+  end
+
+  val r_usize = check_usize()
+  if r_usize != 0
+    return r_usize
+  end
+
+  val r_i64 = check_i64()
+  if r_i64 != 0
+    return r_i64
+  end
+
+  val r_isize = check_isize()
+  if r_isize != 0
+    return r_isize
+  end
+
+  return 0
+end

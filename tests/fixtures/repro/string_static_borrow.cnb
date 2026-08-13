@@ -1,0 +1,141 @@
+#! A string literal is a borrow with a static origin, and the
+#! returned-borrow rule accounts for that.
+#!
+#! `MANIFESTO.md` principle 5 rejects a returned borrow whose origin among
+#! the function's inputs cannot be determined — that rule exists to answer
+#! "how long does the caller's data live?".  A literal's bytes live in the
+#! binary's read-only data for the whole run, so the borrow has an origin,
+#! it just is not an input, and it outlives every caller.  Treating that as
+#! the untraceable case would make `fun name() &[U8] return "x" end`
+#! unwriteable, and returning a fixed message is one of the things string
+#! literals exist for.
+#!
+#! `ret_borrow_ambiguous.cnb`, `ret_borrow_sole_input.cnb`, and
+#! `ret_borrow_uaf.cnb` remain rejected: nothing here relaxes the rule for
+#! a borrow that really does derive from the inputs or from a local.
+#!
+#! Exit code 0 means every check passed; a non-zero code names the check.
+
+pub mod Slice
+  pub nat fun len<T>(view: &[T]) Usize
+end
+
+use Slice.len as slice_len
+
+pub const CONST_MESSAGE: &[U8] = "constant"
+
+pub type Labelled
+  pub label: &[U8]
+end
+
+#! Returned straight from a literal.
+fun literal_message() &[U8]
+  return "literal"
+end
+
+#! Returned from a constant, which folds to the same static bytes.
+fun const_message() &[U8]
+  return CONST_MESSAGE
+end
+
+#! Several static returns on different paths.  Each `return` is checked on
+#! its own, so a function may pick among literals freely.
+fun message_for(code: I64) &[U8]
+  if code == 0
+    return "zero"
+  end
+  if code == 1
+    return "one"
+  end
+  return "many"
+end
+
+#! Forwarding a static borrow out of another function.  The callee's
+#! summary records that its result derives from none of its arguments, so
+#! the borrow stays static across the call rather than becoming
+#! untraceable.
+fun forwarded() &[U8]
+  return literal_message()
+end
+
+fun forwarded_twice() &[U8]
+  return forwarded()
+end
+
+#! A static borrow still flows through the ordinary places a `&[U8]` goes:
+#! a struct field, an argument, an array element.
+fun label_len(item: &Labelled) Usize
+  return slice_len(item.label)
+end
+
+fun check_returns() I64
+  if slice_len(literal_message()) != 7
+    return 10
+  end
+  if slice_len(const_message()) != 8
+    return 11
+  end
+  if slice_len(forwarded()) != 7
+    return 12
+  end
+  if slice_len(forwarded_twice()) != 7
+    return 13
+  end
+  return 0
+end
+
+fun check_branching() I64
+  if slice_len(message_for(0)) != 4
+    return 20
+  end
+  if slice_len(message_for(1)) != 3
+    return 21
+  end
+  if slice_len(message_for(2)) != 4
+    return 22
+  end
+  return 0
+end
+
+fun check_aggregates() I64
+  val labelled = Labelled(label: "in a struct field")
+  if label_len(&labelled) != 17
+    return 30
+  end
+  val table = ["a", "bb", "ccc"]
+  match table
+    [first, second, third] => return check_table(first, second, third)
+  end
+end
+
+fun check_table(first: &[U8], second: &[U8], third: &[U8]) I64
+  if slice_len(first) != 1
+    return 31
+  end
+  if slice_len(second) != 2
+    return 32
+  end
+  if slice_len(third) != 3
+    return 33
+  end
+  return 0
+end
+
+pub fun main() I64
+  val returns = check_returns()
+  if returns != 0
+    return returns
+  end
+
+  val branching = check_branching()
+  if branching != 0
+    return branching
+  end
+
+  val aggregates = check_aggregates()
+  if aggregates != 0
+    return aggregates
+  end
+
+  return 0
+end

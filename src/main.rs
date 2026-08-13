@@ -1361,7 +1361,14 @@ fn dump_expr(names: &[String], nodes: &[i64], lists: &[Vec<i64>], id: i64, depth
     let pad = pad_str(depth);
     let kind = node_a(nodes, id);
     if kind == EXPR_LIT {
-        println!("{}Lit({}, {})", pad, lit_kind_name(node_b(nodes, id)), node_c(nodes, id));
+        let lit = node_b(nodes, id);
+        if lit == LIT_STRING {
+            // A string literal's `c` slot is the interned name id of its
+            // decoded bytes, not a number, so the dump shows the bytes.
+            println!("{}Lit(string, \"{}\")", pad, escaped_literal_text(&name_text(names, node_c(nodes, id))));
+        } else {
+            println!("{}Lit({}, {})", pad, lit_kind_name(lit), node_c(nodes, id));
+        }
     } else if kind == EXPR_PATH {
         println!("{}Path({})", pad, path_text(names, lists, node_b(nodes, id)));
     } else if kind == EXPR_UNARY {
@@ -1468,11 +1475,20 @@ fn dump_pat(names: &[String], nodes: &[i64], lists: &[Vec<i64>], id: i64, depth:
     }
 }
 
+// The literal kinds an `EXPR_LIT` node's `b` slot holds.  These are `LIT_*`
+// values, not the `TOK_*` token kinds the lexer produced them from; the two
+// numberings do not line up.
 fn lit_kind_name(kind: i64) -> &'static str {
-    if kind == TOK_INT {
+    if kind == LIT_INT {
         "int"
-    } else if kind == TOK_HEX {
+    } else if kind == LIT_HEX {
         "hex"
+    } else if kind == LIT_TRUE {
+        "true"
+    } else if kind == LIT_FALSE {
+        "false"
+    } else if kind == LIT_STRING {
+        "string"
     } else {
         "?lit"
     }

@@ -24,6 +24,9 @@
             clippy
             rust-analyzer
             pkg-config
+            # The editor extension's test suite runs under `node --test` as
+            # part of pre_commit_check.sh, so the gate needs a node in scope.
+            nodejs
             semgrep
             valgrind
             gdb
@@ -32,8 +35,12 @@
           ];
 
           shellHook = ''
-            echo "LLVM $(llvm-config --version)"
-            echo "Rust $(rustc --version)"
+            # Banner goes to stderr, not stdout.  container/bin/rust-analyzer-nix
+            # runs rust-analyzer through `nix develop`, and rust-analyzer speaks
+            # LSP over stdout; anything printed there corrupts the stream before
+            # the first Content-Length header and the editor drops the server.
+            echo "LLVM $(llvm-config --version)" >&2
+            echo "Rust $(rustc --version)" >&2
             export NIX_CFLAGS_COMPILE=""
             export NIX_HARDENING_ENABLE=""
             export RUST_BACKTRACE=full

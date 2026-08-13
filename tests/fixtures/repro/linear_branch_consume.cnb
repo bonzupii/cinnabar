@@ -1,0 +1,91 @@
+#! Consuming a linear value on every arm of a branch is correct code and
+#! must be accepted.
+#!
+#! `explain_leak.cnb` locks the rejection when a linear value is consumed on
+#! only some paths.  Nothing locked the other side of that boundary: a value
+#! consumed exactly once on *every* path.  The gap let a borrow-after-move
+#! false positive through, where the consuming call inside a branch was
+#! itself reported as `use of moved value`, and the join was reported as
+#! `consumed on some paths but not on all paths` even though every arm
+#! consumed.  Straight-line consumption never regressed, so the shapes here
+#! all put the consumption inside a branch.
+#!
+#! Every item below must be accepted and exit 0.
+#!
+#!   1. Both arms of an if/else consume.
+#!   2. Every arm of an if/elif/else consumes.
+#!   3. The then-arm consumes and returns; the fall-through consumes too.
+
+pub mod Memory
+  pub nat type Block
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub AccessOutOfBounds(Usize, Usize)
+  end
+
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+end
+
+use Memory.allocate
+use Memory.deallocate
+
+pub const SIZE: Usize = 16
+
+fun consume_both_arms(flag: Bool, block: Memory.Block) impure I64
+  if flag
+    deallocate(block)
+  else
+    deallocate(block)
+  end
+  return 0
+end
+
+fun consume_every_arm(first: Bool, second: Bool, block: Memory.Block) impure I64
+  if first
+    deallocate(block)
+  elif second
+    deallocate(block)
+  else
+    deallocate(block)
+  end
+  return 0
+end
+
+# The shape explain_leak.cnb rejects, corrected: the fall-through path that
+# leaks there consumes here, so both paths consume exactly once.
+fun consume_then_and_fallthrough(flag: Bool, block: Memory.Block) impure I64
+  if flag
+    deallocate(block)
+    return 0
+  end
+  deallocate(block)
+  return 0
+end
+
+# Each block is consumed before the next allocation is attempted.  Holding
+# two live blocks across a fallible `match` would leak the first one on the
+# second one's `Err` path, which is a real linearity error and not what this
+# fixture is here to exercise.
+pub fun main() impure I64
+  val first = match allocate(SIZE)
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  val a = consume_both_arms(true, first)
+
+  val second = match allocate(SIZE)
+    Ok(value) => value
+    Err(error) => return 2
+  end
+  val b = consume_every_arm(false, true, second)
+
+  val third = match allocate(SIZE)
+    Ok(value) => value
+    Err(error) => return 3
+  end
+  val c = consume_then_and_fallthrough(false, third)
+
+  return a + b + c
+end

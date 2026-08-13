@@ -1,0 +1,26 @@
+#!/usr/bin/env sh
+# Rebuilds the language server, then serves with it.
+#
+# Cargo replaces the binary on rebuild but a running server keeps its old
+# image, so an editor started before a rebuild goes on answering from the
+# compiler as it was hours ago -- silently, because the process is healthy.
+# Building here ties "the server you are talking to" to "the source you have"
+# at every server start, which is every window reload.
+#
+# Build output goes to stderr: rust-analyzer's sibling wrapper learned this the
+# hard way, and stdout here is the LSP stream.  A failed build is not fatal --
+# serving the previous binary keeps the editor usable while the code is broken,
+# which is exactly when you want to keep reading it.
+set -e
+cd "$(dirname "$0")/../.."
+nix develop --command cargo build --bin cinnabar-lsp --quiet 1>&2 || true
+# Serving the previous binary is only kind when there *is* one.  On a fresh
+# target volume a failed build would otherwise leave `exec` to report a bare
+# "not found", which says nothing about what to do next.
+if [ ! -x ./target/debug/cinnabar-lsp ]; then
+  echo "no language server at ./target/debug/cinnabar-lsp and the build did not" >&2
+  echo "produce one.  Build it once with:" >&2
+  echo "  nix develop --command cargo build --bin cinnabar-lsp" >&2
+  exit 1
+fi
+exec ./target/debug/cinnabar-lsp "$@"

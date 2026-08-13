@@ -283,6 +283,53 @@ fn is_const_true(ctx: &Ctx, expr: i64) -> bool {
     node_tag(ctx.1, expr) == NODE_EXPR && node_a(ctx.1, expr) == EXPR_LIT && node_b(ctx.1, expr) == LIT_TRUE
 }
 
+// True when a returned reference is rooted in the program's static data
+// rather than in anything the function or its caller owns: a string
+// literal, or a constant of a reference type (which is one).
+//
+// Such a borrow has an origin — the binary's read-only data — and that
+// origin outlives every caller, so there is no loan to trace and no
+// lifetime question to answer. The returned-borrow rule (MANIFESTO
+// principle 5) exists to reject a returned borrow whose origin *among the
+// inputs* is unknown or ambiguous, which is a question about how long the
+// caller's data lives. A static borrow has no input origin because it
+// needs none, so it is not the ambiguous case the rule is about; treating
+// it as one would make `fun name() &[U8] return "cinnabar" end`
+// unwriteable, and returning a fixed message is one of the things string
+// literals exist for.
+//
+// This can never be a `&mut`: a literal is not a place and a constant is
+// not assignable, so nothing statically rooted can be borrowed mutably.
+// Forwarding one is static too: a call whose callee's converged summary is
+// an empty source set returns a borrow that derives from none of its
+// arguments, which for a reference-returning function means it is static.
+// The summary set only grows, so treating an empty set as static stays
+// monotone and the call-graph fixpoint still converges.
+fn static_rooted_ref(ctx: &Ctx, expr: i64) -> bool {
+    if node_tag(ctx.1, expr) != NODE_EXPR {
+        return false;
+    }
+    let kind = node_a(ctx.1, expr);
+    if kind == EXPR_LIT {
+        return node_b(ctx.1, expr) == LIT_STRING;
+    }
+    if kind == EXPR_PATH {
+        let sym = expr_sym_of(ctx.1, expr);
+        return sym != NONE && node_a(ctx.1, sym) == SYM_CONST;
+    }
+    if kind == EXPR_CALL {
+        let inst = expr_sym_of(ctx.1, expr);
+        if node_tag(ctx.1, inst) != NODE_INST {
+            return false;
+        }
+        return match summary_of(ctx.4, inst_fn_of(ctx.1, inst)) {
+            Some(positions) => positions.is_empty(),
+            None => false,
+        };
+    }
+    false
+}
+
 // The value of `expr` is a provably-empty container when it came from a
 // native create call: a direct call, a path to a binding created by one
 // (`b.9`), or a match whose scrutinee is such a value.  One
@@ -761,28 +808,37 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         let cond = node_b(ctx.1, stmt);
         let body = node_c(ctx.1, stmt);
         let join = new_block(f, b, BLK_JOIN, NONE, span);
+        // `new_block` makes the block it creates current, so the condition
+        // built below would otherwise emit into the loop-exit join and
+        // `expr_effects` would hand back the join as `cont`.  That made the
+        // exit block the branch point, gave it a self-edge, and -- because
+        // `break` targets the join -- fed every break's exit state back into
+        // the loop body.  A bare `flag` or any comparison forms no block of
+        // its own, so that was the ordinary case, not an edge case.  The join
+        // is still created first: `break` and `continue` need it as their
+        // target while the condition is being built.
+        resume(f, b, block);
         let scope_start = b.2.len() as i64;
         b.1.push((block, join, scope_start));
         let cont = expr_effects(f, b, ctx, cond, MODE_VALUE, ret, &mut Vec::new());
         let const_true = is_const_true(ctx, cond);
         let body_entry = build_list(f, b, ctx, body, block, ret, &mut Vec::new());
         b.1.pop();
-        // A literal-true condition emits no condition block, so `cont` IS
-        // `join`: the loop has no false path and exits only via `break`, and
-        // the join merges only break-path state.  Routing the header into the
-        // join would smuggle the pre-loop state (container still C_MAY, value
-        // still LIVE) onto the exit path, defeating the `while true` drain
-        // proof.  The join-to-out edge belongs to the enclosing list's
-        // sequencing (build_list), not here, so a mid-list loop cannot feed
-        // its exit state past the statements that follow it.
-        if const_true && cont == join {
-            add_edge(f, block, body_entry);
-        } else {
+        // A condition that emitted no block of its own leaves `cont` as the
+        // header, which is already where control arrives.
+        if cont != block {
             add_edge(f, block, cont);
-            add_edge(f, cont, body_entry);
-            if !const_true {
-                add_edge(f, cont, join);
-            }
+        }
+        add_edge(f, cont, body_entry);
+        // A literal-true condition has no false path: the loop exits only via
+        // `break`, so the join merges only break-path state.  Routing the
+        // condition into the join would smuggle the pre-loop state (container
+        // still C_MAY, value still LIVE) onto the exit path, defeating the
+        // `while true` drain proof.  The join-to-out edge belongs to the
+        // enclosing list's sequencing (build_list), not here, so a mid-list
+        // loop cannot feed its exit state past the statements that follow it.
+        if !const_true {
+            add_edge(f, cont, join);
         }
         return (block, join, Vec::new());
     }
@@ -791,9 +847,23 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         let cond = node_b(ctx.1, stmt);
         let then_list = node_c(ctx.1, stmt);
         let else_list = node_d(ctx.1, stmt);
-        let join = new_block(f, b, BLK_JOIN, NONE, span);
+        // The condition is built before the join exists.  `new_block` makes
+        // the block it creates current, and a condition that needs no block of
+        // its own (a bare `flag`) returns whatever is current -- so creating
+        // the join first made `cont` *be* the join.  Every branch edge then
+        // hung off the join: it gained the arms as successors and as
+        // predecessors, so each arm's entry merged the other arm's exit, and a
+        // value consumed on every arm was reported both as moved twice and as
+        // consumed on only some paths.  The `while` lowering above had the
+        // same hazard and is fixed the same way, by keeping the header current
+        // while the condition is built.
         let cont = expr_effects(f, b, ctx, cond, MODE_VALUE, ret, &mut Vec::new());
-        add_edge(f, block, cont);
+        let join = new_block(f, b, BLK_JOIN, NONE, span);
+        // A condition that emitted no block of its own leaves `cont` as the
+        // statement block itself, which is already where control arrives.
+        if cont != block {
+            add_edge(f, block, cont);
+        }
         let then_entry = build_list(f, b, ctx, then_list, join, ret, &mut Vec::new());
         add_edge(f, cont, then_entry);
         if else_list != NONE {
@@ -818,7 +888,9 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         let mut prod: Vec<i64> = Vec::new();
         expr_effects(f, b, ctx, value, MODE_VALUE, ret, &mut prod);
         let ret_kind = ty_kind_of(ctx.1, ret);
-        if ret_kind == TYD_REF || ret_kind == TYD_REF_MUT || ret_kind == TYD_SLICE {
+        if (ret_kind == TYD_REF || ret_kind == TYD_REF_MUT || ret_kind == TYD_SLICE)
+            && !static_rooted_ref(ctx, value)
+        {
             let op = emit_op(f, OP_RET_REF, NONE, NONE, (0, 0, 0), span);
             set_op_loans(f, op, &prod);
         }
@@ -1898,7 +1970,7 @@ pub fn borrow_check(
                         let ok_id = find_name(names, "Ok");
                         let mut ctx: Ctx = (names, nodes, lists, &mut scratch, &mut summaries, err_id, ok_id, &mut scratch_notes);
                         if build_fn(&mut f, &mut b, &mut ctx, *fn_node) {
-                            compute_summary(&f, &mut ctx, 0)
+                            compute_summary(&f, &mut ctx, 0, *fn_node)
                         } else {
                             None
                         }
@@ -2433,6 +2505,36 @@ fn apply_assign(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool,
             }
         }
     }
+}
+
+// Reports a borrow of a value that has already been moved.
+//
+// `apply_move` catches *moving* a moved value, but a borrow of one was not
+// checked at all: `deallocate(block)` followed by `read_u8(&block, 0)`
+// compiled cleanly and produced a real use-after-free, and closing a
+// `File.Handle` and then writing through a borrow of it did the same.
+// MANIFESTO principle 7 says a linear value "cannot be used after move";
+// moving it twice is only one of the ways to do that, and the borrow is
+// the more dangerous one, because the move it follows has already released
+// the resource.
+//
+// The state is left untouched. Observing a moved value neither consumes it
+// again nor revives it, so the dataflow is unchanged and the diagnostic is
+// reported once per use site rather than folded into the move that caused
+// it.
+//
+// Only `ST_MOVED` is reported, never `ST_PARTIAL`: a partially moved
+// struct still has live fields, and borrowing it to reach one of those is
+// exactly what partial-move tracking exists to allow.
+fn borrow_after_move_check(f: &F, state: &[i64], binding: i64, path: i64, ctx: &mut Ctx, span: (i64, i64, i64)) {
+    if path < 0 {
+        return;
+    }
+    if state_at(state, path) != ST_MOVED {
+        return;
+    }
+    let name = dotted_name_of(f, ctx, binding, path);
+    push_error(ctx.3, &format!("use of moved value '{}'", name), span.0, span.1, span.2);
 }
 
 fn apply_block_linear(f: &F, block: i64, state: &mut [i64], report: bool, ctx: &mut Ctx) {
@@ -3083,10 +3185,11 @@ fn repoint_origin(f: &F, row: (i64, i64, i64, i64, i64, i64, i64, i64, i64), op:
     }
 }
 
-fn compute_summary(f: &F, ctx: &mut Ctx, entry: i64) -> Option<Vec<i64>> {
+fn compute_summary(f: &F, ctx: &mut Ctx, entry: i64, fn_node: i64) -> Option<Vec<i64>> {
     let entry_origins = origin_fixpoint(f, ctx, entry);
     let mut sources: Vec<i64> = Vec::new();
     let mut local = false;
+    let mut saw_ret_ref = false;
     let nblocks = f.6.len() as i64;
     let mut blk = 0i64;
     while blk < nblocks {
@@ -3101,6 +3204,7 @@ fn compute_summary(f: &F, ctx: &mut Ctx, entry: i64) -> Option<Vec<i64>> {
             if row.0 == OP_BIND || row.0 == OP_ASSIGN {
                 repoint_origin(f, row, op, &mut origins);
             } else if row.0 == OP_RET_REF {
+                saw_ret_ref = true;
                 let prod = op_loans_at(f, op);
                 let mut visited: Vec<i64> = Vec::new();
                 trace_origin(f, &origins, &prod, &mut sources, &mut local, &mut visited);
@@ -3109,11 +3213,34 @@ fn compute_summary(f: &F, ctx: &mut Ctx, entry: i64) -> Option<Vec<i64>> {
         }
         blk += 1;
     }
-    if local || sources.is_empty() {
-        None
-    } else {
-        Some(sources)
+    if local {
+        return None;
     }
+    if !sources.is_empty() {
+        return Some(sources);
+    }
+    // No returned borrow derives from an input.  For a function that
+    // returns a reference and emitted no `OP_RET_REF` at all, that is not a
+    // failure to trace: every one of its returns was statically rooted
+    // (`static_rooted_ref`), so the result borrows nothing from the
+    // arguments and outlives every caller.  Recording that as an *empty*
+    // source set rather than as no summary is what lets a caller forward
+    // the borrow — `fun forwarded() &[U8] return direct() end` — instead of
+    // being told the origin cannot be traced.  The set only ever grows, so
+    // a function that later turns out to also return an input-derived
+    // borrow converges to that larger set.
+    if !saw_ret_ref && returns_reference(ctx, fn_node) {
+        return Some(Vec::new());
+    }
+    None
+}
+
+// True when a function's declared return type is a reference or slice —
+// the types the returned-borrow rule applies to.
+fn returns_reference(ctx: &Ctx, fn_node: i64) -> bool {
+    let ret = ty_key_of(ctx.1, node_d(ctx.1, fn_node));
+    let kind = ty_kind_of(ctx.1, ret);
+    kind == TYD_REF || kind == TYD_REF_MUT || kind == TYD_SLICE
 }
 
 // Summary sets only grow: each round unions the newly computed return-origin
@@ -3390,6 +3517,7 @@ fn report(
                 }
             } else if kind == OP_BORROW || kind == OP_BORROW_M {
                 conflicts_at(f, ctx, op, &origins, live_after);
+                borrow_after_move_check(f, &state, binding, row.2, ctx, (row.6, row.7, row.8));
             } else if kind == OP_EXIT {
                 exit_check(f, ctx, op, &state);
             } else if kind == OP_RET_REF {

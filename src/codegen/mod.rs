@@ -1,6 +1,7 @@
 pub mod emitter;
 pub mod error;
 pub mod layout;
+pub mod syscall;
 pub mod types;
 
 use crate::codegen::emitter::{emit_program, protocol_of, InstFns, Session};

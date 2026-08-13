@@ -660,6 +660,22 @@ fn is_bool_key(nodes: &[i64], key: i64) -> bool {
     key_kind(nodes, key) == TYD_BUILTIN && tyinfo_builtin_kind(nodes, key) == BUILTIN_BOOL
 }
 
+// True when a comparison operator is defined on operands of this type.
+//
+// Comparison is a scalar operation: `==` and `!=` compare integers and
+// `Bool`, and the ordering operators compare integers, since ordering
+// `Bool` names nothing. There is no structural equality in the language
+// and no operator overloading, so a struct, enum, array, slice, reference,
+// or native handle has no comparison to lower — aggregates are taken apart
+// with `match` and field access instead. Rejecting these here is what
+// keeps codegen from being handed an aggregate where it expects a scalar.
+fn comparable_key(nodes: &[i64], key: i64, op: i64) -> bool {
+    if is_int_key(nodes, key) {
+        return true;
+    }
+    is_bool_key(nodes, key) && (op == BIN_EQ || op == BIN_NE)
+}
+
 fn is_result_key(nodes: &[i64], key: i64) -> bool {
     key_kind(nodes, key) == TYD_ENUM && sym_prim_kind(nodes, key_sym(nodes, key)) == PRIM_RESULT
 }
@@ -1755,6 +1771,14 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
         if lit == LIT_TRUE || lit == LIT_FALSE {
             return (value, builtin_key_of(state.1, BUILTIN_BOOL));
         }
+        if lit == LIT_STRING {
+            // A string constant folds to the interned name id of its bytes,
+            // which is what codegen needs to emit (or reuse) the literal's
+            // `.rodata` global — the same id an inline literal carries, so a
+            // `const` string and an inline string are one representation.
+            // There is no range to check: the value is a byte sequence.
+            return (value, byte_slice_key(state));
+        }
         let key = if is_int_key(state.1, declared) {
             declared
         } else {
@@ -1868,14 +1892,50 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
         return (0, recover_ty(state, expr, declared));
     }
     if kind == EXPR_BINARY {
-        let (lv, lk) = fold_const(state, node_c(state.1, expr), declared, quiet);
-        if key_kind(state.1, lk) == TYD_UNKNOWN {
-            return (0, recover_ty(state, expr, declared));
-        }
-        let (rv, rk) = fold_const(state, node_d(state.1, expr), declared, quiet);
-        if key_kind(state.1, rk) == TYD_UNKNOWN {
-            return (0, recover_ty(state, expr, declared));
-        }
+        let op = node_b(state.1, expr);
+        let lhs = node_c(state.1, expr);
+        let rhs = node_d(state.1, expr);
+        // The literal-typing rule, identical to `check_binary_operands`: an
+        // operand that is only integer literals adopts the peer operand's
+        // type when the peer has one, otherwise the type expected of this
+        // operator's result.  A comparison declares `Bool`, which tells its
+        // operands nothing, so there the operands type each other.  Keeping
+        // this in step with the runtime path is what stops the same source
+        // text from typing one way in a `const` and another in a `var`.
+        let operand_declared = binary_operand_expected(state, op, declared);
+        let lhs_untyped = int_literal_expr(state.1, lhs);
+        let rhs_untyped = int_literal_expr(state.1, rhs);
+        let folded = if lhs_untyped && !rhs_untyped {
+            let (rv, rk) = fold_const(state, rhs, NONE, quiet);
+            if key_kind(state.1, rk) == TYD_UNKNOWN {
+                return (0, recover_ty(state, expr, declared));
+            }
+            let hint = if is_int_key(state.1, rk) { rk } else { operand_declared };
+            let (lv, lk) = fold_const(state, lhs, hint, quiet);
+            if key_kind(state.1, lk) == TYD_UNKNOWN {
+                return (0, recover_ty(state, expr, declared));
+            }
+            ((lv, lk), (rv, rk))
+        } else {
+            let lhs_declared = if lhs_untyped { operand_declared } else { NONE };
+            let (lv, lk) = fold_const(state, lhs, lhs_declared, quiet);
+            if key_kind(state.1, lk) == TYD_UNKNOWN {
+                return (0, recover_ty(state, expr, declared));
+            }
+            let rhs_declared = if is_int_key(state.1, lk) {
+                lk
+            } else if rhs_untyped {
+                operand_declared
+            } else {
+                NONE
+            };
+            let (rv, rk) = fold_const(state, rhs, rhs_declared, quiet);
+            if key_kind(state.1, rk) == TYD_UNKNOWN {
+                return (0, recover_ty(state, expr, declared));
+            }
+            ((lv, lk), (rv, rk))
+        };
+        let ((lv, lk), (rv, rk)) = folded;
         let ok = unify_key(state.1, state.2, state.6, lk, rk);
         if !ok {
             if quiet == 0 {
@@ -1883,7 +1943,7 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
             }
             return (0, recover_ty(state, expr, declared));
         }
-        let (v, k) = fold_bin(state, node_b(state.1, expr), lv, rv, lk, (file, start, end), quiet);
+        let (v, k) = fold_bin(state, op, lv, rv, lk, (file, start, end), quiet);
         if key_kind(state.1, k) == TYD_UNKNOWN && quiet == 0 {
             // fold_bin already emitted the primary diagnostic; the constant
             // still recovers to the declared key so no "found '?'" cascade
@@ -1961,34 +2021,27 @@ fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, 
     let sub = tyinfo_builtin_kind(state.1, key);
     let width = builtin_int_width(sub);
     if width == 0 {
-        // Bool comparisons are well-defined on the raw 0/1 values even
-        // though Bool has no integer width, so they fold here; every other
-        // non-integer operand reaches the folder only after a type error
-        // was already reported, and the primary is re-reported in non-quiet
-        // mode so the constant is rejected truthfully instead of failing
+        // `Bool` equality is well-defined on the raw 0/1 values even though
+        // Bool has no integer width, so it folds here; `comparable_key` is
+        // the same predicate `check_binary` applies, so a constant and a
+        // runtime expression agree on exactly which comparisons exist.
+        // Every other non-integer operand is rejected below rather than
+        // folded, and the diagnostic is re-reported in non-quiet mode so
+        // the constant is refused truthfully instead of failing
         // unification against '?'.
-        if (BIN_EQ..=BIN_GE).contains(&op) && sub == BUILTIN_BOOL {
-            let a = lv;
-            let b = rv;
+        if comparable_key(state.1, key, op) {
             if op == BIN_EQ {
-                return ((a == b) as i64, bool_key);
+                return ((lv == rv) as i64, bool_key);
             }
-            if op == BIN_NE {
-                return ((a != b) as i64, bool_key);
-            }
-            if op == BIN_LT {
-                return ((a < b) as i64, bool_key);
-            }
-            if op == BIN_GT {
-                return ((a > b) as i64, bool_key);
-            }
-            if op == BIN_LE {
-                return ((a <= b) as i64, bool_key);
-            }
-            return ((a >= b) as i64, bool_key);
+            return ((lv != rv) as i64, bool_key);
         }
         if quiet == 0 {
-            push_error(state.3, &format!("constant binary operator '{}' requires integer operands", op_text(op)), file, start, end);
+            let message = if (BIN_EQ..=BIN_GE).contains(&op) {
+                format!("comparison '{}' is not defined for '{}': compare integer or Bool values, or take the value apart with match", op_text(op), render_key(state.0, state.1, state.2, state.6, state.7, key))
+            } else {
+                format!("constant binary operator '{}' requires integer operands", op_text(op))
+            };
+            push_error(state.3, &message, file, start, end);
         }
         return (0, unknown_key(state.1, state.2));
     }
@@ -2178,10 +2231,32 @@ fn check_expr(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64
     recover_ty(state, expr, expected)
 }
 
+// The type of a string literal: `&[U8]`, a shared borrow of a byte slice.
+//
+// A literal's bytes live in the binary's read-only data for the whole run,
+// so the borrow has no owner to outlive: there is nothing to consume,
+// nothing to free, and no lifetime to track.  `&[U8]` rather than a
+// dedicated string type because the byte slice is the representation the
+// rest of the language already has — `Slice.len`, indexing, and
+// `Collections.string_from_slice` all work on it unchanged.
+fn byte_slice_key(state: &mut State) -> i64 {
+    let byte = builtin_key_of(state.1, BUILTIN_U8);
+    let slice = canon_tyinfo(state.1, state.2, TYD_SLICE, NONE, NONE, byte, NONE);
+    canon_tyinfo(state.1, state.2, TYD_REF, NONE, NONE, slice, NONE)
+}
+
 fn check_lit(state: &mut State, expr: i64, expected: i64) -> i64 {
     let lit = node_b(state.1, expr);
     if lit == LIT_TRUE || lit == LIT_FALSE {
         let key = builtin_key_of(state.1, BUILTIN_BOOL);
+        expr_set_ty(state.1, expr, key);
+        return key;
+    }
+    if lit == LIT_STRING {
+        // A string literal has one type and adopts nothing: unlike an
+        // integer literal it is not a width-agnostic magnitude, so an
+        // expected type of anything else is a mismatch the caller reports.
+        let key = byte_slice_key(state);
         expr_set_ty(state.1, expr, key);
         return key;
     }
@@ -2261,16 +2336,22 @@ fn check_unary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
         key = check_index(state, operand, borrow, expected, ret, impure, self_key);
     } else {
         let inner = check_expr(state, operand, NONE, ret, impure, self_key);
-    if op == UN_REF {
-        if key_kind(state.1, inner) == TYD_ARRAY {
+    if op == UN_REF || op == UN_REF_MUT {
+        // The sanctioned array-to-slice coercion, in both borrow forms:
+        // `&arr` is `&[T]` and `&mut arr` is `&mut [T]`.  Borrowing an
+        // array never yields `&[T; N]` — the length travels in the slice
+        // view instead of in the type — and there is no reason for the
+        // exclusive borrow to behave differently from the shared one.  A
+        // `&mut [T]` is what lets a caller hand a fixed-size buffer to a
+        // native that fills it, which is how `File.read` receives one.
+        let borrow = if op == UN_REF { TYD_REF } else { TYD_REF_MUT };
+        let target = if key_kind(state.1, inner) == TYD_ARRAY {
             let elem = key_elem(state.1, inner);
-            let slice = canon_tyinfo(state.1, state.2, TYD_SLICE, NONE, NONE, elem, NONE);
-            key = canon_tyinfo(state.1, state.2, TYD_REF, NONE, NONE, slice, NONE);
+            canon_tyinfo(state.1, state.2, TYD_SLICE, NONE, NONE, elem, NONE)
         } else {
-            key = canon_tyinfo(state.1, state.2, TYD_REF, NONE, NONE, inner, NONE);
-        }
-    } else if op == UN_REF_MUT {
-            key = canon_tyinfo(state.1, state.2, TYD_REF_MUT, NONE, NONE, inner, NONE);
+            inner
+        };
+        key = canon_tyinfo(state.1, state.2, borrow, NONE, NONE, target, NONE);
         } else if op == UN_NEG {
             let inner_is_int = is_int_key(state.1, inner);
             if !inner_is_int {
@@ -2307,44 +2388,61 @@ fn check_unary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
     key
 }
 
-fn op_text(op: i64) -> &'static str {
-    if op == BIN_ADD {
-        "+"
-    } else if op == BIN_SUB {
-        "-"
-    } else if op == BIN_MUL {
-        "*"
-    } else if op == BIN_DIV {
-        "/"
-    } else if op == BIN_MOD {
-        "%"
-    } else if op == BIN_SHL {
-        "<<"
-    } else if op == BIN_SHR {
-        ">>"
-    } else if op == BIN_BAND {
-        "&"
-    } else if op == BIN_BOR {
-        "|"
-    } else if op == BIN_BXOR {
-        "^"
-    } else if op == BIN_EQ {
-        "=="
-    } else if op == BIN_NE {
-        "!="
-    } else if op == BIN_LT {
-        "<"
-    } else if op == BIN_GT {
-        ">"
-    } else if op == BIN_LE {
-        "<="
-    } else if op == BIN_GE {
-        ">="
-    } else if op == BIN_AND {
-        "&&"
-    } else {
-        "||"
+
+// True when an expression is built out of nothing but integer literals,
+// unary negation, and integer-valued binary operators.  Such an expression
+// carries no type of its own — it is a width-agnostic magnitude — so it
+// adopts the type its context demands (MANIFESTO, "Types": integer literals
+// adopt the expected type in a typed context).  Every other expression form
+// (path, call, index, field access, match, try, struct literal, array) has a
+// declared or inferred type of its own and never adopts one; making a typed
+// *value* take another width would be the implicit conversion the manifesto
+// forbids.
+//
+// Comparison and logical operators are excluded because they yield `Bool`,
+// not an integer, however their own operands are typed.
+fn int_literal_expr(nodes: &[i64], expr: i64) -> bool {
+    if node_tag(nodes, expr) != NODE_EXPR {
+        return false;
     }
+    let kind = node_a(nodes, expr);
+    if kind == EXPR_LIT {
+        let lit = node_b(nodes, expr);
+        return lit == LIT_INT || lit == LIT_HEX;
+    }
+    if kind == EXPR_UNARY {
+        return node_b(nodes, expr) == UN_NEG && int_literal_expr(nodes, node_c(nodes, expr));
+    }
+    if kind == EXPR_BINARY {
+        let op = node_b(nodes, expr);
+        if (BIN_EQ..=BIN_GE).contains(&op) || op == BIN_AND || op == BIN_OR {
+            return false;
+        }
+        return int_literal_expr(nodes, node_c(nodes, expr)) && int_literal_expr(nodes, node_d(nodes, expr));
+    }
+    false
+}
+
+// The integer type a binary operator's *operands* are expected to have,
+// derived from the type expected of the operator's result.  A comparison or
+// logical operator yields `Bool`, which constrains its operands not at all,
+// so it contributes no expectation and the operands type each other.  Every
+// integer operator yields the operand type itself, so the expectation passes
+// straight through — except that `/` and `%` wrap it: they evaluate to
+// `Result(T, DivError)` at runtime, so an expected Result names the operand
+// type in its `Ok` payload.  A constant initializer whose division the
+// folder collapses declares `T` directly, and that shape is read straight
+// through like any other operator's; both spellings name the same `T`.
+fn binary_operand_expected(state: &mut State, op: i64, expected: i64) -> i64 {
+    if expected == NONE || op == BIN_AND || op == BIN_OR || (BIN_EQ..=BIN_GE).contains(&op) {
+        return NONE;
+    }
+    let result = if (op == BIN_DIV || op == BIN_MOD) && is_result_key(state.1, expected) {
+        list_get(state.2, key_args(state.1, expected), 0)
+    } else {
+        expected
+    };
+    if is_int_key(state.1, result) { result } else { NONE }
 }
 
 fn check_static_zero_divisor(state: &mut State, op: i64, rhs: i64) -> i64 {
@@ -2352,7 +2450,12 @@ fn check_static_zero_divisor(state: &mut State, op: i64, rhs: i64) -> i64 {
         return 0;
     }
     let (value, key) = fold_const(state, rhs, NONE, 1);
-    if key_kind(state.1, key) != TYD_UNKNOWN && value == 0 {
+    // Only an *integer* constant divisor can be a provable zero.  A folded
+    // `Bool` carries 0 for `false` and a folded string carries an interned
+    // name id, neither of which is a numeric zero; reporting either as a
+    // division by zero would replace the real operand-type diagnostic with
+    // a false one.
+    if is_int_key(state.1, key) && value == 0 {
         let message = if op == BIN_DIV {
             "division by zero"
         } else {
@@ -2381,6 +2484,43 @@ fn division_result_key(state: &mut State, payload: i64) -> i64 {
     canon_tyinfo(state.1, state.2, TYD_ENUM, result_sym, args, NONE, NONE)
 }
 
+// Checks a binary operator's two operands under the literal-typing rule.
+// An operand that is only integer literals has no type of its own, so it
+// adopts one from its context: the peer operand's type when the peer has
+// one, otherwise the type expected of the operator's result, otherwise the
+// `I64` default.  Whichever operand is typed is therefore checked first, so
+// `255 != narrowed` types exactly like `narrowed != 255`.  An operand that
+// is *not* a bare literal expression is never handed the result's expected
+// type: it already has a type, and reporting it against a foreign
+// expectation would emit a cascade ahead of the real operand-mismatch or
+// assignment diagnostic.
+//
+// `fold_const`'s `EXPR_BINARY` arm applies the identical rule to constant
+// initializers; the two must agree, or the same source text would type one
+// way in a `const` and another in a `var`.
+fn check_binary_operands(state: &mut State, operands: (i64, i64, i64), ret: i64, impure: i64, self_key: i64) -> (i64, i64) {
+    let (lhs, rhs, operand_expected) = operands;
+    let lhs_untyped = int_literal_expr(state.1, lhs);
+    let rhs_untyped = int_literal_expr(state.1, rhs);
+    if lhs_untyped && !rhs_untyped {
+        let r = check_expr(state, rhs, NONE, ret, impure, self_key);
+        let hint = if is_int_key(state.1, r) { r } else { operand_expected };
+        let l = check_expr(state, lhs, hint, ret, impure, self_key);
+        return (l, r);
+    }
+    let lhs_expected = if lhs_untyped { operand_expected } else { NONE };
+    let l = check_expr(state, lhs, lhs_expected, ret, impure, self_key);
+    let rhs_expected = if is_int_key(state.1, l) {
+        l
+    } else if rhs_untyped {
+        operand_expected
+    } else {
+        NONE
+    };
+    let r = check_expr(state, rhs, rhs_expected, ret, impure, self_key);
+    (l, r)
+}
+
 fn check_binary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     let op = node_b(state.1, expr);
     let lhs = node_c(state.1, expr);
@@ -2390,9 +2530,9 @@ fn check_binary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i
     let start = node_start(state.1, expr);
     let end = node_end(state.1, expr);
     let bool_key = builtin_key_of(state.1, BUILTIN_BOOL);
+    let operand_expected = binary_operand_expected(state, op, expected);
     if op == BIN_AND || op == BIN_OR {
-        let l = check_expr(state, lhs, NONE, ret, impure, self_key);
-        let r = check_expr(state, rhs, NONE, ret, impure, self_key);
+        let (l, r) = check_binary_operands(state, (lhs, rhs, operand_expected), ret, impure, self_key);
         if !is_bool_key(state.1, l) {
             push_error(state.3, &format!("logical operator '{}' requires Bool operands", op_text(op)), file, start, end);
         }
@@ -2404,21 +2544,27 @@ fn check_binary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i
         return bool_key;
     }
     if (BIN_EQ..=BIN_GE).contains(&op) {
-        let l = check_expr(state, lhs, NONE, ret, impure, self_key);
-        let r = check_expr(state, rhs, NONE, ret, impure, self_key);
+        let (l, r) = check_binary_operands(state, (lhs, rhs, operand_expected), ret, impure, self_key);
         let ok = unify_key(state.1, state.2, state.6, l, r);
-        if !ok && key_kind(state.1, l) != TYD_UNKNOWN && key_kind(state.1, r) != TYD_UNKNOWN {
-            push_error(state.3, &format!("comparison '{}' requires operands of the same type", op_text(op)), file, start, end);
+        if !ok {
+            if key_kind(state.1, l) != TYD_UNKNOWN && key_kind(state.1, r) != TYD_UNKNOWN {
+                push_error(state.3, &format!("comparison '{}' requires operands of the same type", op_text(op)), file, start, end);
+            }
+        } else if !comparable_key(state.1, l, op) && key_kind(state.1, l) != TYD_UNKNOWN {
+            // The operands agree but the type has no comparison. Reported
+            // only when they agree, so a mismatch produces one diagnostic
+            // rather than a same-type error followed by a not-comparable
+            // cascade.
+            push_error(state.3, &format!("comparison '{}' is not defined for '{}': compare integer or Bool values, or take the value apart with match", op_text(op), render_key(state.0, state.1, state.2, state.6, state.7, l)), file, start, end);
         }
         expr_set_ty(state.1, expr, bool_key);
         return bool_key;
     }
-    let l = check_expr(state, lhs, NONE, ret, impure, self_key);
+    let (l, r) = check_binary_operands(state, (lhs, rhs, operand_expected), ret, impure, self_key);
     let lhs_bad = !is_int_key(state.1, l);
     if lhs_bad {
         push_error(state.3, &format!("binary operator '{}' requires integer operands", op_text(op)), file, start, end);
     }
-    let r = check_expr(state, rhs, l, ret, impure, self_key);
     let ok = unify_key(state.1, state.2, state.6, l, r);
     if lhs_bad {
         // The primary already implicates both operands and the rhs was

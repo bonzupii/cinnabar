@@ -4,3 +4,20 @@ pre_commit.log
 /container/local/
 node_modules/
 **/target/
+
+# Build artifacts under tests/fixtures.
+#
+# Compiling a fixture writes its output next to the source: `cargo run --
+# tests/fixtures/x.cnb` leaves an extensionless `x` binary beside `x.cnb`,
+# and `--emit-llvm` leaves an `x.ll`. `pre_commit_check.sh` deletes the
+# specific ones it builds, but anything compiled by hand while working
+# stays behind and is easy to commit by accident.
+#
+# This is an allowlist rather than a list of artifact patterns, because a
+# compiled fixture has no extension to match on. Only fixture *sources* are
+# trackable; everything else under this tree is a local build product. A new
+# source kind needs its extension added here (or a one-off `git add -f`).
+tests/fixtures/**
+!tests/fixtures/**/
+!tests/fixtures/**/*.cnb
+!tests/fixtures/**/*.idl

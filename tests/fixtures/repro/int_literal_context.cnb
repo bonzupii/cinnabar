@@ -1,0 +1,577 @@
+#! Literal typing context: a `const` and a `var` must type the identical
+#! initializer identically, and a bare literal must adopt the type of the
+#! operand it is compared against.
+#!
+#! An integer literal is a width-agnostic magnitude with no type of its
+#! own; it adopts the type its context demands and defaults to `I64` only
+#! when no context supplies one.  A binary operator supplies that context
+#! from two places: the type expected of the whole expression (a `const`'s
+#! declared type, a `var`'s annotation, a parameter, a return type) and
+#! the peer operand's type when only one side is a bare literal.  A value
+#! that already has a type never adopts another one — that would be the
+#! implicit conversion `MANIFESTO.md` forbids — so `int_literal_no_peer.cnb`
+#! pins the rejections that bound this rule.
+#!
+#! Before this rule was stated, the two paths disagreed: `fold_const`
+#! pushed the declared type into a binary expression's operands, so
+#! `pub const ISIZE_MIN: Isize = -9223372036854775807 - 1` typed as Isize,
+#! while `check_binary` typed its operands with no expectation at all, so
+#! the same text in `var min: Isize = ...` defaulted both literals to I64
+#! and failed to unify against Isize.  For I64 locals it only ever worked
+#! by coincidence, because the default width happened to match.  Every
+#! block below asserts the folded const and the runtime var agree, so the
+#! two implementations of the rule cannot drift apart again.
+#!
+#! Exit code 0 means every check passed.  A non-zero code names the exact
+#! check that failed; each type owns a block of eight codes:
+#!
+#!   U8    10..17    I8    20..27    U16   30..37    I16   40..47
+#!   U32   50..57    I32   60..67    U64   70..77    Usize 80..87
+#!   I64   90..97    Isize 100..107
+#!
+#! Within a block the offsets are, in order: +0 var matches folded const at
+#! the width's wrap point, +1 the folded const matches its hand-derived
+#! value, +2 literal adopts the peer's type on the right of a comparison,
+#! +3 the same with the literal on the left, +4 literal on the left of an
+#! arithmetic operator adopts the peer's type, +5 a nested all-literal tree
+#! adopts the expected type through every level, +6 a literal shift count
+#! adopts the shifted operand's type, +7 var matches folded const at the
+#! width's other wrap point.
+#!
+#! Code 1 is the verbatim reproducer this rule was written for.
+
+#! -- The reported reproducer, verbatim ---------------------------------
+pub const ISIZE_MIN: Isize = -9223372036854775807 - 1
+
+fun reported_case() I64
+  var min: Isize = -9223372036854775807 - 1
+  if min != ISIZE_MIN
+    return 1
+  end
+  return 0
+end
+
+#! ---------------------------------------------------------------- U8 --
+pub const U8_WRAP_HI: U8 = 255 + 1
+pub const U8_WRAP_LO: U8 = 0 - 1
+
+fun check_u8() I64
+  var wrap_hi: U8 = 255 + 1
+  if wrap_hi != U8_WRAP_HI
+    return 10
+  end
+  if U8_WRAP_HI != 0
+    return 11
+  end
+
+  var v: U8 = 40
+  if v != 40
+    return 12
+  end
+  if 40 != v
+    return 13
+  end
+
+  var twice: U8 = 2 * v
+  if twice != 80
+    return 14
+  end
+
+  var nested: U8 = 2 * 3 + 4
+  if nested != 10
+    return 15
+  end
+
+  var one: U8 = 1
+  var shifted: U8 = one << 3
+  if shifted != 8
+    return 16
+  end
+
+  var wrap_lo: U8 = 0 - 1
+  if wrap_lo != U8_WRAP_LO
+    return 17
+  end
+
+  return 0
+end
+
+#! ---------------------------------------------------------------- I8 --
+pub const I8_WRAP_HI: I8 = 127 + 1
+pub const I8_MIN: I8 = -127 - 1
+
+fun check_i8() I64
+  var wrap_hi: I8 = 127 + 1
+  if wrap_hi != I8_WRAP_HI
+    return 20
+  end
+  if I8_WRAP_HI != -128
+    return 21
+  end
+
+  var v: I8 = 40
+  if v != 40
+    return 22
+  end
+  if 40 != v
+    return 23
+  end
+
+  var twice: I8 = 2 * v
+  if twice != 80
+    return 24
+  end
+
+  var nested: I8 = 2 * 3 + 4
+  if nested != 10
+    return 25
+  end
+
+  var one: I8 = 1
+  var shifted: I8 = one << 3
+  if shifted != 8
+    return 26
+  end
+
+  var min: I8 = -127 - 1
+  if min != I8_MIN
+    return 27
+  end
+
+  return 0
+end
+
+#! --------------------------------------------------------------- U16 --
+pub const U16_WRAP_HI: U16 = 65535 + 1
+pub const U16_WRAP_LO: U16 = 0 - 1
+
+fun check_u16() I64
+  var wrap_hi: U16 = 65535 + 1
+  if wrap_hi != U16_WRAP_HI
+    return 30
+  end
+  if U16_WRAP_HI != 0
+    return 31
+  end
+
+  var v: U16 = 40
+  if v != 40
+    return 32
+  end
+  if 40 != v
+    return 33
+  end
+
+  var twice: U16 = 2 * v
+  if twice != 80
+    return 34
+  end
+
+  var nested: U16 = 2 * 3 + 4
+  if nested != 10
+    return 35
+  end
+
+  var one: U16 = 1
+  var shifted: U16 = one << 3
+  if shifted != 8
+    return 36
+  end
+
+  var wrap_lo: U16 = 0 - 1
+  if wrap_lo != U16_WRAP_LO
+    return 37
+  end
+
+  return 0
+end
+
+#! --------------------------------------------------------------- I16 --
+pub const I16_WRAP_HI: I16 = 32767 + 1
+pub const I16_MIN: I16 = -32767 - 1
+
+fun check_i16() I64
+  var wrap_hi: I16 = 32767 + 1
+  if wrap_hi != I16_WRAP_HI
+    return 40
+  end
+  if I16_WRAP_HI != -32768
+    return 41
+  end
+
+  var v: I16 = 40
+  if v != 40
+    return 42
+  end
+  if 40 != v
+    return 43
+  end
+
+  var twice: I16 = 2 * v
+  if twice != 80
+    return 44
+  end
+
+  var nested: I16 = 2 * 3 + 4
+  if nested != 10
+    return 45
+  end
+
+  var one: I16 = 1
+  var shifted: I16 = one << 3
+  if shifted != 8
+    return 46
+  end
+
+  var min: I16 = -32767 - 1
+  if min != I16_MIN
+    return 47
+  end
+
+  return 0
+end
+
+#! --------------------------------------------------------------- U32 --
+pub const U32_WRAP_HI: U32 = 0xFFFFFFFF + 1
+pub const U32_WRAP_LO: U32 = 0 - 1
+
+fun check_u32() I64
+  var wrap_hi: U32 = 0xFFFFFFFF + 1
+  if wrap_hi != U32_WRAP_HI
+    return 50
+  end
+  if U32_WRAP_HI != 0
+    return 51
+  end
+
+  var v: U32 = 40
+  if v != 40
+    return 52
+  end
+  if 40 != v
+    return 53
+  end
+
+  var twice: U32 = 2 * v
+  if twice != 80
+    return 54
+  end
+
+  var nested: U32 = 2 * 3 + 4
+  if nested != 10
+    return 55
+  end
+
+  var one: U32 = 1
+  var shifted: U32 = one << 3
+  if shifted != 8
+    return 56
+  end
+
+  var wrap_lo: U32 = 0 - 1
+  if wrap_lo != U32_WRAP_LO
+    return 57
+  end
+
+  return 0
+end
+
+#! --------------------------------------------------------------- I32 --
+pub const I32_WRAP_HI: I32 = 2147483647 + 1
+pub const I32_MIN: I32 = -2147483647 - 1
+
+fun check_i32() I64
+  var wrap_hi: I32 = 2147483647 + 1
+  if wrap_hi != I32_WRAP_HI
+    return 60
+  end
+  if I32_WRAP_HI != -2147483648
+    return 61
+  end
+
+  var v: I32 = 40
+  if v != 40
+    return 62
+  end
+  if 40 != v
+    return 63
+  end
+
+  var twice: I32 = 2 * v
+  if twice != 80
+    return 64
+  end
+
+  var nested: I32 = 2 * 3 + 4
+  if nested != 10
+    return 65
+  end
+
+  var one: I32 = 1
+  var shifted: I32 = one << 3
+  if shifted != 8
+    return 66
+  end
+
+  var min: I32 = -2147483647 - 1
+  if min != I32_MIN
+    return 67
+  end
+
+  return 0
+end
+
+#! --------------------------------------------------------------- U64 --
+pub const U64_WRAP_HI: U64 = 0xFFFFFFFFFFFFFFFF + 1
+pub const U64_WRAP_LO: U64 = 0 - 1
+
+fun check_u64() I64
+  var wrap_hi: U64 = 0xFFFFFFFFFFFFFFFF + 1
+  if wrap_hi != U64_WRAP_HI
+    return 70
+  end
+  if U64_WRAP_HI != 0
+    return 71
+  end
+
+  var v: U64 = 40
+  if v != 40
+    return 72
+  end
+  if 40 != v
+    return 73
+  end
+
+  var twice: U64 = 2 * v
+  if twice != 80
+    return 74
+  end
+
+  var nested: U64 = 2 * 3 + 4
+  if nested != 10
+    return 75
+  end
+
+  var one: U64 = 1
+  var shifted: U64 = one << 3
+  if shifted != 8
+    return 76
+  end
+
+  #! 0 - 1 wraps to U64's max, which is only orderable as an unsigned
+  #! value: read as signed it would be -1 and compare below 1.
+  var wrap_lo: U64 = 0 - 1
+  if wrap_lo != U64_WRAP_LO
+    return 77
+  end
+
+  return 0
+end
+
+#! ------------------------------------------------------------- Usize --
+pub const USIZE_WRAP_HI: Usize = 0xFFFFFFFFFFFFFFFF + 1
+pub const USIZE_WRAP_LO: Usize = 0 - 1
+
+fun check_usize() I64
+  var wrap_hi: Usize = 0xFFFFFFFFFFFFFFFF + 1
+  if wrap_hi != USIZE_WRAP_HI
+    return 80
+  end
+  if USIZE_WRAP_HI != 0
+    return 81
+  end
+
+  var v: Usize = 40
+  if v != 40
+    return 82
+  end
+  if 40 != v
+    return 83
+  end
+
+  var twice: Usize = 2 * v
+  if twice != 80
+    return 84
+  end
+
+  var nested: Usize = 2 * 3 + 4
+  if nested != 10
+    return 85
+  end
+
+  var one: Usize = 1
+  var shifted: Usize = one << 3
+  if shifted != 8
+    return 86
+  end
+
+  var wrap_lo: Usize = 0 - 1
+  if wrap_lo != USIZE_WRAP_LO
+    return 87
+  end
+
+  return 0
+end
+
+#! --------------------------------------------------------------- I64 --
+pub const I64_WRAP_HI: I64 = 9223372036854775807 + 1
+pub const I64_MIN: I64 = -9223372036854775807 - 1
+
+fun check_i64() I64
+  var wrap_hi: I64 = 9223372036854775807 + 1
+  if wrap_hi != I64_WRAP_HI
+    return 90
+  end
+  if I64_WRAP_HI != -9223372036854775807 - 1
+    return 91
+  end
+
+  var v: I64 = 40
+  if v != 40
+    return 92
+  end
+  if 40 != v
+    return 93
+  end
+
+  var twice: I64 = 2 * v
+  if twice != 80
+    return 94
+  end
+
+  var nested: I64 = 2 * 3 + 4
+  if nested != 10
+    return 95
+  end
+
+  var one: I64 = 1
+  var shifted: I64 = one << 3
+  if shifted != 8
+    return 96
+  end
+
+  var min: I64 = -9223372036854775807 - 1
+  if min != I64_MIN
+    return 97
+  end
+
+  return 0
+end
+
+#! ------------------------------------------------------------- Isize --
+pub const ISIZE_WRAP_HI: Isize = 9223372036854775807 + 1
+
+fun check_isize() I64
+  var wrap_hi: Isize = 9223372036854775807 + 1
+  if wrap_hi != ISIZE_WRAP_HI
+    return 100
+  end
+  if ISIZE_WRAP_HI != ISIZE_MIN
+    return 101
+  end
+
+  var v: Isize = 40
+  if v != 40
+    return 102
+  end
+  if 40 != v
+    return 103
+  end
+
+  var twice: Isize = 2 * v
+  if twice != 80
+    return 104
+  end
+
+  var nested: Isize = 2 * 3 + 4
+  if nested != 10
+    return 105
+  end
+
+  var one: Isize = 1
+  var shifted: Isize = one << 3
+  if shifted != 8
+    return 106
+  end
+
+  var min: Isize = -9223372036854775807 - 1
+  if min != ISIZE_MIN
+    return 107
+  end
+
+  return 0
+end
+
+#! A parameter's declared type is a typed context too, so a bare literal
+#! argument adopts it, and a literal compared against the parameter inside
+#! the callee adopts the parameter's type in turn.
+fun takes_u8(value: U8) I64
+  if value != 200
+    return 110
+  end
+  return 0
+end
+
+pub fun main() I64
+  val r_reported = reported_case()
+  if r_reported != 0
+    return r_reported
+  end
+
+  val r_u8 = check_u8()
+  if r_u8 != 0
+    return r_u8
+  end
+
+  val r_i8 = check_i8()
+  if r_i8 != 0
+    return r_i8
+  end
+
+  val r_u16 = check_u16()
+  if r_u16 != 0
+    return r_u16
+  end
+
+  val r_i16 = check_i16()
+  if r_i16 != 0
+    return r_i16
+  end
+
+  val r_u32 = check_u32()
+  if r_u32 != 0
+    return r_u32
+  end
+
+  val r_i32 = check_i32()
+  if r_i32 != 0
+    return r_i32
+  end
+
+  val r_u64 = check_u64()
+  if r_u64 != 0
+    return r_u64
+  end
+
+  val r_usize = check_usize()
+  if r_usize != 0
+    return r_usize
+  end
+
+  val r_i64 = check_i64()
+  if r_i64 != 0
+    return r_i64
+  end
+
+  val r_isize = check_isize()
+  if r_isize != 0
+    return r_isize
+  end
+
+  val r_param = takes_u8(100 + 100)
+  if r_param != 0
+    return r_param
+  end
+
+  return 0
+end
