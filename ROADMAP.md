@@ -516,14 +516,15 @@ all. The two symlink-escape tests are unchanged in what they test.
 ### Shipped
 Definition-site labels, rendered by default rather than behind a flag: a duplicate symbol labels
 the first declaration, an immutable assignment labels the `val` binding, an unhandled
-`Result`/`Option` labels the producing function's return type, a type mismatch labels the
-declaration whose type it violates. `--explain-borrow` still gates only the borrow checker's own
+`Result`/`Option` labels the producing function's return type, and a return-type or
+constant-initializer mismatch labels the declaration whose type it violates. `--explain-borrow` still gates only the borrow checker's own
 explanations.
 
 `src/suggest.rs` offers near matches for unresolved names, drawn from the scope facts the
-resolver materialized rather than a second walk. Every suggestion is hedged ("possible match",
-"did you mean"), an ambiguous match names no candidate and falls back to the neutral message,
-and no suggestion points toward a local bandaid. That wording contract is asserted directly:
+resolver materialized rather than a second walk. Every suggestion is hedged — "did you mean" is the
+only phrasing emitted, and the accepted-hedge list holds only what is emitted — an ambiguous
+match names no candidate and falls back to the neutral message, and no suggestion points
+toward a local bandaid. That wording contract is asserted directly:
 each suggestion carries a hedge, none carries bandaid vocabulary, and a tie stays silent.
 
 ### Dead code is not part of it, and the attempt is worth recording
@@ -532,7 +533,7 @@ An unused-declaration rejection was written and taken back out. The spec does no
 declarations, and this milestone names dead code as something the suggestion engine speaks about
 rather than a new class of rejected program.
 
-What it cost is the argument against it. Eight fixtures had to change to keep compiling — nine
+What it cost is the argument against it. Seven existing fixtures had to change to keep compiling — nine
 functions in a teaching file marked `pub` so the compiler would stop objecting, which is
 declaring something public API in order to silence a check, exactly the local bandaid above. The
 random-program generator, whose job is to emit *valid* programs, had to be changed to emit `pub`
@@ -543,9 +544,18 @@ generator was wrong is the one needing evidence.
 whatever a future rejection is called. Reintroducing this is a language change: state it in
 `MANIFESTO.md`, and find a remedy that is not `pub`, first.
 
+### Carried forward
+- **Dead-code suggestions.** The milestone names dead code as one of the two things the
+  suggestion engine speaks about. Only unresolved names are covered. What a dead-code
+  suggestion should *say*, given that dead code is not an error, is open — and it is the same
+  question as the one above.
+- **Definition-site labels do not yet cover every type mismatch.** Return-type and
+  constant-initializer mismatches carry one; variant-value and call-result mismatches do not.
+  Nothing structural stands in the way — the declaring node is already resolved at both sites.
+
 ---
 
-## Milestone 7 — Cinnabook and Mushlings
+## Milestone 7 — Cinnabook and Mushlings (PARTIAL)
 - `cinnabar burn`: local web server, static content, bundled at compile time, matching the exact
   installed compiler version. There is one binary and it is called `cinnabar`; no shortened
   `cinna` is shipped, aliased, or packaged.
@@ -595,8 +605,9 @@ that cut it off from the host libc, keeping `-no-pie` because `llc` emits a non-
 object. The static-only rule for shipped output is not relaxed and no binary a user receives is
 built this way.
 
-One test exists to keep the gate from being vacuous: memcheck must report real allocations for
-the instrumented build. If that stops holding, the gate is running and seeing nothing.
+Two tests exist to keep the gate from being vacuous. Memcheck must report real allocations for
+the instrumented build, or the gate is running and seeing nothing; and a C program leaking 64
+bytes must fail the same runner, or the gate is running without objecting to anything.
 
 The gate lives in `cargo test`, which `pre_commit_check.sh` already invokes, rather than as a
 new step in that script.
@@ -616,8 +627,8 @@ new step in that script.
   proof. Monomorphization, trait dispatch, and nested sum-type destructuring are the cases it has
   to survive.
 - **The fuzzer's second half.** `tests/fuzz_generalization.rs` generates random well-typed
-  programs already; what it does not yet do is assert the borrow checker never accepts a
-  memory-unsafe one.
+  programs already, and `generate_negative` covers two fixed linearity-probe shapes. What it
+  does not do is generate memory-unsafe programs and assert the borrow checker rejects them.
 
 ---
 

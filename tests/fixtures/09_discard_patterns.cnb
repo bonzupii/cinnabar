@@ -1,21 +1,21 @@
 #!|
   Discard patterns, and the exercise that cannot be written from them yet.
 
-  ROADMAP.md Milestone 7 lists discard patterns among the failure classes to
+  Milestone 7 originally listed discard patterns among the failure classes to
   source a Mushling from, saying each "already has a real compiler
-  diagnostic" and to use it verbatim. That is not true of this one. Every
-  form below compiles today and the program exits zero:
+  diagnostic" and to use it verbatim. That was not true of this one, and the
+  roadmap no longer claims it. Every form below compiles and the program
+  exits zero:
 
-    - `_` as a match arm, which is the consequential one: a catch-all arm
-      makes any match trivially exhaustive, so adding a variant to an enum
-      stops forcing anyone to handle it.
-    - `val _ = 5`, a binding whose value is discarded outright.
-    - `val _unused = 5`, the `_`-prefixed form.
+    - a bare underscore as a match arm, which is the consequential one: a
+      catch-all makes any match trivially exhaustive, so adding a variant to
+      an enum stops forcing anyone to handle it.
+    - a binding named with a bare underscore, discarding its value outright.
+    - the underscore-prefixed form.
 
-  MANIFESTO.md does not ban them either. The prohibition on `_` lives in
-  AGENTS.md, under rules that govern this compiler's own Rust source rather
-  than the language it compiles — the two were conflated when the roadmap
-  entry was written.
+  MANIFESTO.md does not ban them either. The prohibition lives in AGENTS.md,
+  which governs this compiler's own Rust source rather than the language it
+  compiles; the two were conflated when the roadmap entry was written.
 
   So this file is not wired into `exercises()`. An exercise teaches a rule by
   showing its diagnostic, and there is no rule here yet to teach. Whether
@@ -23,13 +23,13 @@
   MANIFESTO.md first, and the exercise follows the rule rather than the other
   way round.
 
-  Kept as the record of that gap, and as the program to check against once
-  the decision is made.
+  `tests/language_questions.rs` asserts this compiles, so the record cannot
+  rot unnoticed — it was broken for two commits before anything checked it.
 |#
 
 pub type Colour
-  Red
-  Green
+  pub Red
+  pub Green
 end
 
 pub fun classify(value: Colour) I64
@@ -42,5 +42,11 @@ end
 pub fun main() I64
   val _ = 5
   val _unused = 7
-  return classify(Red)
+  if classify(Red) != 1
+    return 1
+  end
+  if classify(Green) != 0
+    return 2
+  end
+  return 0
 end

@@ -5,6 +5,10 @@
 //! that a suggestion appeared somewhere: every suggestion is hedged, an
 //! ambiguous match names no candidate, and every definition-site label
 //! carries a real span (the declaration it names).
+//!
+//! The two questions MANIFESTO.md does not answer — whether an unused
+//! declaration or a discard pattern is an error — are pinned in
+//! `tests/language_questions.rs`, not here.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -100,42 +104,6 @@ fn unresolved_type_offers_a_hedged_match() {
     }
 }
 
-/// An unused private declaration is not a rejection.
-///
-/// MANIFESTO.md's list of compile-time invariants names unused *imports*,
-/// not unused declarations. An unused-declaration check was written for this
-/// milestone and removed: its only remedy was to mark demonstration code
-/// `pub`, which is the local bandaid the milestone forbids a diagnostic from
-/// steering anyone towards, and it forced the random-program generator —
-/// which exists to emit valid programs — to emit `pub` everywhere instead.
-///
-/// Asserted on the compiler's exit status rather than on the absence of a
-/// word, so it fails whatever such a diagnostic ends up being called.
-#[test]
-fn an_unused_private_declaration_still_compiles() {
-    let path = fixture("dead_code.cnb");
-    let status = match Command::new(env!("CARGO_BIN_EXE_cinnabar")).arg(&path).arg("--check-only").status() {
-        Ok(status) => status,
-        Err(err) => {
-            assert!(false, "cannot run the compiler on {}: {}", path.display(), err);
-            return;
-        }
-    };
-    assert!(
-        status.success(),
-        "an unused private declaration was rejected: {}",
-        compiler_output(&path)
-    );
-}
-
-/// The definition-site label points at the definition, not merely exists.
-///
-/// Asserting the words "first declared here" appear says nothing about
-/// where they point: a note attached to the error site, or to a fabricated
-/// span, reads identically. Ariadne renders each labelled span with its own
-/// source line, so the discriminating check is that *both* declarations are
-/// shown. The fixture puts them far apart precisely so that a note collapsed
-/// onto the error site would render only the second.
 #[test]
 fn duplicate_symbol_labels_the_first_declaration() {
     let output = compiler_output(&fixture("duplicate_symbol_note.cnb"));
