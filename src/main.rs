@@ -540,7 +540,7 @@ fn current_executable() -> Result<PathBuf, String> {
 fn inspect_binary(path: &Path, output: Option<&Path>) -> ExitCode {
     let (root, entry) = match project_or_source(path) {
         Ok(value) => value,
-        Err(message) => return source_less_failure(&message),
+        Err(failure) => return finish_with_manifest_error(&failure),
     };
     let analyzed = analysis::analyze(&entry.to_string_lossy(), &[]);
     if !analyzed.errors.is_empty() {
@@ -662,7 +662,7 @@ fn minimize_fuzz(path: &Path, output: Option<&Path>) -> ExitCode {
 fn emit_soundness(path: &Path, output: Option<&Path>) -> ExitCode {
     let (root, entry) = match project_or_source(path) {
         Ok(value) => value,
-        Err(message) => return source_less_failure(&message),
+        Err(failure) => return finish_with_manifest_error(&failure),
     };
     let analyzed = analysis::analyze(&entry.to_string_lossy(), &[]);
     if !analyzed.errors.is_empty() {
@@ -700,14 +700,14 @@ fn run_playground(address: &str) -> ExitCode {
     }
 }
 
-fn project_or_source(path: &Path) -> Result<(PathBuf, PathBuf), String> {
+fn project_or_source(path: &Path) -> Result<(PathBuf, PathBuf), project::ManifestError> {
     let is_source = path.is_file()
         && path.file_name().and_then(|name| name.to_str()) != Some(project::MANIFEST_FILE)
         && path.extension().and_then(|extension| extension.to_str()) == Some("cnb");
     if is_source {
         let root = match path.parent() {
             Some(parent) => parent.to_path_buf(),
-            None => return Err(format!("cannot determine source directory for '{}'", path.display())),
+            None => return Err(project::ManifestError::source_less(format!("cannot determine source directory for '{}'", path.display()))),
         };
         return Ok((root, path.to_path_buf()));
     }
@@ -718,7 +718,7 @@ fn project_or_source(path: &Path) -> Result<(PathBuf, PathBuf), String> {
 fn generate_documentation(path: &Path, output: Option<&Path>, serve: bool, address: Option<&str>) -> ExitCode {
     let (root, entry) = match project_or_source(path) {
         Ok(value) => value,
-        Err(message) => return source_less_failure(&message),
+        Err(failure) => return finish_with_manifest_error(&failure),
     };
     let entry_text = entry.to_string_lossy().to_string();
     let analyzed = analysis::analyze(&entry_text, &[]);
@@ -761,7 +761,7 @@ fn initialize_project(path: &Path) -> ExitCode {
             println!("Initialized Cinnabar project in '{}'.", path.display());
             ExitCode::SUCCESS
         }
-        Err(message) => source_less_failure(&message),
+        Err(failure) => finish_with_manifest_error(&failure),
     }
 }
 
@@ -771,7 +771,7 @@ fn run_project_compiler(path: &Path, run: bool, check: bool, target: &str) -> Ex
     }
     let manifest = match project::discover(path) {
         Ok(value) => value,
-        Err(message) => return source_less_failure(&message),
+        Err(failure) => return finish_with_manifest_error(&failure),
     };
     let executable = match std::env::current_exe() {
         Ok(value) => value,
@@ -804,7 +804,7 @@ fn run_project_compiler(path: &Path, run: bool, check: bool, target: &str) -> Ex
 fn run_project_tests(path: &Path, update_snapshots: bool) -> ExitCode {
     let manifest = match project::discover(path) {
         Ok(value) => value,
-        Err(message) => return source_less_failure(&message),
+        Err(failure) => return finish_with_manifest_error(&failure),
     };
     let executable = match std::env::current_exe() {
         Ok(value) => value,
@@ -812,7 +812,7 @@ fn run_project_tests(path: &Path, update_snapshots: bool) -> ExitCode {
     };
     let summary = match project::run_tests(&executable, &manifest, update_snapshots) {
         Ok(value) => value,
-        Err(message) => return source_less_failure(&message),
+        Err(failure) => return finish_with_manifest_error(&failure),
     };
     for failure in &summary.failed {
         eprintln!("FAIL: {}", failure);
@@ -831,6 +831,14 @@ fn exit_code_from_status(status: std::process::ExitStatus) -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// Renders a manifest failure through the reporter every other diagnostic
+/// uses. One with a real span shows the offending line of `build.cnb`; one
+/// with no Cinnabar origin carries `NO_FILE` and renders source-less, which
+/// is what that already means to the reporter.
+fn finish_with_manifest_error(failure: &project::ManifestError) -> ExitCode {
+    finish_with_diagnostics(&failure.diagnostics, &[], &failure.files)
 }
 
 fn source_less_failure(message: &str) -> ExitCode {

@@ -14,11 +14,11 @@ pub struct ProjectManifest {
     pub tests: PathBuf,
 }
 
-pub fn discover(start: &Path) -> Result<ProjectManifest, String> {
+pub fn discover(start: &Path) -> Result<ProjectManifest, ManifestError> {
     let start_dir = if start.is_file() {
         match start.parent() {
             Some(parent) => parent.to_path_buf(),
-            None => return Err(format!("cannot determine project directory for '{}'", start.display())),
+            None => return Err(ManifestError::source_less(format!("cannot determine project directory for '{}'", start.display()))),
         }
     } else {
         start.to_path_buf()
@@ -31,36 +31,36 @@ pub fn discover(start: &Path) -> Result<ProjectManifest, String> {
         }
         cursor = directory.parent();
     }
-    Err(format!("cannot find {} from '{}'", MANIFEST_FILE, start.display()))
+    Err(ManifestError::source_less(format!("cannot find {} from '{}'", MANIFEST_FILE, start.display())))
 }
 
-pub fn entry_for_source(source: &Path) -> Option<PathBuf> {
-    match discover(source) {
-        Ok(manifest) => Some(manifest.entry),
-        Err(message) => {
-            if message.is_empty() {
-                return None;
-            }
-            None
-        }
-    }
+/// The entry source of the project containing `source`.
+///
+/// The failure is handed back rather than swallowed. Whether "there is no
+/// project here" is worth reporting is the caller's policy and not this
+/// function's: the language server treats it as an ordinary answer for a file
+/// that belongs to no project, while a caller that needs a project has the
+/// diagnostic to render. Deciding here would mean either discarding a real
+/// failure or printing one from inside a pipeline stage.
+pub fn entry_for_source(source: &Path) -> Result<PathBuf, ManifestError> {
+    discover(source).map(|manifest| manifest.entry)
 }
 
-pub fn load_manifest(path: &Path) -> Result<ProjectManifest, String> {
+pub fn load_manifest(path: &Path) -> Result<ProjectManifest, ManifestError> {
     let root_source = match path.parent() {
         Some(parent) => parent,
-        None => return Err(format!("manifest '{}' has no project directory", path.display())),
+        None => return Err(ManifestError::source_less(format!("manifest '{}' has no project directory", path.display()))),
     };
     let root = fs::canonicalize(root_source)
         .map_err(|resolve_error| format!("cannot resolve project root '{}': {}", root_source.display(), resolve_error))?;
     let manifest_path = path.to_string_lossy().to_string();
     let analyzed = analysis::analyze(&manifest_path, &[]);
     if !analyzed.errors.is_empty() {
-        return Err(render_manifest_diagnostics(&analyzed.errors, &analyzed.files));
+        return Err(ManifestError::from_front_end(&analyzed));
     }
     let manifest_file = analysis::file_id_of(&analyzed, &manifest_path);
     if manifest_file == NONE {
-        return Err(format!("manifest '{}' was not present in its front-end analysis", path.display()));
+        return Err(ManifestError::source_less(format!("manifest '{}' was not present in its front-end analysis", path.display())));
     }
     let manifest_source = analysis::file_text_of(&analyzed, manifest_file);
     let manifest_span = (manifest_file, 0i64, manifest_source.len() as i64);
@@ -140,7 +140,7 @@ pub fn load_manifest(path: &Path) -> Result<ProjectManifest, String> {
     };
     let entry_path = canonicalize_confined_existing(&root, &entry_source, "project entry")?;
     if !entry_path.is_file() {
-        return Err(format!("project entry '{}' is not a file", entry_path.display()));
+        return Err(ManifestError::source_less(format!("project entry '{}' is not a file", entry_path.display())));
     }
     Ok(ProjectManifest { name: project_name, root, entry: entry_path, tests: tests_path })
 }
@@ -154,7 +154,7 @@ pub fn load_manifest(path: &Path) -> Result<ProjectManifest, String> {
 /// because a path is obviously a path; `NAME` reaches the same filesystem
 /// through a field that does not look like one, which is exactly why it is
 /// checked here rather than trusted.
-fn validate_project_name(value: &str, analyzed: &analysis::Analysis, item: i64) -> Result<String, String> {
+fn validate_project_name(value: &str, analyzed: &analysis::Analysis, item: i64) -> Result<String, ManifestError> {
     // What the first component *is* decides the message. Counting components
     // first would answer "../outside" with a complaint about its length,
     // which is true and useless: the problem is the step out of the root, and
@@ -249,7 +249,54 @@ fn is_manifest_string_type(nodes: &[i64], key: i64) -> bool {
     byte != NONE && node_b(nodes, byte) == TYD_BUILTIN && node_f(nodes, byte) == BUILTIN_U8
 }
 
-fn manifest_item_error(analyzed: &analysis::Analysis, item: i64, message: &str) -> String {
+/// A manifest failure, carried as the compiler's own diagnostics.
+///
+/// `build.cnb` is Cinnabar source, so its errors have real spans in a real
+/// file and belong in the same ariadne report as every other diagnostic.
+/// Flattening them to a string here did two forbidden things at once: it
+/// stringified an error before the final diagnostic, and it put a second
+/// byte-offset-to-line-and-column implementation beside the one the compiler
+/// already has.
+///
+/// A failure with no Cinnabar origin — a directory that cannot be read, a
+/// manifest that is not there — carries `NO_FILE`, which the renderer already
+/// understands. That is a source-less origin represented explicitly rather
+/// than faked with a span into a file it did not come from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManifestError {
+    pub diagnostics: Vec<Diag>,
+    pub files: Vec<(String, String)>,
+}
+
+impl ManifestError {
+    /// A failure with no Cinnabar source behind it.
+    pub fn source_less(message: String) -> ManifestError {
+        ManifestError { diagnostics: vec![(message, NO_FILE, 0, 0)], files: Vec::new() }
+    }
+
+    /// Everything the front end reported about the manifest, unchanged.
+    fn from_front_end(analyzed: &analysis::Analysis) -> ManifestError {
+        ManifestError { diagnostics: analyzed.errors.clone(), files: analyzed.files.clone() }
+    }
+
+    /// The first message, for callers that want text rather than a report.
+    pub fn message(&self) -> String {
+        match self.diagnostics.first() {
+            Some(diagnostic) => diagnostic.0.clone(),
+            None => "manifest failed without a diagnostic".to_string(),
+        }
+    }
+}
+
+// `?` converts a source-less failure automatically, which is what the
+// filesystem errors throughout this module are.
+impl From<String> for ManifestError {
+    fn from(message: String) -> ManifestError {
+        ManifestError::source_less(message)
+    }
+}
+
+fn manifest_item_error(analyzed: &analysis::Analysis, item: i64, message: &str) -> ManifestError {
     manifest_span_error(
         analyzed,
         (
@@ -261,81 +308,47 @@ fn manifest_item_error(analyzed: &analysis::Analysis, item: i64, message: &str) 
     )
 }
 
-fn manifest_span_error(analyzed: &analysis::Analysis, span: (i64, i64, i64), message: &str) -> String {
-    let diagnostics = vec![(message.to_string(), span.0, span.1, span.2)];
-    render_manifest_diagnostics(&diagnostics, &analyzed.files)
-}
-
-fn render_manifest_diagnostics(errors: &[Diag], files: &[(String, String)]) -> String {
-    let mut rendered: Vec<String> = Vec::new();
-    for diagnostic in errors {
-        if diagnostic.1 == NO_FILE {
-            rendered.push(diagnostic.0.clone());
-            continue;
-        }
-        let source = match files.get(diagnostic.1 as usize) {
-            Some(value) => value,
-            None => {
-                rendered.push(format!("{} (unknown source file {})", diagnostic.0, diagnostic.1));
-                continue;
-            }
-        };
-        if diagnostic.2 < 0 || diagnostic.3 < diagnostic.2 || diagnostic.3 as usize > source.1.len() {
-            rendered.push(format!("{} (invalid source span for '{}')", diagnostic.0, source.0));
-            continue;
-        }
-        let start = diagnostic.2 as usize;
-        let prefix = match source.1.get(0..start) {
-            Some(value) => value,
-            None => {
-                rendered.push(format!("{} (invalid source boundary for '{}')", diagnostic.0, source.0));
-                continue;
-            }
-        };
-        let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
-        let column = match prefix.rsplit('\n').next() {
-            Some(value) => value.chars().count() + 1,
-            None => 1usize,
-        };
-        rendered.push(format!("{}:{}:{}: {}", source.0, line, column, diagnostic.0));
+fn manifest_span_error(analyzed: &analysis::Analysis, span: (i64, i64, i64), message: &str) -> ManifestError {
+    ManifestError {
+        diagnostics: vec![(message.to_string(), span.0, span.1, span.2)],
+        files: analyzed.files.clone(),
     }
-    rendered.join("\n")
 }
 
-fn canonicalize_confined_existing(root: &Path, path: &Path, role: &str) -> Result<PathBuf, String> {
+fn canonicalize_confined_existing(root: &Path, path: &Path, role: &str) -> Result<PathBuf, ManifestError> {
     let resolved = fs::canonicalize(path)
         .map_err(|resolve_error| format!("cannot resolve {} '{}': {}", role, path.display(), resolve_error))?;
     if !resolved.starts_with(root) {
-        return Err(format!("{} '{}' resolves outside project root '{}'", role, path.display(), root.display()));
+        return Err(ManifestError::source_less(format!("{} '{}' resolves outside project root '{}'", role, path.display(), root.display())));
     }
     Ok(resolved)
 }
 
-fn validate_confined_sidecar(root: &Path, path: &Path, role: &str) -> Result<(), String> {
+fn validate_confined_sidecar(root: &Path, path: &Path, role: &str) -> Result<(), ManifestError> {
     if sidecar_present(path, role)? {
         let resolved = canonicalize_confined_existing(root, path, role)?;
         if !resolved.is_file() {
-            return Err(format!("{} '{}' is not a file", role, path.display()));
+            return Err(ManifestError::source_less(format!("{} '{}' is not a file", role, path.display())));
         }
         return Ok(());
     }
     let parent = match path.parent() {
         Some(value) => value,
-        None => return Err(format!("{} '{}' has no parent directory", role, path.display())),
+        None => return Err(ManifestError::source_less(format!("{} '{}' has no parent directory", role, path.display()))),
     };
     let resolved_parent = canonicalize_confined_existing(root, parent, role)?;
     if !resolved_parent.is_dir() {
-        return Err(format!("{} parent '{}' is not a directory", role, parent.display()));
+        return Err(ManifestError::source_less(format!("{} parent '{}' is not a directory", role, parent.display())));
     }
     Ok(())
 }
 
-fn sidecar_present(path: &Path, role: &str) -> Result<bool, String> {
+fn sidecar_present(path: &Path, role: &str) -> Result<bool, ManifestError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
             let recognized_path = metadata.is_file() || metadata.is_symlink() || metadata.is_dir();
             if !recognized_path {
-                return Err(format!("cannot classify {} '{}'", role, path.display()));
+                return Err(ManifestError::source_less(format!("cannot classify {} '{}'", role, path.display())));
             }
             Ok(true)
         }
@@ -343,13 +356,13 @@ fn sidecar_present(path: &Path, role: &str) -> Result<bool, String> {
             if inspect_error.kind() == std::io::ErrorKind::NotFound {
                 Ok(false)
             } else {
-                Err(format!("cannot inspect {} '{}': {}", role, path.display(), inspect_error))
+                Err(ManifestError::source_less(format!("cannot inspect {} '{}': {}", role, path.display(), inspect_error)))
             }
         }
     }
 }
 
-fn validate_relative_path(value: &str, analyzed: &analysis::Analysis, item: i64) -> Result<PathBuf, String> {
+fn validate_relative_path(value: &str, analyzed: &analysis::Analysis, item: i64) -> Result<PathBuf, ManifestError> {
     if value.is_empty() {
         return Err(manifest_item_error(analyzed, item, "path value cannot be empty"));
     }
@@ -383,14 +396,14 @@ fn validate_relative_path(value: &str, analyzed: &analysis::Analysis, item: i64)
     Ok(path)
 }
 
-pub fn initialize(directory: &Path) -> Result<(), String> {
+pub fn initialize(directory: &Path) -> Result<(), ManifestError> {
     let manifest = directory.join(MANIFEST_FILE);
     let main = directory.join("main.cnb");
     let tests_dir = directory.join("tests");
     let smoke = tests_dir.join("smoke.cnb");
     for target in [&manifest, &main, &smoke] {
         if target.exists() {
-            return Err(format!("refusing to overwrite existing path '{}'", target.display()));
+            return Err(ManifestError::source_less(format!("refusing to overwrite existing path '{}'", target.display())));
         }
     }
     fs::create_dir_all(&tests_dir)
@@ -412,10 +425,10 @@ pub fn initialize(directory: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn discover_tests(manifest: &ProjectManifest) -> Result<Vec<PathBuf>, String> {
+pub fn discover_tests(manifest: &ProjectManifest) -> Result<Vec<PathBuf>, ManifestError> {
     let tests_root = canonicalize_confined_existing(&manifest.root, &manifest.tests, "test directory")?;
     if !tests_root.is_dir() {
-        return Err(format!("test directory '{}' is not a directory", tests_root.display()));
+        return Err(ManifestError::source_less(format!("test directory '{}' is not a directory", tests_root.display())));
     }
     let mut tests = Vec::new();
     collect_tests(&tests_root, &mut tests)?;
@@ -423,7 +436,7 @@ pub fn discover_tests(manifest: &ProjectManifest) -> Result<Vec<PathBuf>, String
     Ok(tests)
 }
 
-fn collect_tests(directory: &Path, tests: &mut Vec<PathBuf>) -> Result<(), String> {
+fn collect_tests(directory: &Path, tests: &mut Vec<PathBuf>) -> Result<(), ManifestError> {
     let entries = fs::read_dir(directory)
         .map_err(|read_error| format!("cannot read test directory '{}': {}", directory.display(), read_error))?;
     for entry_result in entries {
@@ -447,7 +460,7 @@ fn collect_tests(directory: &Path, tests: &mut Vec<PathBuf>) -> Result<(), Strin
     Ok(())
 }
 
-pub fn run_tests(executable: &Path, manifest: &ProjectManifest, update_snapshots: bool) -> Result<TestSummary, String> {
+pub fn run_tests(executable: &Path, manifest: &ProjectManifest, update_snapshots: bool) -> Result<TestSummary, ManifestError> {
     let tests_root = canonicalize_confined_existing(&manifest.root, &manifest.tests, "test directory")?;
     let tests = discover_tests(manifest)?;
     let output_dir = manifest.root.join("target").join("cinnabar-tests");
@@ -478,7 +491,7 @@ pub fn run_tests(executable: &Path, manifest: &ProjectManifest, update_snapshots
         };
         match result {
             Ok(()) => passed += 1,
-            Err(message) => failed.push(message),
+            Err(failure) => failed.push(failure.message()),
         }
     }
     Ok(TestSummary { discovered: tests.len(), passed, failed })
@@ -506,9 +519,9 @@ fn exit_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.exit", path.display()))
 }
 
-fn check_rejection(root: &Path, test: &Path, snapshot: &Path, compile: &Output, update_snapshots: bool) -> Result<(), String> {
+fn check_rejection(root: &Path, test: &Path, snapshot: &Path, compile: &Output, update_snapshots: bool) -> Result<(), ManifestError> {
     if compile.status.success() {
-        return Err(format!("{}: expected rejection but compilation succeeded", test.display()));
+        return Err(ManifestError::source_less(format!("{}: expected rejection but compilation succeeded", test.display())));
     }
     let actual = normalize_text(&String::from_utf8_lossy(&compile.stderr));
     if update_snapshots {
@@ -522,15 +535,15 @@ fn check_rejection(root: &Path, test: &Path, snapshot: &Path, compile: &Output, 
         let expected = fs::read_to_string(snapshot)
             .map_err(|read_error| format!("cannot read snapshot '{}': {}", snapshot.display(), read_error))?;
         if normalize_text(&expected) != actual {
-            return Err(format!("{}: diagnostic snapshot differs from '{}'", test.display(), snapshot.display()));
+            return Err(ManifestError::source_less(format!("{}: diagnostic snapshot differs from '{}'", test.display(), snapshot.display())));
         }
     }
     Ok(())
 }
 
-fn check_success(root: &Path, test: &Path, binary: &Path, compile: &Output) -> Result<(), String> {
+fn check_success(root: &Path, test: &Path, binary: &Path, compile: &Output) -> Result<(), ManifestError> {
     if !compile.status.success() {
-        return Err(format!("{}: compilation failed\n{}", test.display(), String::from_utf8_lossy(&compile.stderr)));
+        return Err(ManifestError::source_less(format!("{}: compilation failed\n{}", test.display(), String::from_utf8_lossy(&compile.stderr))));
     }
     let run_status = Command::new(binary)
         .current_dir(match test.parent() {
@@ -543,7 +556,7 @@ fn check_success(root: &Path, test: &Path, binary: &Path, compile: &Output) -> R
     status_matches(run_status, expected, test)
 }
 
-fn expected_exit(root: &Path, test: &Path) -> Result<i32, String> {
+fn expected_exit(root: &Path, test: &Path) -> Result<i32, ManifestError> {
     let path = exit_path(test);
     if !sidecar_present(&path, "expected exit sidecar")? {
         return Ok(0);
@@ -553,19 +566,19 @@ fn expected_exit(root: &Path, test: &Path) -> Result<i32, String> {
         .map_err(|read_error| format!("cannot read expected exit '{}': {}", path.display(), read_error))?;
     text.trim()
         .parse::<i32>()
-        .map_err(|parse_error| format!("invalid exit status in '{}': {}", path.display(), parse_error))
+        .map_err(|parse_error| ManifestError::source_less(format!("invalid exit status in '{}': {}", path.display(), parse_error)))
 }
 
-fn status_matches(status: ExitStatus, expected: i32, test: &Path) -> Result<(), String> {
+fn status_matches(status: ExitStatus, expected: i32, test: &Path) -> Result<(), ManifestError> {
     match status.code() {
         Some(actual) => {
             if actual == expected {
                 Ok(())
             } else {
-                Err(format!("{}: expected exit {}, got {}", test.display(), expected, actual))
+                Err(ManifestError::source_less(format!("{}: expected exit {}, got {}", test.display(), expected, actual)))
             }
         }
-        None => Err(format!("{}: test terminated without an exit status", test.display())),
+        None => Err(ManifestError::source_less(format!("{}: test terminated without an exit status", test.display()))),
     }
 }
 
@@ -592,13 +605,58 @@ mod tests {
         assert!(fs::write(root.join(MANIFEST_FILE), manifest_source).is_ok());
     }
 
-    fn rejected_manifest(label: &str, manifest_source: &str) -> String {
+    fn rejected_manifest(label: &str, manifest_source: &str) -> ManifestError {
         let root = test_directory(label);
         write_project(&root, manifest_source);
         match load_manifest(&root.join(MANIFEST_FILE)) {
-            Ok(manifest) => manifest.name,
-            Err(message) => message,
+            Ok(manifest) => {
+                assert!(false, "manifest was accepted, name '{}'", manifest.name);
+                ManifestError::source_less(String::new())
+            }
+            Err(failure) => failure,
         }
+    }
+
+    /// Asserts the rejection says `message`, and says it *somewhere real*.
+    ///
+    /// The span is checked rather than a rendered "file:line:col" prefix.
+    /// That prefix used to come from a renderer inside this module, and
+    /// removing it is the point: the diagnostic now carries its own span to
+    /// the compiler's reporter, so the span is what there is to assert.
+    fn assert_rejected_at_source(failure: &ManifestError, message: &str) {
+        let diagnostic = match failure.diagnostics.first() {
+            Some(value) => value,
+            None => {
+                assert!(false, "rejected with no diagnostic at all");
+                return;
+            }
+        };
+        assert!(
+            diagnostic.0.contains(message),
+            "rejected with '{}', want something containing '{}'",
+            diagnostic.0,
+            message
+        );
+        assert!(
+            diagnostic.1 != NO_FILE,
+            "'{}' carries no source file, but it is about the manifest's own text",
+            diagnostic.0
+        );
+        let source = match failure.files.get(diagnostic.1 as usize) {
+            Some(value) => value,
+            None => {
+                assert!(false, "'{}' names file {} which is not in the file table", diagnostic.0, diagnostic.1);
+                return;
+            }
+        };
+        assert!(
+            diagnostic.2 >= 0 && diagnostic.3 >= diagnostic.2 && diagnostic.3 as usize <= source.1.len(),
+            "'{}' spans {}..{} of a {}-byte manifest",
+            diagnostic.0,
+            diagnostic.2,
+            diagnostic.3,
+            source.1.len()
+        );
     }
 
     #[test]
@@ -610,8 +668,8 @@ mod tests {
         );
         let manifest = match load_manifest(&root.join(MANIFEST_FILE)) {
             Ok(value) => value,
-            Err(message) => {
-                assert!(message.is_empty(), "{}", message);
+            Err(failure) => {
+                assert!(false, "{}", failure.message());
                 return;
             }
         };
@@ -622,11 +680,11 @@ mod tests {
 
     #[test]
     fn missing_required_manifest_field_has_source_location() {
-        let message = rejected_manifest(
+        let failure = rejected_manifest(
             "missing_entry",
             "pub const NAME: &[U8] = \"cinnabar\"\n",
         );
-        assert!(message.contains("build.cnb:1:1: missing required ENTRY field"), "{}", message);
+        assert_rejected_at_source(&failure, "missing required ENTRY field");
     }
 
     #[test]
@@ -638,8 +696,8 @@ mod tests {
         );
         let manifest = match load_manifest(&root.join(MANIFEST_FILE)) {
             Ok(value) => value,
-            Err(message) => {
-                assert!(message.is_empty(), "{}", message);
+            Err(failure) => {
+                assert!(false, "{}", failure.message());
                 return;
             }
         };
@@ -648,29 +706,29 @@ mod tests {
 
     #[test]
     fn duplicate_manifest_field_has_source_location() {
-        let message = rejected_manifest(
+        let failure = rejected_manifest(
             "duplicate_entry",
             "pub const NAME: &[U8] = \"cinnabar\"\npub const ENTRY: &[U8] = \"main.cnb\"\npub const ENTRY: &[U8] = \"other.cnb\"\n",
         );
-        assert!(message.contains("build.cnb:3:5: duplicate symbol 'ENTRY'"), "{}", message);
+        assert_rejected_at_source(&failure, "duplicate symbol 'ENTRY'");
     }
 
     #[test]
     fn wrong_manifest_field_type_has_declaration_location() {
-        let message = rejected_manifest(
+        let failure = rejected_manifest(
             "wrong_type",
             "pub const NAME: &[U8] = \"cinnabar\"\npub const ENTRY: I64 = 1\n",
         );
-        assert!(message.contains("build.cnb:2:5: manifest fields must have declared type '&[U8]'"), "{}", message);
+        assert_rejected_at_source(&failure, "manifest fields must have declared type '&[U8]'");
     }
 
     #[test]
     fn manifest_path_cannot_escape_project_root() {
-        let message = rejected_manifest(
+        let failure = rejected_manifest(
             "escape",
             "pub const NAME: &[U8] = \"cinnabar\"\npub const ENTRY: &[U8] = \"../outside.cnb\"\n",
         );
-        assert!(message.contains("build.cnb:2:5: project paths cannot leave the project root"), "{}", message);
+        assert_rejected_at_source(&failure, "project paths cannot leave the project root");
     }
 
     // NAME names the built artifact, so it reaches the filesystem through a
@@ -682,35 +740,35 @@ mod tests {
             "name_escape",
             "pub const NAME: &[U8] = \"../outside\"\npub const ENTRY: &[U8] = \"main.cnb\"\n",
         );
-        assert!(escaping.contains("project name cannot leave the project root"), "{}", escaping);
+        assert_rejected_at_source(&escaping, "project name cannot leave the project root");
 
         let nested = rejected_manifest(
             "name_nested",
             "pub const NAME: &[U8] = \"nested/name\"\npub const ENTRY: &[U8] = \"main.cnb\"\n",
         );
-        assert!(nested.contains("project name must be a single path component"), "{}", nested);
+        assert_rejected_at_source(&nested, "project name must be a single path component");
 
         let empty = rejected_manifest(
             "name_empty",
             "pub const NAME: &[U8] = \"\"\npub const ENTRY: &[U8] = \"main.cnb\"\n",
         );
-        assert!(empty.contains("project name cannot be empty"), "{}", empty);
+        assert_rejected_at_source(&empty, "project name cannot be empty");
     }
 
     #[test]
     fn invalid_cinnabar_manifest_reports_frontend_diagnostic() {
-        let message = rejected_manifest("invalid_source", "entry = main.cnb\n");
-        assert!(message.contains("build.cnb:1:"), "{}", message);
-        assert!(!message.contains("expected 'key = relative/path'"), "{}", message);
+        let failure = rejected_manifest("invalid_source", "entry = main.cnb\n");
+        assert!(failure.diagnostics.first().is_some(), "no diagnostic reported");
+        assert!(!failure.message().contains("expected 'key = relative/path'"), "{}", failure.message());
     }
 
     #[test]
     fn manifest_rejects_items_that_are_not_public_constants() {
-        let message = rejected_manifest(
+        let failure = rejected_manifest(
             "private_const",
             "const NAME: &[U8] = \"cinnabar\"\npub const ENTRY: &[U8] = \"main.cnb\"\n",
         );
-        assert!(message.contains("build.cnb:1:1: manifest items must be pub const declarations"), "{}", message);
+        assert_rejected_at_source(&failure, "manifest items must be pub const declarations");
     }
 
     #[test]
@@ -751,8 +809,8 @@ mod tests {
 
         let manifest = match load_manifest(&root.join(MANIFEST_FILE)) {
             Ok(value) => value,
-            Err(message) => {
-                assert!(message.is_empty(), "{}", message);
+            Err(failure) => {
+                assert!(false, "{}", failure.message());
                 return;
             }
         };
@@ -765,7 +823,7 @@ mod tests {
             }
             Err(value) => value,
         };
-        assert!(message.contains("resolves outside project root"));
+        assert!(message.message().contains("resolves outside project root"));
     }
 
     #[cfg(unix)]

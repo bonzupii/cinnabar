@@ -664,7 +664,10 @@ fn register_document(state: &mut ServerState, path: &str) -> String {
     if state.roots.contains(&path.to_string()) {
         return path.to_string();
     }
-    if let Some(entry_path) = project::entry_for_source(std::path::Path::new(path)) {
+    // A file that belongs to no project is the ordinary case for an editor —
+    // a scratch buffer, a fixture opened on its own — so the failure is the
+    // answer "no project", not something to report to the user.
+    if let Ok(entry_path) = project::entry_for_source(std::path::Path::new(path)) {
         let entry = entry_path.to_string_lossy().to_string();
         state.doc_entries.push((path.to_string(), entry.clone()));
         if !state.roots.contains(&entry) {
