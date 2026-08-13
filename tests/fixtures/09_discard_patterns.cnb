@@ -1,7 +1,46 @@
-pub type Bad
-  _: I64
+#!|
+  Discard patterns, and the exercise that cannot be written from them yet.
+
+  ROADMAP.md Milestone 7 lists discard patterns among the failure classes to
+  source a Mushling from, saying each "already has a real compiler
+  diagnostic" and to use it verbatim. That is not true of this one. Every
+  form below compiles today and the program exits zero:
+
+    - `_` as a match arm, which is the consequential one: a catch-all arm
+      makes any match trivially exhaustive, so adding a variant to an enum
+      stops forcing anyone to handle it.
+    - `val _ = 5`, a binding whose value is discarded outright.
+    - `val _unused = 5`, the `_`-prefixed form.
+
+  MANIFESTO.md does not ban them either. The prohibition on `_` lives in
+  AGENTS.md, under rules that govern this compiler's own Rust source rather
+  than the language it compiles — the two were conflated when the roadmap
+  entry was written.
+
+  So this file is not wired into `exercises()`. An exercise teaches a rule by
+  showing its diagnostic, and there is no rule here yet to teach. Whether
+  Cinnabar rejects discards is a language decision: it belongs in
+  MANIFESTO.md first, and the exercise follows the rule rather than the other
+  way round.
+
+  Kept as the record of that gap, and as the program to check against once
+  the decision is made.
+|#
+
+pub type Colour
+  Red
+  Green
+end
+
+pub fun classify(value: Colour) I64
+  match value
+    Red => return 1
+    _ => return 0
+  end
 end
 
 pub fun main() I64
-  return 0
+  val _ = 5
+  val _unused = 7
+  return classify(Red)
 end

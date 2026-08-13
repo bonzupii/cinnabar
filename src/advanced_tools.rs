@@ -65,10 +65,22 @@ fn exercises() -> Vec<Exercise> {
         Exercise { file: "05_const_division.cnb", lesson: "Compile-time division by zero is rejected.", source: include_str!("../tests/fixtures/repro/div_zero_const.cnb"), expected: "division by zero" },
         Exercise { file: "06_integer_range.cnb", lesson: "Integer literals must fit their declared type.", source: include_str!("../tests/fixtures/repro/int_literal_range.cnb"), expected: "out of range" },
         Exercise { file: "07_recursion.cnb", lesson: "Recursion must be tail-recursive.", source: include_str!("../tests/fixtures/repro/non_tail_recursion.cnb"), expected: "tail" },
-        Exercise { file: "08_dropped_pub.cnb", lesson: "An item that is not public cannot be used from outside the module that declares it.", source: include_str!("../tests/fixtures/08_dropped_pub.cnb"), expected: "cannot call '" },
-        Exercise { file: "09_discard_patterns.cnb", lesson: "Discard patterns using `_` or `_`-prefixed bindings are banned in every position.", source: include_str!("../tests/fixtures/09_discard_patterns.cnb"), expected: "'_' violates casing rule" },
+        Exercise { file: "08_dropped_pub.cnb", lesson: "An item that is not public cannot be used from outside the module that declares it.", source: include_str!("../tests/fixtures/08_dropped_pub.cnb"), expected: "cannot call" },
     ]
 }
+
+// There is no discard-pattern exercise, though ROADMAP.md Milestone 7 lists
+// discard patterns among the failure classes to source one from.
+//
+// An exercise is a program with a real diagnostic attached, and this one has
+// none. A bare underscore used as a match arm, as a binding name, or as the
+// prefix of one all compile today and exit zero. MANIFESTO.md does not ban
+// them either — the prohibition lives in AGENTS.md, which governs this
+// compiler's own Rust source rather than the language it compiles.
+//
+// See `tests/fixtures/09_discard_patterns.cnb`. Deciding whether Cinnabar
+// rejects discards is a language change and belongs in MANIFESTO.md first;
+// an exercise cannot be written ahead of the rule it teaches.
 
 pub fn initialize_mushlings(directory: &Path) -> Result<(), String> {
     std::fs::create_dir_all(directory)
