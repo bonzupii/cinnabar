@@ -43,6 +43,8 @@ pub struct Protocol {
     pub invalid_utf8: i64,
     pub exit_diag: i64,
     pub system_fault: i64,
+    pub read_only: i64,
+    pub write_truncate: i64,
 }
 
 pub fn protocol_of(names: &[String]) -> Protocol {
@@ -59,6 +61,8 @@ pub fn protocol_of(names: &[String]) -> Protocol {
         invalid_utf8: find_name(names, "InvalidUtf8"),
         exit_diag: find_name(names, "ExitDiagnostic"),
         system_fault: find_name(names, "SystemFault"),
+        read_only: find_name(names, "ReadOnly"),
+        write_truncate: find_name(names, "WriteTruncate"),
     }
 }
 
@@ -1108,10 +1112,9 @@ fn emit_unary<'ctx, 'a>(
         let out = declare_local(sess, key, "ref", span)?;
         let ref_elem = em_key_elem(sess, key);
         let inner_key = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, inner));
-        if op == UN_REF
-            && em_key_kind(sess, ref_elem) == TYD_SLICE
-            && em_key_kind(sess, inner_key) == TYD_ARRAY
-        {
+        // The array-to-slice coercion, for `&` and `&mut` alike: the
+        // borrow becomes a `{ ptr, len }` view over the array's storage.
+        if em_key_kind(sess, ref_elem) == TYD_SLICE && em_key_kind(sess, inner_key) == TYD_ARRAY {
             let d = slice_gep(sess, out, 0, "")?;
             store_key(sess, d, inner_ptr.into())?;
             let l = slice_gep(sess, out, 1, "")?;
@@ -2448,6 +2451,19 @@ fn dispatch_native<'ctx>(
     if op == NAT_HASH_MAP_REMOVE {
         return native_hash_map_remove(sess, f, locals, params_list, ret_key, out, span);
     }
+    if op == NAT_FILE_OPEN {
+        return native_file_open(sess, f, locals, ret_key, out, span);
+    }
+    if op == NAT_FILE_READ {
+        return native_file_transfer(sess, f, locals, syscall::Sys::Read, ret_key, out, span);
+    }
+    if op == NAT_FILE_WRITE {
+        return native_file_transfer(sess, f, locals, syscall::Sys::Write, ret_key, out, span);
+    }
+    if op == NAT_FILE_CLOSE {
+        native_file_close(sess, locals, ret_key, out, span)?;
+        return Ok(out);
+    }
     if op == NAT_SELF_CHECK {
         native_self_check(sess, ret_key, out, span)?;
         return Ok(out);
@@ -3300,6 +3316,221 @@ fn native_self_check<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: 
     let unit_val = build_unit_value(sess, unit_key, span)?;
     let ok_result = build_result_ok(sess, ret_key, unit_key, unit_val, span)?;
     copy_to_out(sess, ret_key, out, ok_result, span)?;
+    Ok(())
+}
+
+// The largest path `File.open` accepts, matching Linux's own `PATH_MAX`.
+//
+// A path arrives as a `&[U8]` carrying its own length, but `openat` wants a
+// NUL-terminated string, so the path is copied into a stack buffer with a
+// terminator appended. Bounding it at the kernel's own limit means the copy
+// needs no allocation and a longer path is rejected with the same error the
+// kernel would have produced.
+const PATH_MAX: u64 = 4096;
+
+/// `ENAMETOOLONG`, reported for a path at or over `PATH_MAX`.
+const ENAMETOOLONG: u64 = 36;
+
+// A Linux system call reports failure as a negative errno in its result
+// register.  This turns that into the positive code a `SystemFault` payload
+// carries, so a Cinnabar program sees the same number `errno` would hold.
+fn errno_of<'ctx>(sess: &mut Session<'ctx, '_, '_>, raw: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
+    sess.2
+        .build_int_neg(raw, "")
+        .map_err(|err| builder_error(span.0, span.1, span.2, &format!("internal: cannot read an error code out of a system-call result: {}", err)))
+}
+
+// Builds `Err(SystemFault(code))` into `out`.
+//
+// Shared by every syscall-backed surface, so the mapping from a kernel
+// error to a Cinnabar value is stated once. `Net` reaches the same variant
+// through `__errno_location`, because its libc wrappers report that way;
+// the syscall path has the code in hand already.
+fn system_fault_result<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: PointerValue<'ctx>, code: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
+    let err_key = result_arg_key(sess, ret_key, 1);
+    let tag = variant_tag_of(sess, err_key, sess.12.system_fault, span)?;
+    let f0 = variant_payload_key(sess, err_key, tag, 0, span)?;
+    let slot = declare_local(sess, f0, "errno", span)?;
+    let widened = word_of(sess, code, span)?;
+    store_key(sess, slot, widened.into())?;
+    let fail_val = build_enum_value(sess, err_key, tag, &[(f0, slot)], span)?;
+    let err_result = build_result_err(sess, ret_key, err_key, fail_val, span)?;
+    copy_to_out(sess, ret_key, out, err_result, span)
+}
+
+// Splits control flow on a raw syscall result: negative is a failure that
+// writes `Err(SystemFault(errno))` into `out` and jumps to the join block,
+// non-negative continues in the block this returns positioned at.
+//
+// The caller resumes emitting the success path immediately and branches to
+// the returned join block when done.
+fn syscall_result_branch<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    f: FunctionValue<'ctx>,
+    ret_key: i64,
+    out: PointerValue<'ctx>,
+    raw: IntValue<'ctx>,
+    span: (i64, i64, i64),
+) -> Result<BasicBlockId<'ctx>, CodegenError> {
+    let zero = raw.get_type().const_zero();
+    let ok_cmp = sess.2.build_int_compare(IntPredicate::SGE, raw, zero, "").map_err(builder_fail)?;
+    let fail_block = new_block(sess, f, "sys_fail");
+    let ok_block = new_block(sess, f, "sys_ok");
+    let after = new_block(sess, f, "sys_after");
+    sess.2.build_conditional_branch(ok_cmp, ok_block, fail_block).map_err(builder_fail)?;
+    sess.2.position_at_end(fail_block);
+    let code = errno_of(sess, raw, span)?;
+    system_fault_result(sess, ret_key, out, code, span)?;
+    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+    sess.2.position_at_end(ok_block);
+    Ok(after)
+}
+
+// The `openat` flags a `File.Mode` variant selects.
+//
+// The mode is a Cinnabar enum rather than an integer parameter, so a
+// program never writes a Linux flag constant: `File.open(path,
+// WriteTruncate)` says what it means, and the numbers stay inside the
+// compiler. The tags come from the program's own declaration order through
+// `variant_tag_of`, keyed by variant name, so the mapping does not depend
+// on how the enum happens to be written.
+fn open_flags_of<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    mode_key: i64,
+    mode_ptr: PointerValue<'ctx>,
+    span: (i64, i64, i64),
+) -> Result<IntValue<'ctx>, CodegenError> {
+    let i64_ty = sess.0.i64_type();
+    let tag_ptr = struct_gep(sess, mode_key, mode_ptr, 0, "", span)?;
+    let tag = load_i64(sess, tag_ptr)?;
+    let read_only = variant_tag_of(sess, mode_key, sess.12.read_only, span)?;
+    let truncate = variant_tag_of(sess, mode_key, sess.12.write_truncate, span)?;
+    let read_flags = i64_ty.const_int(syscall::O_RDONLY as u64, false);
+    let truncate_flags = i64_ty.const_int((syscall::O_WRONLY | syscall::O_CREAT | syscall::O_TRUNC) as u64, false);
+    let append_flags = i64_ty.const_int((syscall::O_WRONLY | syscall::O_CREAT | syscall::O_APPEND) as u64, false);
+    let is_read = sess.2.build_int_compare(IntPredicate::EQ, tag, i64_ty.const_int(read_only as u64, false), "").map_err(builder_fail)?;
+    let is_truncate = sess.2.build_int_compare(IntPredicate::EQ, tag, i64_ty.const_int(truncate as u64, false), "").map_err(builder_fail)?;
+    // Append is the remaining variant: the enum is exhaustive, so anything
+    // that is neither read nor truncate is the append mode.
+    let write_flags = sess.2.build_select(is_truncate, truncate_flags, append_flags, "").map_err(builder_fail)?;
+    let chosen = sess.2.build_select(is_read, read_flags.into(), write_flags, "").map_err(builder_fail)?;
+    Ok(chosen.into_int_value())
+}
+
+// Copies a `&[U8]` path into a stack buffer and appends the NUL the kernel
+// expects, returning the buffer and whether the path fitted.
+fn nul_terminated_path<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    data: PointerValue<'ctx>,
+    len: IntValue<'ctx>,
+    span: (i64, i64, i64),
+) -> Result<(PointerValue<'ctx>, IntValue<'ctx>), CodegenError> {
+    let i64_ty = sess.0.i64_type();
+    let buffer = alloca_raw(sess, sess.0.i8_type().array_type(PATH_MAX as u32 + 1).into(), "path", span)?;
+    let fits = sess.2.build_int_compare(IntPredicate::ULT, len, i64_ty.const_int(PATH_MAX, false), "").map_err(builder_fail)?;
+    // Clamp before copying so an over-long path cannot overrun the buffer
+    // between the test and the copy; the caller rejects it on `fits`.
+    let clamped = sess.2.build_select(fits, len, i64_ty.const_zero(), "").map_err(builder_fail)?.into_int_value();
+    sess.2.build_memcpy(buffer, 1, data, 1, clamped).map_err(builder_fail)?;
+    let terminator = byte_offset(sess, buffer, clamped)?;
+    sess.2.build_store(terminator, sess.0.i8_type().const_zero()).map_err(builder_fail)?;
+    Ok((buffer, fits))
+}
+
+fn native_file_open<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
+    let p0 = get_local(locals, 0, span)?;
+    let p1 = get_local(locals, 1, span)?;
+    let mode_key = get_local_key(locals, 1, span)?;
+    let data = slice_data(sess, p0)?;
+    let len = slice_len_of(sess, p0)?;
+    let (path, fits) = nul_terminated_path(sess, data, len, span)?;
+    let too_long = new_block(sess, f, "open_too_long");
+    let attempt = new_block(sess, f, "open_attempt");
+    let after = new_block(sess, f, "open_after");
+    sess.2.build_conditional_branch(fits, attempt, too_long).map_err(builder_fail)?;
+    sess.2.position_at_end(too_long);
+    // A path the buffer cannot hold is reported with the code the kernel
+    // itself would have returned, rather than a Cinnabar-specific one.
+    let name_too_long = sess.0.i64_type().const_int(ENAMETOOLONG, false);
+    system_fault_result(sess, ret_key, out, name_too_long, span)?;
+    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+    sess.2.position_at_end(attempt);
+    let flags = open_flags_of(sess, mode_key, p1, span)?;
+    let dir = sess.0.i64_type().const_int(syscall::AT_FDCWD as u64, false);
+    let mode_bits = sess.0.i64_type().const_int(syscall::CREATE_MODE as u64, false);
+    let path_word = ptr_word(sess, path, span)?;
+    // `openat` rather than `open`: AArch64's Linux ABI has no `open`, so
+    // this is one code path on both architectures instead of two.
+    let raw = emit_syscall(sess, syscall::Sys::OpenAt, &[dir, path_word, flags, mode_bits], span)?;
+    let join = syscall_result_branch(sess, f, ret_key, out, raw, span)?;
+    let handle_key = result_arg_key(sess, ret_key, 0);
+    let handle = declare_local(sess, handle_key, "file", span)?;
+    init_native_handle(sess, handle_key, handle, span)?;
+    let fd_slot = struct_gep(sess, handle_key, handle, 1, "", span)?;
+    store_key(sess, fd_slot, raw.into())?;
+    let ok_result = build_result_ok(sess, ret_key, handle_key, handle, span)?;
+    copy_to_out(sess, ret_key, out, ok_result, span)?;
+    sess.2.build_unconditional_branch(join).map_err(builder_fail)?;
+    // Both syscall outcomes meet at `join`; that joins in turn with the
+    // path-too-long branch, which never reached the system call.
+    sess.2.position_at_end(join);
+    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+    sess.2.position_at_end(after);
+    Ok(out)
+}
+
+// `read` and `write` differ only in which system call they issue and which
+// direction the bytes travel, so one emitter serves both: the buffer is a
+// `&mut [U8]` to fill or a `&[U8]` to send, and the result is the count the
+// kernel reports.
+//
+// The count is returned rather than looped over, because a short read is
+// information the caller needs — it is how end-of-file is observed (a zero
+// count) and how a partial record is detected. `Terminal.print` loops
+// because it has no way to report a short write; `File.write` does.
+fn native_file_transfer<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    f: FunctionValue<'ctx>,
+    locals: &Locals<'ctx>,
+    call: syscall::Sys,
+    ret_key: i64,
+    out: PointerValue<'ctx>,
+    span: (i64, i64, i64),
+) -> Result<PointerValue<'ctx>, CodegenError> {
+    let p0 = get_local(locals, 0, span)?;
+    let p1 = get_local(locals, 1, span)?;
+    let handle_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
+    let handle = load_ptr(sess, p0)?;
+    let fd = net_fd_of_handle(sess, handle_key, handle, span)?;
+    let data = slice_data(sess, p1)?;
+    let len = slice_len_of(sess, p1)?;
+    let buffer = ptr_word(sess, data, span)?;
+    let raw = emit_syscall(sess, call, &[fd, buffer, len], span)?;
+    let join = syscall_result_branch(sess, f, ret_key, out, raw, span)?;
+    let count_key = result_arg_key(sess, ret_key, 0);
+    let count = declare_local(sess, count_key, "count", span)?;
+    store_key(sess, count, raw.into())?;
+    let ok_result = build_result_ok(sess, ret_key, count_key, count, span)?;
+    copy_to_out(sess, ret_key, out, ok_result, span)?;
+    sess.2.build_unconditional_branch(join).map_err(builder_fail)?;
+    sess.2.position_at_end(join);
+    Ok(out)
+}
+
+// Closing consumes the handle, which is why `File.Handle` is linear: a
+// descriptor left open is a leak the borrow checker can catch, and closing
+// twice would release a descriptor another part of the program has since
+// been handed.
+//
+// `close` returns `Unit`, so a failing close is not reported. That is the
+// honest surface: the descriptor is gone either way, and the errors `close`
+// can report are about flushing that the program can no longer act on.
+fn native_file_close<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
+    let p0 = get_local(locals, 0, span)?;
+    let handle_key = get_local_key(locals, 0, span)?;
+    let fd = net_fd_of_handle(sess, handle_key, p0, span)?;
+    emit_syscall(sess, syscall::Sys::Close, &[fd], span)?;
+    build_unit_value_into(sess, ret_key, out, span)?;
     Ok(())
 }
 

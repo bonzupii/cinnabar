@@ -866,6 +866,24 @@ fn native_opcode_of(names: &[String], full: i64) -> i64 {
     if name_is(names, full, "Terminal.eprint") {
         return NAT_TERM_EPRINT;
     }
+    if name_is(names, full, "Terminal.read_line") {
+        return NAT_TERM_READ_LINE;
+    }
+    if name_is(names, full, "File.open") {
+        return NAT_FILE_OPEN;
+    }
+    if name_is(names, full, "File.read") {
+        return NAT_FILE_READ;
+    }
+    if name_is(names, full, "File.write") {
+        return NAT_FILE_WRITE;
+    }
+    if name_is(names, full, "File.close") {
+        return NAT_FILE_CLOSE;
+    }
+    if name_is(names, full, "Runtime.args") {
+        return NAT_RUNTIME_ARGS;
+    }
     if name_is(names, full, "Net.socket") {
         return NAT_NET_SOCKET;
     }

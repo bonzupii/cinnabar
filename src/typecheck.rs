@@ -2336,16 +2336,22 @@ fn check_unary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
         key = check_index(state, operand, borrow, expected, ret, impure, self_key);
     } else {
         let inner = check_expr(state, operand, NONE, ret, impure, self_key);
-    if op == UN_REF {
-        if key_kind(state.1, inner) == TYD_ARRAY {
+    if op == UN_REF || op == UN_REF_MUT {
+        // The sanctioned array-to-slice coercion, in both borrow forms:
+        // `&arr` is `&[T]` and `&mut arr` is `&mut [T]`.  Borrowing an
+        // array never yields `&[T; N]` — the length travels in the slice
+        // view instead of in the type — and there is no reason for the
+        // exclusive borrow to behave differently from the shared one.  A
+        // `&mut [T]` is what lets a caller hand a fixed-size buffer to a
+        // native that fills it, which is how `File.read` receives one.
+        let borrow = if op == UN_REF { TYD_REF } else { TYD_REF_MUT };
+        let target = if key_kind(state.1, inner) == TYD_ARRAY {
             let elem = key_elem(state.1, inner);
-            let slice = canon_tyinfo(state.1, state.2, TYD_SLICE, NONE, NONE, elem, NONE);
-            key = canon_tyinfo(state.1, state.2, TYD_REF, NONE, NONE, slice, NONE);
+            canon_tyinfo(state.1, state.2, TYD_SLICE, NONE, NONE, elem, NONE)
         } else {
-            key = canon_tyinfo(state.1, state.2, TYD_REF, NONE, NONE, inner, NONE);
-        }
-    } else if op == UN_REF_MUT {
-            key = canon_tyinfo(state.1, state.2, TYD_REF_MUT, NONE, NONE, inner, NONE);
+            inner
+        };
+        key = canon_tyinfo(state.1, state.2, borrow, NONE, NONE, target, NONE);
         } else if op == UN_NEG {
             let inner_is_int = is_int_key(state.1, inner);
             if !inner_is_int {

@@ -2484,6 +2484,36 @@ fn apply_assign(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool,
     }
 }
 
+// Reports a borrow of a value that has already been moved.
+//
+// `apply_move` catches *moving* a moved value, but a borrow of one was not
+// checked at all: `deallocate(block)` followed by `read_u8(&block, 0)`
+// compiled cleanly and produced a real use-after-free, and closing a
+// `File.Handle` and then writing through a borrow of it did the same.
+// MANIFESTO principle 7 says a linear value "cannot be used after move";
+// moving it twice is only one of the ways to do that, and the borrow is
+// the more dangerous one, because the move it follows has already released
+// the resource.
+//
+// The state is left untouched. Observing a moved value neither consumes it
+// again nor revives it, so the dataflow is unchanged and the diagnostic is
+// reported once per use site rather than folded into the move that caused
+// it.
+//
+// Only `ST_MOVED` is reported, never `ST_PARTIAL`: a partially moved
+// struct still has live fields, and borrowing it to reach one of those is
+// exactly what partial-move tracking exists to allow.
+fn borrow_after_move_check(f: &F, state: &[i64], binding: i64, path: i64, ctx: &mut Ctx, span: (i64, i64, i64)) {
+    if path < 0 {
+        return;
+    }
+    if state_at(state, path) != ST_MOVED {
+        return;
+    }
+    let name = dotted_name_of(f, ctx, binding, path);
+    push_error(ctx.3, &format!("use of moved value '{}'", name), span.0, span.1, span.2);
+}
+
 fn apply_block_linear(f: &F, block: i64, state: &mut [i64], report: bool, ctx: &mut Ctx) {
     let (first, last) = block_op_range(f, block);
     let mut op = first;
@@ -3464,6 +3494,7 @@ fn report(
                 }
             } else if kind == OP_BORROW || kind == OP_BORROW_M {
                 conflicts_at(f, ctx, op, &origins, live_after);
+                borrow_after_move_check(f, &state, binding, row.2, ctx, (row.6, row.7, row.8));
             } else if kind == OP_EXIT {
                 exit_check(f, ctx, op, &state);
             } else if kind == OP_RET_REF {

@@ -616,6 +616,12 @@ pub const NAT_NET_SEND: i64 = 26;
 pub const NAT_NET_CLOSE: i64 = 27;
 pub const NAT_VEC_POP: i64 = 28;
 pub const NAT_HASH_MAP_REMOVE: i64 = 29;
+pub const NAT_FILE_OPEN: i64 = 30;
+pub const NAT_FILE_READ: i64 = 31;
+pub const NAT_FILE_WRITE: i64 = 32;
+pub const NAT_FILE_CLOSE: i64 = 33;
+pub const NAT_TERM_READ_LINE: i64 = 34;
+pub const NAT_RUNTIME_ARGS: i64 = 35;
 
 /// The source spelling of a binary operator opcode.  Every stage that names
 /// an operator in a diagnostic reads it from here, so a message from the

@@ -1,0 +1,120 @@
+#! Borrowing a linear value after it has been moved is a use-after-free.
+#!
+#! `MANIFESTO.md` principle 7 says a linear value cannot be used after
+#! move. Moving it twice was caught; *borrowing* it after the move was not,
+#! so `deallocate(block)` followed by `read_u8(&block, 0)` compiled cleanly
+#! and produced a binary that reads freed memory. That is a direct
+#! violation of the Crucible Rule — a program that compiles must run
+#! without crashing — and the borrow is the more dangerous of the two
+#! shapes, because the move it follows has already released the resource.
+#!
+#! Every item below must be rejected.
+#!
+#!   1. A shared borrow of a deallocated block: reads freed memory.
+#!   2. A mutable borrow of a deallocated block: writes freed memory.
+#!   3. A borrow of a moved container.
+#!   4. A borrow of a value moved into another function.
+#!
+#! Borrowing a *partially* moved struct stays legal — a struct with one
+#! linear field moved out still has live fields, and reaching them is what
+#! partial-move tracking exists for — so this fixture does not touch that
+#! case and `linear_field_consume.cnb` continues to accept it.
+
+pub mod Memory
+  pub nat type Block
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub AccessOutOfBounds(Usize, Usize)
+  end
+
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+  pub nat fun write_u8(block: &Block, offset: Usize, value: U8) impure Result(Unit, Error)
+  pub nat fun read_u8(block: &Block, offset: Usize) impure Result(U8, Error)
+end
+
+pub mod Collections
+  pub nat type Vec(T)
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+    pub KeyNotFound
+    pub EmptySlice
+    pub InvalidUtf8
+  end
+
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_view<T>(vec: &Vec(T)) &[T]
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
+end
+
+pub mod Slice
+  pub nat fun len<T>(view: &[T]) Usize
+end
+
+use Memory.allocate
+use Memory.deallocate
+use Memory.write_u8
+use Memory.read_u8
+use Collections.vec_new
+use Collections.vec_view
+use Collections.vec_free
+use Slice.len as slice_len
+
+pub const SIZE: Usize = 16
+pub const BYTE: U8 = 0x41
+
+fun read_after_free() impure I64
+  val block = match allocate(SIZE)
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  deallocate(block)
+  match read_u8(&block, 0)
+    Ok(value) => return 0
+    Err(error) => return 2
+  end
+end
+
+fun write_after_free() impure I64
+  val block = match allocate(SIZE)
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  deallocate(block)
+  match write_u8(&block, 0, BYTE)
+    Ok(Unit) => return 0
+    Err(error) => return 2
+  end
+end
+
+fun view_after_free() impure I64
+  val vec = match vec_new[U8]()
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  vec_free(vec)
+  return I64.from(slice_len(vec_view(&vec)))
+end
+
+fun consume(block: Memory.Block) impure Unit
+  deallocate(block)
+end
+
+fun borrow_after_handoff() impure I64
+  val block = match allocate(SIZE)
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  consume(block)
+  match read_u8(&block, 0)
+    Ok(value) => return 0
+    Err(error) => return 2
+  end
+end
+
+pub fun main() impure I64
+  return read_after_free() + write_after_free() + view_after_free() + borrow_after_handoff()
+end
