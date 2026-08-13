@@ -39,8 +39,18 @@ RUN mkdir -p /etc/nix \
 # building a month apart would get different Nix versions from the same
 # Containerfile, and CONTAINER_DEVELOPMENT.md's stated version would be true
 # only by coincidence.
+#
+# The digest is the one upstream publishes alongside the installer at
+# https://releases.nixos.org/nix/nix-2.35.1/install.sha256 .  Verifying it
+# matters more here than for a throwaway download: this script runs as root and
+# seeds /nix, which Compose keeps in a named volume, so anything it installed
+# would outlive the container and back every later nix develop, cargo, test and
+# editor-server invocation.  /usr/bin/sha256sum is coreutils from the base
+# image -- the Nix profile's copy does not exist yet at this point.
 RUN mkdir -m 0755 /nix && chown root /nix \
     && curl -fsSL https://releases.nixos.org/nix/nix-2.35.1/install -o /tmp/nix-install.sh \
+    && echo "34e0ef63ec1f3e552e15069660afd9a0a23f69009e340c33067595252888286c  /tmp/nix-install.sh" \
+        | /usr/bin/sha256sum -c - \
     && sh /tmp/nix-install.sh --no-daemon \
     && rm /tmp/nix-install.sh
 
