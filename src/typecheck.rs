@@ -660,6 +660,22 @@ fn is_bool_key(nodes: &[i64], key: i64) -> bool {
     key_kind(nodes, key) == TYD_BUILTIN && tyinfo_builtin_kind(nodes, key) == BUILTIN_BOOL
 }
 
+// True when a comparison operator is defined on operands of this type.
+//
+// Comparison is a scalar operation: `==` and `!=` compare integers and
+// `Bool`, and the ordering operators compare integers, since ordering
+// `Bool` names nothing. There is no structural equality in the language
+// and no operator overloading, so a struct, enum, array, slice, reference,
+// or native handle has no comparison to lower — aggregates are taken apart
+// with `match` and field access instead. Rejecting these here is what
+// keeps codegen from being handed an aggregate where it expects a scalar.
+fn comparable_key(nodes: &[i64], key: i64, op: i64) -> bool {
+    if is_int_key(nodes, key) {
+        return true;
+    }
+    is_bool_key(nodes, key) && (op == BIN_EQ || op == BIN_NE)
+}
+
 fn is_result_key(nodes: &[i64], key: i64) -> bool {
     key_kind(nodes, key) == TYD_ENUM && sym_prim_kind(nodes, key_sym(nodes, key)) == PRIM_RESULT
 }
@@ -2005,34 +2021,27 @@ fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, 
     let sub = tyinfo_builtin_kind(state.1, key);
     let width = builtin_int_width(sub);
     if width == 0 {
-        // Bool comparisons are well-defined on the raw 0/1 values even
-        // though Bool has no integer width, so they fold here; every other
-        // non-integer operand reaches the folder only after a type error
-        // was already reported, and the primary is re-reported in non-quiet
-        // mode so the constant is rejected truthfully instead of failing
+        // `Bool` equality is well-defined on the raw 0/1 values even though
+        // Bool has no integer width, so it folds here; `comparable_key` is
+        // the same predicate `check_binary` applies, so a constant and a
+        // runtime expression agree on exactly which comparisons exist.
+        // Every other non-integer operand is rejected below rather than
+        // folded, and the diagnostic is re-reported in non-quiet mode so
+        // the constant is refused truthfully instead of failing
         // unification against '?'.
-        if (BIN_EQ..=BIN_GE).contains(&op) && sub == BUILTIN_BOOL {
-            let a = lv;
-            let b = rv;
+        if comparable_key(state.1, key, op) {
             if op == BIN_EQ {
-                return ((a == b) as i64, bool_key);
+                return ((lv == rv) as i64, bool_key);
             }
-            if op == BIN_NE {
-                return ((a != b) as i64, bool_key);
-            }
-            if op == BIN_LT {
-                return ((a < b) as i64, bool_key);
-            }
-            if op == BIN_GT {
-                return ((a > b) as i64, bool_key);
-            }
-            if op == BIN_LE {
-                return ((a <= b) as i64, bool_key);
-            }
-            return ((a >= b) as i64, bool_key);
+            return ((lv != rv) as i64, bool_key);
         }
         if quiet == 0 {
-            push_error(state.3, &format!("constant binary operator '{}' requires integer operands", op_text(op)), file, start, end);
+            let message = if (BIN_EQ..=BIN_GE).contains(&op) {
+                format!("comparison '{}' is not defined for '{}': compare integer or Bool values, or take the value apart with match", op_text(op), render_key(state.0, state.1, state.2, state.6, state.7, key))
+            } else {
+                format!("constant binary operator '{}' requires integer operands", op_text(op))
+            };
+            push_error(state.3, &message, file, start, end);
         }
         return (0, unknown_key(state.1, state.2));
     }
@@ -2373,45 +2382,6 @@ fn check_unary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
     key
 }
 
-fn op_text(op: i64) -> &'static str {
-    if op == BIN_ADD {
-        "+"
-    } else if op == BIN_SUB {
-        "-"
-    } else if op == BIN_MUL {
-        "*"
-    } else if op == BIN_DIV {
-        "/"
-    } else if op == BIN_MOD {
-        "%"
-    } else if op == BIN_SHL {
-        "<<"
-    } else if op == BIN_SHR {
-        ">>"
-    } else if op == BIN_BAND {
-        "&"
-    } else if op == BIN_BOR {
-        "|"
-    } else if op == BIN_BXOR {
-        "^"
-    } else if op == BIN_EQ {
-        "=="
-    } else if op == BIN_NE {
-        "!="
-    } else if op == BIN_LT {
-        "<"
-    } else if op == BIN_GT {
-        ">"
-    } else if op == BIN_LE {
-        "<="
-    } else if op == BIN_GE {
-        ">="
-    } else if op == BIN_AND {
-        "&&"
-    } else {
-        "||"
-    }
-}
 
 // True when an expression is built out of nothing but integer literals,
 // unary negation, and integer-valued binary operators.  Such an expression
@@ -2570,8 +2540,16 @@ fn check_binary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i
     if (BIN_EQ..=BIN_GE).contains(&op) {
         let (l, r) = check_binary_operands(state, (lhs, rhs, operand_expected), ret, impure, self_key);
         let ok = unify_key(state.1, state.2, state.6, l, r);
-        if !ok && key_kind(state.1, l) != TYD_UNKNOWN && key_kind(state.1, r) != TYD_UNKNOWN {
-            push_error(state.3, &format!("comparison '{}' requires operands of the same type", op_text(op)), file, start, end);
+        if !ok {
+            if key_kind(state.1, l) != TYD_UNKNOWN && key_kind(state.1, r) != TYD_UNKNOWN {
+                push_error(state.3, &format!("comparison '{}' requires operands of the same type", op_text(op)), file, start, end);
+            }
+        } else if !comparable_key(state.1, l, op) && key_kind(state.1, l) != TYD_UNKNOWN {
+            // The operands agree but the type has no comparison. Reported
+            // only when they agree, so a mismatch produces one diagnostic
+            // rather than a same-type error followed by a not-comparable
+            // cascade.
+            push_error(state.3, &format!("comparison '{}' is not defined for '{}': compare integer or Bool values, or take the value apart with match", op_text(op), render_key(state.0, state.1, state.2, state.6, state.7, l)), file, start, end);
         }
         expr_set_ty(state.1, expr, bool_key);
         return bool_key;

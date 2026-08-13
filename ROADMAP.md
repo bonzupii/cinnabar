@@ -248,6 +248,26 @@ borrow does not outlive the function". `string_static_borrow.cnb` pins the accep
 literal returns, a `const` return, several static returns on different paths, one and two levels of
 forwarding, and a static borrow flowing through a struct field, an argument, and an array element.
 
+### Comparison had to be stated as a scalar operation
+`"a" == "b"` is the most natural thing to write once literals exist, and it made the **compiler
+panic** — a Rust backtrace with no diagnostic and no span, in a codebase whose rule is that codegen
+failures are never a panic. The typechecker's comparison branch required only that the two operands
+have the *same* type, never that the type had a comparison, so codegen was handed an aggregate
+where it expected a scalar and `into_int_value` aborted the process. This was a pre-existing hole
+(`struct == struct` panicked identically and always had); string literals only made it trivial to
+reach.
+
+`comparable_key` now states the rule once: `==`/`!=` compare integers and `Bool`, the ordering
+operators compare integers, and nothing else has a comparison. `check_binary` and the constant
+folder both call it, so a `const` and a runtime expression agree on exactly which comparisons
+exist. `MANIFESTO.md`'s Operators section records the rule normatively. Codegen is hardened
+independently: an operand that is not a scalar is now an internal diagnostic carrying a real span
+rather than a panic, so a future gap in the front end degrades to an honest error message.
+
+`op_text` moved to `ast.rs` on the way — codegen needed to name an operator in that diagnostic, and
+a second copy of the opcode-to-spelling mapping would be exactly the kind of parallel fact that
+drifts.
+
 ### Toolchain consequences that were part of the work
 - **The formatter had to learn about strings.** It extracts a comment-free "code view" of each line
   to decide indentation; without string awareness a `#` inside a literal would start a comment, a

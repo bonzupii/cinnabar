@@ -14,6 +14,13 @@
 #!   4. A string compared against an integer: neither operand adopts the
 #!      other's type.
 #!   5. A string passed where an integer parameter is declared.
+#!   6. Two strings compared with each other. This one is not about literal
+#!      typing at all — the operands agree on type — but about comparison
+#!      being a scalar operation. `==` and `!=` compare integers and `Bool`,
+#!      and the ordering operators compare integers; there is no structural
+#!      equality in the language and no operator overloading, so a slice has
+#!      no comparison to lower. Comparing string *contents* is a loop over
+#!      the bytes, written explicitly.
 
 pub const NOT_AN_INT: I64 = "eight"
 pub const NOT_A_SLICE: &[U8] = 8
@@ -26,6 +33,10 @@ end
 fun compares() Bool
   val text = "abc"
   if text == 3
+    return true
+  end
+  val other = "abc"
+  if text == other
     return true
   end
   return false

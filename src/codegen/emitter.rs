@@ -1211,6 +1211,43 @@ fn bin_ge_pred(sess: &Session, key: i64) -> IntPredicate {
     }
 }
 
+// Loads a binary operator's operand as the scalar the operator needs.
+//
+// The typechecker already rejects an aggregate operand (arithmetic
+// requires integers, comparison requires integers or `Bool`), so reaching
+// here with one means an earlier stage let something through. That is an
+// internal error with a real source span, not a Rust panic: `into_int_value`
+// aborts the process on a mismatch, which would take the compiler down with
+// a backtrace and no diagnostic, in a codebase whose rule is that codegen
+// failures are never a panic.
+fn load_scalar_operand<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    key: i64,
+    ptr: PointerValue<'ctx>,
+    op: i64,
+    span: (i64, i64, i64),
+) -> Result<IntValue<'ctx>, CodegenError> {
+    let value = load_key(sess, key, ptr, span)?;
+    match value {
+        BasicValueEnum::IntValue(int) => Ok(int),
+        BasicValueEnum::ArrayValue(other) => Err(non_scalar_operand(op, other.get_type().to_string(), span)),
+        BasicValueEnum::FloatValue(other) => Err(non_scalar_operand(op, other.get_type().to_string(), span)),
+        BasicValueEnum::PointerValue(other) => Err(non_scalar_operand(op, other.get_type().to_string(), span)),
+        BasicValueEnum::StructValue(other) => Err(non_scalar_operand(op, other.get_type().to_string(), span)),
+        BasicValueEnum::VectorValue(other) => Err(non_scalar_operand(op, other.get_type().to_string(), span)),
+        BasicValueEnum::ScalableVectorValue(other) => Err(non_scalar_operand(op, other.get_type().to_string(), span)),
+    }
+}
+
+fn non_scalar_operand(op: i64, lowered: String, span: (i64, i64, i64)) -> CodegenError {
+    builder_error(
+        span.0,
+        span.1,
+        span.2,
+        &format!("internal: binary operator '{}' reached codegen with a non-scalar operand lowered as {}", op_text(op), lowered),
+    )
+}
+
 fn emit_binary<'ctx, 'a>(
     sess: &mut Session<'ctx, '_, '_>,
     ctx: &mut FnCtx<'ctx, 'a>,
@@ -1225,8 +1262,8 @@ fn emit_binary<'ctx, 'a>(
     let lptr = emit_expr(sess, ctx, lhs)?;
     let rptr = emit_expr(sess, ctx, rhs)?;
     let span = (node_file(sess.5, expr), node_start(sess.5, expr), node_end(sess.5, expr));
-    let lv = load_key(sess, lkey, lptr, span)?.into_int_value();
-    let rv = load_key(sess, rkey, rptr, span)?.into_int_value();
+    let lv = load_scalar_operand(sess, lkey, lptr, op, span)?;
+    let rv = load_scalar_operand(sess, rkey, rptr, op, span)?;
     let out = declare_local(sess, result_key, "bin", span)?;
     let r;
     if op == BIN_DIV || op == BIN_MOD {

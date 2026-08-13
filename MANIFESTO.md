@@ -110,7 +110,7 @@ The program entry point is `main`. It must return `Unit`, a builtin integer scal
 ### Operators
 Arithmetic: `+`, `-`, `*`, `/`, `%`. Modulo has the same precedence as `*` and `/`.
 Bitwise: `&`, `|`, `^`, `<<`, `>>`.
-Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`.
+Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`. Comparison is a scalar operation: `==` and `!=` compare the ten integer types and `Bool`; the ordering operators compare the integer types, since ordering `Bool` names nothing. A struct, enum, array, slice, reference, or native handle has no comparison — there is no structural equality and no operator overloading, so an aggregate is taken apart with `match` and field access, and comparing two byte slices for content is a loop over the bytes, written explicitly.
 Logical: `&&`, `||`.
 
 All operators require operands of the same type. No implicit widening. A bare integer literal is not yet an operand of any type — it adopts the peer operand's type before the sameness rule is applied (see "Literal typing context" under Types); a typed value never adopts anything.

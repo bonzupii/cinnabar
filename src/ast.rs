@@ -617,6 +617,50 @@ pub const NAT_NET_CLOSE: i64 = 27;
 pub const NAT_VEC_POP: i64 = 28;
 pub const NAT_HASH_MAP_REMOVE: i64 = 29;
 
+/// The source spelling of a binary operator opcode.  Every stage that names
+/// an operator in a diagnostic reads it from here, so a message from the
+/// typechecker and one from codegen cannot disagree about what `BIN_SHL` is
+/// called.
+pub fn op_text(op: i64) -> &'static str {
+    if op == BIN_ADD {
+        "+"
+    } else if op == BIN_SUB {
+        "-"
+    } else if op == BIN_MUL {
+        "*"
+    } else if op == BIN_DIV {
+        "/"
+    } else if op == BIN_MOD {
+        "%"
+    } else if op == BIN_SHL {
+        "<<"
+    } else if op == BIN_SHR {
+        ">>"
+    } else if op == BIN_BAND {
+        "&"
+    } else if op == BIN_BOR {
+        "|"
+    } else if op == BIN_BXOR {
+        "^"
+    } else if op == BIN_EQ {
+        "=="
+    } else if op == BIN_NE {
+        "!="
+    } else if op == BIN_LT {
+        "<"
+    } else if op == BIN_GT {
+        ">"
+    } else if op == BIN_LE {
+        "<="
+    } else if op == BIN_GE {
+        ">="
+    } else if op == BIN_AND {
+        "&&"
+    } else {
+        "||"
+    }
+}
+
 pub const PRIM_NONE: i64 = 0;
 pub const PRIM_UNIT: i64 = 1;
 pub const PRIM_RESULT: i64 = 2;
