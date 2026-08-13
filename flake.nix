@@ -24,6 +24,9 @@
             clippy
             rust-analyzer
             pkg-config
+            # The editor extension's test suite runs under `node --test` as
+            # part of pre_commit_check.sh, so the gate needs a node in scope.
+            nodejs
             semgrep
             valgrind
             gdb
