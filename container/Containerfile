@@ -1,5 +1,56 @@
-FROM nixos/nix:2.35.1@sha256:377d4887aca98f0dfa12971c1ea6d6a625a435d8b610d4c95a436843da6fbfd1
+# Debian rather than nixos/nix, solely so the VS Code Server can run: it ships
+# a prebuilt glibc-linked node binary that needs an FHS layout (the dynamic
+# loader at /lib64, libstdc++, libc, ldconfig).  The pure-Nix image has none of
+# those, so `Attach to Running Container` fails its requirements check before
+# the server ever starts.  Nix is installed on top; flake.nix, not this image,
+# remains the single source of truth for Rust, LLVM, Clang, musl, and the rest.
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 
+# ca-certificates/curl/xz-utils are the Nix installer's dependencies; git lets
+# Nix resolve the flake from the bind-mounted worktree; libstdc++6 and
+# libatomic1 are what the VS Code Server links against beyond libc.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        xz-utils \
+        git \
+        procps \
+        libstdc++6 \
+        libatomic1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Nix builds as root here, so there is no nixbld group to drop privileges to;
+# leaving the default would fail every build, including the installer's own
+# profile write.  /etc/nix lives in the image layer, not under the /nix volume,
+# so this applies at runtime too, whichever store the volume supplies.
+RUN mkdir -p /etc/nix \
+    && printf 'build-users-group =\nexperimental-features = nix-command flakes\nsandbox = false\n' \
+        > /etc/nix/nix.conf
+
+# Single-user install: this container runs as root and has no init system, so
+# the multi-user daemon would have nothing to supervise it.  The installer
+# shells out to sudo to create /nix and there is no sudo here, so create the
+# directory first; the script then uses it as-is.
+#
+# The installer URL is version-pinned.  The generic https://nixos.org/nix/install
+# tracks the current release, which would make the base image digest-pinned
+# while the largest piece of software on top of it floated -- two developers
+# building a month apart would get different Nix versions from the same
+# Containerfile, and CONTAINER_DEVELOPMENT.md's stated version would be true
+# only by coincidence.
+RUN mkdir -m 0755 /nix && chown root /nix \
+    && curl -fsSL https://releases.nixos.org/nix/nix-2.35.1/install -o /tmp/nix-install.sh \
+    && sh /tmp/nix-install.sh --no-daemon \
+    && rm /tmp/nix-install.sh
+
+# Compose mounts the shared cinnabar-nix volume over /nix.  Docker seeds a
+# volume from the image only while the volume is empty, so a fresh volume picks
+# up the Nix installed above, and an existing one keeps the store it already
+# has.  Both layouts expose the same default profile, so resolve nix from there
+# rather than from ~/.nix-profile, whose per-user path a pre-existing volume
+# will not contain.
+ENV PATH="/nix/var/nix/profiles/default/bin:${PATH}"
 ENV NIX_CONFIG="experimental-features = nix-command flakes"
 WORKDIR /workspace
 

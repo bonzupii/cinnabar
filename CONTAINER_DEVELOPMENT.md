@@ -97,7 +97,18 @@ Start the selected service, then use **Dev Containers: Attach to Running Contain
 }
 ```
 
+Save that JSON as `nameConfigs/dev.json` under the Dev Containers extension's global storage (`%APPDATA%/Code/User/globalStorage/ms-vscode-remote.remote-containers/` on Windows), or create it from **Dev Containers: Open Attached Container Configuration File...**. Keying it on the name works because `compose.dev.yaml` pins `container_name: dev`, so the config survives service recreation.
+
 The wrapper runs rust-analyzer through `nix develop`, so it and its Cargo/build-script children see the same LLVM 21 and musl environment as command-line builds. After changing `flake.nix`, reload the VS Code window or restart rust-analyzer.
+
+Because of that wrapper, **nothing in `shellHook` may write to stdout**. rust-analyzer speaks LSP over stdout, so a hook that echoes a banner there emits it ahead of the first `Content-Length` header and the editor discards the server. Send diagnostic output to stderr (`echo ... >&2`), as `flake.nix` does. To check the stream is clean:
+
+```bash
+docker compose --env-file "container/local/main/worktree.env" -f compose.dev.yaml \
+  exec dev sh -c 'cd /workspace && container/bin/rust-analyzer-nix --version 2>/dev/null'
+```
+
+The only line on stdout must be rust-analyzer's own version.
 
 An attached terminal starts in `/workspace` but is not itself an interactive Nix shell. Either run `nix develop` or prefix individual commands:
 
