@@ -808,28 +808,37 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         let cond = node_b(ctx.1, stmt);
         let body = node_c(ctx.1, stmt);
         let join = new_block(f, b, BLK_JOIN, NONE, span);
+        // `new_block` makes the block it creates current, so the condition
+        // built below would otherwise emit into the loop-exit join and
+        // `expr_effects` would hand back the join as `cont`.  That made the
+        // exit block the branch point, gave it a self-edge, and -- because
+        // `break` targets the join -- fed every break's exit state back into
+        // the loop body.  A bare `flag` or any comparison forms no block of
+        // its own, so that was the ordinary case, not an edge case.  The join
+        // is still created first: `break` and `continue` need it as their
+        // target while the condition is being built.
+        resume(f, b, block);
         let scope_start = b.2.len() as i64;
         b.1.push((block, join, scope_start));
         let cont = expr_effects(f, b, ctx, cond, MODE_VALUE, ret, &mut Vec::new());
         let const_true = is_const_true(ctx, cond);
         let body_entry = build_list(f, b, ctx, body, block, ret, &mut Vec::new());
         b.1.pop();
-        // A literal-true condition emits no condition block, so `cont` IS
-        // `join`: the loop has no false path and exits only via `break`, and
-        // the join merges only break-path state.  Routing the header into the
-        // join would smuggle the pre-loop state (container still C_MAY, value
-        // still LIVE) onto the exit path, defeating the `while true` drain
-        // proof.  The join-to-out edge belongs to the enclosing list's
-        // sequencing (build_list), not here, so a mid-list loop cannot feed
-        // its exit state past the statements that follow it.
-        if const_true && cont == join {
-            add_edge(f, block, body_entry);
-        } else {
+        // A condition that emitted no block of its own leaves `cont` as the
+        // header, which is already where control arrives.
+        if cont != block {
             add_edge(f, block, cont);
-            add_edge(f, cont, body_entry);
-            if !const_true {
-                add_edge(f, cont, join);
-            }
+        }
+        add_edge(f, cont, body_entry);
+        // A literal-true condition has no false path: the loop exits only via
+        // `break`, so the join merges only break-path state.  Routing the
+        // condition into the join would smuggle the pre-loop state (container
+        // still C_MAY, value still LIVE) onto the exit path, defeating the
+        // `while true` drain proof.  The join-to-out edge belongs to the
+        // enclosing list's sequencing (build_list), not here, so a mid-list
+        // loop cannot feed its exit state past the statements that follow it.
+        if !const_true {
+            add_edge(f, cont, join);
         }
         return (block, join, Vec::new());
     }
@@ -838,9 +847,23 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         let cond = node_b(ctx.1, stmt);
         let then_list = node_c(ctx.1, stmt);
         let else_list = node_d(ctx.1, stmt);
-        let join = new_block(f, b, BLK_JOIN, NONE, span);
+        // The condition is built before the join exists.  `new_block` makes
+        // the block it creates current, and a condition that needs no block of
+        // its own (a bare `flag`) returns whatever is current -- so creating
+        // the join first made `cont` *be* the join.  Every branch edge then
+        // hung off the join: it gained the arms as successors and as
+        // predecessors, so each arm's entry merged the other arm's exit, and a
+        // value consumed on every arm was reported both as moved twice and as
+        // consumed on only some paths.  The `while` lowering above had the
+        // same hazard and is fixed the same way, by keeping the header current
+        // while the condition is built.
         let cont = expr_effects(f, b, ctx, cond, MODE_VALUE, ret, &mut Vec::new());
-        add_edge(f, block, cont);
+        let join = new_block(f, b, BLK_JOIN, NONE, span);
+        // A condition that emitted no block of its own leaves `cont` as the
+        // statement block itself, which is already where control arrives.
+        if cont != block {
+            add_edge(f, block, cont);
+        }
         let then_entry = build_list(f, b, ctx, then_list, join, ret, &mut Vec::new());
         add_edge(f, cont, then_entry);
         if else_list != NONE {

@@ -57,6 +57,8 @@ const EXPECT_OK: &[(&str, i32)] = &[
     ("utf8_validation", 0),
     ("multiline_const", 30),
     ("fib", 155),
+    ("linear_branch_consume", 0),
+    ("linear_loop_consume", 0),
     ("linear_field_reinit", 0),
     ("linear_ref_swap", 0),
     ("linear_field_consume", 0),
