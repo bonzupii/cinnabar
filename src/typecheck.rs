@@ -1,4 +1,4 @@
-//! Stage 5: type checking, constant evaluation, and fact attachment.
+//! Type checking, constant evaluation, and fact attachment.
 //!
 //! `typecheck` runs as an explicit sequence of sub-passes over one shared
 //! `State` — collect types, check function signatures, collect consts, then

@@ -1,4 +1,4 @@
-//! Milestone 3: memory access widths and handle integrity, read from IR.
+//! Memory access widths and handle integrity, asserted against the IR.
 //!
 //! An external memory checker cannot cover this. A Cinnabar binary is
 //! linked `-static -nostdlib -no-pie` against a musl `libc.a` embedded in
@@ -8,8 +8,8 @@
 //! better placed: its runtime wants the libc the link deliberately does
 //! not provide.
 //!
-//! So the two properties Milestone 3 is about are pinned where they are
-//! stated literally — in the IR — and behaviourally, by
+//! So the two properties are pinned where they are stated literally — in
+//! the IR — and behaviourally, by
 //! `tests/fixtures/repro/mem_byte_access.cnb`, which detects a wide access
 //! as a clobbered neighbouring byte. The IR assertions here catch what the
 //! runtime oracle structurally cannot: a handle field that is never

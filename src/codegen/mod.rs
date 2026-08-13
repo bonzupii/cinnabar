@@ -1,4 +1,4 @@
-//! Stage 7d: the backend driver, from printed IR to a linked executable.
+//! The backend driver, from printed IR to a linked executable.
 //!
 //! Takes the module's IR text and shells out to `opt` (running the
 //! `default<O2>`-class module pipeline), `llc -filetype=obj`, and

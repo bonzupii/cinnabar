@@ -1,4 +1,4 @@
-//! Stage 7b: lowering the typed arena to LLVM IR.
+//! Lowering of the typed arena to LLVM IR.
 //!
 //! `emit_program` locates `main` through the `SYM_FUN_MAIN` tag the
 //! resolver attached, then monomorphizes and emits every reachable function

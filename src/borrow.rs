@@ -1,4 +1,4 @@
-//! Stage 6: flow-sensitive borrow, linearity, and container-state checking.
+//! Flow-sensitive borrow, linearity, and container-state checking.
 //!
 //! A control-flow graph is built per function (`BLK_ENTRY`, `BLK_STMT`,
 //! `BLK_JOIN`, `BLK_EXIT`) and walked to a fixpoint, so a fact holds on

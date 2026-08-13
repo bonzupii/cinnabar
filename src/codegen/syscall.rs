@@ -5,10 +5,10 @@
 //! its socket wrappers, because an allocator and a `sockaddr` marshaller
 //! are real code rather than thin syscall shims. The `Memory`, `Terminal`,
 //! and `File` surfaces do not go through it. They issue the kernel entry
-//! point directly, which is what Milestone 4 asks for and what makes those
-//! three surfaces auditable end to end: the instruction that leaves user
-//! space is visible in the emitted IR, with nothing between the Cinnabar
-//! declaration and the kernel.
+//! point directly, which is what makes those three surfaces auditable end
+//! to end: the instruction that leaves user space is visible in the
+//! emitted IR, with nothing between the Cinnabar declaration and the
+//! kernel.
 //!
 //! Everything architecture-specific is in this file and derived from the
 //! module's target triple: the instruction, the register constraints, and

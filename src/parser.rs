@@ -1,4 +1,4 @@
-//! Stage 3: recursive-descent parsing over the lexer's token rows.
+//! Recursive-descent parsing over the lexer's token rows.
 //!
 //! Hand-rolled, with no parser generator or PEG crate. The token rows the
 //! lexer left in the arena are consumed in place and `NODE_ITEM`, `NODE_FN`,

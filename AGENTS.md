@@ -68,6 +68,7 @@ Every `.rs` file in `src/`, `tests/`, and `build.rs` opens with an inner doc com
 
 - **First line is mandatory and fixed in form**: one sentence, a noun phrase, ending in a period. `grep -rn '^//! [A-Z].*\.$' src tests build.rs` must yield a one-line index of the tree, so no other line may take that shape at the top of a file.
 - **The body is free prose**, in the voice of the surrounding code — explain the design and its reasons, not a restatement of the file's own name or path. "Purpose: the typed error type" is not worth a line.
+- **No stage numbers, milestone numbers, or other project-tracking labels**, in the first line or the body. `Stage 4:` and `Milestone 8 —` are positions in a plan, not descriptions of code: they go stale when the plan is reorganized, they mean nothing to a reader who has not read the plan, and they take the place of the sentence that would have said what the file does. Describe the work — "Name resolution, scope construction, and casing enforcement." A pointer to `ROADMAP.md` for a genuine open follow-up is fine; a number worn as a label is not.
 - **The `**Invariants:**` block is included only where the file carries a hard rule** worth pinning — a Single-Fact Rule boundary, a no-fabricated-span rule, a "derived, never hand-maintained" table. Omit it entirely rather than filling it with restated obviousness.
 - Doc comments on individual items (`///`) are unaffected by this and stay where they are.
 

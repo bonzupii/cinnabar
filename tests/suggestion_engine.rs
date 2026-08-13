@@ -1,8 +1,8 @@
 //! Suggestion-engine diagnostics, pinned through the real compiler.
 //!
 //! These tests run real fixtures through the compiler binary and read what
-//! it printed. They pin the wording contract the milestone demands, not merely
-//! that a suggestion appeared somewhere: every suggestion is hedged, an
+//! it printed. They pin the wording contract itself, not merely that a
+//! suggestion appeared somewhere: every suggestion is hedged, an
 //! ambiguous match names no candidate, and every definition-site label
 //! carries a real span — the declaration it names.
 //!

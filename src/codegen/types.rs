@@ -1,4 +1,4 @@
-//! Stage 7a: lowering canonical type keys to LLVM types.
+//! Lowering of canonical type keys to LLVM types.
 //!
 //! `llvm_type`/`build_type` turn the typechecker's canonical keys into
 //! inkwell `BasicTypeEnum`s: builtins to LLVM integer and `i1` types,

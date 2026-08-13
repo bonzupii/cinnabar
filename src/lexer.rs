@@ -1,4 +1,4 @@
-//! Stage 2: byte-level scanning into `NODE_TOKEN` rows.
+//! Byte-level scanning of source text into `NODE_TOKEN` rows.
 //!
 //! A hand-written scanner that writes tokens straight into the shared
 //! arena — there is no separate token type and no intermediate vector of

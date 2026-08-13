@@ -1,4 +1,4 @@
-//! Stage 4: name resolution, scope construction, and casing enforcement.
+//! Name resolution, scope construction, and casing enforcement.
 //!
 //! `resolve` builds a scope tree over two separate namespaces, `NS_TYPE`
 //! and `NS_VALUE`, then rewrites every unresolved `EXPR_PATH`, `TY_PATH`,

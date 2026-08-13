@@ -1,4 +1,4 @@
-//! Stage 1: entry-file loading and sibling-module discovery.
+//! Entry-file loading and sibling-module discovery.
 //!
 //! Cinnabar has no package manager and no import search path. A `use X.y`
 //! whose first segment `X` is not a `mod` already declared in the importing

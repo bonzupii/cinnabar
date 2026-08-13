@@ -1,4 +1,4 @@
-//! Milestone 8 — every valid program run under a memory checker.
+//! Every valid program in the corpus, run under a memory checker.
 //!
 //! ## Why this needs a second link mode
 //!
@@ -34,7 +34,7 @@
 //! here, but the instrumentation is an IR pass that would have to run between
 //! `opt` and `llc` in the compiler's own pipeline. That is a real follow-up
 //! and is tracked in ROADMAP.md; Valgrind already covers the heap errors and
-//! leaks that motivated the milestone.
+//! leaks this gate exists for.
 //!
 //! ## Fixture selection
 //!
