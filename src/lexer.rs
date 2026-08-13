@@ -415,9 +415,29 @@ fn lex_string(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: 
         }
         if byte == b'\\' {
             if !append_run(&mut text, source, run, cursor, errors) {
-                return cursor + 2;
+                return cursor + 1;
             }
-            match escape_byte(byte_at(bytes, cursor + 1)) {
+            // A backslash begins a two-byte escape only when a byte follows
+            // it that a literal could contain at all. At end of file none
+            // follows, and a newline bounds the literal rather than
+            // belonging to it. In both cases the backslash stands alone and
+            // must consume only itself: consuming a second byte it does not
+            // have would put the reported span past the last byte of the
+            // source, and consuming the newline would let the escape swallow
+            // the very byte that stops a missing quote from running on into
+            // the rest of the file.
+            //
+            // Advancing by one leaves the newline and end-of-file arms above
+            // to report the unterminated literal, so neither case needs its
+            // own copy of that diagnostic and every span stays in range.
+            let body = byte_at(bytes, cursor + 1);
+            if cursor + 1 >= bytes.len() || body == b'\n' {
+                push_error(errors, "incomplete escape in string literal", file, cursor as i64, (cursor + 1) as i64);
+                cursor += 1;
+                run = cursor;
+                continue;
+            }
+            match escape_byte(body) {
                 Some(decoded) => text.push(decoded as char),
                 None => {
                     // Report the escape and keep scanning the same literal
@@ -855,5 +875,64 @@ mod tests {
             Some(diag) => assert!(diag.0.contains("unterminated string")),
             None => assert!(false),
         }
+    }
+
+    // Every span a lexical error carries has to address bytes the file
+    // actually has. A span reaching past the last byte cannot be rendered
+    // against the source it names, so this asserts the offsets rather than
+    // the wording.
+    fn assert_spans_addressable(source: &str, errors: &[Diag]) {
+        let mut idx = 0usize;
+        while idx < errors.len() {
+            match errors.get(idx) {
+                Some(diag) => {
+                    assert!(
+                        diag.2 >= 0 && diag.3 >= diag.2 && diag.3 <= source.len() as i64,
+                        "span {}..{} of '{}' leaves a {}-byte source",
+                        diag.2,
+                        diag.3,
+                        diag.0,
+                        source.len()
+                    );
+                }
+                None => break,
+            }
+            idx += 1;
+        }
+    }
+
+    #[test]
+    fn trailing_backslash_at_eof_stays_inside_the_source() {
+        // A backslash as the last byte of the file has no escape body.
+        // Reading one anyway put both the escape span and the following
+        // unterminated-literal span one byte past the end of the source.
+        let source = "val x = \"runs off\\";
+        let errors = lex_errors(source);
+        assert!(errors.len() > 0, "a literal ending in a backslash must be rejected");
+        assert_spans_addressable(source, &errors);
+    }
+
+    #[test]
+    fn backslash_before_newline_does_not_swallow_the_next_line() {
+        // A newline is never an escape body — it bounds the literal. Taking
+        // it as one carried the scan onto the following line, so the line
+        // after an unterminated literal vanished into that literal instead
+        // of being lexed as the source it is.
+        let source = "val x = \"open\\\nval y = 1\n";
+        let mut names: Vec<String> = Vec::new();
+        let mut nodes: Vec<i64> = Vec::new();
+        let mut errors: Vec<Diag> = Vec::new();
+        let ok = lex(&mut names, &mut nodes, source, 0, &mut errors);
+        assert!(!ok, "an unterminated literal must be rejected");
+        assert_spans_addressable(source, &errors);
+        let mut saw_following_binding = false;
+        let mut idx = 0i64;
+        while idx < nodes.len() as i64 / NODE_STRIDE {
+            if tok_is_name(&nodes, &names, idx, "y") {
+                saw_following_binding = true;
+            }
+            idx += 1;
+        }
+        assert!(saw_following_binding, "the line after the literal must still be lexed");
     }
 }
