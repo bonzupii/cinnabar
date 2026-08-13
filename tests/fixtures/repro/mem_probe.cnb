@@ -77,6 +77,27 @@ fun fail_write(block: Memory.Block, error: Memory.Error) impure Result(U8, Memor
   return Err(error)
 end
 
+# The probe block must be *written* before `recurse` reads it.
+#
+# This fixture used to recurse over a block it had only allocated, and
+# passed: `Memory.allocate` lowered to `malloc`, LLVM knows freshly
+# malloc'd memory is undef, and it folded the `byte == PROBE_BYTE` test to
+# whichever branch it liked -- which happened to be the one the expected
+# exit code wanted. The test was reading uninitialized memory and depending
+# on how the optimizer resolved the undefined behaviour.
+#
+# Milestone 4 lowers `allocate` to `mmap`, whose anonymous pages arrive
+# genuinely zero-filled, and the read then returns a real 0 rather than a
+# convenient undef. Seeding the byte is what the probe always meant to do:
+# the point is 500000 tail-recursive frames each performing an opaque heap
+# read, not what an unwritten byte happens to contain.
+fun seed_probe_byte(block: &Memory.Block) impure Bool
+  match write_u8(block, ZERO_USIZE, PROBE_BYTE)
+    Ok(Unit) => return true
+    Err(error) => return false
+  end
+end
+
 fun fail_read(block: Memory.Block, error: Memory.Error) impure Result(U8, Memory.Error)
   deallocate(block)
   return Err(error)
@@ -108,6 +129,10 @@ pub fun main() impure I64
   val block = match allocate(1)
     Ok(value) => value
     Err(error) => return 1
+  end
+  if !seed_probe_byte(&block)
+    deallocate(block)
+    return 1
   end
   val depth = recurse(PROBE_RECURSE_DEPTH, 0, &block)
   deallocate(block)

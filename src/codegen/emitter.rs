@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::codegen::error::*;
+use crate::codegen::syscall;
 use crate::codegen::types::*;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -2112,15 +2113,76 @@ fn extern_memcmp<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> 
     )
 }
 
-fn extern_write<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
-    let i8p = ptr_ty(sess);
-    extern_fn(
-        sess,
-        "write",
-        sess.0
-            .i64_type()
-            .fn_type(&[sess.0.i32_type().into(), i8p.into(), sess.0.i64_type().into()], false),
-    )
+// The architecture whose syscall ABI this module targets.
+//
+// Read from the module's own triple rather than carried in `Session`, so
+// there is one source for it and no chance of the emitter and the linker
+// disagreeing about what is being built. An architecture with no
+// implemented ABI is a compile error naming the triple, never a guess: a
+// syscall number is meaningless on an architecture whose table is absent,
+// and emitting one anyway would call an arbitrary kernel entry point.
+fn target_arch(sess: &Session, span: (i64, i64, i64)) -> Result<syscall::Arch, CodegenError> {
+    let triple = sess.1.get_triple();
+    let text = triple.as_str().to_string_lossy().to_string();
+    match syscall::arch_of(&text) {
+        Some(arch) => Ok(arch),
+        None => Err(builder_error(
+            span.0,
+            span.1,
+            span.2,
+            &format!("no system-call ABI is implemented for target '{}': Memory, Terminal, and File issue Linux system calls directly on x86_64 and AArch64", text),
+        )),
+    }
+}
+
+// Issues one system call, widening every argument to the machine word the
+// ABI passes it in.
+fn emit_syscall<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    call: syscall::Sys,
+    args: &[IntValue<'ctx>],
+    span: (i64, i64, i64),
+) -> Result<IntValue<'ctx>, CodegenError> {
+    let arch = target_arch(sess, span)?;
+    let mut widened: Vec<IntValue<'ctx>> = Vec::new();
+    let mut idx = 0usize;
+    while idx < args.len() {
+        let arg = match args.get(idx) {
+            Some(value) => *value,
+            None => break,
+        };
+        widened.push(word_of(sess, arg, span)?);
+        idx += 1;
+    }
+    syscall::emit(sess.0, sess.2, arch, call, &widened, span)
+}
+
+// Sign-extends a value to the machine word a syscall argument register
+// holds.  Sign-extension rather than zero-extension because several
+// arguments are signed: `AT_FDCWD` is -100 and `mmap`'s file descriptor is
+// -1 for an anonymous mapping.
+fn word_of<'ctx>(sess: &mut Session<'ctx, '_, '_>, value: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
+    let i64_ty = sess.0.i64_type();
+    if value.get_type().get_bit_width() >= 64 {
+        return Ok(value);
+    }
+    sess.2
+        .build_int_s_extend(value, i64_ty, "")
+        .map_err(|err| builder_error(span.0, span.1, span.2, &format!("internal: cannot widen a system-call argument: {}", err)))
+}
+
+// A pointer as the integer a syscall argument register holds.
+fn ptr_word<'ctx>(sess: &mut Session<'ctx, '_, '_>, ptr: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
+    sess.2
+        .build_ptr_to_int(ptr, sess.0.i64_type(), "")
+        .map_err(|err| builder_error(span.0, span.1, span.2, &format!("internal: cannot pass a pointer to a system call: {}", err)))
+}
+
+// The integer a syscall returned, as a pointer.
+fn word_ptr<'ctx>(sess: &mut Session<'ctx, '_, '_>, value: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
+    sess.2
+        .build_int_to_ptr(value, ptr_ty(sess), "")
+        .map_err(|err| builder_error(span.0, span.1, span.2, &format!("internal: cannot read a pointer out of a system-call result: {}", err)))
 }
 
 fn extern_socket<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
@@ -2473,15 +2535,28 @@ fn native_allocate<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     let p0 = get_local(locals, 0, span)?;
     let k0 = get_local_key(locals, 0, span)?;
     let size = load_key(sess, k0, p0, span)?.into_int_value();
-    let malloc = extern_malloc(sess);
-    let call = sess.2.build_call(malloc, &[into_meta(size.into())], "").map_err(builder_fail)?;
-    let data = match call.try_as_basic_value() {
-        ValueKind::Basic(bv) => bv.into_pointer_value(),
-        ValueKind::Instruction(inst) => {
-            return Err(builder_error(span.0, span.1, span.2, &format!("internal: malloc returned void ({:?})", inst.get_opcode())));
-        }
-    };
-    let null_cmp = is_null_ptr(sess, data)?;
+    // `mmap` directly, not libc's allocator: `Memory` is the raw-memory
+    // quarantine, and a `Block` already carries the length `munmap`
+    // needs to give the mapping back, so nothing about the allocator's
+    // bookkeeping is required here. `Collections` keeps using the libc
+    // allocator, because a growable container genuinely needs `realloc`
+    // semantics rather than whole mappings.
+    //
+    // An anonymous private mapping of `size` bytes, rounded up to a page
+    // by the kernel. The requested length is what the handle records, so
+    // the bounds checks in `write_u8`/`read_u8` still reject an offset
+    // past what the program asked for, not merely past the page.
+    let zero = sess.0.i64_type().const_zero();
+    let prot = sess.0.i64_type().const_int(syscall::PROT_READ_WRITE as u64, false);
+    let flags = sess.0.i64_type().const_int(syscall::MAP_PRIVATE_ANONYMOUS as u64, false);
+    let no_fd = sess.0.i64_type().const_all_ones();
+    let raw = emit_syscall(sess, syscall::Sys::Mmap, &[zero, size, prot, flags, no_fd, zero], span)?;
+    // `mmap` reports failure as a small negative errno rather than as a
+    // null pointer, so the failure test is `raw < 0` — a returned address
+    // is never in that range for a user-space mapping.
+    let failed = sess.2.build_int_compare(IntPredicate::SLT, raw, sess.0.i64_type().const_zero(), "").map_err(builder_fail)?;
+    let data = word_ptr(sess, raw, span)?;
+    let null_cmp = failed;
     let fail_block = new_block(sess, f, "alloc_fail");
     let ok_block = new_block(sess, f, "alloc_ok");
     let after = new_block(sess, f, "alloc_after");
@@ -2517,8 +2592,14 @@ fn native_deallocate<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ct
     let block_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let bd = struct_gep(sess, block_key, p0, 0, "", span)?;
     let data = load_ptr(sess, bd)?;
-    let free = extern_free(sess);
-    sess.2.build_call(free, &[into_meta(data.into())], "").map_err(builder_fail)?;
+    // `munmap` needs the mapping's length as well as its address, which is
+    // exactly the field `allocate` recorded in the handle. This is the
+    // second reason the handle must be fully initialized (Milestone 3): a
+    // garbage length here would unmap memory the program still owns.
+    let bl = struct_gep(sess, block_key, p0, 1, "", span)?;
+    let len = load_i64(sess, bl)?;
+    let addr = ptr_word(sess, data, span)?;
+    emit_syscall(sess, syscall::Sys::Munmap, &[addr, len], span)?;
     build_unit_value_into(sess, ret_key, out, span)?;
     Ok(())
 }
@@ -2831,22 +2912,72 @@ fn native_print<'ctx>(
     newline: bool,
     span: (i64, i64, i64),
 ) -> Result<(), CodegenError> {
+    // `write` directly, not through libc's wrapper: Milestone 4 puts the
+    // kernel entry point in the emitted IR for the Terminal surface, so
+    // nothing sits between the Cinnabar declaration and the system call.
     let (data, len) = byte_view_of(sess, locals, span)?;
-    let write = extern_write(sess);
-    let fd = sess.0.i32_type().const_int(if stderr { 2 } else { 1 }, false);
-    sess.2
-        .build_call(write, &[into_meta(fd.into()), into_meta(data.into()), into_meta(len.into())], "")
-        .map_err(builder_fail)?;
+    let fd = sess.0.i64_type().const_int(if stderr { 2 } else { 1 }, false);
+    write_all(sess, fd, data, len, span)?;
     if newline {
         let nl_slot = alloca_raw(sess, sess.0.i8_type().into(), "nl", span)?;
         let nl = sess.0.i8_type().const_int(10, false);
         sess.2.build_store(nl_slot, nl).map_err(builder_fail)?;
         let one = sess.0.i64_type().const_int(1, false);
-        sess.2
-            .build_call(write, &[into_meta(fd.into()), into_meta(nl_slot.into()), into_meta(one.into())], "")
-            .map_err(builder_fail)?;
+        write_all(sess, fd, nl_slot, one, span)?;
     }
     build_unit_value_into(sess, ret_key, out, span)?;
+    Ok(())
+}
+
+// Writes exactly `len` bytes, looping until they are all gone.
+//
+// A single `write` is allowed to transfer fewer bytes than asked — that is
+// the documented contract, not an error condition — so issuing one and
+// walking away silently truncates output on a pipe or a slow terminal. The
+// libc wrapper does not loop either; the loop has to be here.
+//
+// The loop also ends on a non-positive result, which covers both an error
+// (negative errno) and a zero-byte write. `Terminal.print` returns `Unit`
+// and so has nowhere to report a failure: this is the surface the reference
+// specification declares, and giving it an error channel would change the
+// language surface rather than implement it. Stopping rather than spinning
+// is the honest behaviour available here — an infinite loop on a closed
+// stdout would be worse than a short write.
+fn write_all<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    fd: IntValue<'ctx>,
+    data: PointerValue<'ctx>,
+    len: IntValue<'ctx>,
+    span: (i64, i64, i64),
+) -> Result<(), CodegenError> {
+    let function = match sess.2.get_insert_block().and_then(|block| block.get_parent()) {
+        Some(found) => found,
+        None => return Err(builder_error(span.0, span.1, span.2, "internal: write outside a function body")),
+    };
+    let i64_ty = sess.0.i64_type();
+    let done_slot = alloca_raw(sess, i64_ty.into(), "written", span)?;
+    store_key(sess, done_slot, i64_ty.const_zero().into())?;
+    let cond = new_block(sess, function, "write_cond");
+    let body = new_block(sess, function, "write_body");
+    let after = new_block(sess, function, "write_done");
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(cond);
+    let done = load_i64(sess, done_slot)?;
+    let more = sess.2.build_int_compare(IntPredicate::ULT, done, len, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(more, body, after).map_err(builder_fail)?;
+    sess.2.position_at_end(body);
+    let cursor = byte_offset(sess, data, done)?;
+    let remaining = sess.2.build_int_sub(len, done, "").map_err(builder_fail)?;
+    let cursor_word = ptr_word(sess, cursor, span)?;
+    let wrote = emit_syscall(sess, syscall::Sys::Write, &[fd, cursor_word, remaining], span)?;
+    let progressed = sess.2.build_int_compare(IntPredicate::SGT, wrote, i64_ty.const_zero(), "").map_err(builder_fail)?;
+    let advance = new_block(sess, function, "write_advance");
+    sess.2.build_conditional_branch(progressed, advance, after).map_err(builder_fail)?;
+    sess.2.position_at_end(advance);
+    let next = sess.2.build_int_add(done, wrote, "").map_err(builder_fail)?;
+    store_key(sess, done_slot, next.into())?;
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(after);
     Ok(())
 }
 

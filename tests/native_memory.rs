@@ -293,7 +293,7 @@ fn native_handle_constructors_initialize_every_field() {
 }
 
 #[test]
-fn deallocate_frees_the_handles_data_field() {
+fn deallocate_unmaps_the_handles_address_and_length() {
     let dir = temp_dir("deallocate");
     match std::fs::create_dir_all(&dir) {
         Ok(()) => {}
@@ -305,39 +305,76 @@ fn deallocate_frees_the_handles_data_field() {
     let guard = TempDirGuard(dir.clone());
     let ir = emit_ir(&dir, "mem_byte_access");
 
-    // The pointer handed to `free` must come from field 0 of the handle —
-    // the data pointer `malloc` returned — and from nowhere else. Freeing
-    // any other field is the reported garbage-pointer free.
+    // `Memory.deallocate` unmaps the mapping `allocate` made, and `munmap`
+    // needs *both* halves of the handle: the address from field 0 and the
+    // length from field 1. Releasing a pointer from any other field is the
+    // reported garbage-pointer free, and passing a length from anywhere but
+    // the handle would unmap memory the program still owns — which is the
+    // second reason a handle must be fully initialized.
+    //
+    // The assertion is on the data flow, not on a syscall number, so it
+    // holds on every architecture. The numbers themselves are checked
+    // independently by the unit tests in `src/codegen/syscall.rs`, against
+    // hand-written Linux ABI values.
     let body = function_body(&ir, "@Memory_deallocate");
     assert!(!body.is_empty(), "no Memory.deallocate in the emitted IR");
-    let data_field = ssa_defined_by(
-        &body,
-        &format!("getelementptr inbounds nuw {}, ptr", HANDLE_TY),
+
+    let data_field = handle_field(&body, 0);
+    assert!(!data_field.is_empty(), "Memory.deallocate does not read the handle's data field");
+    let address = load_from(&body, &data_field);
+    assert!(
+        address.starts_with("load ptr,"),
+        "Memory.deallocate does not load a pointer from the handle's data field: {}",
+        address
     );
-    assert!(!data_field.is_empty(), "Memory.deallocate reads no handle field");
-    let field_line = match line_index(&body, &data_field) {
-        Some(idx) => match body.lines().nth(idx) {
-            Some(line) => line.to_string(),
-            None => String::new(),
-        },
-        None => String::new(),
+    let address_ssa = ssa_defined_by(&body, &format!("load ptr, ptr {},", data_field));
+
+    let length_field = handle_field(&body, 1);
+    assert!(!length_field.is_empty(), "Memory.deallocate does not read the handle's length field");
+    let length_ssa = ssa_defined_by(&body, &format!("load i64, ptr {},", length_field));
+    assert!(!length_ssa.is_empty(), "Memory.deallocate does not load the handle's length");
+
+    // The address reaches the kernel as an integer, so it passes through a
+    // `ptrtoint` of exactly the pointer loaded from the data field.
+    let address_word = ssa_defined_by(&body, &format!("ptrtoint ptr {} to i64", address_ssa));
+    assert!(
+        !address_word.is_empty(),
+        "Memory.deallocate does not pass the handle's data pointer to the system call"
+    );
+
+    let unmap = match body.lines().find(|line| line.contains("asm sideeffect")) {
+        Some(line) => line.to_string(),
+        None => {
+            assert!(false, "Memory.deallocate issues no system call: {}", body);
+            String::new()
+        }
     };
     assert!(
-        field_line.ends_with("i32 0, i32 0"),
-        "Memory.deallocate reads the wrong handle field: {}",
-        field_line
+        unmap.contains(&format!("i64 {}", address_word)),
+        "Memory.deallocate's system call does not receive the handle's address: {}",
+        unmap
     );
-    let loaded = load_from(&body, &data_field);
     assert!(
-        loaded.starts_with("load ptr,"),
-        "Memory.deallocate does not load a pointer from the handle's data field: {}",
-        loaded
-    );
-    let freed = ssa_defined_by(&body, "load ptr, ptr");
-    assert!(
-        body.contains(&format!("call void @free(ptr {})", freed)),
-        "Memory.deallocate does not free the pointer it loaded from the data field"
+        unmap.contains(&format!("i64 {}", length_ssa)),
+        "Memory.deallocate's system call does not receive the handle's length: {}",
+        unmap
     );
 
     drop(guard);
+}
+
+/// The SSA name of the `getelementptr` selecting field `index` of a native
+/// handle.
+fn handle_field(body: &str, index: u32) -> String {
+    let suffix = format!("i32 0, i32 {}", index);
+    for line in body.lines() {
+        let (name, value) = match line.split_once(" = ") {
+            Some(pair) => pair,
+            None => continue,
+        };
+        if value.starts_with(&format!("getelementptr inbounds nuw {}, ptr", HANDLE_TY)) && value.ends_with(&suffix) {
+            return name.to_string();
+        }
+    }
+    String::new()
 }
