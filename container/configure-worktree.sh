@@ -113,7 +113,7 @@ mkdir -p -- "${configuration_root}"
 worktree_host_path="$(to_host_path "${resolved_worktree}")"
 environment_lines="CINNABAR_WORKTREE=\"${worktree_host_path}\"
 CINNABAR_CACHE_KEY=${cache_key}"
-compose_files="-f compose.dev.yaml"
+compose_file_list="compose.dev.yaml"
 
 if [ -d "${git_marker}" ]; then
   checkout_kind="main checkout"
@@ -153,21 +153,34 @@ CINNABAR_GIT_COMMON=\"${git_common_host_path}\"
 CINNABAR_GIT_POINTER=\"${git_pointer_host_path}\"
 CINNABAR_GIT_BACKLINK=\"${git_backlink_host_path}\"
 CINNABAR_GIT_ADMIN=${git_admin}"
-  compose_files="${compose_files} -f compose.worktree.yaml"
+  compose_file_list="${compose_file_list};compose.worktree.yaml"
   checkout_kind="linked worktree"
 fi
+
+# Compose reads COMPOSE_FILE from --env-file, so the selection travels with
+# the file instead of being retyped as -f arguments.  This is the only thing
+# that differed between a main checkout and a linked worktree, so carrying it
+# here makes every command identical for both.  An explicit -f still wins,
+# which keeps older invocations working.
+#
+# COMPOSE_PATH_SEPARATOR is pinned rather than left to the platform default
+# (';' on Windows, ':' elsewhere) so one generated file means the same thing
+# on either host.  ';' rather than ':' because a drive letter contains a colon.
+environment_lines="${environment_lines}
+COMPOSE_PATH_SEPARATOR=;
+COMPOSE_FILE=${compose_file_list}"
 
 environment_file="${configuration_root}/worktree.env"
 printf '%s\n' "${environment_lines}" > "${environment_file}"
 
-# The printed commands use a repository-relative --env-file because the -f
-# arguments are relative too: both assume the repository root as the working
-# directory, and a relative path needs no host/Unix conversion to be usable
-# from PowerShell, bash, and zsh alike.
+# The printed commands use a repository-relative --env-file because Compose
+# resolves COMPOSE_FILE relative to the working directory too: both assume the
+# repository root, and a relative path needs no host/Unix conversion to be
+# usable from PowerShell, bash, and zsh alike.
 relative_environment_file="container/local/${cache_key}/worktree.env"
 
 echo "Configured ${checkout_kind} at ${resolved_worktree}"
 echo "Environment file: ${environment_file}"
 echo "Run these from the repository root:"
-echo "Start: docker compose --env-file \"${relative_environment_file}\" ${compose_files} up -d --build"
-echo "Gate:  docker compose --env-file \"${relative_environment_file}\" ${compose_files} exec dev nix develop --command ./pre_commit_check.sh"
+echo "Start: docker compose --env-file \"${relative_environment_file}\" up -d --build"
+echo "Gate:  docker compose --env-file \"${relative_environment_file}\" exec dev nix develop --command ./pre_commit_check.sh"

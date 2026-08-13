@@ -17,8 +17,7 @@ if [ "${CINNABAR_IN_DEV_CONTAINER:-}" = "" ]; then
   echo "This runs inside the dev container.  From the repository root:" >&2
   echo "" >&2
   echo "  docker compose --env-file container/local/main/worktree.env \\" >&2
-  echo "    -f compose.dev.yaml exec dev \\" >&2
-  echo "    nix develop --command ./container/install-vscode-extension.sh" >&2
+  echo "    exec dev nix develop --command ./container/install-vscode-extension.sh" >&2
   exit 1
 fi
 
@@ -53,7 +52,11 @@ if [ -z "${SERVER_CLI}" ]; then
   exit 1
 fi
 
-"${SERVER_CLI}" --install-extension "${VSIX}" \
+# --force because the version in package.json rarely changes between local
+# rebuilds: without it the CLI sees the same version already installed, skips
+# the install, and still exits 0 -- so the developer reloads the window and
+# keeps running the extension they just replaced.
+"${SERVER_CLI}" --install-extension "${VSIX}" --force \
   --extensions-dir "${HOME}/.vscode-server/extensions"
 
 echo ""

@@ -37,13 +37,13 @@ Run the helper from the repository root. Give every worktree a stable, lowercase
 
 On Windows this is the Git Bash that Git for Windows already installs; the helper needs nothing beyond bash and Git. It is the one script here that must run on the *host* rather than in the container, because it produces the environment file every later `docker compose --env-file` command reads — there is no container to run it in yet. Host paths reach Compose through `cygpath -m`, so `/c/...` becomes the `C:/...` form Docker accepts as a bind source; on a Unix host there is nothing to convert.
 
-The helper writes ignored files below `container/local/<cache-key>/` and prints exact start and gate commands. It never rewrites the checkout's `.git` data. For the main checkout, use only `compose.dev.yaml`:
+The helper writes ignored files below `container/local/<cache-key>/` and prints exact start and gate commands. It never rewrites the checkout's `.git` data. Selecting a checkout takes only its environment file:
 
 ```bash
-docker compose --env-file "container/local/main/worktree.env" -f compose.dev.yaml config
-docker compose --env-file "container/local/main/worktree.env" -f compose.dev.yaml up -d --build
-docker compose --env-file "container/local/main/worktree.env" -f compose.dev.yaml exec dev nix develop
-docker compose --env-file "container/local/main/worktree.env" -f compose.dev.yaml exec dev nix develop --command ./pre_commit_check.sh
+docker compose --env-file "container/local/main/worktree.env" config
+docker compose --env-file "container/local/main/worktree.env" up -d --build
+docker compose --env-file "container/local/main/worktree.env" exec dev nix develop
+docker compose --env-file "container/local/main/worktree.env" exec dev nix develop --command ./pre_commit_check.sh
 cat pre_commit.log
 ```
 
@@ -53,15 +53,26 @@ Both arguments have defaults: `--worktree` is the current directory and `--cache
 ./container/configure-worktree.sh --worktree /c/path/to/cinnabar-feature --cache-key feature
 ```
 
-Use both Compose files for the linked worktree, exactly as printed by the helper:
+The commands for it are identical apart from the cache key — there are no `-f` arguments to remember or get wrong:
 
 ```bash
-docker compose --env-file "container/local/feature/worktree.env" -f compose.dev.yaml -f compose.worktree.yaml config
-docker compose --env-file "container/local/feature/worktree.env" -f compose.dev.yaml -f compose.worktree.yaml up -d --build
-docker compose --env-file "container/local/feature/worktree.env" -f compose.dev.yaml -f compose.worktree.yaml exec dev nix develop --command ./pre_commit_check.sh
+docker compose --env-file "container/local/feature/worktree.env" config
+docker compose --env-file "container/local/feature/worktree.env" up -d --build
+docker compose --env-file "container/local/feature/worktree.env" exec dev nix develop --command ./pre_commit_check.sh
 ```
 
-The printed commands use a repository-relative `--env-file` because the `-f` arguments are relative too: both assume the repository root as the working directory, and a relative path stays valid whether you paste it into bash or PowerShell.
+That works because the generated file carries the Compose file selection itself:
+
+```text
+COMPOSE_PATH_SEPARATOR=;
+COMPOSE_FILE=compose.dev.yaml;compose.worktree.yaml
+```
+
+Which Compose files apply was the only thing that differed between a main checkout and a linked worktree, and it is derived from the same `.git` inspection that produces the rest of the file — so it travels with the selection rather than being retyped at each call site. A main checkout gets `COMPOSE_FILE=compose.dev.yaml` alone. An explicit `-f` still overrides the variable, so older invocations keep working.
+
+`COMPOSE_PATH_SEPARATOR` is pinned rather than left to the platform default (`;` on Windows, `:` elsewhere) so one generated file means the same thing on either host; `;` rather than `:` because a drive letter contains a colon.
+
+Paths in the printed commands are repository-relative because Compose resolves `COMPOSE_FILE` against the working directory too: both assume the repository root, and a relative path stays valid whether you paste it into bash or PowerShell.
 
 To switch branches, first confirm no command is running, then run the target worktree's `up -d --build` command. Compose recreates only the service. The Nix and Cargo volumes remain shared and the target volume changes with the cache key.
 
@@ -84,7 +95,7 @@ HOST generated backlink file         -> /git-common/worktrees/<admin>/gitdir
 
 Inside the container, the proxy pointer says `gitdir: /git-common/worktrees/<admin>` and the proxy backlink says `/workspace/.git`. This preserves Git and Nix flake discovery without modifying host metadata or mounting a second alias of the source tree. Avoiding that duplicate source alias also prevents repository scanners from visiting the same files twice.
 
-The main checkout needs no proxy: its real `.git` directory arrives with the `/workspace` bind mount, so `compose.worktree.yaml` must not be included for it.
+The main checkout needs no proxy: its real `.git` directory arrives with the `/workspace` bind mount, so `compose.worktree.yaml` must not be included for it. The helper decides that from the checkout's `.git` and records it as `COMPOSE_FILE`, so including the override for a main checkout is not a mistake left to the caller.
 
 ## VS Code
 
@@ -119,7 +130,7 @@ The wrapper runs rust-analyzer through `nix develop`, so it and its Cargo/build-
 Because of that wrapper, **nothing in `shellHook` may write to stdout**. rust-analyzer speaks LSP over stdout, so a hook that echoes a banner there emits it ahead of the first `Content-Length` header and the editor discards the server. Send diagnostic output to stderr (`echo ... >&2`), as `flake.nix` does. To check the stream is clean:
 
 ```bash
-docker compose --env-file "container/local/main/worktree.env" -f compose.dev.yaml \
+docker compose --env-file "container/local/main/worktree.env" \
   exec dev sh -c 'cd /workspace && container/bin/rust-analyzer-nix --version 2>/dev/null'
 ```
 
@@ -130,7 +141,7 @@ The only line on stdout must be rust-analyzer's own version.
 `editors/vscode` is not on the Marketplace, so an attached-container configuration cannot pull it by identifier. Package and install it into the container once:
 
 ```bash
-docker compose --env-file "container/local/main/worktree.env" -f compose.dev.yaml \
+docker compose --env-file "container/local/main/worktree.env" \
   exec dev nix develop --command ./container/install-vscode-extension.sh
 ```
 
@@ -193,7 +204,7 @@ Branch switching and worktree creation/removal remain host responsibilities. Clo
 
 ## Verification checklist
 
-For infrastructure changes, validate `docker compose ... config` for the main checkout and at least two linked worktrees. Start each selection and confirm:
+For infrastructure changes, validate `docker compose --env-file "container/local/<cache-key>/worktree.env" config` for the main checkout and at least two linked worktrees, passing no `-f` so the generated `COMPOSE_FILE` is what gets exercised. The main checkout's output must contain no `/git-common` mount and a linked worktree's must contain all four bind mounts from the topology above. Start each selection and confirm:
 
 ```bash
 git status --short --branch
@@ -206,6 +217,7 @@ The exact gate must pass without profile overrides, and its `pre_commit.log` mus
 
 ## References
 
+- [Docker Compose pre-defined environment variables](https://docs.docker.com/compose/how-tos/environment-variables/envvars/) (`COMPOSE_FILE`, `COMPOSE_PATH_SEPARATOR`)
 - [Docker Compose volumes](https://docs.docker.com/reference/compose-file/volumes/)
 - [Docker Compose service mounts](https://docs.docker.com/reference/compose-file/services/#volumes)
 - [Docker Desktop WSL best practices](https://docs.docker.com/desktop/features/wsl/best-practices/)
