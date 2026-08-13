@@ -1,0 +1,9 @@
+pub mod Helper
+  fun secret() I64
+    return 42
+  end
+end
+
+pub fun main() I64
+  return Helper.secret()
+end

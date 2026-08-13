@@ -1,0 +1,7 @@
+pub type Bad
+  _: I64
+end
+
+pub fun main() I64
+  return 0
+end

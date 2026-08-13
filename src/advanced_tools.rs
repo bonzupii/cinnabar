@@ -65,6 +65,8 @@ fn exercises() -> Vec<Exercise> {
         Exercise { file: "05_const_division.cnb", lesson: "Compile-time division by zero is rejected.", source: include_str!("../tests/fixtures/repro/div_zero_const.cnb"), expected: "division by zero" },
         Exercise { file: "06_integer_range.cnb", lesson: "Integer literals must fit their declared type.", source: include_str!("../tests/fixtures/repro/int_literal_range.cnb"), expected: "out of range" },
         Exercise { file: "07_recursion.cnb", lesson: "Recursion must be tail-recursive.", source: include_str!("../tests/fixtures/repro/non_tail_recursion.cnb"), expected: "tail" },
+        Exercise { file: "08_dropped_pub.cnb", lesson: "An item that is not public cannot be used from outside the module that declares it.", source: include_str!("../tests/fixtures/08_dropped_pub.cnb"), expected: "cannot call '" },
+        Exercise { file: "09_discard_patterns.cnb", lesson: "Discard patterns using `_` or `_`-prefixed bindings are banned in every position.", source: include_str!("../tests/fixtures/09_discard_patterns.cnb"), expected: "'_' violates casing rule" },
     ]
 }
 
