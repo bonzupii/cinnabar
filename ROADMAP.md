@@ -466,25 +466,79 @@ allocation-dense, a suballocator over `mmap` belongs in the surface rather than 
 
 ---
 
-## Milestone 5 — `build.cnb` Project Manifest
-- **Decided in Milestone 2, not open.** Compile-time string constants resolve via the
-  literal-as-`&[U8]` representation, and manifest fields are `&[U8]`, not `String`. There is no
-  distinct compile-time-only string type: `pub const NAME: &[U8] = "cinnabar"` folds to the
-  interned name id of its bytes and materializes through the same `.rodata` global as an inline
-  literal of the same text. `Collections.String` stays what it was — native, heap-backed, and
-  constructed by an `impure` call — and is simply not what a manifest field is.
-- CLI: `cinnabar build`, `cinnabar run`, `cinnabar test`, `cinnabar check`.
-- Depends on Milestone 2.
+## Milestone 5 — `build.cnb` Project Manifest (COMPLETE)
+
+`build.cnb` is Cinnabar source, read by the compiler's own front end.
+
+```
+pub const NAME: &[U8] = "cinnabar"
+pub const ENTRY: &[U8] = "main.cnb"
+pub const TESTS: &[U8] = "tests"
+```
+
+Field names are `SCREAMING_SNAKE_CASE` because the compiler enforces that casing on `const`
+declarations — a lowercase field is a compile error, not a style complaint. Manifest fields are
+`&[U8]`, decided in Milestone 2 and not reopened: `Collections.String` is native, heap-backed
+and built by an `impure` call, and is simply not what a manifest field is.
+
+### It is parsed, not scanned
+`load_manifest` runs `analysis::analyze` and reads `ITEM_CONST` nodes, taking each field's
+declared type and folded value from what the resolver and typechecker already attached. It had
+been a hand-rolled `key = value` line splitter: a second implementation of the front end living
+beside the real one, in a file whose extension claims it is Cinnabar.
+
+A field's type is checked against the canonical descriptors — `TYD_REF` over `TYD_SLICE` over
+`BUILTIN_U8` — never against the spelling of a type name. Duplicate fields need no check of
+their own: two `pub const NAME` declarations are a duplicate symbol, and the resolver already
+owns that fact.
+
+### `NAME` names the artifact, and is checked because it reaches the disk
+`cinnabar build` names its output after `NAME` rather than after whichever file happens to be
+the entry point, so renaming an entry source does not rename the project.
+
+That makes `NAME` a path, so it is validated as one: a single component, no separator, no parent
+step, no root, no drive prefix. `ENTRY` and `TESTS` are confined because a path is visibly a
+path; `NAME` reaches the same filesystem through a field that does not look like one, which is
+why it was worth checking rather than trusting.
+
+### Verification
+Manifest parsing, a missing required field, a wrong field type, a path escaping the root, a
+non-`pub` item, a name escaping its component, and a `build.cnb` that is not valid Cinnabar at
+all. The two symlink-escape tests are unchanged in what they test.
 
 ---
 
-## Milestone 6 — Diagnostic Quality
-- Multi-label Ariadne rendering: error site + relevant definition site in one diagnostic.
-- Suggestion engine (dead code, unresolved-name matches): every suggestion is hedged
-  ("possible match", "did you mean") regardless of source — cache-derived or purely structural.
-  Never state inferred developer intent as fact; an inconclusive cache or ambiguous match falls
-  back to the neutral, non-presumptive message. No suggestion may point toward a local bandaid
-  (suppress, stub, comment out) over a structurally correct fix.
+## Milestone 6 — Diagnostic Quality (PARTIAL)
+
+### Shipped
+Definition-site labels, rendered by default rather than behind a flag: a duplicate symbol labels
+the first declaration, an immutable assignment labels the `val` binding, an unhandled
+`Result`/`Option` labels the producing function's return type, a type mismatch labels the
+declaration whose type it violates. `--explain-borrow` still gates only the borrow checker's own
+explanations.
+
+`src/suggest.rs` offers near matches for unresolved names, drawn from the scope facts the
+resolver materialized rather than a second walk. Every suggestion is hedged ("possible match",
+"did you mean"), an ambiguous match names no candidate and falls back to the neutral message,
+and no suggestion points toward a local bandaid. That wording contract is asserted directly:
+each suggestion carries a hedge, none carries bandaid vocabulary, and a tie stays silent.
+
+### Dead code is not part of it, and the attempt is worth recording
+An unused-declaration rejection was written and taken back out. The spec does not ask for it:
+`MANIFESTO.md` lists unused *imports* among the compile-time invariants, not unused
+declarations, and this milestone names dead code as something the suggestion engine speaks about
+rather than a new class of rejected program.
+
+What it cost is the argument against it. Eight fixtures had to change to keep compiling — nine
+functions in a teaching file marked `pub` so the compiler would stop objecting, which is
+declaring something public API in order to silence a check, exactly the local bandaid above. The
+random-program generator, whose job is to emit *valid* programs, had to be changed to emit `pub`
+everywhere; when a check rejects the output of a valid-program generator, the reading that the
+generator was wrong is the one needing evidence.
+
+`tests/fixtures/dead_code.cnb` pins the current answer, asserted on exit status so it fails
+whatever a future rejection is called. Reintroducing this is a language change: state it in
+`MANIFESTO.md`, and find a remedy that is not `pub`, first.
 
 ---
 
@@ -492,25 +546,75 @@ allocation-dense, a suballocator over `mmap` belongs in the surface rather than 
 - `cinnabar burn`: local web server, static content, bundled at compile time, matching the exact
   installed compiler version. There is one binary and it is called `cinnabar`; no shortened
   `cinna` is shipped, aliased, or packaged.
-- Mushlings: rustlings-style broken/diagnostic/fixed exercises. Source directly from the failure
-  classes already found (dropped `pub`, mixed struct/enum body, unhandled `Result`/`Option`,
-  discard patterns, unconsumed linear value, ambiguous returned borrow, compile-time-zero division,
-  and the fixed-width overflow/range cases from Milestone 1) — each already has a real compiler
-  diagnostic; use it verbatim rather than writing new exercise text from scratch.
+- Mushlings: rustlings-style broken/diagnostic/fixed exercises, each using a real compiler
+  diagnostic verbatim rather than new exercise text.
 - Depends on Milestone 6 (diagnostic rendering) and a stable language surface.
+
+### Shipped
+`cinnabar burn` serves version-pinned Cinnabook documentation locally.
+
+Mushlings ships **eight** exercises, each sourced from a failure class that has a real compiler
+diagnostic: mixed struct/enum body, unconsumed linear value, unhandled `Result`, ambiguous
+returned borrow, compile-time-zero division, fixed-width literal range, non-tail recursion, and
+dropped `pub`.
+
+### Discard patterns have no exercise, because they have no diagnostic
+This entry used to list discard patterns among the classes to source from, on the basis that
+each already had a diagnostic to use verbatim. That is not true of this one. A bare underscore
+as a match arm, as a binding, and as the prefix of one all compile today and exit zero.
+
+The match-arm case is the consequential one: a catch-all makes any match trivially exhaustive,
+so adding a variant to an enum stops forcing anyone to handle it.
+
+`MANIFESTO.md` does not ban discards either. That prohibition lives in `AGENTS.md`, which
+governs this compiler's own Rust source rather than the language it compiles; the two were
+conflated when this entry was written. `tests/fixtures/09_discard_patterns.cnb` keeps the forms
+as the record and as the program to check once the question is settled.
+
+**Open question:** does Cinnabar reject discard patterns? It is a language decision and belongs
+in `MANIFESTO.md` before an exercise teaches it — writing the exercise first is what produced
+one that taught a casing rule while claiming to teach this.
 
 ---
 
-## Milestone 8 — Verification
-- Type soundness: progress + preservation, checked against monomorphization, trait dispatch, and
-  nested sum-type destructuring.
-- AST/type fuzzer generating random well-typed programs, asserting the typechecker/borrow checker
-  never accepts an ill-typed or memory-unsafe one.
-- Sanitizer gate in `pre_commit_check.sh`: all fixture binaries under UBSan, ASan, and Valgrind.
-  Zero UB, zero leaks, zero unhandled traps on every valid program. Since shipped binaries are
-  static/syscall-direct, build a separate instrumented target for the sanitizer gate (dynamically
-  linked against sanitizer runtimes, as UBSan/ASan require) rather than relaxing the static-only
-  rule for shipped output. The sanitizer build is test infrastructure, not a release artifact.
+## Milestone 8 — Verification (PARTIAL)
+
+### The memory-checker gate, and the link mode it needed
+Every valid program in the expected-success corpus runs under Valgrind memcheck, failing on any
+error or definite leak, and separately asserted to still exit with the code it is supposed to —
+a link mode that changed what a program computes would make every clean report meaningless.
+
+That needed a second link mode. A shipped binary is static, `-nostdlib`, `-no-pie`, against a
+musl `libc.a` embedded in the compiler, so it carries no dynamic section and memcheck has no
+`malloc` to interpose on: it reports `0 allocs, 0 frees` for a program that demonstrably
+allocates. `LinkMode::Instrumented` hands the *same object file* to the driver without the flags
+that cut it off from the host libc, keeping `-no-pie` because `llc` emits a non-relocatable
+object. The static-only rule for shipped output is not relaxed and no binary a user receives is
+built this way.
+
+One test exists to keep the gate from being vacuous: memcheck must report real allocations for
+the instrumented build. If that stops holding, the gate is running and seeing nothing.
+
+The gate lives in `cargo test`, which `pre_commit_check.sh` already invokes, rather than as a
+new step in that script.
+
+### Carried forward
+- **UBSan.** Its checks are emitted by Clang's front end while lowering C, not by a pass over
+  finished IR, so there is nothing to run over a Cinnabar module. Covering it means the emitter
+  emitting the checks itself — emitter work, not gate configuration. Not claimed until something
+  performs it.
+- **ASan.** The runtime links and works in the dev shell, but the instrumentation is an IR pass
+  that has to run between `opt` and `llc` in the compiler's own pipeline. Valgrind covers the
+  heap errors and leaks that motivated the milestone; ASan would widen it to stack and global
+  overflows.
+- **Type soundness — progress and preservation.** Not started, and the largest piece left.
+  `cinnabar soundness` emits machine-checkable front-end evidence and says `formal_proof: false`,
+  which is honest about being a count of what the front end accepted rather than a mechanized
+  proof. Monomorphization, trait dispatch, and nested sum-type destructuring are the cases it has
+  to survive.
+- **The fuzzer's second half.** `tests/fuzz_generalization.rs` generates random well-typed
+  programs already; what it does not yet do is assert the borrow checker never accepts a
+  memory-unsafe one.
 
 ---
 
