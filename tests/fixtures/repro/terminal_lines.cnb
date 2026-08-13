@@ -1,0 +1,121 @@
+#! `Terminal.read_line`'s success path, which nothing reached before.
+#!
+#! The harness gives every fixture a null standard input, so only
+#! `Err(EndOfInput)` ever ran and every statement about what a *line* is
+#! went unchecked. This fixture is run with real input on standard input:
+#!
+#!   alpha\n\nbeta        (no terminator after the last line)
+#!
+#! and each read is checked by length, which is what distinguishes the
+#! behaviours the surface promises:
+#!
+#!   - `alpha\n` yields a line of 5, not 6: the terminator is consumed but
+#!     is not part of the line.
+#!   - The empty line yields `Ok` with a length of 0, not `Err(EndOfInput)`.
+#!     A blank line and "no more lines" are different answers.
+#!   - `beta` with no terminator still yields a line of 4: bytes already
+#!     read followed by end of input are a final line, not a discarded
+#!     remainder.
+#!   - Only then does the next read report end of input.
+#!
+#! Every line is freed on both paths, so the run also has to be clean under
+#! the linearity rules rather than merely produce the right numbers.
+
+pub mod Collections
+  pub nat type String
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+    pub KeyNotFound
+    pub EmptySlice
+    pub InvalidUtf8
+    pub EndOfInput
+  end
+
+  pub nat fun string_len(value: &String) Usize
+  pub nat fun string_free(value: String) impure Unit
+end
+
+pub mod Terminal
+  pub nat fun print_line(text: &[U8]) impure Unit
+  pub nat fun read_line() impure Result(Collections.String, Collections.Error)
+end
+
+use Collections.string_len
+use Collections.string_free
+use Terminal.print_line
+use Terminal.read_line
+
+#! Measures the line, releases it, and reports whether it was the expected
+#! length. The line is freed before the comparison so that a wrong length
+#! leaves nothing leaked behind it.
+fun check_length(line: Collections.String, want: Usize) impure I64
+  val got = string_len(&line)
+  string_free(line)
+  if got != want
+    return 50
+  end
+  return 0
+end
+
+#! A line that arrived when one was expected, measured against `want`.
+fun take_line(want: Usize) impure I64
+  match read_line()
+    Ok(line) => return check_length(line, want)
+    Err(Collections.EndOfInput) => return 40
+    Err(Collections.AllocationFailed(size)) => return 41
+    Err(Collections.IndexOutOfBounds(index)) => return 42
+    Err(Collections.KeyNotFound) => return 43
+    Err(Collections.EmptySlice) => return 44
+    Err(Collections.InvalidUtf8) => return 45
+  end
+end
+
+#! A line that should not have arrived still owns its buffer, so it is
+#! freed before the failure is reported.
+fun unexpected_line(line: Collections.String) impure I64
+  string_free(line)
+  return 60
+end
+
+#! The stream must be over here, and must say so rather than hand back an
+#! empty line.
+fun expect_end() impure I64
+  match read_line()
+    Ok(line) => return unexpected_line(line)
+    Err(Collections.EndOfInput) => return 0
+    Err(Collections.AllocationFailed(size)) => return 61
+    Err(Collections.IndexOutOfBounds(index)) => return 62
+    Err(Collections.KeyNotFound) => return 63
+    Err(Collections.EmptySlice) => return 64
+    Err(Collections.InvalidUtf8) => return 65
+  end
+end
+
+pub fun main() impure I64
+  val first = take_line(5)
+  if first != 0
+    return first
+  end
+  print_line("terminator excluded")
+
+  val blank = take_line(0)
+  if blank != 0
+    return blank
+  end
+  print_line("blank line is a line")
+
+  val final_line = take_line(4)
+  if final_line != 0
+    return final_line
+  end
+  print_line("unterminated final line")
+
+  val ended = expect_end()
+  if ended != 0
+    return ended
+  end
+  print_line("end of input")
+  return 0
+end

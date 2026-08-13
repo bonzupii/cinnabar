@@ -1,0 +1,73 @@
+#! `Runtime.args` past `argv[0]`, which no fixture reached before.
+#!
+#! Every fixture ran with no arguments, so the argument table was only ever
+#! observed at length one. A table built with the right first element and
+#! the wrong stride, or one that stopped after `argv[0]`, would have passed
+#! the whole suite.
+#!
+#! The harness runs this with exactly two arguments, `alpha` and `beta`, so:
+#!   - the view is three elements long, the program name and both arguments
+#!   - element 1 is 5 bytes and element 2 is 4, which are different from
+#!     each other and from `argv[0]`, so a stride that reads the same
+#!     element twice, or reads one element short, changes the answer
+#!
+#! The elements are borrowed, never moved: a `String` is linear, and these
+#! live in the memory the kernel set up for the process, so there is no
+#! moment at which freeing one would be correct.
+
+pub mod Slice
+  pub nat fun len<T>(view: &[T]) Usize
+end
+
+pub mod Collections
+  pub nat type String
+
+  pub nat fun string_len(value: &String) Usize
+end
+
+pub mod Terminal
+  pub nat fun print_line(text: &[U8]) impure Unit
+end
+
+pub mod Runtime
+  pub nat fun args() &[Collections.String]
+end
+
+use Slice.len as slice_len
+use Collections.string_len
+use Terminal.print_line
+use Runtime.args
+
+fun check_arg(value: &Collections.String, want: Usize) I64
+  if string_len(value) != want
+    return 20
+  end
+  return 0
+end
+
+fun arg_length(all: &[Collections.String], index: Usize, want: Usize) I64
+  match &all[index]
+    Ok(value) => return check_arg(value, want)
+    Err(IndexOutOfBounds(idx, length)) => return 21
+  end
+end
+
+pub fun main() impure I64
+  val all = args()
+  if slice_len(all) != 3
+    return 10
+  end
+
+  val second = arg_length(all, 1, 5)
+  if second != 0
+    return second
+  end
+
+  val third = arg_length(all, 2, 4)
+  if third != 0
+    return third
+  end
+
+  print_line("arguments carried through")
+  return 0
+end
