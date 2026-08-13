@@ -1868,14 +1868,50 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
         return (0, recover_ty(state, expr, declared));
     }
     if kind == EXPR_BINARY {
-        let (lv, lk) = fold_const(state, node_c(state.1, expr), declared, quiet);
-        if key_kind(state.1, lk) == TYD_UNKNOWN {
-            return (0, recover_ty(state, expr, declared));
-        }
-        let (rv, rk) = fold_const(state, node_d(state.1, expr), declared, quiet);
-        if key_kind(state.1, rk) == TYD_UNKNOWN {
-            return (0, recover_ty(state, expr, declared));
-        }
+        let op = node_b(state.1, expr);
+        let lhs = node_c(state.1, expr);
+        let rhs = node_d(state.1, expr);
+        // The literal-typing rule, identical to `check_binary_operands`: an
+        // operand that is only integer literals adopts the peer operand's
+        // type when the peer has one, otherwise the type expected of this
+        // operator's result.  A comparison declares `Bool`, which tells its
+        // operands nothing, so there the operands type each other.  Keeping
+        // this in step with the runtime path is what stops the same source
+        // text from typing one way in a `const` and another in a `var`.
+        let operand_declared = binary_operand_expected(state, op, declared);
+        let lhs_untyped = int_literal_expr(state.1, lhs);
+        let rhs_untyped = int_literal_expr(state.1, rhs);
+        let folded = if lhs_untyped && !rhs_untyped {
+            let (rv, rk) = fold_const(state, rhs, NONE, quiet);
+            if key_kind(state.1, rk) == TYD_UNKNOWN {
+                return (0, recover_ty(state, expr, declared));
+            }
+            let hint = if is_int_key(state.1, rk) { rk } else { operand_declared };
+            let (lv, lk) = fold_const(state, lhs, hint, quiet);
+            if key_kind(state.1, lk) == TYD_UNKNOWN {
+                return (0, recover_ty(state, expr, declared));
+            }
+            ((lv, lk), (rv, rk))
+        } else {
+            let lhs_declared = if lhs_untyped { operand_declared } else { NONE };
+            let (lv, lk) = fold_const(state, lhs, lhs_declared, quiet);
+            if key_kind(state.1, lk) == TYD_UNKNOWN {
+                return (0, recover_ty(state, expr, declared));
+            }
+            let rhs_declared = if is_int_key(state.1, lk) {
+                lk
+            } else if rhs_untyped {
+                operand_declared
+            } else {
+                NONE
+            };
+            let (rv, rk) = fold_const(state, rhs, rhs_declared, quiet);
+            if key_kind(state.1, rk) == TYD_UNKNOWN {
+                return (0, recover_ty(state, expr, declared));
+            }
+            ((lv, lk), (rv, rk))
+        };
+        let ((lv, lk), (rv, rk)) = folded;
         let ok = unify_key(state.1, state.2, state.6, lk, rk);
         if !ok {
             if quiet == 0 {
@@ -1883,7 +1919,7 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
             }
             return (0, recover_ty(state, expr, declared));
         }
-        let (v, k) = fold_bin(state, node_b(state.1, expr), lv, rv, lk, (file, start, end), quiet);
+        let (v, k) = fold_bin(state, op, lv, rv, lk, (file, start, end), quiet);
         if key_kind(state.1, k) == TYD_UNKNOWN && quiet == 0 {
             // fold_bin already emitted the primary diagnostic; the constant
             // still recovers to the declared key so no "found '?'" cascade
@@ -2347,6 +2383,62 @@ fn op_text(op: i64) -> &'static str {
     }
 }
 
+// True when an expression is built out of nothing but integer literals,
+// unary negation, and integer-valued binary operators.  Such an expression
+// carries no type of its own — it is a width-agnostic magnitude — so it
+// adopts the type its context demands (MANIFESTO, "Types": integer literals
+// adopt the expected type in a typed context).  Every other expression form
+// (path, call, index, field access, match, try, struct literal, array) has a
+// declared or inferred type of its own and never adopts one; making a typed
+// *value* take another width would be the implicit conversion the manifesto
+// forbids.
+//
+// Comparison and logical operators are excluded because they yield `Bool`,
+// not an integer, however their own operands are typed.
+fn int_literal_expr(nodes: &[i64], expr: i64) -> bool {
+    if node_tag(nodes, expr) != NODE_EXPR {
+        return false;
+    }
+    let kind = node_a(nodes, expr);
+    if kind == EXPR_LIT {
+        let lit = node_b(nodes, expr);
+        return lit == LIT_INT || lit == LIT_HEX;
+    }
+    if kind == EXPR_UNARY {
+        return node_b(nodes, expr) == UN_NEG && int_literal_expr(nodes, node_c(nodes, expr));
+    }
+    if kind == EXPR_BINARY {
+        let op = node_b(nodes, expr);
+        if (BIN_EQ..=BIN_GE).contains(&op) || op == BIN_AND || op == BIN_OR {
+            return false;
+        }
+        return int_literal_expr(nodes, node_c(nodes, expr)) && int_literal_expr(nodes, node_d(nodes, expr));
+    }
+    false
+}
+
+// The integer type a binary operator's *operands* are expected to have,
+// derived from the type expected of the operator's result.  A comparison or
+// logical operator yields `Bool`, which constrains its operands not at all,
+// so it contributes no expectation and the operands type each other.  Every
+// integer operator yields the operand type itself, so the expectation passes
+// straight through — except that `/` and `%` wrap it: they evaluate to
+// `Result(T, DivError)` at runtime, so an expected Result names the operand
+// type in its `Ok` payload.  A constant initializer whose division the
+// folder collapses declares `T` directly, and that shape is read straight
+// through like any other operator's; both spellings name the same `T`.
+fn binary_operand_expected(state: &mut State, op: i64, expected: i64) -> i64 {
+    if expected == NONE || op == BIN_AND || op == BIN_OR || (BIN_EQ..=BIN_GE).contains(&op) {
+        return NONE;
+    }
+    let result = if (op == BIN_DIV || op == BIN_MOD) && is_result_key(state.1, expected) {
+        list_get(state.2, key_args(state.1, expected), 0)
+    } else {
+        expected
+    };
+    if is_int_key(state.1, result) { result } else { NONE }
+}
+
 fn check_static_zero_divisor(state: &mut State, op: i64, rhs: i64) -> i64 {
     if op != BIN_DIV && op != BIN_MOD {
         return 0;
@@ -2381,6 +2473,43 @@ fn division_result_key(state: &mut State, payload: i64) -> i64 {
     canon_tyinfo(state.1, state.2, TYD_ENUM, result_sym, args, NONE, NONE)
 }
 
+// Checks a binary operator's two operands under the literal-typing rule.
+// An operand that is only integer literals has no type of its own, so it
+// adopts one from its context: the peer operand's type when the peer has
+// one, otherwise the type expected of the operator's result, otherwise the
+// `I64` default.  Whichever operand is typed is therefore checked first, so
+// `255 != narrowed` types exactly like `narrowed != 255`.  An operand that
+// is *not* a bare literal expression is never handed the result's expected
+// type: it already has a type, and reporting it against a foreign
+// expectation would emit a cascade ahead of the real operand-mismatch or
+// assignment diagnostic.
+//
+// `fold_const`'s `EXPR_BINARY` arm applies the identical rule to constant
+// initializers; the two must agree, or the same source text would type one
+// way in a `const` and another in a `var`.
+fn check_binary_operands(state: &mut State, operands: (i64, i64, i64), ret: i64, impure: i64, self_key: i64) -> (i64, i64) {
+    let (lhs, rhs, operand_expected) = operands;
+    let lhs_untyped = int_literal_expr(state.1, lhs);
+    let rhs_untyped = int_literal_expr(state.1, rhs);
+    if lhs_untyped && !rhs_untyped {
+        let r = check_expr(state, rhs, NONE, ret, impure, self_key);
+        let hint = if is_int_key(state.1, r) { r } else { operand_expected };
+        let l = check_expr(state, lhs, hint, ret, impure, self_key);
+        return (l, r);
+    }
+    let lhs_expected = if lhs_untyped { operand_expected } else { NONE };
+    let l = check_expr(state, lhs, lhs_expected, ret, impure, self_key);
+    let rhs_expected = if is_int_key(state.1, l) {
+        l
+    } else if rhs_untyped {
+        operand_expected
+    } else {
+        NONE
+    };
+    let r = check_expr(state, rhs, rhs_expected, ret, impure, self_key);
+    (l, r)
+}
+
 fn check_binary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     let op = node_b(state.1, expr);
     let lhs = node_c(state.1, expr);
@@ -2390,9 +2519,9 @@ fn check_binary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i
     let start = node_start(state.1, expr);
     let end = node_end(state.1, expr);
     let bool_key = builtin_key_of(state.1, BUILTIN_BOOL);
+    let operand_expected = binary_operand_expected(state, op, expected);
     if op == BIN_AND || op == BIN_OR {
-        let l = check_expr(state, lhs, NONE, ret, impure, self_key);
-        let r = check_expr(state, rhs, NONE, ret, impure, self_key);
+        let (l, r) = check_binary_operands(state, (lhs, rhs, operand_expected), ret, impure, self_key);
         if !is_bool_key(state.1, l) {
             push_error(state.3, &format!("logical operator '{}' requires Bool operands", op_text(op)), file, start, end);
         }
@@ -2404,8 +2533,7 @@ fn check_binary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i
         return bool_key;
     }
     if (BIN_EQ..=BIN_GE).contains(&op) {
-        let l = check_expr(state, lhs, NONE, ret, impure, self_key);
-        let r = check_expr(state, rhs, NONE, ret, impure, self_key);
+        let (l, r) = check_binary_operands(state, (lhs, rhs, operand_expected), ret, impure, self_key);
         let ok = unify_key(state.1, state.2, state.6, l, r);
         if !ok && key_kind(state.1, l) != TYD_UNKNOWN && key_kind(state.1, r) != TYD_UNKNOWN {
             push_error(state.3, &format!("comparison '{}' requires operands of the same type", op_text(op)), file, start, end);
@@ -2413,12 +2541,11 @@ fn check_binary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i
         expr_set_ty(state.1, expr, bool_key);
         return bool_key;
     }
-    let l = check_expr(state, lhs, NONE, ret, impure, self_key);
+    let (l, r) = check_binary_operands(state, (lhs, rhs, operand_expected), ret, impure, self_key);
     let lhs_bad = !is_int_key(state.1, l);
     if lhs_bad {
         push_error(state.3, &format!("binary operator '{}' requires integer operands", op_text(op)), file, start, end);
     }
-    let r = check_expr(state, rhs, l, ret, impure, self_key);
     let ok = unify_key(state.1, state.2, state.6, l, r);
     if lhs_bad {
         // The primary already implicates both operands and the rhs was

@@ -73,31 +73,71 @@ memory-mapped I/O, and cryptography all require precise widths. Representing eve
 (i64) misrepresents these domains and forces unsafe implicit truncation/extension at every
 boundary.
 
-### Type set
+### Type set (shipped)
 - Unsigned: `U8`, `U16`, `U32`, `U64`
 - Signed: `I8`, `I16`, `I32`, `I64`
-- Pointer-sized: `Usize` (existing). Decide whether `Isize` (pointer-sized signed) is needed for
-  syscall return values and pointer arithmetic; add it only if a concrete systems use case exists.
+- Pointer-sized: `Usize` and `Isize`. `Isize` shipped: signed syscall returns (a negative errno)
+  and signed pointer displacement both need a pointer-sized signed type, and neither is expressible
+  as `Usize` without a lossy reinterpretation at every boundary.
 - `Bool` remains `i1`.
 
-Decision — fate of `Int`: either (a) retain `Int` as a builtin alias for `I64`, or (b) retire it
-in favor of explicit `I64`. Recommend (a) for now: `Int` is documented as `I64`, integer literals
-default to `Int`, and explicit-width types are used wherever a width matters.
+Decision — fate of `Int`: **(b), retired.** The integer grid is the ten fixed-width types and
+nothing else; `I64` is the sole 64-bit signed type and the width an untyped integer literal
+defaults to. Keeping `Int` as an alias would have left two spellings for one type in every
+diagnostic, every `T.from` receiver, and every fixture. `duplicate_builtin_int.cnb` locks the
+builtin against redeclaration.
 
-### Decisions to lock before implementation
+### Decisions locked
 1. **Literal typing and range.** Literals are width-agnostic; they adopt the expected type in a
-   typed context and default to `Int` otherwise. A literal adopted into a narrower width is
+   typed context and default to `I64` otherwise. A literal adopted into a narrower width is
    range-checked at compile time (`300` as `U8` is an error; `-1` as `U16` is an error). Hex
-   literals are range-checked against the target width, not just `i64::MAX`.
-2. **Conversions.** No implicit conversions (per `MANIFESTO`). Design an explicit, width- and
-   sign-aware conversion surface. Recommend a single `T.from(value)` constructor per integer type
-   where the typechecker accepts any integer argument and codegen lowers to the correct LLVM cast
-   (`zext`/`sext`/`trunc`) based on source and destination width and signedness. Derive everything
-   from the canonical type descriptor's width and signedness — no pass matches type names.
-3. **Overflow semantics.** Cinnabar arithmetic wraps. Wrapping must be per-width. Confirm whether
-   the current approach (fold at `i64`, mask at emission in `const_int_of`) is correct for every
-   width and every operator — especially division, remainder, shifts, and signed vs unsigned
-   comparison — or make the constant folder width-aware. Do not leave this implicit.
+   literals are range-checked against the target width, not just `i64::MAX`. `range_check_literal`
+   derives the bound from the canonical width and signedness, and checks a negated literal against
+   the signed half of the width so an out-of-range hex magnitude cannot wrap back into range.
+   Rejection is fixed by `int_literal_range.cnb` and `int_unsigned_neg.cnb`.
+
+   **What counts as a typed context — decided, not left implicit.** Two things supply a literal's
+   type and nothing else does: (a) the type expected of the position it occupies (declared type of
+   a `const`/`val`/`var`, parameter type, return type, array element type, struct field type), and
+   (b) the type of the peer operand of a binary operator, when exactly one side is a *bare literal
+   expression* — one built out of nothing but integer literals, unary `-`, and integer-valued
+   binary operators. `MANIFESTO.md`'s "Literal typing context" paragraph is the normative
+   statement.
+
+   Deciding (b) the other way — literals take an expected type but never a peer's — was the
+   defensible alternative, since `MANIFESTO` forbids implicit conversions. It was rejected for two
+   reasons. First, the language already depended on it: `a + 1` with `a: U16` typed the `1` as
+   `U16` from its peer long before the rule was written down, and withdrawing that would have
+   broken arithmetic at every width but `I64`. Second, it is not a conversion. A conversion changes
+   a value that already has a type; a literal has no type to change, which is precisely why
+   `T.from` exists for the cases that *are* conversions. The boundary that keeps this honest is
+   that only a bare literal adopts: a path, call, index, field access, `match`, `try`, or `const`
+   reference is a typed value, so `narrow == wide` across two widths stays an error. Because an
+   adopted literal is range-checked, adoption strengthens diagnostics rather than weakening them —
+   `narrowed != 300` with `narrowed: U8` reports the out-of-range literal instead of a type
+   mismatch.
+
+   **The const path and the runtime path implement one rule, not two.** `fold_const` pushed the
+   declared type into a binary expression's operands while `check_binary` typed its operands with
+   no expectation at all, so `pub const ISIZE_MIN: Isize = -9223372036854775807 - 1` was accepted
+   and `var min: Isize = -9223372036854775807 - 1` was rejected with "cannot assign 'I64' to
+   'Isize'" — and the `I64` form of the same text worked only by coincidence, because the default
+   width happened to match. Both paths now call the same two helpers, `int_literal_expr` (which
+   operand is bare-literal) and `binary_operand_expected` (what the result's expected type implies
+   for the operands: nothing for a comparison, which yields `Bool`; the `Ok` payload for `/` and
+   `%`, which yield `Result(T, DivError)`; the expected type itself otherwise), so the same source
+   text cannot type one way in a `const` and another in a `var`.
+2. **Conversions.** No implicit conversions (per `MANIFESTO`). A single `T.from(value)` constructor
+   per integer type: `check_int_from` accepts any integer argument and keys the lowered conversion
+   by both receiver and source type, and `coerce_int` selects `zext`/`sext`/`trunc` from the two
+   widths and the source's signedness. Everything derives from the canonical type descriptor —
+   no pass matches type names.
+3. **Overflow semantics.** Cinnabar arithmetic wraps, per width. Fold-at-`i64`-then-mask was **not**
+   sufficient: it gets shift-count masking and unsigned comparison wrong at every width below 64.
+   The constant folder is therefore width-aware — `fold_bin` sign-extends signed operands, masks
+   unsigned ones, masks shift counts by the operand width, orders comparisons by signedness, and
+   stores the width-masked bit pattern that `const_int_of` masks again at emission. Euclidean
+   division and the defined `MIN / -1` edge hold at every signed width.
 
 ### Implementation across the pipeline
 - **`ast.rs`:** add the new builtin kinds; extend `is_int_key`, a signedness predicate
@@ -114,13 +154,35 @@ default to `Int`, and explicit-width types are used wherever a width matters.
   report non-linear.
 
 ### Verification
-- Extend `spec.cnb` and the repro corpus to exercise every width: arithmetic, bitwise, comparison,
-  division/modulo, shifts at the width boundary, literal range acceptance and rejection, and at
-  least one widening and one narrowing conversion per width.
-- Add fixtures asserting wrap-around at each width's max/min and correct signed vs unsigned
-  comparison.
-- The sanitizer gate (Milestone 7) must run the whole suite clean on every width before this
-  milestone is considered done.
+- `tests/fixtures/verify_math/int_widths.cnb` prints a computed value per width — wrapping,
+  signed vs unsigned comparison, shift-count masking, bitwise ops, `T.from` truncate/zero-extend/
+  sign-extend, and Euclidean division/modulo below 64 bits — and `int_widths_oracle` in
+  `tests/verify_math.rs` recomputes every line with independent Rust arithmetic and compares
+  output line by line. Exit codes are not the assertion; the values are.
+- `tests/fixtures/repro/int_width_grid.cnb` covers the same grid against the *other*
+  implementation of the semantics, the width-aware constant folder: for all ten types it asserts
+  a folded `const` equals the runtime result for wrap-around at both max and min, shift-left at
+  the width boundary, shift-right past it, the three bitwise ops, division, modulo, signed vs
+  unsigned comparison, and a widening and a narrowing conversion. Folder and codegen cannot drift
+  apart silently.
+- `tests/fixtures/repro/int_literal_context.cnb` pins the literal-typing context rule at all ten
+  widths: for each type it asserts that a folded `const` and a runtime `var` given the *identical*
+  initializer text agree at both of the width's wrap points, that a bare literal adopts the peer
+  operand's type on either side of a comparison and on the left of an arithmetic operator, that a
+  nested all-literal tree adopts the expected type through every level, and that a literal shift
+  count adopts the shifted operand's type. The reported const-vs-local reproducer
+  (`-9223372036854775807 - 1` as `Isize`) is check 1, verbatim.
+  `tests/fixtures/repro/int_literal_no_peer.cnb` pins the boundary: two typed values of different
+  widths or signedness never adopt each other, a `const` reference is a typed value rather than a
+  literal, and a literal that does adopt a peer's type is range-checked against it — in the const
+  path and the runtime path alike.
+- `int_min_neg1.cnb` and `shift_mask.cnb` pin the `I64` edges (`MIN / -1`, `MIN % -1`,
+  shift counts past the width) across both paths; `int_literal_range.cnb` and
+  `int_unsigned_neg.cnb` pin literal range and unsigned-negation rejection.
+- Carried forward, not a gate on this milestone: the sanitizer gate (Milestone 8) must run the
+  whole suite clean on every width. Milestone 1 is complete on the fixture and oracle evidence
+  above; the sanitizer pass is Milestone 8's acceptance criterion applied to this suite, and
+  ordering it as a precondition here would make every milestone wait on the last one.
 
 ---
 

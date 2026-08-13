@@ -1,0 +1,78 @@
+#! The boundary of the literal-typing rule: only a bare literal adopts a
+#! type from its context.  A value that already has one never adopts
+#! another, and a literal that does adopt one is range-checked against it.
+#! Every item below must be rejected.
+#!
+#!   1. A U8 and a U16 local compared: neither is a literal, so neither
+#!      adopts the other.  Widening the U8 would be an implicit conversion.
+#!   2. A U8 and an I8 local compared: same width, different signedness,
+#!      still two typed values.
+#!   3. A U8 and a U16 local added: the same rule on an arithmetic operator.
+#!   4. A literal compared against a U8: it adopts U8 and 300 does not fit.
+#!   5. A negated literal compared against a U8: it adopts U8, and unary '-'
+#!      on an unsigned type is an error.
+#!   6. The const path must reject items 4 and 5 identically — a comparison
+#!      declares Bool, which tells its operands nothing, so there too the
+#!      operands take their type from each other.
+#!   7. A U8 const and an I64 local compared: a const is a typed value, not
+#!      a literal, so it does not adopt either.
+
+pub const SOME_U8: U8 = 40
+
+fun typed_peers_never_adopt() Bool
+  var narrow: U8 = 1
+  var wide: U16 = 1
+  var signed_narrow: I8 = 1
+  var sum: U16 = narrow + wide
+  if narrow == wide
+    return true
+  end
+  if narrow == signed_narrow
+    return true
+  end
+  if sum == 2
+    return true
+  end
+  return false
+end
+
+fun adopted_literal_is_range_checked() Bool
+  var narrow: U8 = 1
+  if narrow == 300
+    return true
+  end
+  if narrow == -1
+    return true
+  end
+  return false
+end
+
+fun const_is_a_typed_value() Bool
+  var wide: I64 = 40
+  if SOME_U8 == wide
+    return true
+  end
+  return false
+end
+
+pub const BAD_RANGE_CMP: Bool = SOME_U8 == 300
+pub const BAD_NEG_CMP: Bool = SOME_U8 == -1
+
+pub fun main() I64
+  if typed_peers_never_adopt()
+    return 1
+  end
+  if adopted_literal_is_range_checked()
+    return 2
+  end
+  if const_is_a_typed_value()
+    return 3
+  end
+  if BAD_RANGE_CMP
+    return 4
+  end
+  if BAD_NEG_CMP
+    return 5
+  end
+  return 0
+end

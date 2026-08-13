@@ -134,7 +134,7 @@ end
 fun append_int_digits(vec: &mut Collections.Vec(U8), magnitude: U64) impure Result(Unit, Collections.Error)
   var count: I64 = 1
   var remaining: U64 = magnitude
-  while remaining >= U64.from(10)
+  while remaining >= 10
     val quotient = match remaining / 10
       Ok(qv) => qv
       Err(DivByZero) => 0
@@ -152,7 +152,7 @@ fun append_int_digits(vec: &mut Collections.Vec(U8), magnitude: U64) impure Resu
 
   var rest: U64 = magnitude
   var place: U64 = power
-  while place >= U64.from(1)
+  while place >= 1
     val digit = match rest / place
       Ok(dv) => dv
       Err(DivByZero) => 0
@@ -186,7 +186,7 @@ fun append_int(vec: &mut Collections.Vec(U8), value: I64) impure Result(Unit, Co
     magnitude = U64.from(0 - value)
   end
 
-  if magnitude == U64.from(0)
+  if magnitude == 0
     try vec_push(vec, ZERO_DIGIT)
   else
     try append_int_digits(vec, magnitude)

@@ -109,7 +109,7 @@ Bitwise: `&`, `|`, `^`, `<<`, `>>`.
 Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`.
 Logical: `&&`, `||`.
 
-All operators require operands of the same type. No implicit widening.
+All operators require operands of the same type. No implicit widening. A bare integer literal is not yet an operand of any type — it adopts the peer operand's type before the sameness rule is applied (see "Literal typing context" under Types); a typed value never adopts anything.
 
 Division `/` and modulo `%` return `Result(T, DivError)`: any compile-time-provable-zero divisor — a literal, a folded const reference, or any arithmetic combination of them (`N / 0`, `5 / 0`, `x / (3 - 3)`) — is a compile-time error, whatever the numerator. A runtime zero produces `Err(DivByZero)`, handled with `try` or `match` like every other fallible operation. Division never traps and is never undefined behavior.
 
@@ -137,6 +137,18 @@ Reassigning an effectively-Live linear field without consuming the previous hand
 Compiler builtins: `Unit`, `Result(T, E)`, `Option(T)`, `IndexError`, `Bool`, and the ten fixed-width integer types `I8`, `I16`, `I32`, `I64`, `Isize` (signed) and `U8`, `U16`, `U32`, `U64`, `Usize` (unsigned). They are always available; no program may declare them.
 
 The ten integer types form a fixed-width grid: every width supports every operator, and arithmetic and bitwise operations wrap per-width in two's complement. Shift counts mask by `width - 1` (so `1 << 8` on `U8` is `1 << 0`); signed types shift and compare arithmetically, unsigned types logically. Integer literals are non-negative magnitudes that adopt the expected type in a typed context and are range-checked against that type's width (`300` as `U8`, `-1` as `U16`, `0x100` as `U8` are compile errors); untyped literals default to `I64`, and unary `-` on an unsigned type is a compile error. `T.from(value)` converts any integer to `T`, selecting the correct truncation, zero-extension, or sign-extension from the source and destination width and signedness; no implicit conversions exist.
+
+**Literal typing context.** An integer literal has no type of its own until its context gives it one. Two things supply that context, and nothing else does:
+
+(1) The type expected of the position the literal appears in — a `const`'s or local's declared type, a parameter's declared type, a function's declared return type, an array element type, a struct field's type.
+
+(2) The type of the peer operand of a binary operator, when exactly one side is a bare literal expression.
+
+A *bare literal expression* is one built out of nothing but integer literals, unary `-`, and integer-valued binary operators. Such an expression adopts a type through every level at once: in `var x: U8 = 2 * 3 + 4` all four literals adopt `U8`. A literal that adopts a type is range-checked against that type's width, so `narrowed != 300` where `narrowed: U8` is an out-of-range error, not a type mismatch, and `narrowed != -1` is an unsigned-negation error.
+
+Every other expression form — a path, call, index, field access, `match`, `try`, struct literal, array literal — already has a declared or inferred type and never adopts a different one. A `const` reference is a typed value, not a literal. This is what keeps the rule distinct from an implicit conversion: no *value* ever changes width or signedness, so `narrow == wide` with `narrow: U8` and `wide: U16` is a compile error, as is `a + b` across two widths. Only a literal, which had no width to begin with, receives one.
+
+The rule holds identically for constant initializers and for runtime code: the same initializer text types the same way in a `const` and in a `val`/`var`, at every one of the ten widths. `-9223372036854775807 - 1` is `Isize` in `pub const ISIZE_MIN: Isize = ...` and `Isize` in `var min: Isize = ...`; `255 + 1` is `U8` and wraps to `0` in both. A literal reaching neither kind of context defaults to `I64`.
 
 Fixed-size arrays `[T; N]`: indexed with `arr[i]`, `&arr[i]`, and `&mut arr[i]` (see Indexing), and destructured with `match arr [a, b, c] => ...` and rest patterns. Array length is always statically known, so a constant index is proven at compile time.
 
