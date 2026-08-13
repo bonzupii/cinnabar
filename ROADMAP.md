@@ -489,8 +489,9 @@ allocation-dense, a suballocator over `mmap` belongs in the surface rather than 
 ---
 
 ## Milestone 7 — Cinnabook and Mushlings
-- `cinna burn`: local web server, static content, bundled at compile time, matching the exact
-  installed compiler version.
+- `cinnabar burn`: local web server, static content, bundled at compile time, matching the exact
+  installed compiler version. There is one binary and it is called `cinnabar`; no shortened
+  `cinna` is shipped, aliased, or packaged.
 - Mushlings: rustlings-style broken/diagnostic/fixed exercises. Source directly from the failure
   classes already found (dropped `pub`, mixed struct/enum body, unhandled `Result`/`Option`,
   discard patterns, unconsumed linear value, ambiguous returned borrow, compile-time-zero division,
