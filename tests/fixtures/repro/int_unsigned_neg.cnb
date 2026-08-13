@@ -3,7 +3,7 @@
 #! expression are rejected below.
 pub const NEG_U16: U16 = -1
 
-fun neg_u8() U8
+pub fun neg_u8() U8
   return -1
 end
 

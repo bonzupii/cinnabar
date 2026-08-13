@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::suggest;
 
 pub const NS_TYPE: i64 = 0;
 pub const NS_VALUE: i64 = 1;
@@ -14,6 +15,13 @@ type State<'a> = (
     &'a mut Vec<i64>,
     &'a mut Vec<(i64, i64)>,
     &'a mut Vec<i64>,
+    // Secondary notes tied to the errors this stage reports (definition-site
+    // labels and hedged name suggestions), indexed like the borrow checker's.
+    &'a mut Vec<Note>,
+    // Symbols a path resolved to, in resolution order.  A symbol absent from
+    // this list was declared but never referenced: the resolver's own fact
+    // about reference, read by the dead-code check instead of a second walk.
+    &'a mut Vec<i64>,
 );
 
 pub fn resolve(
@@ -21,6 +29,7 @@ pub fn resolve(
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
     errors: &mut Vec<Diag>,
+    notes: &mut Vec<Note>,
     root: i64,
     ext_mods: &[(i64, i64)],
 ) -> bool {
@@ -30,6 +39,7 @@ pub fn resolve(
     let mut prefixes: Vec<i64> = Vec::new();
     let mut item_scopes: Vec<(i64, i64)> = Vec::new();
     let mut used: Vec<i64> = Vec::new();
+    let mut referenced: Vec<i64> = Vec::new();
     let empty_prefix = alloc_list(lists);
     let root_scope = alloc_scope(&mut scopes, &mut parents, &mut pubs, &mut prefixes, NONE, empty_prefix, 1);
     let mut state: State = (
@@ -43,6 +53,8 @@ pub fn resolve(
         &mut prefixes,
         &mut item_scopes,
         &mut used,
+        notes,
+        &mut referenced,
     );
     seed_builtins(&mut state, root_scope, root);
 
@@ -106,6 +118,16 @@ pub fn resolve(
     }
 
     materialize_scope_facts(&mut state);
+
+    check_dead_code(&mut state, root);
+    idx = 0;
+    while idx < ext_mods.len() {
+        match ext_mods.get(idx) {
+            Some(pair) => check_dead_code(&mut state, pair.1),
+            None => break,
+        }
+        idx += 1;
+    }
 
     state.3.is_empty()
 }
@@ -509,6 +531,19 @@ fn insert_decl(state: &mut State, scope: i64, name: i64, sym: i64, ns: i64, casi
         span
     };
     push_error(state.3, &message, report_span.0, report_span.1, report_span.2);
+    // A duplicate of two real declarations: point at the first one so the
+    // developer sees both sites of the clash in one diagnostic.  A builtin
+    // redeclaration has no source origin to point at, so it gets no note.
+    if !builtin_collision && existing_decl != NONE {
+        push_note_for_last(
+            state.3,
+            state.10,
+            "first declared here",
+            node_file(state.1, existing_decl),
+            node_start(state.1, existing_decl),
+            node_end(state.1, existing_decl),
+        );
+    }
     0
 }
 
@@ -690,6 +725,16 @@ fn insert_hoisted(state: &mut State, scope: i64, name: i64, sym: i64, decl: i64)
         return;
     }
     push_error(state.3, &format!("duplicate symbol '{}'", name_text(state.0, name)), node_file(state.1, decl), node_start(state.1, decl), node_end(state.1, decl));
+    if existing_decl != NONE && node_file(state.1, existing_decl) != NO_FILE {
+        push_note_for_last(
+            state.3,
+            state.10,
+            "first declared here",
+            node_file(state.1, existing_decl),
+            node_start(state.1, existing_decl),
+            node_end(state.1, existing_decl),
+        );
+    }
 }
 
 fn collect_trait_methods(state: &mut State, sub: i64, trait_full: i64, item: i64) {
@@ -1095,12 +1140,19 @@ fn resolve_path(state: &mut State, scope: i64, segs: i64, final_ns: i64) -> i64 
     if sym != NONE && src != NONE {
         mark_used(state.9, src);
     }
+    mark_referenced(state.11, sym);
     sym
 }
 
 fn mark_used(used: &mut Vec<i64>, use_item: i64) {
     if !contains_i64(used, use_item) {
         used.push(use_item);
+    }
+}
+
+fn mark_referenced(referenced: &mut Vec<i64>, sym: i64) {
+    if sym != NONE && !contains_i64(referenced, sym) {
+        referenced.push(sym);
     }
 }
 
@@ -1458,6 +1510,10 @@ fn walk_struct_lit(state: &mut State, scope: i64, expr: i64) {
     let sym = resolve_path(state, scope, segs, NS_TYPE);
     if sym == NONE {
         push_error(state.3, &format!("unknown type '{}'", join_segs(state.0, state.2, segs)), file, start, end);
+        let first = list_first(state.2, segs);
+        if first != NONE {
+            suggest_type_name(state, scope, first);
+        }
         return;
     }
     if !is_visible(state.5, state.6, state.1, scope, sym) {
@@ -1546,6 +1602,7 @@ fn resolve_type_name(state: &mut State, scope: i64, ty: i64, name: i64) {
     let (sym, src) = lookup_walk(state.4, state.5, scope, name, NS_TYPE);
     if sym == NONE {
         push_error(state.3, &format!("unknown type '{}'", name_text(state.0, name)), node_file(state.1, ty), node_start(state.1, ty), node_end(state.1, ty));
+        suggest_type_name(state, scope, name);
         return;
     }
     if src != NONE {
@@ -1563,6 +1620,12 @@ fn resolve_type_path(state: &mut State, scope: i64, ty: i64) {
     let sym = resolve_path(state, scope, segs, NS_TYPE);
     if sym == NONE {
         push_error(state.3, &format!("cannot resolve type '{}'", join_segs(state.0, state.2, segs)), node_file(state.1, ty), node_start(state.1, ty), node_end(state.1, ty));
+        if list_len(state.2, segs) == 1 {
+            let first = list_first(state.2, segs);
+            if first != NONE {
+                suggest_type_name(state, scope, first);
+            }
+        }
         return;
     }
     if !is_visible(state.5, state.6, state.1, scope, sym) {
@@ -1613,5 +1676,134 @@ fn check_unused(names: &[String], nodes: &[i64], lists: &[Vec<i64>], errors: &mu
         node_file(nodes, item),
         node_start(nodes, item),
         node_end(nodes, item),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Dead code and unresolved-name suggestions
+// ---------------------------------------------------------------------------
+
+// The visible type-namespace names from `scope` up through its parents, as
+// (name, file, start, end) for the declaration each name points at.  This
+// reads the resolver's own scope table — the same entries `resolve_type_name`
+// walks — so a suggestion is offered from the names actually in scope rather
+// than from a second, parallel registry.
+fn visible_type_names(state: &State, scope: i64) -> Vec<(String, i64, i64, i64)> {
+    let mut out: Vec<(String, i64, i64, i64)> = Vec::new();
+    let mut seen: Vec<i64> = Vec::new();
+    let mut current = scope;
+    while current != NONE {
+        let entries = match state.4.get(current as usize) {
+            Some(value) => value,
+            None => break,
+        };
+        let count = entries.len() as i64 / 4;
+        let mut idx = 0i64;
+        while idx < count {
+            let name = entry_get(entries, idx, 0);
+            let sym = entry_get(entries, idx, 1);
+            let ns = entry_get(entries, idx, 2);
+            if ns == NS_TYPE
+                && sym != NONE
+                && !contains_i64(&seen, name)
+                && is_visible(state.5, state.6, state.1, scope, sym)
+            {
+                seen.push(name);
+                let decl = sym_decl_of(state.1, sym);
+                if decl != NONE && node_tag(state.1, decl) == NODE_ITEM && node_file(state.1, decl) != NO_FILE {
+                    out.push((
+                        name_text(state.0, name),
+                        node_file(state.1, decl),
+                        node_start(state.1, decl),
+                        node_end(state.1, decl),
+                    ));
+                }
+            }
+            idx += 1;
+        }
+        current = parent_of(state.5, current);
+    }
+    out
+}
+
+// Offer a hedged "did you mean" note for an unresolved type name, pointing
+// at the candidate declaration when the match is unambiguous.  The error
+// must already be pushed so the note attaches to it.
+fn suggest_type_name(state: &mut State, scope: i64, misspelled: i64) {
+    let text = name_text(state.0, misspelled);
+    let entries = visible_type_names(state, scope);
+    let mut candidates: Vec<suggest::Candidate> = Vec::new();
+    let mut idx = 0usize;
+    while idx < entries.len() {
+        match entries.get(idx) {
+            Some(entry) => {
+                candidates.push(suggest::Candidate {
+                    name: entry.0.clone(),
+                    file: entry.1,
+                    start: entry.2,
+                    end: entry.3,
+                });
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    if let Some(suggestion) = suggest::suggest(&text, &candidates) {
+        push_note_for_last(state.3, state.10, &suggestion.message, suggestion.file, suggestion.start, suggestion.end);
+    }
+}
+
+fn check_dead_code(state: &mut State, list: i64) {
+    let count = list_len(state.2, list);
+    let mut idx = 0i64;
+    while idx < count {
+        check_dead_item(state, list_get(state.2, list, idx));
+        idx += 1;
+    }
+}
+
+fn check_dead_item(state: &mut State, item: i64) {
+    if node_tag(state.1, item) != NODE_ITEM {
+        return;
+    }
+    let kind = node_a(state.1, item);
+    if kind == ITEM_MODULE {
+        check_dead_code(state, node_e(state.1, item));
+        return;
+    }
+    // A `pub` item is reachable API, not dead code; a native declaration is
+    // an external binding, not Cinnabar source to judge.  Only private
+    // Cinnabar functions and constants are checked.
+    if item_is_pub(state.1, item) == 1 {
+        return;
+    }
+    let sym = item_sym_of(state.1, item);
+    if sym == NONE {
+        return;
+    }
+    let label;
+    let name;
+    if kind == ITEM_FUN {
+        if node_f(state.1, sym) == SYM_FUN_MAIN {
+            return;
+        }
+        let fn_node = node_d(state.1, item);
+        name = node_a(state.1, fn_node);
+        label = "function";
+    } else if kind == ITEM_CONST {
+        name = node_d(state.1, item);
+        label = "constant";
+    } else {
+        return;
+    }
+    if contains_i64(state.11, sym) {
+        return;
+    }
+    push_error(
+        state.3,
+        &format!("unused {} '{}'", label, name_text(state.0, name)),
+        node_file(state.1, item),
+        node_start(state.1, item),
+        node_end(state.1, item),
     );
 }

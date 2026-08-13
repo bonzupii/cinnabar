@@ -73,11 +73,11 @@ pub fn analyze(entry_path: &str, overlay: &[(String, String)]) -> Analysis {
             };
         }
     };
-    let resolved = resolver::resolve(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods);
+    let resolved = resolver::resolve(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods);
     let mut typechecked = false;
     let mut impls_list = NONE;
     if resolved {
-        let (ok, impls) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods);
+        let (ok, impls) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods);
         impls_list = impls;
         typechecked = true;
         if ok {

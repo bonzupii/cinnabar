@@ -3,7 +3,7 @@
 # ambiguous and must be rejected by the ambiguity rule — the compiler must
 # never guess which parameter the returned reference came from.
 
-fun choose_ref(a: &I64, b: &I64) &I64
+pub fun choose_ref(a: &I64, b: &I64) &I64
   if a < b
     return a
   end

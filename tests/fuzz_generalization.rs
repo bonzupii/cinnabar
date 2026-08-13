@@ -2240,42 +2240,42 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
     g.push("end");
     g.push("");
     let bounded = g.fresh_snake();
-    g.push(&format!("fun {}<T: {}>(value: &T) I64", bounded, trait_name));
+    g.push(&format!("pub fun {}<T: {}>(value: &T) I64", bounded, trait_name));
     g.push(&format!("  return {}.{}(value)", trait_name, trait_method));
     g.push("end");
     g.push("");
     g.bounded = bounded;
     let uname = g.fresh_snake();
     let usem = pick_unary_sem(&mut g.rng);
-    g.push(&format!("fun {}(x: I64) I64", uname));
+    g.push(&format!("pub fun {}(x: I64) I64", uname));
     g.push(&format!("  return {}", unary_body(&usem)));
     g.push("end");
     g.push("");
     g.unary_helpers.push((uname, usem));
     let bname = g.fresh_snake();
     let bsem = pick_binary_sem(&mut g.rng);
-    g.push(&format!("fun {}(x: I64, y: I64) I64", bname));
+    g.push(&format!("pub fun {}(x: I64, y: I64) I64", bname));
     g.push(&format!("  return {}", binary_body(&bsem)));
     g.push("end");
     g.push("");
     g.binary_helpers.push((bname, bsem));
     let flname = g.fresh_snake();
     let flsem = pick_bool_sem(&mut g.rng);
-    g.push(&format!("fun {}(x: I64) Bool", flname));
+    g.push(&format!("pub fun {}(x: I64) Bool", flname));
     g.push(&format!("  return {}", bool_body(&flsem)));
     g.push("end");
     g.push("");
     g.bool_helpers.push((flname, flsem));
     let (shr_fields, shr_body) = struct_reader_parts(&mut g.rng, &sdef0);
     let shr_name = g.fresh_snake();
-    g.push(&format!("fun {}(value: &{}) I64", shr_name, sdef0.name));
+    g.push(&format!("pub fun {}(value: &{}) I64", shr_name, sdef0.name));
     g.push(&format!("  return {}", shr_body));
     g.push("end");
     g.push("");
     g.shared_helpers.push((shr_name, shr_fields));
     let (mut_fields, mut_body) = struct_reader_parts(&mut g.rng, &sdef0);
     let mut_name = g.fresh_snake();
-    g.push(&format!("fun {}(value: &mut {}) I64", mut_name, sdef0.name));
+    g.push(&format!("pub fun {}(value: &mut {}) I64", mut_name, sdef0.name));
     g.push(&format!("  return {}", mut_body));
     g.push("end");
     g.push("");
@@ -2292,7 +2292,7 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
         g.push(&format!("pub const {}: Usize = {}", c0, k0));
         g.push(&format!("pub const {}: Usize = {}", c1, k1));
         g.push("");
-        g.push(&format!("fun {}(index: Usize, length: Usize) I64", oob_name));
+        g.push(&format!("pub fun {}(index: Usize, length: Usize) I64", oob_name));
         g.push(&format!("  if index == {} && length == {}", c0, c1));
         g.push(&format!("    return {}", a));
         g.push("  end");
@@ -2309,7 +2309,7 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
         let htail = g.fresh_snake();
         let rest_len = (arr_n - 1) as i64;
         g.push(&format!(
-            "fun {}({}: {}, {}: &[{}], {}: I64, {}: I64) I64",
+            "pub fun {}({}: {}, {}: &[{}], {}: I64, {}: I64) I64",
             finish_name, hp0, sdef0.name, hrest, sdef0.name, htotal, hwant
         ));
         g.push(&format!("  val {} = match &{}[0]", hd0, hrest));

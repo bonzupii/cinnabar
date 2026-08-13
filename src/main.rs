@@ -365,12 +365,12 @@ fn main() -> ExitCode {
         dump_program(&names, &nodes, &lists, root);
         return ExitCode::SUCCESS;
     }
-    if !resolver::resolve(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods) {
-        return finish_with_diagnostics(&errors, &[], &files);
+    if !resolver::resolve(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods) {
+        return finish_with_diagnostics(&errors, &notes, &files);
     }
-    let (ok, impls_list) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods);
+    let (ok, impls_list) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods);
     if !ok {
-        return finish_with_diagnostics(&errors, &[], &files);
+        return finish_with_diagnostics(&errors, &notes, &files);
     }
     if !borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods) {
         if args.explain_borrow.as_deref() == Some("json") {
