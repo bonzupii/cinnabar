@@ -226,6 +226,28 @@ builtin against redeclaration.
   `.rodata` global as an inline literal of the same text, so `const` and inline strings are one
   representation rather than two.
 
+### The borrow checker had to learn that static data is an origin
+Returning a literal — `fun name() &[U8] return "cinnabar" end` — was rejected as *"returned borrow
+has no traceable origin: it does not derive from any input reference parameter"*. That rule
+(`MANIFESTO` principle 5) exists to answer "how long does the caller's data live?", and a literal
+makes the question moot: its bytes are in read-only data for the whole run, so the borrow has an
+origin, it just is not an input, and it outlives every caller. Returning a fixed message is one of
+the things string literals exist for, so this had to be fixed rather than worked around.
+
+A statically rooted return — a string literal, or a `const` of a reference type — emits no
+returned-borrow obligation at all, because there is no loan to trace. Forwarding one needed the
+function summary too: a summary previously recorded only *which input parameters* a returned borrow
+derives from, and a reference-returning function that derives from none of them had no entry, which
+a caller could not distinguish from "not analyzable". An empty source set is now recorded and means
+"static", so `return literal_message()` stays static across the call. The set only ever grows, so
+the call-graph fixpoint is still monotone and still converges.
+
+Nothing about the rule is relaxed: `ret_borrow_ambiguous.cnb`, `ret_borrow_sole_input.cnb`, and
+`ret_borrow_uaf.cnb` remain rejected, and returning a borrow of a local still reports "returned
+borrow does not outlive the function". `string_static_borrow.cnb` pins the accepted side — direct
+literal returns, a `const` return, several static returns on different paths, one and two levels of
+forwarding, and a static borrow flowing through a struct field, an argument, and an array element.
+
 ### Toolchain consequences that were part of the work
 - **The formatter had to learn about strings.** It extracts a comment-free "code view" of each line
   to decide indentation; without string awareness a `#` inside a literal would start a comment, a

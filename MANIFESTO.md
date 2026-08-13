@@ -25,6 +25,8 @@ Return types are always declared. No inference of function signatures.
 ### 5. No Lifetime Annotations
 Borrow scopes are flow-sensitive and determined by the compiler. Returned borrows must be unambiguous — if the compiler cannot determine which input a returned reference derives from, it is a compile error. The programmer resolves this by restructuring the API, not by annotating lifetimes. Lifetime annotation syntax (`'a`) does not exist in the language.
 
+A borrow into the program's static data is the one case with no input origin and no error: a string literal, and a `const` of a reference type, borrow bytes that live in the binary's read-only data for the whole run, so the borrow outlives every caller and there is no lifetime question to answer. Returning one is always valid, including through a function that forwards another's static result. This is not an exception to the rule but the rule's premise being absent — there is no caller data whose lifetime could be exceeded.
+
 ### 6. No Dereference Operator
 There is no `*ptr`. There is no `->`. References are accessed through field access, method calls, and pattern matching. The compiler manages indirection internally. This eliminates an entire class of memory safety bugs and makes the borrow checker's job tractable without annotations.
 

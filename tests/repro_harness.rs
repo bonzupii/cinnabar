@@ -50,6 +50,7 @@ const EXPECT_OK: &[(&str, i32)] = &[
     ("int_literal_context", 0),
     ("string_literal", 0),
     ("string_print", 0),
+    ("string_static_borrow", 0),
     ("empty_block", 0),
     ("utf8_validation", 0),
     ("multiline_const", 30),
