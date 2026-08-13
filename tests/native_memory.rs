@@ -28,6 +28,10 @@
 //!    "`deallocate` frees a garbage pointer" defect.
 //! 3. `Memory.deallocate` frees the pointer held in the handle's data
 //!    field, not some other field.
+//! 4. `Terminal.read_line` reports a failed buffer growth instead of
+//!    returning the bytes that fit. A failed `realloc` is unreachable from a
+//!    Cinnabar program for the same reason the checkers above are unusable,
+//!    so the path is asserted where it is written.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -358,6 +362,96 @@ fn deallocate_unmaps_the_handles_address_and_length() {
         unmap.contains(&format!("i64 {}", length_ssa)),
         "Memory.deallocate's system call does not receive the handle's length: {}",
         unmap
+    );
+
+    drop(guard);
+}
+
+/// The instructions of the basic block labelled `label`, up to the next
+/// label. `function_body` has already trimmed indentation, so a label is a
+/// line whose first token ends in a colon and an instruction never is.
+fn basic_block(body: &str, label: &str) -> String {
+    let opener = format!("{}:", label);
+    let mut block = String::new();
+    let mut inside = false;
+    for line in body.lines() {
+        let starts_block = match line.split_whitespace().next() {
+            Some(token) => token.ends_with(':'),
+            None => false,
+        };
+        if !inside {
+            if starts_block && line.starts_with(&opener) {
+                inside = true;
+            }
+            continue;
+        }
+        if starts_block {
+            return block;
+        }
+        block.push_str(line);
+        block.push('\n');
+    }
+    block
+}
+
+/// `Terminal.read_line` reports a failed buffer growth rather than
+/// returning the bytes that happened to fit.
+///
+/// A null from `realloc` cannot be reproduced from a Cinnabar program — the
+/// binary links a musl `libc.a` embedded in the compiler with no dynamic
+/// section, so there is no interposition point to fail an allocation from —
+/// which is the same reason every other property in this file is asserted
+/// against the IR.
+///
+/// The byte that triggered the growth has already been taken off the
+/// descriptor and cannot be put back. Returning the bytes read so far would
+/// drop it and everything after it while reporting `Ok`, and no caller could
+/// distinguish that truncated line from a complete one. So the failure path
+/// must release the buffer `realloc` left valid and report the allocation
+/// failure — never reach the construction of a line value.
+#[test]
+fn read_line_reports_a_failed_growth_rather_than_a_short_line() {
+    let dir = temp_dir("read_line_growth");
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => {}
+        Err(err) => {
+            assert!(false, "cannot create temp dir: {}", err);
+            return;
+        }
+    }
+    let guard = TempDirGuard(dir.clone());
+    let ir = emit_ir(&dir, "runtime_io");
+    let body = function_body(&ir, "Terminal_read_line");
+    assert!(!body.is_empty(), "runtime_io must emit Terminal.read_line");
+
+    // Reachability first: a failure block that nothing branches to would
+    // satisfy every assertion below while the null still fell through to the
+    // finish path.
+    let growth = basic_block(&body, "line_grow");
+    assert!(
+        growth.contains("label %line_grow_fail"),
+        "a null from realloc must branch to the failure path, but the growth \
+         block ends: {}",
+        growth
+    );
+
+    let failure = basic_block(&body, "line_grow_fail");
+    assert!(
+        !failure.is_empty(),
+        "read_line gives a failed growth no block of its own, so it falls into \
+         the finish path and returns a silently truncated line as a success"
+    );
+    assert!(
+        failure.contains("@free"),
+        "the failed-growth path must release the buffer realloc left valid, \
+         but its block is: {}",
+        failure
+    );
+    assert!(
+        !failure.contains("line_value") && !failure.contains("line_finish"),
+        "the failed-growth path must not reach the line-value construction, \
+         but its block branches there: {}",
+        failure
     );
 
     drop(guard);

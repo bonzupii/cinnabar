@@ -3729,6 +3729,7 @@ fn native_runtime_args<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<
 fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
     let i64_ty = sess.0.i64_type();
     let str_key = result_arg_key(sess, ret_key, 0);
+    let err_key = result_arg_key(sess, ret_key, 1);
     let capacity = alloca_raw(sess, i64_ty.into(), "cap", span)?;
     let length = alloca_raw(sess, i64_ty.into(), "len", span)?;
     let buffer = alloca_raw(sess, ptr_ty(sess).into(), "buf", span)?;
@@ -3752,14 +3753,7 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     sess.2.build_conditional_branch(null, alloc_failed, scan).map_err(builder_fail)?;
 
     sess.2.position_at_end(alloc_failed);
-    let err_key = result_arg_key(sess, ret_key, 1);
-    let alloc_tag = variant_tag_of(sess, err_key, sess.12.alloc_failed, span)?;
-    let alloc_payload = variant_payload_key(sess, err_key, alloc_tag, 0, span)?;
-    let alloc_slot = declare_local(sess, alloc_payload, "need", span)?;
-    store_key(sess, alloc_slot, start_capacity.into())?;
-    let alloc_val = build_enum_value(sess, err_key, alloc_tag, &[(alloc_payload, alloc_slot)], span)?;
-    let alloc_result = build_result_err(sess, ret_key, err_key, alloc_val, span)?;
-    copy_to_out(sess, ret_key, out, alloc_result, span)?;
+    emit_alloc_failed(sess, ret_key, err_key, start_capacity, out, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
 
     sess.2.position_at_end(scan);
@@ -3798,12 +3792,27 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
             return Err(builder_error(span.0, span.1, span.2, &format!("internal: realloc returned void ({:?})", inst.get_opcode())));
         }
     };
-    // `realloc` returning null leaves the old block valid, so the line so
-    // far is kept and returned rather than lost: a short line is a better
-    // outcome than a leak plus an error.
+    // `realloc` returning null leaves the old block valid, so it is freed
+    // here rather than leaked.
+    //
+    // The line so far is *not* returned. The byte that triggered the growth
+    // has already been taken off the descriptor and cannot be put back, so
+    // there is no line left to hand over: returning `Ok` with the bytes that
+    // happened to fit would drop that byte and every byte after it while
+    // reporting success, and no caller could tell that truncated line from a
+    // complete one. An allocation that failed is reported as one, exactly as
+    // the initial allocation is.
     let grow_failed = is_null_ptr(sess, grown)?;
+    let grow_fail_block = new_block(sess, f, "line_grow_fail");
     let grow_ok = new_block(sess, f, "line_grow_ok");
-    sess.2.build_conditional_branch(grow_failed, finish, grow_ok).map_err(builder_fail)?;
+    sess.2.build_conditional_branch(grow_failed, grow_fail_block, grow_ok).map_err(builder_fail)?;
+
+    sess.2.position_at_end(grow_fail_block);
+    let free_partial = extern_free(sess);
+    sess.2.build_call(free_partial, &[into_meta(old.into())], "").map_err(builder_fail)?;
+    emit_alloc_failed(sess, ret_key, err_key, doubled, out, span)?;
+    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+
     sess.2.position_at_end(grow_ok);
     store_key(sess, buffer, grown.into())?;
     store_key(sess, capacity, doubled.into())?;
@@ -3854,6 +3863,31 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
 
 /// Starting capacity for a `read_line` buffer, doubled as needed.
 const READ_LINE_CAPACITY: u64 = 128;
+
+// Writes `Err(AllocFailed { need })` into the caller's return slot.
+//
+// `read_line` has two allocation sites — the initial buffer and every
+// doubling — and both report failure the same way. Building that error in
+// one place keeps the variant and its payload derived from the declared
+// surface once: two copies could drift into naming different variants, or
+// into one site carrying the byte count it asked for while the other carried
+// the count it already had.
+fn emit_alloc_failed<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    ret_key: i64,
+    err_key: i64,
+    need: IntValue<'ctx>,
+    out: PointerValue<'ctx>,
+    span: (i64, i64, i64),
+) -> Result<(), CodegenError> {
+    let tag = variant_tag_of(sess, err_key, sess.12.alloc_failed, span)?;
+    let payload_key = variant_payload_key(sess, err_key, tag, 0, span)?;
+    let slot = declare_local(sess, payload_key, "need", span)?;
+    store_key(sess, slot, need.into())?;
+    let value = build_enum_value(sess, err_key, tag, &[(payload_key, slot)], span)?;
+    let result = build_result_err(sess, ret_key, err_key, value, span)?;
+    copy_to_out(sess, ret_key, out, result, span)
+}
 
 fn net_fd_of_handle<'ctx>(sess: &mut Session<'ctx, '_, '_>, sock_key: i64, handle: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
     let fd_slot = struct_gep(sess, sock_key, handle, 1, "", span)?;
