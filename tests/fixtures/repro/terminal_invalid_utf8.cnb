@@ -22,6 +22,7 @@ pub mod Collections
     pub EmptySlice
     pub InvalidUtf8
     pub EndOfInput
+    pub ReadFailed(Usize)
   end
 
   pub nat fun string_free(value: String) impure Unit
@@ -57,5 +58,6 @@ pub fun main() impure I64
     Err(Collections.IndexOutOfBounds(index)) => return 73
     Err(Collections.KeyNotFound) => return 74
     Err(Collections.EmptySlice) => return 75
+    Err(Collections.ReadFailed(errno)) => return 76
   end
 end

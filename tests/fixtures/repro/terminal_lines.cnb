@@ -31,6 +31,7 @@ pub mod Collections
     pub EmptySlice
     pub InvalidUtf8
     pub EndOfInput
+    pub ReadFailed(Usize)
   end
 
   pub nat fun string_len(value: &String) Usize
@@ -69,6 +70,7 @@ fun take_line(want: Usize) impure I64
     Err(Collections.KeyNotFound) => return 43
     Err(Collections.EmptySlice) => return 44
     Err(Collections.InvalidUtf8) => return 45
+    Err(Collections.ReadFailed(errno)) => return 46
   end
 end
 
@@ -90,6 +92,7 @@ fun expect_end() impure I64
     Err(Collections.KeyNotFound) => return 63
     Err(Collections.EmptySlice) => return 64
     Err(Collections.InvalidUtf8) => return 65
+    Err(Collections.ReadFailed(errno)) => return 66
   end
 end
 

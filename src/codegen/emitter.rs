@@ -1,3 +1,40 @@
+//! Stage 7b: lowering the typed arena to LLVM IR.
+//!
+//! `emit_program` locates `main` through the `SYM_FUN_MAIN` tag the
+//! resolver attached, then monomorphizes and emits every reachable function
+//! (`get_or_emit_fn`), lowering expressions, statements, and match arms to
+//! inkwell builder calls. The user's `main` — which may return a scalar
+//! exit code or an exit-status enum — is wrapped in a real C
+//! `int main(void)`.
+//!
+//! It also implements the native surface: heap memory through `malloc` and
+//! `free`, BSD sockets through real libc entry points (`socket`, `bind`,
+//! `listen`, `accept`, `send`, `close` — networking is a first-class native
+//! surface here, not a userland abstraction), and the `Vec`, `String`, and
+//! `HashMap` intrinsics with `errno`-based error mapping via
+//! `__errno_location`. Which operation a call is dispatches on the `NAT_*`
+//! opcode assigned during resolution.
+//!
+//! Self-tail-recursive calls are marked `tail` at emission time. Tailness
+//! propagates only through the value expression of a tail-positioned match
+//! arm — never through an argument subexpression or a match scrutinee — and
+//! that marking is what lets LLVM's `-O2` deliver the language's
+//! O(1)-call-stack recursion guarantee with no runtime stack check anywhere
+//! in the emitted binary.
+//!
+//! **Invariants:**
+//! - Nothing is re-derived here. Types come from the typechecker's
+//!   canonical keys, symbols from the resolver, variant tags from
+//!   `NODE_VARFACT`, field offsets from `NODE_FIELDKEY`. Codegen never
+//!   re-resolves a name or re-infers a type.
+//! - No semantic decision reads a string name. Native dispatch is by
+//!   `NAT_*` opcode and `main` is found by tag, so renaming a function in
+//!   Cinnabar source cannot change how it lowers.
+//! - Every size, offset, and slot count is derived from the declared type,
+//!   never hardcoded to the shapes the current fixtures happen to contain.
+//! - A failure is a typed `CodegenError` carrying a real span, never a
+//!   panic.
+
 use crate::ast::*;
 use crate::codegen::error::*;
 use crate::codegen::syscall;
@@ -46,6 +83,7 @@ pub struct Protocol {
     pub read_only: i64,
     pub write_truncate: i64,
     pub end_of_input: i64,
+    pub read_failed: i64,
 }
 
 pub fn protocol_of(names: &[String]) -> Protocol {
@@ -65,6 +103,7 @@ pub fn protocol_of(names: &[String]) -> Protocol {
         read_only: find_name(names, "ReadOnly"),
         write_truncate: find_name(names, "WriteTruncate"),
         end_of_input: find_name(names, "EndOfInput"),
+        read_failed: find_name(names, "ReadFailed"),
     }
 }
 
@@ -3759,7 +3798,7 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     sess.2.build_conditional_branch(null, alloc_failed, scan).map_err(builder_fail)?;
 
     sess.2.position_at_end(alloc_failed);
-    emit_alloc_failed(sess, ret_key, err_key, start_capacity, out, span)?;
+    emit_payload_error(sess, ret_key, err_key, sess.12.alloc_failed, start_capacity, out, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
 
     sess.2.position_at_end(scan);
@@ -3816,7 +3855,7 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     sess.2.position_at_end(grow_fail_block);
     let free_partial = extern_free(sess);
     sess.2.build_call(free_partial, &[into_meta(old.into())], "").map_err(builder_fail)?;
-    emit_alloc_failed(sess, ret_key, err_key, doubled, out, span)?;
+    emit_payload_error(sess, ret_key, err_key, sess.12.alloc_failed, doubled, out, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
 
     sess.2.position_at_end(grow_ok);
@@ -3835,6 +3874,31 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     sess.2.position_at_end(finish);
     let final_len = load_i64(sess, length)?;
     let final_buf = load_ptr(sess, buffer)?;
+
+    // A failed read is a failed read, not the end of the stream.
+    //
+    // `finish` is reached three ways: the read returned zero, the read
+    // failed, or a newline arrived. Reporting the middle one as
+    // `EndOfInput` told a caller the stream had ended cleanly when the
+    // device had in fact errored, and returning the bytes read so far as
+    // `Ok` handed back a line that was never terminated — the same defect
+    // the allocation path was fixed for, one screen up.
+    //
+    // The syscall returns a negated errno, so negating it back is the errno
+    // itself.
+    let read_failed = sess.2.build_int_compare(IntPredicate::SLT, got, i64_ty.const_zero(), "").map_err(builder_fail)?;
+    let failed_block = new_block(sess, f, "line_read_failed");
+    let ended_block = new_block(sess, f, "line_ended");
+    sess.2.build_conditional_branch(read_failed, failed_block, ended_block).map_err(builder_fail)?;
+
+    sess.2.position_at_end(failed_block);
+    let free_failed = extern_free(sess);
+    sess.2.build_call(free_failed, &[into_meta(final_buf.into())], "").map_err(builder_fail)?;
+    let errno = sess.2.build_int_neg(got, "").map_err(builder_fail)?;
+    emit_payload_error(sess, ret_key, err_key, sess.12.read_failed, errno, out, span)?;
+    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+
+    sess.2.position_at_end(ended_block);
     let ended = sess.2.build_int_compare(IntPredicate::SLE, got, i64_ty.const_zero(), "").map_err(builder_fail)?;
     let empty = sess.2.build_int_compare(IntPredicate::EQ, final_len, i64_ty.const_zero(), "").map_err(builder_fail)?;
     let at_end = sess.2.build_and(ended, empty, "").map_err(builder_fail)?;
@@ -3891,7 +3955,8 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
 /// Starting capacity for a `read_line` buffer, doubled as needed.
 const READ_LINE_CAPACITY: u64 = 128;
 
-// Writes `Err(AllocFailed { need })` into the caller's return slot.
+// Writes `Err(<variant>(payload))` into the caller's return slot, for the
+// error variants that carry exactly one integer.
 //
 // `read_line` has two allocation sites — the initial buffer and every
 // doubling — and both report failure the same way. Building that error in
@@ -3899,18 +3964,19 @@ const READ_LINE_CAPACITY: u64 = 128;
 // surface once: two copies could drift into naming different variants, or
 // into one site carrying the byte count it asked for while the other carried
 // the count it already had.
-fn emit_alloc_failed<'ctx>(
+fn emit_payload_error<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     ret_key: i64,
     err_key: i64,
-    need: IntValue<'ctx>,
+    variant: i64,
+    payload: IntValue<'ctx>,
     out: PointerValue<'ctx>,
     span: (i64, i64, i64),
 ) -> Result<(), CodegenError> {
-    let tag = variant_tag_of(sess, err_key, sess.12.alloc_failed, span)?;
+    let tag = variant_tag_of(sess, err_key, variant, span)?;
     let payload_key = variant_payload_key(sess, err_key, tag, 0, span)?;
-    let slot = declare_local(sess, payload_key, "need", span)?;
-    store_key(sess, slot, need.into())?;
+    let slot = declare_local(sess, payload_key, "payload", span)?;
+    store_key(sess, slot, payload.into())?;
     let value = build_enum_value(sess, err_key, tag, &[(payload_key, slot)], span)?;
     let result = build_result_err(sess, ret_key, err_key, value, span)?;
     copy_to_out(sess, ret_key, out, result, span)
