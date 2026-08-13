@@ -104,7 +104,7 @@ pub fn load_manifest(path: &Path) -> Result<ProjectManifest, String> {
         };
         let field = name_text(&analyzed.names, node_d(&analyzed.nodes, item));
         if field == "NAME" {
-            name = Some(value);
+            name = Some(validate_project_name(&value, &analyzed, item)?);
         } else if field == "ENTRY" {
             entry = Some(validate_relative_path(&value, &analyzed, item)?);
         } else if field == "TESTS" {
@@ -135,6 +135,54 @@ pub fn load_manifest(path: &Path) -> Result<ProjectManifest, String> {
         return Err(format!("project entry '{}' is not a file", entry_path.display()));
     }
     Ok(ProjectManifest { name: project_name, root, entry: entry_path, tests: tests_path })
+}
+
+/// The project name names the built artifact, so it has to be one path
+/// component and nothing else.
+///
+/// A name carrying a separator, a parent-directory step, or a drive prefix
+/// would let a manifest choose where the build writes rather than merely
+/// what it is called. `ENTRY` and `TESTS` are confined to the project root
+/// because a path is obviously a path; `NAME` reaches the same filesystem
+/// through a field that does not look like one, which is exactly why it is
+/// checked here rather than trusted.
+fn validate_project_name(value: &str, analyzed: &analysis::Analysis, item: i64) -> Result<String, String> {
+    // What the first component *is* decides the message. Counting components
+    // first would answer "../outside" with a complaint about its length,
+    // which is true and useless: the problem is the step out of the root, and
+    // that is what the manifest author has to be told.
+    let mut components = Path::new(value).components();
+    let name = match components.next() {
+        Some(Component::Normal(text)) => match text.to_str() {
+            Some(text) => text.to_string(),
+            None => return Err(manifest_item_error(analyzed, item, "project name is not valid text")),
+        },
+        Some(Component::CurDir) => {
+            return Err(manifest_item_error(analyzed, item, "project name cannot be a directory reference"));
+        }
+        Some(Component::ParentDir) => {
+            return Err(manifest_item_error(analyzed, item, "project name cannot leave the project root"));
+        }
+        Some(Component::RootDir) => {
+            return Err(manifest_item_error(analyzed, item, "project name must be relative"));
+        }
+        Some(Component::Prefix(prefix)) => {
+            return Err(manifest_item_error(
+                analyzed,
+                item,
+                &format!("project name cannot carry the path prefix '{:?}'", prefix),
+            ));
+        }
+        None => return Err(manifest_item_error(analyzed, item, "project name cannot be empty")),
+    };
+    if let Some(trailing) = components.next() {
+        return Err(manifest_item_error(
+            analyzed,
+            item,
+            &format!("project name must be a single path component, but continues with '{:?}'", trailing),
+        ));
+    }
+    Ok(name)
 }
 
 fn is_manifest_string_type(nodes: &[i64], key: i64) -> bool {
@@ -572,6 +620,30 @@ mod tests {
             "pub const NAME: &[U8] = \"cinnabar\"\npub const ENTRY: &[U8] = \"../outside.cnb\"\n",
         );
         assert!(message.contains("build.cnb:2:5: project paths cannot leave the project root"), "{}", message);
+    }
+
+    // NAME names the built artifact, so it reaches the filesystem through a
+    // field that does not look like a path. A name that escapes its single
+    // component would choose where the build writes.
+    #[test]
+    fn project_name_cannot_reach_outside_its_own_component() {
+        let escaping = rejected_manifest(
+            "name_escape",
+            "pub const NAME: &[U8] = \"../outside\"\npub const ENTRY: &[U8] = \"main.cnb\"\n",
+        );
+        assert!(escaping.contains("project name cannot leave the project root"), "{}", escaping);
+
+        let nested = rejected_manifest(
+            "name_nested",
+            "pub const NAME: &[U8] = \"nested/name\"\npub const ENTRY: &[U8] = \"main.cnb\"\n",
+        );
+        assert!(nested.contains("project name must be a single path component"), "{}", nested);
+
+        let empty = rejected_manifest(
+            "name_empty",
+            "pub const NAME: &[U8] = \"\"\npub const ENTRY: &[U8] = \"main.cnb\"\n",
+        );
+        assert!(empty.contains("project name cannot be empty"), "{}", empty);
     }
 
     #[test]

@@ -767,11 +767,11 @@ fn run_project_compiler(path: &Path, run: bool, check: bool, target: &str) -> Ex
         if let Err(create_error) = std::fs::create_dir_all(&output_dir) {
             return source_less_failure(&format!("cannot create build directory '{}': {}", output_dir.display(), create_error));
         }
-        let binary_name = match manifest.entry.file_stem() {
-            Some(name) => name,
-            None => return source_less_failure(&format!("entry '{}' has no file name", manifest.entry.display())),
-        };
-        invocation.arg("-o").arg(output_dir.join(binary_name));
+        // The artifact is named by the manifest's NAME, not by whichever file
+        // happens to be the entry point. A project that renames its entry
+        // source is not renaming itself, and NAME is required precisely so
+        // there is an answer that does not depend on that.
+        invocation.arg("-o").arg(output_dir.join(&manifest.name));
         if run {
             invocation.arg("--run");
         }
