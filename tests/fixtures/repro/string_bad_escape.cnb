@@ -1,0 +1,25 @@
+#! Lexical rejections for string literals.  Every line below must be an
+#! error.
+#!
+#!   1. `\q` is not one of the five escapes the language defines
+#!      (`\n`, `\t`, `\0`, `\"`, `\\`).  An unknown escape is an error
+#!      rather than a passed-through backslash, which is what makes a
+#!      literal's byte sequence fully determined at lex time.
+#!   2. There is deliberately no byte escape (`\xNN`): one would let a
+#!      literal name a lone UTF-8 continuation byte and put runtime
+#!      validation back on a value that is supposed to be checked once, at
+#!      compile time.
+#!   3. A literal does not span lines.  An unescaped newline before the
+#!      closing quote is an error, so a missing quote cannot swallow the
+#!      rest of the file.
+#!
+#! Recovery keeps scanning the same literal after a bad escape, so each
+#! line here reports exactly one diagnostic.
+
+pub const UNKNOWN_ESCAPE: &[U8] = "bad \q escape"
+pub const BYTE_ESCAPE: &[U8] = "no \x41 byte escape"
+pub const RUNS_OFF_THE_LINE: &[U8] = "missing the closing quote
+
+pub fun main() I64
+  return 0
+end

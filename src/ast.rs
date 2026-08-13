@@ -59,6 +59,7 @@ pub const TOK_EOF: i64 = 3;
 pub const TOK_NL: i64 = 4; // newline (statement boundary)
 pub const TOK_SYM: i64 = 5; // operator or punctuation symbol, by interned name
 pub const TOK_DOC: i64 = 6; // documentation comment body, by interned name
+pub const TOK_STRING: i64 = 7; // string literal, escapes decoded, by interned name
 
 // Documentation attachment rows. (tag=NODE_DOC, a=target node, b=doc name-id list).
 // The lexer records comment bodies once and the parser attaches each consecutive
@@ -112,6 +113,13 @@ pub const LIT_INT: i64 = 0;
 pub const LIT_HEX: i64 = 1;
 pub const LIT_TRUE: i64 = 2;
 pub const LIT_FALSE: i64 = 3;
+// A string literal.  Its `c` slot holds the interned name id of the
+// *decoded* bytes (escapes already applied), not a numeric value: the
+// literal's value is a byte sequence, and the name table is the arena that
+// already stores byte sequences.  Interning also means two identical
+// literals share one id, which is what lets codegen emit one `.rodata`
+// global per distinct literal.
+pub const LIT_STRING: i64 = 4;
 
 pub const UN_NEG: i64 = 0;
 pub const UN_NOT: i64 = 1;
@@ -203,6 +211,34 @@ pub fn name_text(names: &[String], id: i64) -> String {
         Some(text) => text.clone(),
         None => String::new(),
     }
+}
+
+/// Renders a string literal's decoded bytes back into the source form that
+/// would produce them, escaping exactly the five sequences the language
+/// defines.
+///
+/// Every tool that shows a literal goes through this: a decoded literal can
+/// contain a newline or a NUL, which would break a line-oriented dump or
+/// make it non-text, and a reader needs to tell a real newline from the two
+/// characters that produced it.
+pub fn escaped_literal_text(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        if ch == '\n' {
+            out.push_str("\\n");
+        } else if ch == '\t' {
+            out.push_str("\\t");
+        } else if ch == '\0' {
+            out.push_str("\\0");
+        } else if ch == '"' {
+            out.push_str("\\\"");
+        } else if ch == '\\' {
+            out.push_str("\\\\");
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 pub fn find_name(names: &[String], text: &str) -> i64 {

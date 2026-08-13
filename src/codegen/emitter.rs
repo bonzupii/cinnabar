@@ -458,6 +458,22 @@ fn key_builtin_of(sess: &Session, key: i64) -> i64 {
     }
 }
 
+// True for `&[U8]`, the type of a string literal and therefore of a string
+// constant.  Nothing else in the language folds to a constant of this type,
+// so this is how the constant path recognizes that the value it stored is
+// the interned name id of a byte sequence rather than a number.
+fn is_byte_slice_key(sess: &Session, key: i64) -> bool {
+    if em_key_kind(sess, key) != TYD_REF {
+        return false;
+    }
+    let slice = em_key_elem(sess, key);
+    if em_key_kind(sess, slice) != TYD_SLICE {
+        return false;
+    }
+    let elem = em_key_elem(sess, slice);
+    em_key_kind(sess, elem) == TYD_BUILTIN && key_builtin_of(sess, elem) == BUILTIN_U8
+}
+
 fn deref_key_of(sess: &Session, key: i64) -> i64 {
     let kind = em_key_kind(sess, key);
     if kind == TYD_REF || kind == TYD_REF_MUT {
@@ -947,6 +963,55 @@ fn emit_expr<'ctx, 'a>(
     }
 }
 
+// The `.rodata` global holding a string literal's bytes, created on first
+// use and reused afterwards.
+//
+// The global's name is derived from the literal's interned name id, so the
+// module itself is the reuse table: two occurrences of the same literal
+// intern to the same id, resolve to the same global, and share one copy of
+// the bytes. There is no side table to keep in step with the name arena.
+//
+// The bytes are stored exactly as the lexer decoded them, with no trailing
+// NUL: a Cinnabar byte slice carries its own length, and appending a
+// terminator would make the global disagree with the length the slice
+// reports.
+fn string_literal_global<'ctx>(sess: &mut Session<'ctx, '_, '_>, name_id: i64) -> Result<(PointerValue<'ctx>, u64), CodegenError> {
+    let text = em_name(sess, name_id);
+    let bytes = text.as_bytes();
+    let symbol = format!(".cnb.str.{}", name_id);
+    let existing = sess.1.get_global(&symbol);
+    let global = match existing {
+        Some(found) => found,
+        None => {
+            let data = sess.0.const_string(bytes, false);
+            let created = sess.1.add_global(data.get_type(), Some(AddressSpace::from(0u16)), &symbol);
+            created.set_initializer(&data);
+            created.set_constant(true);
+            // Private and unnamed_addr: the literal has no linkage-visible
+            // identity, only its contents, so the linker is free to merge
+            // equal literals across translation units.
+            created.set_linkage(inkwell::module::Linkage::Private);
+            created.set_unnamed_address(inkwell::values::UnnamedAddress::Global);
+            created
+        }
+    };
+    Ok((global.as_pointer_value(), bytes.len() as u64))
+}
+
+// Materializes a string literal as a `&[U8]` slice value: the `.rodata`
+// pointer and the byte length, in the same `{ ptr, i64 }` shape every other
+// slice in the language uses.  Shared by the inline-literal path and the
+// `const` path so the two cannot diverge.
+fn emit_string_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, name_id: i64, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
+    let (data, len) = string_literal_global(sess, name_id)?;
+    let view = declare_local(sess, key, "str", span)?;
+    let dp = slice_gep(sess, view, 0, "")?;
+    store_key(sess, dp, data.into())?;
+    let lp = slice_gep(sess, view, 1, "")?;
+    store_key(sess, lp, sess.0.i64_type().const_int(len, false).into())?;
+    Ok(view)
+}
+
 fn emit_lit<'ctx, 'a>(
     sess: &mut Session<'ctx, '_, '_>,
     ctx: &mut FnCtx<'ctx, 'a>,
@@ -955,6 +1020,9 @@ fn emit_lit<'ctx, 'a>(
     let span = (node_file(sess.5, expr), node_start(sess.5, expr), node_end(sess.5, expr));
     let key = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, expr));
     let value = node_c(sess.5, expr);
+    if node_b(sess.5, expr) == LIT_STRING {
+        return emit_string_slice(sess, key, value, span);
+    }
     let ptr = declare_local(sess, key, "lit", span)?;
     let cv = const_int_of(sess, key, value, span)?;
     store_key(sess, ptr, cv)?;
@@ -972,11 +1040,17 @@ fn emit_path<'ctx, 'a>(
         let kind = node_a(sess.5, sym);
         if kind == SYM_CONST {
             let key = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, expr));
-            let ptr = declare_local(sess, key, "const", span)?;
             if !has_const_value(sess.5, sym) {
                 return Err(builder_error(span.0, span.1, span.2, "internal: constant without a folded value"));
             }
             let value = find_const_value(sess.5, sym);
+            if is_byte_slice_key(sess, key) {
+                // A string constant folded to the interned name id of its
+                // bytes, so it materializes through exactly the same global
+                // as an inline literal of the same text.
+                return emit_string_slice(sess, key, value, span);
+            }
+            let ptr = declare_local(sess, key, "const", span)?;
             let cv = const_int_of(sess, key, value, span)?;
             store_key(sess, ptr, cv)?;
             return Ok(ptr);
@@ -2685,6 +2759,32 @@ fn native_string_len<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ct
     Ok(())
 }
 
+// The (data pointer, byte length) pair of whichever byte-sequence view a
+// native's first parameter names.
+//
+// The language has no overloading, so `Terminal.print` accepts either
+// `&Collections.String` or `&[U8]` by having its *emitted body* read the
+// pair out of whichever representation the program declared — never by
+// matching the parameter's spelling. The two differ only in where the pair
+// lives: a `&String` parameter is a pointer to a heap-owning handle whose
+// fields must be loaded through it, while a `&[U8]` parameter *is* the
+// `{ ptr, i64 }` view, held directly in the parameter slot. The decision
+// comes from the canonical type descriptor the typechecker already
+// attached to the parameter.
+fn byte_view_of<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>, span: (i64, i64, i64)) -> Result<(PointerValue<'ctx>, IntValue<'ctx>), CodegenError> {
+    let p0 = get_local(locals, 0, span)?;
+    let viewed = deref_key_of(sess, get_local_key(locals, 0, span)?);
+    if em_key_kind(sess, viewed) == TYD_SLICE {
+        return Ok((slice_data(sess, p0)?, slice_len_of(sess, p0)?));
+    }
+    let handle = load_ptr(sess, p0)?;
+    let data_ptr = struct_gep(sess, viewed, handle, 0, "", span)?;
+    let data = load_ptr(sess, data_ptr)?;
+    let len_ptr = struct_gep(sess, viewed, handle, 1, "", span)?;
+    let len = load_i64(sess, len_ptr)?;
+    Ok((data, len))
+}
+
 fn native_print<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     locals: &Locals<'ctx>,
@@ -2694,13 +2794,7 @@ fn native_print<'ctx>(
     newline: bool,
     span: (i64, i64, i64),
 ) -> Result<(), CodegenError> {
-    let p0 = get_local(locals, 0, span)?;
-    let str_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
-    let str_ref = load_ptr(sess, p0)?;
-    let data_ptr = struct_gep(sess, str_key, str_ref, 0, "", span)?;
-    let data = load_ptr(sess, data_ptr)?;
-    let len_ptr = struct_gep(sess, str_key, str_ref, 1, "", span)?;
-    let len = load_i64(sess, len_ptr)?;
+    let (data, len) = byte_view_of(sess, locals, span)?;
     let write = extern_write(sess);
     let fd = sess.0.i32_type().const_int(if stderr { 2 } else { 1 }, false);
     sess.2

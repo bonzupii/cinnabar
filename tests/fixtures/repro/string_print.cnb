@@ -1,0 +1,38 @@
+#! `Terminal.print` and `Terminal.print_line` accept a `&[U8]` byte view
+#! directly, alongside the `&Collections.String` form the reference
+#! specification uses.
+#!
+#! The language has no overloading, so this is not two functions: it is one
+#! native whose emitted body reads the (data, length) pair out of whichever
+#! byte-sequence representation the program declared the parameter as.  A
+#! `&Collections.String` parameter is a pointer to a heap-owning handle
+#! whose fields are loaded through it; a `&[U8]` parameter *is* the
+#! `{ ptr, len }` view.  Codegen decides between them from the canonical
+#! type descriptor the typechecker attached to the parameter, never from
+#! the parameter's spelling.
+#!
+#! Printing a string literal therefore needs no allocation and no
+#! `string_from_slice` round trip: the bytes are already in `.rodata` and
+#! were UTF-8-checked when the literal was lexed.
+#!
+#! The harness asserts exit 0.  Standard output is
+#!   Cinnabar
+#!   ok
+#! with no trailing newline after "ok" (the second line is written with
+#! `print`, not `print_line`, and the run ends there).
+
+pub mod Terminal
+  pub nat fun print(text: &[U8]) impure Unit
+  pub nat fun print_line(text: &[U8]) impure Unit
+end
+
+use Terminal.print
+use Terminal.print_line
+
+pub const NAME: &[U8] = "Cinnabar"
+
+pub fun main() impure I64
+  print_line(NAME)
+  print("ok")
+  return 0
+end

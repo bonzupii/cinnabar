@@ -1755,6 +1755,14 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
         if lit == LIT_TRUE || lit == LIT_FALSE {
             return (value, builtin_key_of(state.1, BUILTIN_BOOL));
         }
+        if lit == LIT_STRING {
+            // A string constant folds to the interned name id of its bytes,
+            // which is what codegen needs to emit (or reuse) the literal's
+            // `.rodata` global — the same id an inline literal carries, so a
+            // `const` string and an inline string are one representation.
+            // There is no range to check: the value is a byte sequence.
+            return (value, byte_slice_key(state));
+        }
         let key = if is_int_key(state.1, declared) {
             declared
         } else {
@@ -2214,10 +2222,32 @@ fn check_expr(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64
     recover_ty(state, expr, expected)
 }
 
+// The type of a string literal: `&[U8]`, a shared borrow of a byte slice.
+//
+// A literal's bytes live in the binary's read-only data for the whole run,
+// so the borrow has no owner to outlive: there is nothing to consume,
+// nothing to free, and no lifetime to track.  `&[U8]` rather than a
+// dedicated string type because the byte slice is the representation the
+// rest of the language already has — `Slice.len`, indexing, and
+// `Collections.string_from_slice` all work on it unchanged.
+fn byte_slice_key(state: &mut State) -> i64 {
+    let byte = builtin_key_of(state.1, BUILTIN_U8);
+    let slice = canon_tyinfo(state.1, state.2, TYD_SLICE, NONE, NONE, byte, NONE);
+    canon_tyinfo(state.1, state.2, TYD_REF, NONE, NONE, slice, NONE)
+}
+
 fn check_lit(state: &mut State, expr: i64, expected: i64) -> i64 {
     let lit = node_b(state.1, expr);
     if lit == LIT_TRUE || lit == LIT_FALSE {
         let key = builtin_key_of(state.1, BUILTIN_BOOL);
+        expr_set_ty(state.1, expr, key);
+        return key;
+    }
+    if lit == LIT_STRING {
+        // A string literal has one type and adopts nothing: unlike an
+        // integer literal it is not a width-agnostic magnitude, so an
+        // expected type of anything else is a mismatch the caller reports.
+        let key = byte_slice_key(state);
         expr_set_ty(state.1, expr, key);
         return key;
     }
@@ -2444,7 +2474,12 @@ fn check_static_zero_divisor(state: &mut State, op: i64, rhs: i64) -> i64 {
         return 0;
     }
     let (value, key) = fold_const(state, rhs, NONE, 1);
-    if key_kind(state.1, key) != TYD_UNKNOWN && value == 0 {
+    // Only an *integer* constant divisor can be a provable zero.  A folded
+    // `Bool` carries 0 for `false` and a folded string carries an interned
+    // name id, neither of which is a numeric zero; reporting either as a
+    // division by zero would replace the real operand-type diagnostic with
+    // a false one.
+    if is_int_key(state.1, key) && value == 0 {
         let message = if op == BIN_DIV {
             "division by zero"
         } else {

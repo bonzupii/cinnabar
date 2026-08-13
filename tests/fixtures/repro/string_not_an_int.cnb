@@ -1,0 +1,39 @@
+#! A string literal has exactly one type, `&[U8]`, and adopts nothing from
+#! its context.
+#!
+#! This is the boundary between the two literal kinds.  An integer literal
+#! is a width-agnostic magnitude with no type until its context supplies
+#! one, so it adopts an expected or peer type (see
+#! `int_literal_context.cnb`).  A string literal is not: its value is a
+#! byte sequence whose length and contents are already fixed, so there is
+#! nothing for a context to decide.  Every item below must be rejected.
+#!
+#!   1. A string constant declared as an integer.
+#!   2. An integer constant declared as a byte slice.
+#!   3. A string as an arithmetic operand: `+` requires integer operands.
+#!   4. A string compared against an integer: neither operand adopts the
+#!      other's type.
+#!   5. A string passed where an integer parameter is declared.
+
+pub const NOT_AN_INT: I64 = "eight"
+pub const NOT_A_SLICE: &[U8] = 8
+pub const SUM: I64 = "one" + 1
+
+fun takes_int(value: I64) I64
+  return value
+end
+
+fun compares() Bool
+  val text = "abc"
+  if text == 3
+    return true
+  end
+  return false
+end
+
+pub fun main() I64
+  if compares()
+    return 1
+  end
+  return takes_int("nine")
+end

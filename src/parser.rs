@@ -1051,6 +1051,14 @@ fn parse_primary(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &
         let end = node_end(nodes, *pos);
         *pos += 1;
         Some(alloc_expr(nodes, EXPR_LIT, file, start, end, &[lit, value, NONE]))
+    } else if kind == TOK_STRING {
+        // The lexer already decoded the escapes and interned the bytes; the
+        // literal carries that name id, and no stage re-reads the quoted
+        // source text.
+        let name = node_b(nodes, *pos);
+        let end = node_end(nodes, *pos);
+        *pos += 1;
+        Some(alloc_expr(nodes, EXPR_LIT, file, start, end, &[LIT_STRING, name, NONE]))
     } else if is_name(nodes, names, *pos, "true") {
         let end = node_end(nodes, *pos);
         *pos += 1;

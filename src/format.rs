@@ -81,6 +81,29 @@ fn match_arm_has_multiline_body(code: &str) -> bool {
     }
 }
 
+// The index just past the closing quote of the string literal opening at
+// `open`, or the end of the line when the literal is unterminated (which
+// the lexer reports; the formatter only has to avoid running off the end).
+// A backslash escapes the next byte, so `\"` does not close the literal.
+fn skip_string_literal(bytes: &[u8], open: usize) -> usize {
+    let mut idx = open + 1;
+    while idx < bytes.len() {
+        let byte = match bytes.get(idx) {
+            Some(value) => *value,
+            None => return bytes.len(),
+        };
+        if byte == b'\\' {
+            idx += 2;
+            continue;
+        }
+        if byte == b'"' {
+            return idx + 1;
+        }
+        idx += 1;
+    }
+    bytes.len()
+}
+
 fn comment_free_code(line: &str, block_comment: &mut bool) -> String {
     let bytes = line.as_bytes();
     let mut code = String::new();
@@ -109,6 +132,15 @@ fn comment_free_code(line: &str, block_comment: &mut bool) -> String {
                 idx += 2;
             } else if bytes.get(idx).is_some_and(|byte| *byte == b'#') {
                 break;
+            } else if bytes.get(idx).is_some_and(|byte| *byte == b'"') {
+                // A string literal's contents are not code: a `#` inside one
+                // does not start a comment, a bracket inside one does not
+                // change nesting depth, and a word inside one is not a
+                // keyword — `print("match")` must not read as opening a
+                // match block. The literal collapses to an empty pair so the
+                // line keeps its shape without its contents being scanned.
+                idx = skip_string_literal(bytes, idx);
+                code.push_str("\"\"");
             } else {
                 match bytes.get(idx) {
                     Some(byte) => code.push(*byte as char),
@@ -284,5 +316,38 @@ mod tests {
         let expected = "fun main() I64\n  #|\ncomment text\n  |# if true\n    return 1\n  end\n  return 0\nend\n";
         assert_eq!(format_source(source), expected);
         assert_eq!(format_source(expected), expected);
+    }
+
+    #[test]
+    fn ignores_structure_words_inside_string_literals() {
+        // A keyword inside a literal is text, not structure: `"match"` must
+        // not open a block and `"end"` must not close one, or every line
+        // after the literal would be indented against a block that does not
+        // exist.
+        let source = "fun main() I64\nprint(\"match\")\nprint(\"end\")\nreturn 0\nend\n";
+        let expected = "fun main() I64\n  print(\"match\")\n  print(\"end\")\n  return 0\nend\n";
+        assert_eq!(format_source(source), expected);
+        assert_eq!(format_source(expected), expected);
+    }
+
+    #[test]
+    fn ignores_comment_and_bracket_characters_inside_string_literals() {
+        // A `#` inside a literal does not start a comment, so the bracket
+        // after it still counts; an unbalanced bracket *inside* the literal
+        // does not count. An escaped quote does not end the literal.
+        let source = "fun main() I64\nprint(\"# ( not code\")\nprint(\"say \\\"hi\\\"\")\nreturn 0\nend\n";
+        let expected = "fun main() I64\n  print(\"# ( not code\")\n  print(\"say \\\"hi\\\"\")\n  return 0\nend\n";
+        assert_eq!(format_source(source), expected);
+        assert_eq!(format_source(expected), expected);
+    }
+
+    #[test]
+    fn preserves_literal_contents_verbatim() {
+        // The formatter re-indents lines and never rewrites token text, so a
+        // literal's bytes — including leading whitespace inside it — come
+        // through unchanged.
+        let source = "fun main() I64\nval text = \"  spaced   out  \"\nreturn 0\nend\n";
+        let expected = "fun main() I64\n  val text = \"  spaced   out  \"\n  return 0\nend\n";
+        assert_eq!(format_source(source), expected);
     }
 }

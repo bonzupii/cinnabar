@@ -186,15 +186,76 @@ builtin against redeclaration.
 
 ---
 
-## Milestone 2 — String Literals
-- Lexer: `TOK_STRING`, double-quoted, standard escapes (`\n`, `\t`, `\0`, `\"`, `\\`).
-- Type: a literal evaluates to `&[U8]` — a static `.rodata` byte array plus a `{ ptr, len }` slice.
-  No heap allocation, no lifetime.
-- UTF-8 validity of a literal is known at compile time — validate at parse time, not via a runtime
-  `Result`.
-- `Terminal.print`/`print_line` accept `&[U8]` directly alongside `&Collections.String`.
-- No dependency on any later milestone. Ships early because diagnostics, `read_line` ergonomics,
-  and text processing all want it.
+## Milestone 2 — String Literals (COMPLETE)
+
+### Shipped
+- **Lexer:** `TOK_STRING`, double-quoted, with exactly the five escapes `\n`, `\t`, `\0`, `\"`,
+  `\\`. Any other escape is a lexical error rather than a passed-through backslash, so a literal's
+  byte sequence is fully determined at lex time and no later stage re-reads the quoted source. A
+  literal does not span lines: an unescaped newline before the closing quote is an error, which
+  stops a missing quote from swallowing the rest of the file. Recovery keeps scanning the same
+  literal after a bad escape, so one mistake reports one diagnostic.
+
+  Unescaped text is copied out of the source as whole `&str` runs rather than byte by byte, so a
+  multi-byte character passes through as the character it is. The decoded bytes are interned in the
+  existing name arena — the arena that already stores byte sequences — which is also what makes
+  equal literals one value downstream.
+- **Type:** `&[U8]`, and exactly that; a string literal adopts nothing from its context, unlike an
+  integer literal (see Milestone 1's literal-typing rule). It evaluates to a `private
+  unnamed_addr constant` byte array — confirmed to land in `.rodata` in the linked binary — plus a
+  `{ ptr, len }` slice over it. No heap allocation, no owner, no lifetime.
+- **Compile-time UTF-8:** validity follows from the escape set rather than from a validation pass.
+  Source text is UTF-8, every unescaped byte is therefore part of a well-formed sequence copied
+  through unchanged, and all five escapes decode to ASCII, so no decoding step can introduce a
+  malformed sequence. This is why there is **no** `\xNN` byte escape: one would let a literal name
+  a lone continuation byte and put runtime validation back on a value that is supposed to be
+  settled at compile time. Writing a validation pass over bytes that cannot be invalid would have
+  been a check that never fires; excluding the escape that could break the invariant is what
+  actually enforces it.
+- **`Terminal.print`/`print_line` accept `&[U8]`** alongside `&Collections.String`. The language
+  has no overloading, so this is one native whose *emitted body* reads the (data, length) pair out
+  of whichever byte-sequence representation the program declared: a `&Collections.String` parameter
+  is a pointer to a heap-owning handle whose fields are loaded through it, while a `&[U8]`
+  parameter *is* the `{ ptr, len }` view. `byte_view_of` decides between them from the canonical
+  type descriptor the typechecker attached to the parameter, never from the parameter's spelling.
+- **Compile-time string constants**, which Milestone 5 asks to have decided before designing
+  `build.cnb`: `pub const NAME: &[U8] = "Cinnabar"` works, and the answer is the second of the two
+  options that milestone lists — manifest fields are `&[U8]`, resolved through Milestone 2's
+  literal representation, with no distinct compile-time-only string type. A string constant folds
+  to the interned name id of its bytes rather than to a number, and materializes through the *same*
+  `.rodata` global as an inline literal of the same text, so `const` and inline strings are one
+  representation rather than two.
+
+### Toolchain consequences that were part of the work
+- **The formatter had to learn about strings.** It extracts a comment-free "code view" of each line
+  to decide indentation; without string awareness a `#` inside a literal would start a comment, a
+  bracket inside one would change nesting depth, and `print("match")` would read as opening a match
+  block and mis-indent every line after it. String literals now collapse to an empty pair in that
+  view, with `\"` correctly not ending the literal. The formatter still never rewrites token text,
+  so literal contents pass through verbatim.
+- **Dumps stay text.** A decoded literal can contain a newline or a NUL, which would break a
+  line-oriented dump or make it non-text. `escaped_literal_text` renders a literal back into the
+  source form that would produce it, and both `--dump-ast` and `--dump-typed-ast` go through it —
+  one implementation, not two. Fixing this also exposed and fixed a pre-existing bug in the AST
+  dumper: `lit_kind_name` compared `LIT_*` values against `TOK_*` constants, which do not line up,
+  so every integer literal was already being labelled with the wrong kind.
+
+### Verification
+- `tests/fixtures/repro/string_literal.cnb` asserts byte lengths (a literal's length is its byte
+  count, not its character count: `"é€𝄞"` is 9), the decoded value of each of the five escapes in
+  order, indexing into a literal, and that an inline literal compares byte-for-byte equal to a
+  `const` of the same text — the observable consequence of both resolving to one global.
+- `tests/fixtures/repro/string_print.cnb` prints a `&[U8]` constant and an inline literal through
+  `Terminal.print_line`/`print`, while `spec.cnb` (immutable) keeps exercising the
+  `&Collections.String` form of the same natives, so both parameter shapes stay covered.
+- `tests/fixtures/repro/string_bad_escape.cnb` pins the lexical rejections: an unknown escape, a
+  `\xNN` byte escape, and a literal running off its line. `string_not_an_int.cnb` pins the type
+  boundary — a string is not an integer and an integer is not a byte slice, in constant
+  initializers, arithmetic, comparison, and argument position.
+- Lexer unit tests cover escape decoding, multi-byte UTF-8 preservation at the byte level, the
+  empty literal, that equal literals intern to one name id (the property codegen's global reuse
+  rests on), and each lexical rejection. Formatter unit tests cover keywords, `#`, brackets, and
+  escaped quotes inside literals.
 
 ---
 
@@ -276,11 +337,12 @@ built in-tree instead.
 ---
 
 ## Milestone 5 — `build.cnb` Project Manifest
-- Before designing the format, decide how a compile-time string constant works, since
-  `Collections.String` is native, heap-backed, and constructed via an `impure` call — not usable as
-  a `const` initializer. Either define a distinct compile-time-only string representation for
-  manifest fields, or resolve it via Milestone 2's literal-as-`&[U8]` representation and keep
-  manifest fields as `&[U8]`, not `String`.
+- **Decided in Milestone 2, not open.** Compile-time string constants resolve via the
+  literal-as-`&[U8]` representation, and manifest fields are `&[U8]`, not `String`. There is no
+  distinct compile-time-only string type: `pub const NAME: &[U8] = "cinnabar"` folds to the
+  interned name id of its bytes and materializes through the same `.rodata` global as an inline
+  literal of the same text. `Collections.String` stays what it was — native, heap-backed, and
+  constructed by an `impure` call — and is simply not what a manifest field is.
 - CLI: `cinnabar build`, `cinnabar run`, `cinnabar test`, `cinnabar check`.
 - Depends on Milestone 2.
 

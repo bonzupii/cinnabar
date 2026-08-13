@@ -170,6 +170,11 @@ fn token_detail(names: &[String], nodes: &[i64], id: i64) -> String {
     if kind == TOK_HEX {
         return format!("tok HEX {}", node_c(nodes, id));
     }
+    if kind == TOK_STRING {
+        // The lexer decoded the escapes and interned the bytes, so the
+        // token's payload is a name id like an identifier's, not a value.
+        return format!("tok STRING \"{}\"", escaped_literal_text(&name_text(names, node_b(nodes, id))));
+    }
     if kind == TOK_NL {
         return "tok NL".to_string();
     }

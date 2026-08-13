@@ -94,6 +94,8 @@ Multi-line expressions are valid: a const initializer, argument list, struct lit
 
 Comments: `#`, `#!`, `#| |#`, `#!| |#`. Block comments do not nest. Trailing comments may follow any line.
 
+String literals are double-quoted and do not span lines: an unescaped newline before the closing quote is a lexical error, so a missing quote cannot swallow the rest of the file. Exactly five escapes exist — `\n`, `\t`, `\0`, `\"`, `\\` — and any other escape is a lexical error rather than a passed-through backslash. There is deliberately no byte escape (`\xNN`); see "String literals" under Types for why.
+
 ### Control Flow
 `if` / `elif` / `else` are all supported. `elif` is a single keyword, not `else if`. An `if` without `else`, an `if` with `else` but no `elif`, and any combination are valid.
 
@@ -152,7 +154,17 @@ The rule holds identically for constant initializers and for runtime code: the s
 
 Fixed-size arrays `[T; N]`: indexed with `arr[i]`, `&arr[i]`, and `&mut arr[i]` (see Indexing), and destructured with `match arr [a, b, c] => ...` and rest patterns. Array length is always statically known, so a constant index is proven at compile time.
 
-Slices `&[T]`: produced by `vec_view` or by the sanctioned coercion `&[T; N]` → `&[T]`.
+Slices `&[T]`: produced by `vec_view`, by a string literal, or by the sanctioned coercion `&[T; N]` → `&[T]`.
+
+**String literals.** A string literal has type `&[U8]` and exactly that type; unlike an integer literal it adopts nothing from its context, because its value is a byte sequence whose length and contents are already fixed. It evaluates to a static byte array in the binary's read-only data plus a `{ ptr, len }` slice over it: no heap allocation, no owner, nothing to consume or free, and no lifetime to track, since the bytes live for the whole run. A literal's length is its **byte** count, not its character count — `"é"` is two bytes.
+
+`&[U8]` rather than a distinct string type because the byte slice is the representation the language already has: `Slice.len`, indexing, and `Collections.string_from_slice` all apply to a literal unchanged.
+
+A literal's UTF-8 validity is a compile-time fact, not a runtime `Result`. This follows from the escape set rather than from a validation pass: source text is UTF-8, every unescaped byte is therefore part of a well-formed sequence copied through unchanged, and all five escapes decode to ASCII. A byte escape (`\xNN`) is excluded precisely because it would let a literal name a lone continuation byte and so put runtime validation back on a value that is supposed to be settled at compile time. `Collections.string_from_slice` still validates, because a slice can come from anywhere; a literal needs no such check.
+
+Two occurrences of the same literal text are one value: literals are interned, so equal literals share a single copy of the bytes in the binary. A `const` of type `&[U8]` and an inline literal of the same text resolve to that same copy.
+
+`Terminal.print` and `Terminal.print_line` accept `&[U8]` as well as `&Collections.String`. This is not overloading, which the language does not have: it is one native whose parameter may be declared as either byte-sequence view, with the implementation reading the (data, length) pair out of whichever representation was declared. Printing a literal therefore needs no allocation and no `String` round trip.
 
 References: `&T` (shared), `&mut T` (exclusive mutable).
 
