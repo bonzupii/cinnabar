@@ -211,13 +211,21 @@ See [`CONTAINER_DEVELOPMENT.md`](CONTAINER_DEVELOPMENT.md) for setup, VS Code at
 
 ## Using the compiler
 
+There are two ways to invoke `cinnabar`. Given a **source file**, it runs the whole pipeline and
+writes a static binary. Given a **subcommand**, it acts on the project whose `build.cnb` manifest is
+discovered by walking upward from the supplied path.
+
 ```
 cinnabar <FILE> [-o|--output PATH] [--dump-ast] [--dump-typed-ast] [--print-layout]
-                [--emit-llvm] [--emit-obj] [--explain-borrow] [--run]
+                [--emit-llvm] [--emit-obj] [--explain-borrow[=human|json]] [--run]
                 [-O|--opt-level {0,1,2,3,s,z}]
-cinnabar fmt [--check] <FILE>
-cinnabar {build|run|check|test|doc|burn|init} [PATH]
+cinnabar <COMMAND> [ARGS]
 ```
+
+Every command below is documented in the binary itself — `cinnabar <COMMAND> --help` prints the
+full description, not a one-line summary.
+
+### Compiling a single file
 
 | Flag | Description |
 |---|---|
@@ -228,33 +236,88 @@ cinnabar {build|run|check|test|doc|burn|init} [PATH]
 | `--print-layout` | Run the full front-end, then print ABI size, alignment, field offsets, and enum variant tags for every concrete struct/enum/native handle and exit |
 | `--emit-llvm` | Write the emitter's LLVM IR (before optimization) to the input path with `.ll` and stop |
 | `--emit-obj` | Optimize and assemble to a relocatable object at the input path with `.o`, skipping the static link |
-| `--explain-borrow` | Attach secondary labels to borrow/linearity errors: which paths consume a value, where it was bound (and its linear type), where it was previously moved |
-| `--run` | Execute the produced binary after a successful build and propagate its exit code |
+| `--explain-borrow[=human\|json]` | Attach secondary labels to borrow/linearity errors: which paths consume a value, where it was bound (and its linear type), where it was previously moved. `=json` emits them as structured diagnostics instead |
+| `--run` | Execute the produced binary after a successful build; `cinnabar` then exits `0` if the program exited `0` and non-zero otherwise |
 | `-O, --opt-level <LEVEL>` | LLVM optimization level: `0`, `1`, `2`, `3`, `s`, `z` (default `2`) |
 
-Examples:
-
 ```bash
-cargo run -- tests/fixtures/spec.cnb                 # compiles spec.cnb -> tests/fixtures/spec
+cargo run -- tests/fixtures/spec.cnb                  # compiles spec.cnb -> tests/fixtures/spec
 cargo run -- tests/fixtures/multi_file/main.cnb --run # compiles and runs, following `use Math.add`
 cargo run -- my_program.cnb --dump-ast                # inspect the parsed AST
 ```
 
-Projects use a `build.cnb` manifest with root-confined relative paths:
+On success the compiler prints `Successfully compiled <input> to '<output>'.` and exits `0`. Any
+lex, parse, resolve, typecheck, borrow-check, or codegen failure is rendered as one or more
+source-located diagnostics (via [`ariadne`](https://github.com/zesterer/ariadne)) and exits
+non-zero. There is no partial output: a build either produces its artifact or produces diagnostics.
 
-```text
-entry = main.cnb
-tests = tests
+### Working on a project
+
+| Command | What it does |
+|---|---|
+| `cinnabar init [PATH]` | Scaffold `build.cnb`, `main.cnb`, and `tests/smoke.cnb`. Refuses to overwrite: if any of the three exists, it writes none of them |
+| `cinnabar build [PATH] [--target host]` | Compile the manifest's `ENTRY` to `<project>/target/<NAME>` |
+| `cinnabar run [PATH] [--target host]` | Build, then execute the artifact. Exits `0` if the program exited `0`, non-zero otherwise |
+| `cinnabar check [PATH]` | Load, resolve, typecheck, and borrow-check; stop before code generation. Needs no LLVM and links nothing |
+| `cinnabar test [PATH] [--update-snapshots]` | Compile and run every `.cnb` file under the manifest's `TESTS` directory, recursively |
+| `cinnabar fmt [--check] <FILE>` | Rewrite one file into canonical form, or (with `--check`) exit non-zero if it isn't already |
+| `cinnabar doc [PATH] [-o DIR]` | Render every public declaration into `<project>/target/doc/index.html` |
+| `cinnabar burn [PATH] [--address ADDR]` | Serve those docs plus the manifesto over HTTP, pinned to this compiler's version (default `127.0.0.1:7878`) |
+
+`PATH` defaults to `.` and may be a project directory, a `build.cnb`, or a source path inside the
+project — the manifest is found by walking upward from it either way. `--target` currently accepts
+only `host`; run `cinnabar targets` for the list and the state of each.
+
+`check` is not a laxer `build`. It runs the same stages `build` runs and reaches the same verdicts;
+it stops once the front end has established everything it can establish without emitting code.
+
+`build` and `run` name the artifact after the manifest's `NAME` field rather than after whichever
+file happens to be `ENTRY` — a project that renames its entry source has not renamed itself.
+
+#### The manifest
+
+`build.cnb` is Cinnabar source, not a configuration format. It is read back through the compiler's
+own front end, so it obeys the same casing, typing, and literal rules as any other program — and a
+mistake in it is reported as an ordinary diagnostic pointing at the offending line:
+
+```cinnabar
+pub const NAME: &[U8] = "my_project"
+pub const ENTRY: &[U8] = "main.cnb"
+pub const TESTS: &[U8] = "tests"
 ```
 
-`cinnabar init [PATH]` creates this manifest, `main.cnb`, and `tests/smoke.cnb`. `build`, `run`, and
-`check` discover the manifest upward from the supplied path. `test` recursively runs `.cnb` files:
-`.reject.cnb` files must be rejected, `.stderr` sidecars snapshot complete diagnostics, and `.exit`
-sidecars specify nonzero expected statuses. Use `test --update-snapshots` to deliberately refresh
-diagnostic snapshots. `doc` writes public API HTML to `target/doc`, while `burn` serves those docs
-with the bundled manifesto and exact installed compiler version.
+`NAME` names the built artifact and must be a single path component. `ENTRY` and `TESTS` are
+relative paths confined to the project root. `TESTS` may be omitted, and then defaults to `tests`.
 
-On success, the compiler prints `Successfully compiled <input> to '<output>'.` and exits `0`. Any lex, parse, resolve, typecheck, borrow-check, or codegen failure is rendered as one or more source-located diagnostics (via [`ariadne`](https://github.com/zesterer/ariadne)) and exits non-zero.
+#### Test layout
+
+`cinnabar test` decides what is expected of a file from its name:
+
+| File | Expectation |
+|---|---|
+| `case.cnb` | Must compile, link, and exit `0` |
+| `case.cnb.exit` | The non-zero status `case.cnb` is expected to exit with |
+| `case.reject.cnb` | Must be *rejected*; compiling it successfully is a failure |
+| `case.reject.cnb.stderr` | The exact diagnostic that rejection must produce |
+
+A `.stderr` sidecar makes its test a rejection test whether or not the name says `.reject`, and the
+snapshot is compared in full rather than searched for a substring — a diagnostic is part of what the
+compiler promises, so a change to its wording is a change to be reviewed. `--update-snapshots`
+rewrites those sidecars from what the compiler currently prints; it is for deliberately accepting a
+diagnostic whose diff you have read, not for making a red run go green.
+
+### Inspecting and experimenting
+
+| Command | What it does |
+|---|---|
+| `cinnabar targets` | List code-generation targets and whether this binary can build for each |
+| `cinnabar inspect [PATH] [-o FILE]` | Build, then report computed layouts alongside the linked binary's sections, symbols, and disassembly |
+| `cinnabar soundness [PATH] [-o FILE]` | Emit what the front end established as JSON. Evidence, not a proof — the report says `formal_proof: false` and scopes itself |
+| `cinnabar playground [--address ADDR]` | Serve a local page that compiles and runs submitted source. Loopback-only, size-capped, and time-limited by design (default `127.0.0.1:7879`) |
+| `cinnabar mushlings {init\|verify} [PATH]` | Exercises that teach the language through its own diagnostics; the real compiler decides whether a fix is right |
+| `cinnabar fuzz replay <FILE>` | Recompile a saved fuzz artifact and report whether it still reproduces its failure |
+| `cinnabar fuzz minimize <FILE> [-o FILE]` | Shrink an artifact to the smallest source with the *same* failure signature |
+| `cinnabar native-stub <IDL> -o <FILE>` | Generate a typed, opaque `nat type`/`nat fun` surface from the constrained native IDL |
 
 ## Language server
 
