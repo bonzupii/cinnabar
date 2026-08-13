@@ -3726,6 +3726,12 @@ fn native_runtime_args<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<
 // input with nothing read is `Err(EndOfInput)` rather than an empty
 // string, so a program can tell "a blank line" from "no more lines". Bytes
 // already read followed by end of input are returned as a final line.
+//
+// The bytes are validated as UTF-8 before they become a `String`, through
+// the same scan `string_from_slice` runs. Standard input is the least
+// controlled source a string can have, and the language validates string
+// construction from any slice whose contents are not settled at compile
+// time; a line is one of those.
 fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
     let i64_ty = sess.0.i64_type();
     let str_key = result_arg_key(sess, ret_key, 0);
@@ -3848,6 +3854,27 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
 
     sess.2.position_at_end(line_block);
+    // A line arrives from outside the process, so its bytes are precisely the
+    // "a slice can come from anywhere" case the language validates on string
+    // construction — no different from `string_from_slice`, and rather more
+    // exposed. Storing them unchecked would let `read_line` be the one
+    // constructor able to hand back a `String` holding malformed UTF-8, and
+    // every reader of that string would inherit a guarantee the language
+    // states but this path never established.
+    let line_valid = new_block(sess, f, "line_utf8_ok");
+    let line_invalid = new_block(sess, f, "line_utf8_bad");
+    emit_utf8_scan(sess, f, final_buf, final_len, line_valid, line_invalid, span)?;
+
+    sess.2.position_at_end(line_invalid);
+    let free_malformed = extern_free(sess);
+    sess.2.build_call(free_malformed, &[into_meta(final_buf.into())], "").map_err(builder_fail)?;
+    let invalid_tag = variant_tag_of(sess, err_key, sess.12.invalid_utf8, span)?;
+    let invalid_val = build_enum_value(sess, err_key, invalid_tag, &[], span)?;
+    let invalid_result = build_result_err(sess, ret_key, err_key, invalid_val, span)?;
+    copy_to_out(sess, ret_key, out, invalid_result, span)?;
+    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+
+    sess.2.position_at_end(line_valid);
     let line = declare_local(sess, str_key, "line", span)?;
     init_native_handle(sess, str_key, line, span)?;
     let line_data = struct_gep(sess, str_key, line, 0, "", span)?;
@@ -4128,16 +4155,32 @@ fn emit_cont_step<'ctx>(
     Ok(ok2)
 }
 
-fn native_string_from_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
-    let p0 = get_local(locals, 0, span)?;
-    let data = slice_data(sess, p0)?;
-    let len = slice_len_of(sess, p0)?;
+// Emits the UTF-8 well-formedness scan over the `len` bytes at `data`.
+//
+// Control leaves through exactly one of the two blocks the caller supplies:
+// `valid_block` once every sequence in the range has been accepted, and
+// `invalid_block` at the first one that is not. The caller positions the
+// builder at each and decides what a well-formed or malformed buffer means
+// for it; the scan has no opinion about where the bytes came from.
+//
+// Every construction of a `Collections.String` from bytes that are not
+// settled at compile time runs this one scan, which is what makes "a String
+// holds well-formed UTF-8" a single fact rather than one per constructor.
+// A second copy would be free to drift — accepting an overlong encoding
+// here and rejecting it there — while the language promises one answer.
+fn emit_utf8_scan<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    f: FunctionValue<'ctx>,
+    data: PointerValue<'ctx>,
+    len: IntValue<'ctx>,
+    valid_block: BasicBlockId<'ctx>,
+    invalid_block: BasicBlockId<'ctx>,
+    span: (i64, i64, i64),
+) -> Result<(), CodegenError> {
     let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "i", span)?;
     store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
     let loop_cond = new_block(sess, f, "utf8_cond");
     let loop_body = new_block(sess, f, "utf8_body");
-    let valid_block = new_block(sess, f, "utf8_valid");
-    let invalid_block = new_block(sess, f, "utf8_invalid");
     sess.2.build_unconditional_branch(loop_cond).map_err(builder_fail)?;
     sess.2.position_at_end(loop_cond);
     let i = load_i64(sess, i_slot)?;
@@ -4269,6 +4312,16 @@ fn native_string_from_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionV
     sess.2.build_unconditional_branch(loop_cond).map_err(builder_fail)?;
     sess.2.position_at_end(bad);
     sess.2.build_unconditional_branch(invalid_block).map_err(builder_fail)?;
+    Ok(())
+}
+
+fn native_string_from_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
+    let p0 = get_local(locals, 0, span)?;
+    let data = slice_data(sess, p0)?;
+    let len = slice_len_of(sess, p0)?;
+    let valid_block = new_block(sess, f, "utf8_valid");
+    let invalid_block = new_block(sess, f, "utf8_invalid");
+    emit_utf8_scan(sess, f, data, len, valid_block, invalid_block, span)?;
     sess.2.position_at_end(invalid_block);
     let err_key = result_arg_key(sess, ret_key, 1);
     let invalid_tag = variant_tag_of(sess, err_key, sess.12.invalid_utf8, span)?;
