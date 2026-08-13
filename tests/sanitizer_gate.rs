@@ -38,9 +38,11 @@
 //!
 //! ## Fixture selection
 //!
-//! The corpus is `EXPECT_OK`, shared with `repro_harness` rather than copied.
-//! Valgrind costs 10–50x native runtime, so the profile controls how many run
-//! and the count actually used is printed — a gate that silently checked four
+//! The corpus is `EXPECT_OK`, shared with `repro_harness` rather than copied,
+//! plus the `STREAM_CASES` fixtures that read standard input. The full profile
+//! runs every one of them, so "every valid program" is a description rather
+//! than an aspiration. Valgrind costs 10-50x native runtime, so reduced
+//! profiles check fewer and print how many — a gate that silently checked four
 //! of sixty would read as coverage it does not have.
 
 #[path = "support/test_controls.rs"]
@@ -48,17 +50,21 @@ mod test_controls;
 #[path = "support/repro_corpus.rs"]
 mod repro_corpus;
 
-use repro_corpus::EXPECT_OK;
+use repro_corpus::{EXPECT_OK, STREAM_CASES};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use test_controls::{evenly_selected, profile_name, profile_usize, reduced_usize_control, test_profile};
 
-const FULL_CASES: usize = 24;
+/// The full profile checks the whole corpus, so "every valid program" is
+/// true of it rather than nearly true. Reduced profiles trade coverage for
+/// time and say how much they took.
 const BALANCED_CASES: usize = 8;
 const SMOKE_CASES: usize = 3;
 
 /// Valgrind's exit code when it finds an error, chosen not to collide with
-/// any exit code the corpus expects.
+/// any exit code the corpus expects. Passed to valgrind from this constant
+/// rather than written out again, so the two cannot disagree.
 const VALGRIND_ERROR_EXIT: i32 = 99;
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -69,8 +75,11 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(format!("{}.cnb", name))
 }
 
-fn temp_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("cinnabar_sanitizer_{}", std::process::id()))
+// One directory per test, never nested inside another test's. The tests in
+// this file run concurrently, and a guard that removed a parent directory
+// would delete a sibling's binaries mid-run.
+fn temp_dir(label: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("cinnabar_sanitizer_{}_{}", std::process::id(), label))
 }
 
 struct TempDirGuard(PathBuf);
@@ -110,29 +119,122 @@ fn build_instrumented(cinnabar: &str, fixture: &Path, out: &Path) -> Result<(), 
 struct CheckedRun {
     exit: i32,
     report: String,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
 }
 
 /// Runs `binary` under memcheck, failing the run on any error or definite
 /// leak rather than only on a non-zero program exit.
-fn run_under_valgrind(binary: &Path) -> Result<CheckedRun, String> {
-    let output = Command::new("valgrind")
-        .arg("--error-exitcode=99")
+///
+/// `input` is written to the program's standard input and the descriptor
+/// closed, so a fixture that reads until end of input terminates. A fixture
+/// that reads nothing is given an empty stream, which is the same definite
+/// state the repro harness gives it.
+fn run_under_valgrind(binary: &Path, args: &[&str], input: &[u8]) -> Result<CheckedRun, String> {
+    // The checker's own report goes to a file rather than to standard error.
+    // Valgrind writes there by default, which would mix its output into the
+    // program's and make the program's own stderr impossible to compare
+    // against what the fixture promises.
+    let log_path = binary.with_extension("valgrind");
+    let mut child = Command::new("valgrind")
+        .arg(format!("--error-exitcode={}", VALGRIND_ERROR_EXIT))
         .arg("--leak-check=full")
         .arg("--errors-for-leak-kinds=definite")
         .arg("--track-origins=yes")
+        .arg(format!("--log-file={}", log_path.display()))
         .arg(binary)
-        // The same reasoning as the repro harness: a fixture must not read
-        // the suite's own standard input, and its output is not what this
-        // gate is about.
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .output()
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|err| format!("cannot run valgrind on {}: {}", binary.display(), err))?;
+    match child.stdin.take() {
+        Some(mut pipe) => pipe
+            .write_all(input)
+            .map_err(|err| format!("cannot write standard input for {}: {}", binary.display(), err))?,
+        None => return Err(format!("{} was spawned without a standard input pipe", binary.display())),
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("cannot collect valgrind output for {}: {}", binary.display(), err))?;
     let exit = match output.status.code() {
         Some(code) => code,
         None => return Err(format!("{} terminated without an exit status", binary.display())),
     };
-    Ok(CheckedRun { exit, report: String::from_utf8_lossy(&output.stderr).to_string() })
+    let report = std::fs::read_to_string(&log_path)
+        .map_err(|err| format!("cannot read the checker's report at {}: {}", log_path.display(), err))?;
+    Ok(CheckedRun { exit, report, stdout: output.stdout, stderr: output.stderr })
+}
+
+/// The checker objects to what it finds, rather than merely seeing it.
+///
+/// The visibility test below proves memcheck can *see* the instrumented
+/// build's allocations. On its own that is not enough: drop `--leak-check`,
+/// or the leak-kinds selection, and every fixture still allocates, still
+/// exits with the code it should, and the whole gate stays green while
+/// reporting nothing. The two together are what make a clean run evidence.
+///
+/// The leaking program is C rather than Cinnabar because a leak is a compile
+/// error in Cinnabar — linear handles are consumed exactly once on every
+/// path. That is the language working, and no help at all in testing whether
+/// the checker would notice.
+#[test]
+fn the_checker_fails_a_program_that_leaks() {
+    require_valgrind();
+    let dir = temp_dir("positive_control");
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => {}
+        Err(err) => {
+            assert!(false, "cannot create temp dir: {}", err);
+            return;
+        }
+    }
+    let guard = TempDirGuard(dir.clone());
+
+    // Exits zero, so a non-zero result can only have come from the checker.
+    let source = dir.join("leak.c");
+    match std::fs::write(&source, "#include <stdlib.h>\nint main(void){ char *p = malloc(64); p[0] = 1; return p[0] - 1; }\n") {
+        Ok(()) => {}
+        Err(err) => {
+            assert!(false, "cannot write the leaking source: {}", err);
+            return;
+        }
+    }
+    let binary = dir.join("leak");
+    let built = Command::new("clang").arg("-o").arg(&binary).arg(&source).output();
+    match built {
+        Ok(output) => assert!(
+            output.status.success(),
+            "cannot build the leaking control: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        Err(err) => {
+            assert!(false, "cannot run clang: {}", err);
+            return;
+        }
+    }
+    let run = match run_under_valgrind(&binary, &[], b"") {
+        Ok(run) => run,
+        Err(message) => {
+            assert!(false, "{}", message);
+            return;
+        }
+    };
+    assert_eq!(
+        run.exit, VALGRIND_ERROR_EXIT,
+        "a program leaking 64 bytes exited {} rather than the checker's error code — \
+         memcheck is running but not objecting, so a clean report from this gate \
+         means nothing:\n{}",
+        run.exit, run.report
+    );
+    assert!(
+        run.report.contains("definitely lost"),
+        "the checker failed the run without reporting the leak that caused it:\n{}",
+        run.report
+    );
+
+    drop(guard);
 }
 
 /// The gate depends on valgrind, which the dev shell provides. A missing
@@ -164,7 +266,7 @@ fn every_selected_fixture_is_clean_under_memcheck() {
     let budget = reduced_usize_control(
         profile,
         "CINNABAR_SANITIZER_CASES",
-        profile_usize(profile, FULL_CASES, BALANCED_CASES, SMOKE_CASES),
+        profile_usize(profile, EXPECT_OK.len(), BALANCED_CASES, SMOKE_CASES),
     );
     assert!(
         budget <= EXPECT_OK.len(),
@@ -179,7 +281,7 @@ fn every_selected_fixture_is_clean_under_memcheck() {
         EXPECT_OK.len()
     );
 
-    let dir = temp_dir();
+    let dir = temp_dir("corpus");
     match std::fs::create_dir_all(&dir) {
         Ok(()) => {}
         Err(err) => {
@@ -208,7 +310,7 @@ fn every_selected_fixture_is_clean_under_memcheck() {
                 return;
             }
         }
-        let run = match run_under_valgrind(&binary) {
+        let run = match run_under_valgrind(&binary, &[], b"") {
             Ok(run) => run,
             Err(message) => {
                 assert!(false, "{}", message);
@@ -238,6 +340,89 @@ fn every_selected_fixture_is_clean_under_memcheck() {
     drop(guard);
 }
 
+/// The fixtures that read standard input, checked too.
+///
+/// These cannot join the corpus above: `EXPECT_OK` is run with an empty
+/// standard input, and a fixture that expects a line would take its
+/// end-of-input path and exit non-zero. Left out entirely they would be the
+/// one gap that matters most — `terminal_lines` is a `String`
+/// allocate-and-free workout over `read_line`'s success path, and
+/// `terminal_invalid_utf8` exercises the path that frees a line's buffer
+/// after rejecting it. A leak in either is exactly what this gate exists to
+/// catch, and neither would have been run at all.
+#[test]
+fn the_stdin_fixtures_are_clean_under_memcheck() {
+    require_valgrind();
+    let cinnabar = env!("CARGO_BIN_EXE_cinnabar");
+    let dir = temp_dir("streams");
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => {}
+        Err(err) => {
+            assert!(false, "cannot create temp dir: {}", err);
+            return;
+        }
+    }
+    let guard = TempDirGuard(dir.clone());
+
+    let mut idx = 0usize;
+    while idx < STREAM_CASES.len() {
+        let case = match STREAM_CASES.get(idx) {
+            Some(case) => case,
+            None => break,
+        };
+        let binary = dir.join(format!("{}_instrumented", case.name));
+        match build_instrumented(cinnabar, &fixture_path(case.name), &binary) {
+            Ok(()) => {}
+            Err(message) => {
+                assert!(false, "{}", message);
+                return;
+            }
+        }
+        let run = match run_under_valgrind(&binary, case.args, case.stdin) {
+            Ok(run) => run,
+            Err(message) => {
+                assert!(false, "{}", message);
+                return;
+            }
+        };
+        assert!(
+            run.exit != VALGRIND_ERROR_EXIT,
+            "{} is not clean under memcheck:\n{}",
+            case.name,
+            run.report
+        );
+        assert_eq!(
+            run.exit, case.exit,
+            "{} exited {} under memcheck, want {} — the instrumented link \
+             changed the program's behaviour:\n{}",
+            case.name, run.exit, case.exit, run.report
+        );
+        // The instrumented binary must be the same program byte for byte on
+        // both descriptors, not merely one that exits the same way. This is
+        // where the link mode would show if it had changed anything, and it
+        // is the only place the two builds are compared on output at all.
+        assert!(
+            run.stdout == case.stdout,
+            "{}: instrumented standard output differs from the shipped \
+             contract\n  got:  {:?}\n  want: {:?}",
+            case.name,
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(case.stdout)
+        );
+        assert!(
+            run.stderr == case.stderr,
+            "{}: instrumented standard error differs from the shipped \
+             contract\n  got:  {:?}\n  want: {:?}",
+            case.name,
+            String::from_utf8_lossy(&run.stderr),
+            String::from_utf8_lossy(case.stderr)
+        );
+        idx += 1;
+    }
+
+    drop(guard);
+}
+
 /// The gap this milestone exists to close, asserted directly.
 ///
 /// A shipped binary defeats memcheck: with no dynamic section there is no
@@ -249,7 +434,7 @@ fn every_selected_fixture_is_clean_under_memcheck() {
 fn the_instrumented_link_is_what_makes_memcheck_see_anything() {
     require_valgrind();
     let cinnabar = env!("CARGO_BIN_EXE_cinnabar");
-    let dir = temp_dir().join("visibility");
+    let dir = temp_dir("visibility");
     match std::fs::create_dir_all(&dir) {
         Ok(()) => {}
         Err(err) => {
@@ -270,7 +455,7 @@ fn the_instrumented_link_is_what_makes_memcheck_see_anything() {
             return;
         }
     }
-    let seen = match run_under_valgrind(&instrumented) {
+    let seen = match run_under_valgrind(&instrumented, &[], b"") {
         Ok(run) => run,
         Err(message) => {
             assert!(false, "{}", message);

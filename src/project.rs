@@ -85,6 +85,18 @@ pub fn load_manifest(path: &Path) -> Result<ProjectManifest, String> {
                 "manifest items must be pub const declarations",
             ));
         }
+        // Whether the field exists is settled before whether its type is
+        // right. The other order tells the author of `pub const VERSION: I64`
+        // to change its type — asserting `VERSION` is a manifest field, which
+        // it is not, and sending them to fix the wrong thing first.
+        let field = name_text(&analyzed.names, node_d(&analyzed.nodes, item));
+        if field != "NAME" && field != "ENTRY" && field != "TESTS" {
+            return Err(manifest_item_error(
+                &analyzed,
+                item,
+                &format!("unknown manifest field '{}'", field),
+            ));
+        }
         let declared_type = ty_key_of(&analyzed.nodes, node_e(&analyzed.nodes, item));
         if !is_manifest_string_type(&analyzed.nodes, declared_type) {
             return Err(manifest_item_error(
@@ -102,19 +114,15 @@ pub fn load_manifest(path: &Path) -> Result<ProjectManifest, String> {
             Some(text) => text.clone(),
             None => return Err(manifest_item_error(&analyzed, item, "manifest field has an invalid folded value")),
         };
-        let field = name_text(&analyzed.names, node_d(&analyzed.nodes, item));
+        // Three fields, and the check above has already rejected anything
+        // else, so the final arm is `TESTS` rather than a fourth case that
+        // cannot happen.
         if field == "NAME" {
             name = Some(validate_project_name(&value, &analyzed, item)?);
         } else if field == "ENTRY" {
             entry = Some(validate_relative_path(&value, &analyzed, item)?);
-        } else if field == "TESTS" {
-            tests = Some(validate_relative_path(&value, &analyzed, item)?);
         } else {
-            return Err(manifest_item_error(
-                &analyzed,
-                item,
-                &format!("unknown manifest field '{}'", field),
-            ));
+            tests = Some(validate_relative_path(&value, &analyzed, item)?);
         }
         item_index += 1;
     }
@@ -182,7 +190,50 @@ fn validate_project_name(value: &str, analyzed: &analysis::Analysis, item: i64) 
             &format!("project name must be a single path component, but continues with '{:?}'", trailing),
         ));
     }
+    // A single component is still not enough on Windows. `NUL`, `CON`, the
+    // `COM`/`LPT` series, and any name with a trailing dot or space name
+    // devices rather than files, in *every* directory — so `NAME = "NUL"`
+    // would let a build report success while its artifact went nowhere. The
+    // check is unconditional rather than `cfg(windows)`: a manifest is
+    // portable, and a project that builds on Linux and vanishes on Windows
+    // is worse than one rejected in both places.
+    if is_reserved_device_name(&name) {
+        return Err(manifest_item_error(
+            analyzed,
+            item,
+            &format!("project name '{}' names a reserved device on Windows rather than a file", name),
+        ));
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Err(manifest_item_error(
+            analyzed,
+            item,
+            "project name cannot end with a dot or a space; Windows strips both, so the name on disk would differ from the one declared",
+        ));
+    }
     Ok(name)
+}
+
+/// Whether `name` is a Windows reserved device name.
+///
+/// Matched on the stem before the first dot and without regard to case,
+/// because `NUL`, `nul`, and `nul.txt` all name the same device.
+fn is_reserved_device_name(name: &str) -> bool {
+    let stem = match name.split('.').next() {
+        Some(text) => text,
+        None => name,
+    };
+    let upper = stem.to_ascii_uppercase();
+    if upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL" {
+        return true;
+    }
+    let numbered = |prefix: &str| -> bool {
+        match upper.strip_prefix(prefix) {
+            Some(digit) => digit.len() == 1 && matches!(digit.as_bytes().first(), Some(b'1'..=b'9')),
+            None => false,
+        }
+    };
+    numbered("COM") || numbered("LPT")
 }
 
 fn is_manifest_string_type(nodes: &[i64], key: i64) -> bool {

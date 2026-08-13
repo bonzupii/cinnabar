@@ -11,7 +11,12 @@
 /// The phrases a suggestion message must contain.  Every message the engine
 /// returns is built around one of these, which is what keeps a suggestion a
 /// *suggestion* rather than a claim about what the programmer meant.
-pub const HEDGE_PHRASES: [&str; 2] = ["did you mean", "possible match"];
+///
+/// One entry, because one phrasing is emitted.  "possible match" was listed
+/// here too and produced nowhere, which left the contract accepting a
+/// message the engine cannot construct — a check that passes for a case
+/// that does not exist is not a check.  Add it back when something emits it.
+pub const HEDGE_PHRASES: [&str; 1] = ["did you mean"];
 
 /// Vocabulary a suggestion must never contain.  A suggestion that told the
 /// programmer to silence, stub, or comment out code would point at a local

@@ -438,16 +438,36 @@ fn lex_string(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: 
                 continue;
             }
             match escape_byte(body) {
-                Some(decoded) => text.push(decoded as char),
+                Some(decoded) => {
+                    // Every defined escape body is ASCII, so the escape is
+                    // exactly two bytes wide.
+                    text.push(decoded as char);
+                    cursor += 2;
+                }
                 None => {
-                    // Report the escape and keep scanning the same literal
-                    // rather than bailing out mid-string: bailing would
-                    // leave the closing quote to open a second literal and
-                    // report a spurious "unterminated" on the same line.
-                    push_error(errors, "unknown escape in string literal", file, cursor as i64, (cursor + 2) as i64);
+                    // An escape body is a character, not a byte. `"\é"` is a
+                    // typo someone will make, and assuming one byte both
+                    // ended the reported span inside the character and left
+                    // the next run starting on a continuation byte — which
+                    // `append_run` then rejects, so the user was handed an
+                    // internal invariant failure in place of their typo.
+                    //
+                    // Taking the body's real width keeps the span over the
+                    // whole escape and every run on a character boundary.
+                    //
+                    // Reported and scanning continues rather than bailing
+                    // mid-string: bailing would leave the closing quote to
+                    // open a second literal and report a spurious
+                    // "unterminated" on the same line.
+                    let body_width = match source.get(cursor + 1..).and_then(|rest| rest.chars().next()) {
+                        Some(character) => character.len_utf8(),
+                        None => 1,
+                    };
+                    let escape_end = cursor + 1 + body_width;
+                    push_error(errors, "unknown escape in string literal", file, cursor as i64, escape_end as i64);
+                    cursor = escape_end;
                 }
             }
-            cursor += 2;
             run = cursor;
             continue;
         }
@@ -459,9 +479,12 @@ fn lex_string(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: 
 
 // Appends the source text between two byte offsets of an unescaped run.
 // Both offsets fall on a character boundary: a run begins after the opening
-// quote or after an escape and ends at a quote or a backslash, and every one
-// of those delimiters is ASCII.  `source.get` rather than an index so a
-// broken invariant is an internal diagnostic, never a panic.
+// quote or after a whole escape and ends at a quote or a backslash. The
+// quote and the backslash are ASCII, and an escape is consumed by whole
+// characters — including an undefined one, whose body may be any character
+// at all — so no run can start part-way through a multi-byte sequence.
+// `source.get` rather than an index so a broken invariant is an internal
+// diagnostic, never a panic.
 fn append_run(text: &mut String, source: &str, from: usize, to: usize, errors: &mut Vec<Diag>) -> bool {
     match source.get(from..to) {
         Some(part) => {
@@ -909,6 +932,34 @@ mod tests {
         let source = "val x = \"runs off\\";
         let errors = lex_errors(source);
         assert!(errors.len() > 0, "a literal ending in a backslash must be rejected");
+        assert_spans_addressable(source, &errors);
+    }
+
+    #[test]
+    fn an_undefined_escape_over_a_multibyte_body_reports_the_typo() {
+        // An escape body is a character, not a byte. Assuming one byte ended
+        // the span inside `é` and left the next run on a continuation byte,
+        // so the literal failed an internal boundary check and the user was
+        // told the compiler had broken its own invariant instead of being
+        // told they had mistyped an escape.
+        let source = "val x = \"a\\éb\"\n";
+        let errors = lex_errors(source);
+        assert_eq!(errors.len(), 1, "expected exactly the typo: {:?}", errors);
+        match errors.first() {
+            Some(diag) => {
+                assert!(
+                    diag.0.contains("unknown escape"),
+                    "reported something other than the escape: {}",
+                    diag.0
+                );
+                assert!(
+                    !diag.0.contains("character boundary"),
+                    "a user typo produced an internal invariant diagnostic: {}",
+                    diag.0
+                );
+            }
+            None => assert!(false, "no diagnostic reported"),
+        }
         assert_spans_addressable(source, &errors);
     }
 

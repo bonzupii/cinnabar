@@ -56,7 +56,10 @@ fn compiler_output(path: &Path) -> String {
     ))
 }
 
-const BANDAID_TERMS: [&str; 5] = ["suppress", "silence", "stub", "comment out", "ignore this"];
+// Read from the engine rather than restated. A sixth term added there would
+// otherwise leave this test quietly checking the original five, which is the
+// drift the shared corpus was extracted to prevent.
+use cinnabar::suggest::BANDAID_TERMS;
 
 #[test]
 fn unresolved_function_offers_a_hedged_match() {
@@ -125,11 +128,30 @@ fn an_unused_private_declaration_still_compiles() {
     );
 }
 
+/// The definition-site label points at the definition, not merely exists.
+///
+/// Asserting the words "first declared here" appear says nothing about
+/// where they point: a note attached to the error site, or to a fabricated
+/// span, reads identically. Ariadne renders each labelled span with its own
+/// source line, so the discriminating check is that *both* declarations are
+/// shown. The fixture puts them far apart precisely so that a note collapsed
+/// onto the error site would render only the second.
 #[test]
 fn duplicate_symbol_labels_the_first_declaration() {
     let output = compiler_output(&fixture("duplicate_symbol_note.cnb"));
     assert!(output.contains("duplicate symbol 'VALUE'"), "output: {}", output);
     assert!(output.contains("first declared here"), "output: {}", output);
+    assert!(
+        output.contains("pub const VALUE: I64 = 2"),
+        "the diagnostic does not show the offending declaration: {}",
+        output
+    );
+    assert!(
+        output.contains("pub const VALUE: I64 = 1"),
+        "the note claims to point at the first declaration but that line is \
+         not rendered, so the label is not on it: {}",
+        output
+    );
 }
 
 #[test]
