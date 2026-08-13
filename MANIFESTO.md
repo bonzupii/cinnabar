@@ -156,7 +156,7 @@ The rule holds identically for constant initializers and for runtime code: the s
 
 Fixed-size arrays `[T; N]`: indexed with `arr[i]`, `&arr[i]`, and `&mut arr[i]` (see Indexing), and destructured with `match arr [a, b, c] => ...` and rest patterns. Array length is always statically known, so a constant index is proven at compile time.
 
-Slices `&[T]`: produced by `vec_view`, by a string literal, or by the sanctioned coercion `&[T; N]` → `&[T]`.
+Slices `&[T]`: produced by `vec_view`, by a string literal, or by the sanctioned array-to-slice coercion. That coercion applies to both borrow forms — `&[T; N]` → `&[T]` and `&mut [T; N]` → `&mut [T]` — since borrowing an array never yields a reference to the array type itself; the length travels in the slice view rather than in the type. A `&mut [T]` is how a caller hands a fixed-size buffer to something that fills it, such as `File.read`.
 
 **String literals.** A string literal has type `&[U8]` and exactly that type; unlike an integer literal it adopts nothing from its context, because its value is a byte sequence whose length and contents are already fixed. It evaluates to a static byte array in the binary's read-only data plus a `{ ptr, len }` slice over it: no heap allocation, no owner, nothing to consume or free, and no lifetime to track, since the bytes live for the whole run. A literal's length is its **byte** count, not its character count — `"é"` is two bytes.
 
@@ -177,7 +177,9 @@ Enum variant constructors require exactly their declared payload. Using a payloa
 ### Linear Types
 `Memory.Block`, `Collections.Vec(T)`, `Collections.String`, `Collections.HashMap(K, V)` are linear. `Vec(T)` and `HashMap(K, V)` are linear regardless of their element type; they own heap storage requiring an explicit free.
 
-Linear values must be consumed exactly once on every execution path.
+`File.Handle` is linear: an open descriptor must be closed exactly once on every path.
+
+Linear values must be consumed exactly once on every execution path. A moved value cannot be used again — neither moved a second time nor *borrowed*, since a borrow after the move reads a resource the move already released.
 
 Type parameters are conservatively linear: a value of a generic type-parameter type must be consumed exactly once on every path, because its instantiation is unknown at definition time.
 
@@ -200,6 +202,47 @@ Collections.hash_map_remove<K,V>(map: &mut HashMap(K,V), key: K)
   Returns Ok(value) or Err(KeyNotFound) if the key is absent. Popping a
   linear value transfers its linear obligation to the caller's linear
   context.
+
+### Native Surface: Operating System
+
+`Memory`, `Terminal`, and `File` issue Linux system calls directly rather than calling libc. The instruction that leaves user space is visible in the emitted IR, with nothing between the Cinnabar declaration and the kernel. `Collections` and `Net` keep the statically linked musl, because an allocator and a `sockaddr` marshaller are real code rather than thin syscall shims — this is the "where a target genuinely cannot avoid libc" case, and it is never a dynamic link.
+
+`File.Handle` is linear, like every other native handle: an open descriptor must be closed exactly once on every path. A leaked descriptor is a compile error, and so is closing one twice — which would release a number the kernel may since have handed back out, making a later read touch the wrong file.
+
+File.open(path: &[U8], mode: File.Mode) impure Result(File.Handle, File.Error)
+  Opens `path` in one of three modes: `ReadOnly`, `WriteTruncate`, or
+  `WriteAppend`. The mode is an enum, not an integer of flag bits, so a
+  program never writes an operating-system constant. A path longer than
+  the system maximum is an error, not a truncation.
+
+File.read(file: &File.Handle, into: &mut [U8]) impure Result(Usize, File.Error)
+File.write(file: &File.Handle, bytes: &[U8]) impure Result(Usize, File.Error)
+  Transfer bytes and return the count actually transferred, which may be
+  fewer than asked. A short count is information, not a failure: a zero
+  count from `read` is how end of file is observed. Looping until a
+  transfer completes is the caller's decision, made explicitly.
+
+File.close(file: File.Handle) impure Unit
+  Consumes the handle. Returns `Unit`: the descriptor is released either
+  way, and the failures `close` can report concern flushing the program
+  can no longer act on.
+
+Terminal.read_line() impure Result(Collections.String, Collections.Error)
+  Reads one line from standard input, excluding its newline. End of input
+  with nothing read is `Err(EndOfInput)` rather than an empty string, so a
+  blank line and "no more lines" stay distinguishable. Reads are
+  unbuffered and byte-at-a-time by design: a larger read would consume
+  bytes past the newline that an unbuffered descriptor cannot put back.
+  Buffering belongs to a reader the program owns.
+
+Runtime.args() &[Collections.String]
+  The process's command-line arguments, with the program name first. The
+  result is a shared borrow, not an owned collection, because the strings
+  live in memory the kernel set up for the process and last for the whole
+  run — there is no moment at which freeing one would be correct.
+  Linearity enforces this rather than convention: a `String` cannot be
+  moved out of a slice, so a program can read an argument but can never
+  hand one to `string_free`.
 
 ### Visibility
 Private by default. `pub` exposes.
@@ -256,7 +299,7 @@ Dereference operators (`*`, `->`)
 Warning severities or lint configuration
 Macros or metaprogramming
 Operator overloading
-Implicit conversions or coercions (other than the single sanctioned `&[T; N]` → `&[T]` slice coercion)
+Implicit conversions or coercions (other than the sanctioned array-to-slice coercion, `&[T; N]` → `&[T]` and `&mut [T; N]` → `&mut [T]`)
 Glob imports or implicit preludes
 Garbage collection or reference counting
 Mutexes or shared mutable state primitives

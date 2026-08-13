@@ -45,6 +45,7 @@ pub struct Protocol {
     pub system_fault: i64,
     pub read_only: i64,
     pub write_truncate: i64,
+    pub end_of_input: i64,
 }
 
 pub fn protocol_of(names: &[String]) -> Protocol {
@@ -63,6 +64,7 @@ pub fn protocol_of(names: &[String]) -> Protocol {
         system_fault: find_name(names, "SystemFault"),
         read_only: find_name(names, "ReadOnly"),
         write_truncate: find_name(names, "WriteTruncate"),
+        end_of_input: find_name(names, "EndOfInput"),
     }
 }
 
@@ -2464,6 +2466,13 @@ fn dispatch_native<'ctx>(
         native_file_close(sess, locals, ret_key, out, span)?;
         return Ok(out);
     }
+    if op == NAT_TERM_READ_LINE {
+        return native_read_line(sess, f, ret_key, out, span);
+    }
+    if op == NAT_RUNTIME_ARGS {
+        native_runtime_args(sess, f, ret_key, out, span)?;
+        return Ok(out);
+    }
     if op == NAT_SELF_CHECK {
         native_self_check(sess, ret_key, out, span)?;
         return Ok(out);
@@ -3534,6 +3543,318 @@ fn native_file_close<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ct
     Ok(())
 }
 
+// Names of the module globals holding the command line and the built
+// argument slice.  Derived from one place so the entry-point writer and
+// `Runtime.args` cannot disagree about where the values live.
+const ARGC_GLOBAL: &str = ".cnb.argc";
+const ARGV_GLOBAL: &str = ".cnb.argv";
+const ARGS_VIEW_GLOBAL: &str = ".cnb.args.view";
+const ARGS_BUILT_GLOBAL: &str = ".cnb.args.built";
+
+// A private mutable global, created on first use.
+fn runtime_global<'ctx>(sess: &mut Session<'ctx, '_, '_>, name: &str, ty: BasicTypeEnum<'ctx>) -> inkwell::values::GlobalValue<'ctx> {
+    match sess.1.get_global(name) {
+        Some(existing) => existing,
+        None => {
+            let created = sess.1.add_global(ty, Some(AddressSpace::from(0u16)), name);
+            created.set_initializer(&ty.const_zero());
+            created.set_linkage(inkwell::module::Linkage::Private);
+            created
+        }
+    }
+}
+
+// Stores `argc` and `argv` where `Runtime.args` can find them.
+//
+// The C runtime hands the command line to `main` and to nothing else, so
+// this is the only point at which it can be captured. Two stores in the
+// entry block, unconditionally: a program that never asks for its
+// arguments pays those and nothing more.
+fn capture_command_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, wrapper: FunctionValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
+    let argc = match wrapper.get_nth_param(0) {
+        Some(value) => value.into_int_value(),
+        None => return Err(builder_error(span.0, span.1, span.2, "internal: entry point has no argc parameter")),
+    };
+    let argv = match wrapper.get_nth_param(1) {
+        Some(value) => value.into_pointer_value(),
+        None => return Err(builder_error(span.0, span.1, span.2, "internal: entry point has no argv parameter")),
+    };
+    let argc_global = runtime_global(sess, ARGC_GLOBAL, sess.0.i64_type().into());
+    let widened = word_of(sess, argc, span)?;
+    store_key(sess, argc_global.as_pointer_value(), widened.into())?;
+    let argv_global = runtime_global(sess, ARGV_GLOBAL, ptr_ty(sess).into());
+    store_key(sess, argv_global.as_pointer_value(), argv.into())?;
+    Ok(())
+}
+
+// The length of a NUL-terminated C string, as a loop over its bytes.
+//
+// `argv` entries are C strings, and a Cinnabar `String` carries an explicit
+// length instead of a terminator, so the length has to be measured once at
+// the boundary. This is emitted rather than calling libc's `strlen` because
+// the argument surface, like the rest of Milestone 4, does not route
+// through libc.
+fn emit_strlen<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, text: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
+    let i64_ty = sess.0.i64_type();
+    let cursor = alloca_raw(sess, i64_ty.into(), "len", span)?;
+    store_key(sess, cursor, i64_ty.const_zero().into())?;
+    let cond = new_block(sess, f, "strlen_cond");
+    let body = new_block(sess, f, "strlen_body");
+    let done = new_block(sess, f, "strlen_done");
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(cond);
+    let idx = load_i64(sess, cursor)?;
+    let byte_ptr = byte_offset(sess, text, idx)?;
+    let byte = load_i8(sess, byte_ptr)?;
+    let more = sess.2.build_int_compare(IntPredicate::NE, byte, sess.0.i8_type().const_zero(), "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(more, body, done).map_err(builder_fail)?;
+    sess.2.position_at_end(body);
+    let next = sess.2.build_int_add(idx, i64_ty.const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, cursor, next.into())?;
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(done);
+    load_i64(sess, cursor)
+}
+
+// Builds the `&[Collections.String]` view over the process's arguments,
+// once, and returns it on every later call.
+//
+// The `String` handles point *into* `argv` rather than copying it. The
+// process's argument strings live for the whole run, which is what makes
+// that safe, and it is also why the view is a shared borrow: a `String`
+// cannot be moved out of a slice (the element is linear, and moving a
+// linear element out of a container by index is a compile error), so a
+// program can read an argument but can never hand one to `string_free`.
+// The borrow checker enforces on its own that these are never freed.
+//
+// The handle array itself is allocated once and deliberately never
+// released: it is process-lifetime data, exactly like the `argv` it points
+// into, so there is no moment at which freeing it would be correct.
+fn native_runtime_args<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
+    let i64_ty = sess.0.i64_type();
+    let view_ty = slice_view_ty(sess.0);
+    let view_global = runtime_global(sess, ARGS_VIEW_GLOBAL, view_ty);
+    let built_global = runtime_global(sess, ARGS_BUILT_GLOBAL, i64_ty.into());
+    let built = load_i64(sess, built_global.as_pointer_value())?;
+    let already = sess.2.build_int_compare(IntPredicate::NE, built, i64_ty.const_zero(), "").map_err(builder_fail)?;
+    let build = new_block(sess, f, "args_build");
+    let ready = new_block(sess, f, "args_ready");
+    sess.2.build_conditional_branch(already, ready, build).map_err(builder_fail)?;
+
+    sess.2.position_at_end(build);
+    let argc_slot = runtime_global(sess, ARGC_GLOBAL, i64_ty.into()).as_pointer_value();
+    let argc = load_i64(sess, argc_slot)?;
+    let argv_ty = ptr_ty(sess).into();
+    let argv_slot = runtime_global(sess, ARGV_GLOBAL, argv_ty).as_pointer_value();
+    let argv = load_ptr(sess, argv_slot)?;
+    let elem_key = em_key_elem(sess, em_key_elem(sess, ret_key));
+    let elem_ty = llvm_of(sess, elem_key, span)?;
+    let stride = i64_ty.const_int(sess.3.get_abi_size(&elem_ty), false);
+    let bytes = sess.2.build_int_mul(argc, stride, "").map_err(builder_fail)?;
+    let malloc = extern_malloc(sess);
+    let call = sess.2.build_call(malloc, &[into_meta(bytes.into())], "").map_err(builder_fail)?;
+    let table = match call.try_as_basic_value() {
+        ValueKind::Basic(value) => value.into_pointer_value(),
+        ValueKind::Instruction(inst) => {
+            return Err(builder_error(span.0, span.1, span.2, &format!("internal: malloc returned void ({:?})", inst.get_opcode())));
+        }
+    };
+    // A failed allocation yields an empty argument list rather than a
+    // failure the surface cannot report: `Runtime.args` returns a slice,
+    // not a Result, and a program that reads no arguments is a better
+    // outcome than one that reads a null pointer.
+    let null = is_null_ptr(sess, table)?;
+    let fill = new_block(sess, f, "args_fill");
+    let empty = new_block(sess, f, "args_empty");
+    sess.2.build_conditional_branch(null, empty, fill).map_err(builder_fail)?;
+
+    sess.2.position_at_end(empty);
+    let empty_data = slice_gep(sess, view_global.as_pointer_value(), 0, "")?;
+    store_key(sess, empty_data, ptr_ty(sess).const_null().into())?;
+    let empty_len = slice_gep(sess, view_global.as_pointer_value(), 1, "")?;
+    store_key(sess, empty_len, i64_ty.const_zero().into())?;
+    sess.2.build_unconditional_branch(ready).map_err(builder_fail)?;
+
+    sess.2.position_at_end(fill);
+    let index = alloca_raw(sess, i64_ty.into(), "i", span)?;
+    store_key(sess, index, i64_ty.const_zero().into())?;
+    let loop_cond = new_block(sess, f, "args_cond");
+    let loop_body = new_block(sess, f, "args_body");
+    let loop_done = new_block(sess, f, "args_done");
+    sess.2.build_unconditional_branch(loop_cond).map_err(builder_fail)?;
+    sess.2.position_at_end(loop_cond);
+    let i = load_i64(sess, index)?;
+    let more = sess.2.build_int_compare(IntPredicate::ULT, i, argc, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(more, loop_body, loop_done).map_err(builder_fail)?;
+    sess.2.position_at_end(loop_body);
+    let slot_ptr = unsafe { sess.2.build_gep(ptr_ty(sess), argv, &[i], "") }.map_err(builder_fail)?;
+    let text = load_ptr(sess, slot_ptr)?;
+    let length = emit_strlen(sess, f, text, span)?;
+    let entry = offset_elem_ptr(sess, elem_key, table, i, span)?;
+    init_native_handle(sess, elem_key, entry, span)?;
+    let entry_data = struct_gep(sess, elem_key, entry, 0, "", span)?;
+    store_key(sess, entry_data, text.into())?;
+    let entry_len = struct_gep(sess, elem_key, entry, 1, "", span)?;
+    store_key(sess, entry_len, length.into())?;
+    let stepped = sess.2.build_int_add(i, i64_ty.const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, index, stepped.into())?;
+    sess.2.build_unconditional_branch(loop_cond).map_err(builder_fail)?;
+    sess.2.position_at_end(loop_done);
+    let data_slot = slice_gep(sess, view_global.as_pointer_value(), 0, "")?;
+    store_key(sess, data_slot, table.into())?;
+    let len_slot = slice_gep(sess, view_global.as_pointer_value(), 1, "")?;
+    store_key(sess, len_slot, argc.into())?;
+    sess.2.build_unconditional_branch(ready).map_err(builder_fail)?;
+
+    sess.2.position_at_end(ready);
+    store_key(sess, built_global.as_pointer_value(), i64_ty.const_int(1, false).into())?;
+    copy_value(sess, ret_key, out, view_global.as_pointer_value(), span)?;
+    Ok(())
+}
+
+// Reads one line from standard input into a fresh `Collections.String`.
+//
+// Byte at a time, which is the point rather than an oversight. A larger
+// read would consume bytes past the newline, and an unbuffered file
+// descriptor has nowhere to put them back — the next `read_line` would
+// silently lose them, and so would anything else reading the same
+// descriptor. Buffering belongs to a reader the program owns, not to a
+// primitive that hands the descriptor back after every call.
+//
+// The newline is consumed but not included: a line's content is what the
+// caller wants, and the terminator is an artifact of the encoding. End of
+// input with nothing read is `Err(EndOfInput)` rather than an empty
+// string, so a program can tell "a blank line" from "no more lines". Bytes
+// already read followed by end of input are returned as a final line.
+fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
+    let i64_ty = sess.0.i64_type();
+    let str_key = result_arg_key(sess, ret_key, 0);
+    let capacity = alloca_raw(sess, i64_ty.into(), "cap", span)?;
+    let length = alloca_raw(sess, i64_ty.into(), "len", span)?;
+    let buffer = alloca_raw(sess, ptr_ty(sess).into(), "buf", span)?;
+    let byte_slot = alloca_raw(sess, sess.0.i8_type().into(), "byte", span)?;
+    let start_capacity = i64_ty.const_int(READ_LINE_CAPACITY, false);
+    store_key(sess, capacity, start_capacity.into())?;
+    store_key(sess, length, i64_ty.const_zero().into())?;
+    let malloc = extern_malloc(sess);
+    let first = sess.2.build_call(malloc, &[into_meta(start_capacity.into())], "").map_err(builder_fail)?;
+    let initial = match first.try_as_basic_value() {
+        ValueKind::Basic(value) => value.into_pointer_value(),
+        ValueKind::Instruction(inst) => {
+            return Err(builder_error(span.0, span.1, span.2, &format!("internal: malloc returned void ({:?})", inst.get_opcode())));
+        }
+    };
+    store_key(sess, buffer, initial.into())?;
+    let after = new_block(sess, f, "line_after");
+    let alloc_failed = new_block(sess, f, "line_alloc_fail");
+    let scan = new_block(sess, f, "line_scan");
+    let null = is_null_ptr(sess, initial)?;
+    sess.2.build_conditional_branch(null, alloc_failed, scan).map_err(builder_fail)?;
+
+    sess.2.position_at_end(alloc_failed);
+    let err_key = result_arg_key(sess, ret_key, 1);
+    let alloc_tag = variant_tag_of(sess, err_key, sess.12.alloc_failed, span)?;
+    let alloc_payload = variant_payload_key(sess, err_key, alloc_tag, 0, span)?;
+    let alloc_slot = declare_local(sess, alloc_payload, "need", span)?;
+    store_key(sess, alloc_slot, start_capacity.into())?;
+    let alloc_val = build_enum_value(sess, err_key, alloc_tag, &[(alloc_payload, alloc_slot)], span)?;
+    let alloc_result = build_result_err(sess, ret_key, err_key, alloc_val, span)?;
+    copy_to_out(sess, ret_key, out, alloc_result, span)?;
+    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+
+    sess.2.position_at_end(scan);
+    let cond = new_block(sess, f, "line_cond");
+    let finish = new_block(sess, f, "line_finish");
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(cond);
+    let byte_word = ptr_word(sess, byte_slot, span)?;
+    let got = emit_syscall(sess, syscall::Sys::Read, &[i64_ty.const_zero(), byte_word, i64_ty.const_int(1, false)], span)?;
+    // A non-positive result ends the line: zero is end of input, negative
+    // is a read error. Both stop here, and `finish` decides between
+    // returning what was read and reporting end of input.
+    let progressed = sess.2.build_int_compare(IntPredicate::SGT, got, i64_ty.const_zero(), "").map_err(builder_fail)?;
+    let keep = new_block(sess, f, "line_keep");
+    sess.2.build_conditional_branch(progressed, keep, finish).map_err(builder_fail)?;
+    sess.2.position_at_end(keep);
+    let byte = load_i8(sess, byte_slot)?;
+    let is_newline = sess.2.build_int_compare(IntPredicate::EQ, byte, sess.0.i8_type().const_int(10, false), "").map_err(builder_fail)?;
+    let store_byte = new_block(sess, f, "line_store");
+    sess.2.build_conditional_branch(is_newline, finish, store_byte).map_err(builder_fail)?;
+    sess.2.position_at_end(store_byte);
+    let used = load_i64(sess, length)?;
+    let room = load_i64(sess, capacity)?;
+    let full = sess.2.build_int_compare(IntPredicate::UGE, used, room, "").map_err(builder_fail)?;
+    let grow = new_block(sess, f, "line_grow");
+    let place = new_block(sess, f, "line_place");
+    sess.2.build_conditional_branch(full, grow, place).map_err(builder_fail)?;
+    sess.2.position_at_end(grow);
+    let doubled = sess.2.build_int_mul(room, i64_ty.const_int(2, false), "").map_err(builder_fail)?;
+    let old = load_ptr(sess, buffer)?;
+    let realloc = extern_realloc(sess);
+    let grown_call = sess.2.build_call(realloc, &[into_meta(old.into()), into_meta(doubled.into())], "").map_err(builder_fail)?;
+    let grown = match grown_call.try_as_basic_value() {
+        ValueKind::Basic(value) => value.into_pointer_value(),
+        ValueKind::Instruction(inst) => {
+            return Err(builder_error(span.0, span.1, span.2, &format!("internal: realloc returned void ({:?})", inst.get_opcode())));
+        }
+    };
+    // `realloc` returning null leaves the old block valid, so the line so
+    // far is kept and returned rather than lost: a short line is a better
+    // outcome than a leak plus an error.
+    let grow_failed = is_null_ptr(sess, grown)?;
+    let grow_ok = new_block(sess, f, "line_grow_ok");
+    sess.2.build_conditional_branch(grow_failed, finish, grow_ok).map_err(builder_fail)?;
+    sess.2.position_at_end(grow_ok);
+    store_key(sess, buffer, grown.into())?;
+    store_key(sess, capacity, doubled.into())?;
+    sess.2.build_unconditional_branch(place).map_err(builder_fail)?;
+    sess.2.position_at_end(place);
+    let target_base = load_ptr(sess, buffer)?;
+    let at = load_i64(sess, length)?;
+    let target = byte_offset(sess, target_base, at)?;
+    sess.2.build_store(target, byte).map_err(builder_fail)?;
+    let advanced = sess.2.build_int_add(at, i64_ty.const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, length, advanced.into())?;
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+
+    sess.2.position_at_end(finish);
+    let final_len = load_i64(sess, length)?;
+    let final_buf = load_ptr(sess, buffer)?;
+    let ended = sess.2.build_int_compare(IntPredicate::SLE, got, i64_ty.const_zero(), "").map_err(builder_fail)?;
+    let empty = sess.2.build_int_compare(IntPredicate::EQ, final_len, i64_ty.const_zero(), "").map_err(builder_fail)?;
+    let at_end = sess.2.build_and(ended, empty, "").map_err(builder_fail)?;
+    let end_block = new_block(sess, f, "line_end_of_input");
+    let line_block = new_block(sess, f, "line_value");
+    sess.2.build_conditional_branch(at_end, end_block, line_block).map_err(builder_fail)?;
+
+    sess.2.position_at_end(end_block);
+    // Nothing was read and the stream is over: the buffer is released here
+    // rather than handed back inside a `String` nobody asked for.
+    let free = extern_free(sess);
+    sess.2.build_call(free, &[into_meta(final_buf.into())], "").map_err(builder_fail)?;
+    let end_tag = variant_tag_of(sess, err_key, sess.12.end_of_input, span)?;
+    let end_val = build_enum_value(sess, err_key, end_tag, &[], span)?;
+    let end_result = build_result_err(sess, ret_key, err_key, end_val, span)?;
+    copy_to_out(sess, ret_key, out, end_result, span)?;
+    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+
+    sess.2.position_at_end(line_block);
+    let line = declare_local(sess, str_key, "line", span)?;
+    init_native_handle(sess, str_key, line, span)?;
+    let line_data = struct_gep(sess, str_key, line, 0, "", span)?;
+    store_key(sess, line_data, final_buf.into())?;
+    let line_len = struct_gep(sess, str_key, line, 1, "", span)?;
+    store_key(sess, line_len, final_len.into())?;
+    let ok_result = build_result_ok(sess, ret_key, str_key, line, span)?;
+    copy_to_out(sess, ret_key, out, ok_result, span)?;
+    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+    sess.2.position_at_end(after);
+    Ok(out)
+}
+
+/// Starting capacity for a `read_line` buffer, doubled as needed.
+const READ_LINE_CAPACITY: u64 = 128;
+
 fn net_fd_of_handle<'ctx>(sess: &mut Session<'ctx, '_, '_>, sock_key: i64, handle: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
     let fd_slot = struct_gep(sess, sock_key, handle, 1, "", span)?;
     load_i64(sess, fd_slot)
@@ -4013,10 +4334,17 @@ pub fn emit_program<'ctx>(sess: &mut Session<'ctx, '_, '_>, entry_span: (i64, i6
     let main_val = get_or_emit_fn(sess, main_fn, NONE, mono, params_list, ret_key)?;
     let exit_key = ret_key;
     let i32_ty = sess.0.i32_type();
-    let sig = i32_ty.fn_type(&[], false);
+    // `main(int argc, char **argv)` rather than `main(void)`: the C runtime
+    // passes the command line here and nowhere else, so `Runtime.args` can
+    // only see it if the entry point accepts it. The two values are stashed
+    // in module globals on entry and read back when a program asks for
+    // them — a program that never calls `Runtime.args` pays two stores and
+    // allocates nothing.
+    let sig = i32_ty.fn_type(&[i32_ty.into(), ptr_ty(sess).into()], false);
     let main_wrapper = sess.1.add_function("main", sig, None);
     let entry = sess.0.append_basic_block(main_wrapper, "entry");
     sess.2.position_at_end(entry);
+    capture_command_line(sess, main_wrapper, main_span)?;
     let call = sess.2.build_call(main_val, &[], "").map_err(builder_fail)?;
     let exit_val = match call.try_as_basic_value() {
         ValueKind::Basic(bv) => bv,

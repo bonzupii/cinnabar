@@ -1,0 +1,139 @@
+#! `Runtime.args` and `Terminal.read_line`, the two surfaces that bring the
+#! outside world into a program.
+#!
+#! `Runtime.args()` returns `&[Collections.String]` — a shared borrow, and
+#! deliberately not an owned collection. The argument strings live in the
+#! memory the kernel set up for the process, so they last for the whole run
+#! and there is no moment at which freeing one would be correct. Returning
+#! a borrow is what makes that safe *by construction* rather than by
+#! convention: a `String` is linear, moving a linear element out of a
+#! container by index is a compile error, so a program can read an argument
+#! but can never hand one to `string_free`.
+#!
+#! `Terminal.read_line()` reads standard input a byte at a time. That is the
+#! point rather than an oversight: a larger read would consume bytes past
+#! the newline, and an unbuffered descriptor has nowhere to put them back,
+#! so the next read would silently lose them. Buffering belongs to a reader
+#! the program owns, not to a primitive that hands the descriptor back after
+#! every call.
+#!
+#! The line excludes its terminator, and end of input with nothing read is
+#! `Err(EndOfInput)` rather than an empty string, so a blank line and "no
+#! more lines" stay distinguishable.
+#!
+#! The harness runs this with no arguments and no standard input, so:
+#!   - `args` has exactly one element, the program name, which is non-empty
+#!   - `read_line` reports end of input immediately
+#! Exit code 0 means every check passed.
+
+pub mod Slice
+  pub nat fun len<T>(view: &[T]) Usize
+end
+
+pub mod Collections
+  pub nat type String
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+    pub KeyNotFound
+    pub EmptySlice
+    pub InvalidUtf8
+    pub EndOfInput
+  end
+
+  pub nat fun string_len(value: &String) Usize
+  pub nat fun string_free(value: String) impure Unit
+end
+
+pub mod Terminal
+  pub nat fun print(text: &[U8]) impure Unit
+  pub nat fun read_line() impure Result(Collections.String, Collections.Error)
+end
+
+pub mod Runtime
+  pub nat fun args() &[Collections.String]
+end
+
+use Slice.len as slice_len
+use Collections.string_len
+use Collections.string_free
+use Terminal.print
+use Runtime.args
+use Terminal.read_line
+
+#! The program name is always present, so a run with no arguments still has
+#! exactly one.
+fun check_args() I64
+  val all = args()
+  if slice_len(all) != 1
+    return 10
+  end
+  match &all[0]
+    Ok(first) => return check_program_name(first)
+    Err(IndexOutOfBounds(idx, length)) => return 11
+  end
+end
+
+#! `argv[0]` is the path the program was invoked as, so it is never empty.
+#! Reading its length proves the handle was built from the real `argv`
+#! rather than left zeroed.
+fun check_program_name(name: &Collections.String) I64
+  if string_len(name) == 0
+    return 12
+  end
+  return 0
+end
+
+#! Calling twice must yield the same view: the argument table is built once
+#! and reused, so a program that asks repeatedly does not allocate
+#! repeatedly.
+fun check_args_are_stable() I64
+  val first = args()
+  val second = args()
+  if slice_len(first) != slice_len(second)
+    return 20
+  end
+  return 0
+end
+
+#! With no standard input, the first read reports end of input rather than
+#! returning an empty line.
+fun check_end_of_input() impure I64
+  match read_line()
+    Ok(line) => return consume_and_fail(line)
+    Err(Collections.EndOfInput) => return 0
+    Err(Collections.AllocationFailed(size)) => return 31
+    Err(Collections.IndexOutOfBounds(index)) => return 32
+    Err(Collections.KeyNotFound) => return 33
+    Err(Collections.EmptySlice) => return 34
+    Err(Collections.InvalidUtf8) => return 35
+  end
+end
+
+#! A line that should not have arrived still owns its buffer, so it is
+#! freed before the failure is reported.
+fun consume_and_fail(line: Collections.String) impure I64
+  string_free(line)
+  return 30
+end
+
+pub fun main() impure I64
+  val arguments = check_args()
+  if arguments != 0
+    return arguments
+  end
+
+  val stable = check_args_are_stable()
+  if stable != 0
+    return stable
+  end
+
+  val ended = check_end_of_input()
+  if ended != 0
+    return ended
+  end
+
+  print("runtime io ok\n")
+  return 0
+end

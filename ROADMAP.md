@@ -365,16 +365,104 @@ built in-tree instead.
 
 ---
 
-## Milestone 4 — Native OS Surfaces
-- `Terminal.read_line() -> Result(Collections.String, Error)`
-- `File.open`/`read`/`write`/`close` with a linear `File` handle.
-- `Runtime.args() -> &[Collections.String]`
-- Static linking only, ever — not configurable per target. `Memory`, `Terminal`, `File` lower
-  directly to OS syscalls (`sys_mmap`/`sys_munmap`, `sys_write`/`sys_read`, `sys_open`/`sys_close`
-  on x86_64/AArch64) rather than through libc. Where a target genuinely cannot avoid libc, link it
-  statically (musl) — never dynamically.
-- Depends on Milestone 1 (syscall argument/return widths) and Milestone 2 (`read_line` returns a
-  `String`; `args` yields slices).
+## Milestone 4 — Native OS Surfaces (COMPLETE)
+
+### Direct system calls
+`src/codegen/syscall.rs` emits the kernel entry point as inline assembly. Everything
+architecture-specific lives in that one file and is derived from the module's own target triple:
+the instruction (`syscall` on x86_64, `svc #0` on AArch64), the register constraints, and the
+syscall numbers. `Memory.allocate`/`deallocate` issue `mmap`/`munmap`, `Terminal.print`/`print_line`
+/`eprint` and `Terminal.read_line` issue `write`/`read`, and the whole `File` surface issues
+`openat`/`read`/`write`/`close`. `mem_byte_access.cnb` and `file_roundtrip.cnb` both compile to IR
+that declares **no libc function at all**.
+
+`Collections` keeps the libc allocator and `Net` keeps the socket wrappers, deliberately: a
+growable container needs `realloc` semantics rather than whole mappings, and a `sockaddr` marshaller
+is real code rather than a thin syscall shim. That is the roadmap's "where a target genuinely cannot
+avoid libc" case, and it is still a static musl link, never a dynamic one.
+
+Details that mattered:
+- A Linux syscall reports failure as a **negative errno in the result register**, not through a
+  separate `errno` variable, so the syscall path needs no `__errno_location` — `Net`, on the libc
+  wrappers, still uses it. `mmap` in particular reports failure that way rather than as a null
+  pointer, so the failure test is `< 0`.
+- x86_64 passes the fourth argument in `r10`, not `rcx`, because the `syscall` instruction
+  overwrites `rcx` and `r11`. `mmap` takes six arguments and is where that matters.
+- AArch64's Linux ABI has no `open` at all, only `openat`, so the file surface uses `openat` with
+  `AT_FDCWD` on **both** architectures rather than branching per target.
+- Both architectures declare a memory clobber. Without it the optimizer could move loads and stores
+  across a call that fills or reads a buffer.
+- `munmap` needs the mapping's length as well as its address — exactly the handle field Milestone 3
+  made sure is always initialized. A garbage length there would unmap memory the program still owns.
+- An architecture with no implemented table is a compile error naming the triple, never a guess: a
+  syscall number is meaningless on an architecture it was not assigned for, and emitting one anyway
+  would call an arbitrary kernel entry point.
+
+### Surfaces
+- **`File`** — a linear `File.Handle` with `open`/`read`/`write`/`close`. The mode is a Cinnabar
+  enum (`ReadOnly`, `WriteTruncate`, `WriteAppend`) rather than an integer of flag bits, so a
+  program never writes an operating-system constant; the variant tags come from the program's own
+  declaration through `variant_tag_of`, keyed by name rather than by declaration order. `read` and
+  `write` return the count actually transferred instead of looping, because a short count is
+  information the caller needs — a zero count from `read` is how end of file is observed. A path
+  arrives as a `&[U8]` carrying its own length but `openat` wants a terminator, so `open` copies it
+  into a `PATH_MAX` stack buffer; the length is **clamped before** the copy rather than only tested,
+  so an over-long path cannot overrun the buffer between the test and the `memcpy`, and it is
+  rejected with `ENAMETOOLONG` — the code the kernel would itself have returned.
+- **`Terminal.read_line`** — reads standard input byte at a time, which is the design rather than an
+  oversight: a larger read would consume bytes past the newline, and an unbuffered descriptor has
+  nowhere to put them back, so the next read would silently lose them. Buffering belongs to a reader
+  the program owns. The newline is consumed but excluded; end of input with nothing read is
+  `Err(EndOfInput)` rather than an empty string, so a blank line stays distinguishable from "no more
+  lines". `Terminal.print`, by contrast, *does* loop, because a `write` may transfer fewer bytes
+  than asked and `print` returns `Unit` — it has no channel on which to report a short write.
+- **`Runtime.args`** — returns `&[Collections.String]`, a shared borrow rather than an owned
+  collection. The argument strings live in memory the kernel set up for the process and last for the
+  whole run, so there is no moment at which freeing one would be correct. Linearity enforces that by
+  construction rather than by convention: a `String` cannot be moved out of a slice, so a program
+  can read an argument but can never hand one to `string_free`. Getting at `argv` required the entry
+  point to become `main(int argc, char **argv)` — the C runtime passes the command line there and
+  nowhere else — with the two values stashed in module globals. The argument table is built lazily
+  and once, so a program that never asks pays two stores and allocates nothing.
+
+### Two fixes this milestone forced
+**A use-after-free that compiled.** Writing the `File` fixtures surfaced a soundness hole older than
+this milestone: borrowing a linear value after it was moved was not checked at all. `apply_move`
+caught *moving* a moved value, but `deallocate(block)` followed by `read_u8(&block, 0)` compiled
+cleanly and produced a binary that reads freed memory — a direct violation of the Crucible Rule, and
+the more dangerous of the two shapes, since the move it follows has already released the resource.
+`OP_BORROW`/`OP_BORROW_M` now check the binding's linear state. Only `ST_MOVED` is reported, never
+`ST_PARTIAL`: a partially moved struct still has live fields, and reaching them is what partial-move
+tracking is for. `borrow_after_move.cnb` pins all four shapes.
+
+**A fixture passing on undefined behaviour.** `mem_probe.cnb` recursed over a block it had only
+allocated, never written. LLVM knows freshly `malloc`'d memory is undef and folded the byte test to
+whichever branch it liked — which happened to be the one the expected exit code wanted. `mmap`'s
+anonymous pages arrive genuinely zero-filled, so the read now returns a real `0` and the fixture
+fails honestly. It seeds the byte it means to read; the point was always 500000 tail-recursive
+frames each doing an opaque heap read, not what an unwritten byte contains.
+
+### Verification
+- `file_roundtrip.cnb` writes, reads back byte for byte, appends and confirms the file grew rather
+  than being replaced, and checks that opening a missing path fails with a real errno rather than
+  succeeding with a handle to nothing. `file_unclosed.cnb` pins the linear obligations on a
+  descriptor: leaked, closed on one path only, closed twice, used after closing.
+- `runtime_io.cnb` checks that `args` reports exactly the program name when invoked with none, that
+  the name is non-empty (proving the handle was built from the real `argv` rather than left zeroed),
+  that calling twice yields the same view (the table is built once), and that `read_line` reports
+  end of input rather than an empty string when there is no input.
+- The syscall ABI table is checked by a **second, independently hand-written copy** of the Linux
+  numbers, plus tests that numbers are distinct within an architecture, that `r10`/`x8` are used
+  where the ABI requires, that both architectures clobber memory, and that an unimplemented
+  architecture reports as unknown rather than falling back to one of the two tables.
+- The repro harness now gives every fixture a null standard input. `Terminal.read_line` blocks until
+  a line or end of input arrives, so an inherited descriptor would make a fixture's exit code depend
+  on whether the suite was run from a terminal, a pipe, or CI.
+
+### Carried forward
+`Memory.allocate` maps whole pages, so a small allocation costs a page. That is the right trade for
+a raw-memory quarantine and the wrong one for many small allocations; if `Memory` ever needs to be
+allocation-dense, a suballocator over `mmap` belongs in the surface rather than a return to libc.
 
 ---
 

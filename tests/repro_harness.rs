@@ -52,6 +52,7 @@ const EXPECT_OK: &[(&str, i32)] = &[
     ("string_print", 0),
     ("string_static_borrow", 0),
     ("file_roundtrip", 0),
+    ("runtime_io", 0),
     ("empty_block", 0),
     ("utf8_validation", 0),
     ("multiline_const", 30),
@@ -271,6 +272,13 @@ fn repro_config() -> ReproConfig {
 
 fn run_binary(bin: &Path, timeout_secs: u64) -> i32 {
     let mut child = match Command::new(bin)
+        // A fixture must never read the harness's own standard input.
+        // `Terminal.read_line` blocks until a line or end of input arrives,
+        // so an inherited descriptor would make a fixture's exit code
+        // depend on whether the suite was run from a terminal, a pipe, or
+        // CI. A null stdin is at end of input immediately, which is a
+        // definite state every run agrees on.
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
