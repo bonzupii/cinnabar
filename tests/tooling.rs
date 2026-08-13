@@ -1,7 +1,17 @@
-// Integration tests for the tooling layer: the analysis queries the
-// language server is built on, position mapping, module-loader overlays,
-// and the borrow checker's explanatory notes.  All of them consume facts
-// the pipeline attached; none re-derive resolution or types.
+//! Integration tests for the tooling layer, against the library directly.
+//!
+//! Covers the analysis queries the language server is built on, byte-offset
+//! to position mapping, module-loader overlays for unsaved buffers, the
+//! formatter, and the borrow checker's explanatory notes. These call into
+//! `cinnabar::analysis` rather than through the protocol, which is what
+//! makes them the right place to pin an answer's *content*; the protocol
+//! behaviour around those answers is pinned in `lsp_protocol.rs`.
+//!
+//! **Invariants:**
+//! - Every query under test consumes facts the pipeline attached. A test
+//!   here that passed while the compiler disagreed would mean the tooling
+//!   had grown a second implementation, which is the thing this layer
+//!   exists not to have.
 
 use cinnabar::analysis::{
     analyze, completions, definition, file_id_of, hover, offset_to_position, position_to_offset,

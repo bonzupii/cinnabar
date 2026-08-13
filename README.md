@@ -1,6 +1,10 @@
 # Cinnabar
 
-Cinnabar is a from-scratch, statically-typed **systems programming language** and compiler, written in Rust and targeting native machine code via LLVM. It is designed for building compilers, runtimes, kernels, firmware, and network stacks — domains where garbage collection, hidden control flow, and runtime panics are unacceptable.
+Cinnabar is a **zero-trust systems language for durable software**. It assumes that code authors may optimize for immediate task completion rather than long-term correctness, whether they are humans under pressure or AI code-generating systems. Cinnabar therefore grants no mechanism to bypass, suppress, weaken, or defer its safety, ownership, failure-handling, and explicitness invariants. Programs must express valid designs within those invariants; designs that require an exception are not representable in Cinnabar.
+
+Concretely, it is a from-scratch, statically-typed compiler written in Rust, targeting native machine code via LLVM, for building compilers, runtimes, kernels, firmware, and network stacks — domains where garbage collection, hidden control flow, and runtime panics are unacceptable.
+
+There is no `#[allow]`, no warning severity, no suppression pragma, and no escape hatch to add one. If you are looking for the flag that turns a check off, its absence is the feature.
 
 The language's defining feature is **Austral-style linear typing**: resource-owning handles (heap memory, vectors, strings, hash maps, sockets) must be consumed exactly once on every execution path, enforced entirely at compile time by a dedicated flow-sensitive borrow checker — with no lifetime annotations, no garbage collector, and no reference counting.
 
@@ -212,7 +216,7 @@ cinnabar <FILE> [-o|--output PATH] [--dump-ast] [--dump-typed-ast] [--print-layo
                 [--emit-llvm] [--emit-obj] [--explain-borrow] [--run]
                 [-O|--opt-level {0,1,2,3,s,z}]
 cinnabar fmt [--check] <FILE>
-cinnabar {build|run|check|test|doc|book|init} [PATH]
+cinnabar {build|run|check|test|doc|burn|init} [PATH]
 ```
 
 | Flag | Description |
@@ -247,7 +251,7 @@ tests = tests
 `check` discover the manifest upward from the supplied path. `test` recursively runs `.cnb` files:
 `.reject.cnb` files must be rejected, `.stderr` sidecars snapshot complete diagnostics, and `.exit`
 sidecars specify nonzero expected statuses. Use `test --update-snapshots` to deliberately refresh
-diagnostic snapshots. `doc` writes public API HTML to `target/doc`, while `book` serves those docs
+diagnostic snapshots. `doc` writes public API HTML to `target/doc`, while `burn` serves those docs
 with the bundled manifesto and exact installed compiler version.
 
 On success, the compiler prints `Successfully compiled <input> to '<output>'.` and exits `0`. Any lex, parse, resolve, typecheck, borrow-check, or codegen failure is rendered as one or more source-located diagnostics (via [`ariadne`](https://github.com/zesterer/ariadne)) and exits non-zero.

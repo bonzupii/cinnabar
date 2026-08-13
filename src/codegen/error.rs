@@ -1,3 +1,20 @@
+//! The typed error codegen carries until the driver renders it.
+//!
+//! Every failure at or below IR emission — an LLVM builder rejection, an
+//! I/O failure, a failed `opt`, `llc`, or `clang` invocation — becomes a
+//! `CodegenError` with its kind preserved, so no intermediate step has to
+//! stringify and no detail is lost on the way up. `codegen_error_message`
+//! is the single place one is rendered, and the driver calls it, not the
+//! code that raised the error.
+//!
+//! **Invariants:**
+//! - Codegen failures are values, never panics. That is what lets the CLI
+//!   report a tool failure as a diagnostic instead of a backtrace.
+//! - A failure with no Cinnabar source origin carries `NO_FILE` rather than
+//!   a plausible-looking location. `clang` failing to link is not a fact
+//!   about line 1 of the user's program, and saying so would be a
+//!   fabricated span.
+
 pub enum CodegenErrorKind {
     Builder(String),
     Io(String),

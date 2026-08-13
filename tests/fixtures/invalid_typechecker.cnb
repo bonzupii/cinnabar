@@ -1,0 +1,118 @@
+#!|
+  Every type-checking rejection, in a file the resolver accepts.
+
+  invalid_resolver_and_typechecker.cnb carries twenty-four numbered cases
+  and reports four. The pipeline stops at the first stage that fails, so
+  its resolver errors — a duplicate constant, an unresolvable import, and
+  two redeclarations of builtins it did not realise were builtin — end the
+  run before the type checker is ever reached. Nineteen type-checking cases
+  sat behind them asserting nothing, and an exit-code check could never
+  have said so.
+
+  This file reaches the type checker because nothing here fails earlier:
+  Result and Option are builtin and are not redeclared, every name
+  resolves, and the only rejections left are the ones type checking is for.
+
+  Assignment to an undeclared variable and the two unknown-symbol cases are
+  deliberately absent: those are resolver rejections, and including them
+  here would recreate exactly the shadowing this file exists to undo.
+|#
+
+pub type Point
+  pub x: I64
+  pub y: I64
+end
+
+# Item-level: constant initializer type mismatch.
+pub const BAD_CONST: I64 = true
+
+pub fun test_statement_errors() Unit
+  # Local val and var initializer mismatches.
+  val bad_val: I64 = true
+  var bad_var: I64 = true
+
+  # Assignment requires var; a val is immutable.
+  val immutable_val: I64 = 10
+  immutable_val = 20
+
+  # Assignment type mismatch.
+  var mutable_var: I64 = 10
+  mutable_var = true
+
+  # While condition must be Bool.
+  while 123
+    break
+  end
+end
+
+pub fun test_binary_and_unary_errors() Unit
+  # Arithmetic requires integer operands.
+  val bad_add = true + false
+
+  # Logical operators require Bool operands.
+  val bad_and = 100 && 200
+
+  # Negation requires an integer operand.
+  val bad_neg = -true
+
+  # NOT requires a Bool operand.
+  val bad_not = !100
+end
+
+# Return type mismatch.
+pub fun test_return_mismatch() I64
+  return true
+end
+
+# Empty return from a function that declares a value.
+pub fun test_empty_return_mismatch() I64
+  return
+end
+
+# `try` on a Result inside a function that does not return one.
+pub fun test_try_result_in_int_func() I64
+  val x = try Ok(10)
+  return x
+end
+
+# `try` on an Option inside a function that does not return one.
+pub fun test_try_option_in_int_func() I64
+  val x = try Some(10)
+  return x
+end
+
+# `try` on a type that is neither Result nor Option.
+pub fun test_try_on_int() Option(I64)
+  val x = try 100
+  return Some(x)
+end
+
+# A match with no arms.
+pub fun test_empty_match(target: I64) I64
+  return match target
+  end
+end
+
+# Arms that do not agree on a type.
+pub fun test_match_arm_mismatch(target: I64) I64
+  return match target
+    1 => 100
+    2 => true
+  end
+end
+
+# If condition must be Bool.
+pub fun test_if_condition() Unit
+  if 999
+    val x = 1
+  end
+end
+
+# Struct field initialized with the wrong type.
+pub fun test_struct_field_mismatch() Point
+  return Point(x: true, y: 10)
+end
+
+pub fun main() I64
+  return 0
+end

@@ -1,0 +1,63 @@
+#! A line is a `String`, so a line has to be well-formed UTF-8.
+#!
+#! `Collections.string_from_slice` validates "because a slice can come from
+#! anywhere", and standard input is the least controlled source a string can
+#! have. A line read from it is constructed from bytes that are not settled
+#! at compile time, so it runs the same scan: this fixture is fed a lone
+#! `0xFF`, which no well-formed sequence can begin or continue with, and the
+#! read must report `InvalidUtf8` rather than hand back a `String` whose
+#! contents contradict what every reader of a `String` is entitled to
+#! assume.
+#!
+#! Freeing is the compiler's business on this path, not the program's: the
+#! failure carries no handle, so there is nothing for `main` to release.
+
+pub mod Collections
+  pub nat type String
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+    pub KeyNotFound
+    pub EmptySlice
+    pub InvalidUtf8
+    pub EndOfInput
+    pub ReadFailed(Usize)
+  end
+
+  pub nat fun string_free(value: String) impure Unit
+end
+
+pub mod Terminal
+  pub nat fun print_line(text: &[U8]) impure Unit
+  pub nat fun read_line() impure Result(Collections.String, Collections.Error)
+end
+
+use Collections.string_free
+use Terminal.print_line
+use Terminal.read_line
+
+#! A line built from bytes that are not UTF-8 should never have existed, so
+#! its buffer is released before the failure is reported.
+fun unexpected_line(line: Collections.String) impure I64
+  string_free(line)
+  return 70
+end
+
+fun accepted() impure I64
+  print_line("malformed input rejected")
+  return 0
+end
+
+pub fun main() impure I64
+  match read_line()
+    Ok(line) => return unexpected_line(line)
+    Err(Collections.InvalidUtf8) => return accepted()
+    Err(Collections.EndOfInput) => return 71
+    Err(Collections.AllocationFailed(size)) => return 72
+    Err(Collections.IndexOutOfBounds(index)) => return 73
+    Err(Collections.KeyNotFound) => return 74
+    Err(Collections.EmptySlice) => return 75
+    Err(Collections.ReadFailed(errno)) => return 76
+  end
+end

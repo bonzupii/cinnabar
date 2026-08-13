@@ -127,10 +127,22 @@ expect_failure "Rejecting nested block comment (standalone)" cargo run --quiet -
 expect_failure "Rejecting comprehensive resolver & typechecker error suite" cargo run --quiet -- tests/fixtures/invalid_resolver_and_typechecker.cnb
 expect_failure "Rejecting missing input file" cargo run --quiet -- tests/fixtures/does_not_exist.cnb
 
+# Rejection cases the cargo suites assert in detail, invoked here too so the
+# gate itself fails if any of them stops being rejected at all.
+expect_failure "Rejecting type-checking suite unreachable behind the resolver bundle" cargo run --quiet -- tests/fixtures/invalid_typechecker.cnb
+expect_failure "Rejecting unused declarations, public and private" cargo run --quiet -- tests/fixtures/dead_code.cnb
+expect_failure "Rejecting discard patterns in every position" cargo run --quiet -- tests/fixtures/09_discard_patterns.cnb
+expect_failure "Rejecting a call to a non-public item from outside its module" cargo run --quiet -- tests/fixtures/08_dropped_pub.cnb
+expect_failure "Rejecting an unconsumed linear handle" cargo run --quiet -- tests/fixtures/explain_leak.cnb
+expect_failure "Rejecting an unhandled Result" cargo run --quiet -- tests/fixtures/mushling_unhandled_result.cnb
+expect_failure "Rejecting an unresolved function name" cargo run --quiet -- tests/fixtures/suggest_unresolved_fn.cnb
+expect_failure "Rejecting an unresolved type name" cargo run --quiet -- tests/fixtures/suggest_unresolved_type.cnb
+expect_failure "Rejecting an ambiguous unresolved name" cargo run --quiet -- tests/fixtures/suggest_ambiguous.cnb
+
 # 5. Cleanup: remove compiled fixture binaries (keep the cargo cache)
 rm -f tests/fixtures/spec tests/fixtures/constructor_parse tests/fixtures/pub_use tests/fixtures/multi_file/main
 
 echo ""
 echo -e "${GREEN}=================================================="
-echo "====== All pre-commit checks passed cleanly! ====="
+echo "====== All pre-commit checks passed cleanly ======"
 echo -e "==================================================${NC}"

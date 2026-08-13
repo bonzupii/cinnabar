@@ -1,12 +1,18 @@
-// `--print-layout`: sizes, alignments, and field offsets for every concrete
-// struct, enum, and native-handle type the typechecker canonicalized.
-//
-// All numbers come from the exact same lowering a real build uses: the
-// canonical type keys are lowered through `types::llvm_type` and measured
-// with LLVM's target data for the host machine.  Field keys reuse
-// `struct_field_keys` (the lowering's own substitution path) and enum
-// variant tags are read from the typechecker's NODE_VARFACT rows — nothing
-// here re-derives a layout fact by parallel logic.
+//! The `--print-layout` report: sizes, alignments, and field offsets.
+//!
+//! Covers every concrete struct, enum, and native-handle type the
+//! typechecker canonicalized. All numbers come from the exact same lowering
+//! a real build uses: the canonical type keys are lowered through
+//! `types::llvm_type` and measured with LLVM's target data for the host
+//! machine. Field keys reuse `struct_field_keys` (the lowering's own
+//! substitution path) and enum variant tags are read from the typechecker's
+//! `NODE_VARFACT` rows.
+//!
+//! **Invariants:**
+//! - Nothing here re-derives a layout fact by parallel logic. A number this
+//!   report prints is one the real build would use, or it is not printed —
+//!   a layout report that could disagree with the binary would be worse
+//!   than none.
 
 use crate::ast::*;
 use crate::codegen::error::*;

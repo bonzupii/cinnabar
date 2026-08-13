@@ -1,14 +1,27 @@
-// IDE-facing queries over the compiler's attached facts.
-//
-// This module runs the standard front-end pipeline (load -> resolve ->
-// typecheck -> borrow) over a file set — optionally overlaid with unsaved
-// editor buffers — and answers position queries (hover, definition,
-// references, completion, signature help) by reading the attachments the
-// pipeline already computed: resolved symbol ids on expression/pattern/type
-// rows, canonical type keys, field facts.  It never re-resolves a name or
-// re-infers a type with parallel logic (Single-Fact Rule); a question the
-// attachments cannot answer is answered with "nothing" rather than with a
-// second implementation.
+//! IDE-facing queries over the compiler's attached facts.
+//!
+//! `analyze` runs the standard front-end pipeline (load -> resolve ->
+//! typecheck -> borrow) over a file set — optionally overlaid with unsaved
+//! editor buffers — and answers position queries by reading the
+//! attachments the pipeline already computed: resolved symbol ids on
+//! expression, pattern, and type rows; canonical type keys; field facts.
+//!
+//! Hover reads the attached type key, the resolved signature, and the
+//! linearity flag. Definition and references follow resolver symbol ids
+//! across the module graph. Completion reads resolver-attached
+//! `NODE_SCOPEFACT` visibility rows, typechecker-attached `NODE_LOCALFACT`
+//! lexical snapshots, and `NODE_FIELDKEY` facts for members after a `.`.
+//! Byte-offset to line/UTF-16-column mapping lives here too, since that is
+//! the boundary where the compiler's spans meet the protocol's positions.
+//!
+//! **Invariants:**
+//! - No name is re-resolved and no type re-inferred here, ever. A question
+//!   the attachments cannot answer is answered with "nothing" rather than
+//!   with a second implementation that could drift from the first.
+//! - Answering "nothing" is a real answer, not a failure to handle a case.
+//!   An editor showing no hover is correct where a build would also have
+//!   no fact; an editor showing a *different* answer than the build would
+//!   be the bug this rule exists to prevent.
 
 use crate::ast::*;
 use crate::inspect::sym_kind_name;
@@ -73,16 +86,30 @@ pub fn analyze(entry_path: &str, overlay: &[(String, String)]) -> Analysis {
             };
         }
     };
-    let resolved = resolver::resolve(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods);
+    let mut deferred: Vec<Diag> = Vec::new();
+    let resolved = resolver::resolve(
+        &mut names,
+        &mut nodes,
+        &mut lists,
+        resolver::Diagnostics { errors: &mut errors, notes: &mut notes, deferred: &mut deferred },
+        root,
+        &ext_mods,
+    );
     let mut typechecked = false;
     let mut impls_list = NONE;
     if resolved {
-        let (ok, impls) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut errors, root, &ext_mods);
+        let (ok, impls) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods);
         impls_list = impls;
         typechecked = true;
         if ok {
             borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods);
         }
+    }
+    // Unused items are reported only once the stages that can explain a
+    // broken program have run. A file with a type error is told about the
+    // type error, not that the functions containing it are unreachable.
+    if errors.is_empty() {
+        errors.append(&mut deferred);
     }
     Analysis {
         names,

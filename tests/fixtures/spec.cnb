@@ -364,7 +364,9 @@ use Collections.hash_map_new
 use Collections.hash_map_insert
 use Collections.hash_map_get
 use Collections.hash_map_free
+use Terminal.print
 use Terminal.print_line
+use Terminal.eprint
 
 pub trait Checksum
   pub fun checksum(value: &Self) U32
@@ -693,8 +695,13 @@ fun string_demo() impure Result(Usize, Collections.Error)
 
   val length = string_len(&string)
 
-  # Exercise native terminal printing
+  # Exercise every declared Terminal surface: `print` writes the bytes and
+  # adds nothing, `print_line` adds exactly one terminator, and `eprint`
+  # writes to standard error rather than standard output. A declaration this
+  # module makes and never uses is dead code, and dead code is a rejection.
+  print(&string)
   print_line(&string)
+  eprint(&string)
 
   string_free(string)
   vec_free(vec)

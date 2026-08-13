@@ -1,0 +1,33 @@
+#! Terminal output, asserted for its bytes and for its descriptor.
+#!
+#! The repro harness discards both output streams, so a fixture that checks
+#! its own work can report only an exit code — and a swapped descriptor, a
+#! dropped terminator, or a `print` that quietly behaved like `print_line`
+#! leaves every exit code unchanged. This fixture writes a known
+#! interleaving to both descriptors and the harness reads them back
+#! separately.
+#!
+#! What that pins:
+#!   - `print` writes its bytes and adds nothing, so the two stdout writes
+#!     abut as `out-aout-b` rather than arriving on separate lines.
+#!   - `print_line` adds exactly one terminator, at the end.
+#!   - `eprint` goes to standard error and none of it reaches standard
+#!     output, even though the two are interleaved in program order.
+
+pub mod Terminal
+  pub nat fun print(text: &[U8]) impure Unit
+  pub nat fun print_line(text: &[U8]) impure Unit
+  pub nat fun eprint(text: &[U8]) impure Unit
+end
+
+use Terminal.print
+use Terminal.print_line
+use Terminal.eprint
+
+pub fun main() impure I64
+  print("out-a")
+  eprint("err-a")
+  print_line("out-b")
+  eprint("err-b")
+  return 0
+end

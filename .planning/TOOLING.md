@@ -143,7 +143,7 @@ use the same representation. Documentation consumers read this attached fact ins
 source comments.
 
 `cinnabar doc [PATH]` runs the shared front end and writes `target/doc/index.html` by default. It
-includes only `pub` items and public members and fails on compiler errors. `cinnabar book [PATH]
+includes only `pub` items and public members and fails on compiler errors. `cinnabar burn [PATH]
 --address 127.0.0.1:7878` serves the generated API documentation alongside the bundled manifesto.
 The page displays `CARGO_PKG_VERSION`, pinning its content to the installed compiler version.
 

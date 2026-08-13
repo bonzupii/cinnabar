@@ -1,3 +1,32 @@
+//! Byte-level scanning of source text into `NODE_TOKEN` rows.
+//!
+//! A hand-written scanner that writes tokens straight into the shared
+//! arena — there is no separate token type and no intermediate vector of
+//! lexemes. It handles the four comment forms (`#`, `#!` doc, `#| |#`
+//! block, `#!| |#` block doc), decimal and `0x` integer literals stored as
+//! raw bit patterns, double-quoted strings with the five escapes `\n`,
+//! `\t`, `\0`, `\"`, `\\`, and the one- and two-character operators.
+//!
+//! Two decisions here are load-bearing much further down. String literal
+//! bytes are interned into the same `names` table identifiers use, so equal
+//! literals collapse to a single name id and codegen can emit one `.rodata`
+//! global per distinct literal with no side table to keep in step. And
+//! unescaped text is copied out as whole `&str` runs rather than byte by
+//! byte, so multi-byte characters survive intact.
+//!
+//! **Invariants:**
+//! - Literal accumulation uses `checked_mul`/`checked_add`. An overflowing
+//!   literal is a lexical error, never a silently wrapped bit pattern.
+//! - Whether a literal fits its type is the typechecker's fact, not this
+//!   file's: the lexer does not yet know what type a literal will adopt.
+//! - Casing is tokenized, not judged. The resolver enforces the casing
+//!   rules, so a mis-cased identifier lexes cleanly and is rejected once,
+//!   in the one place that owns that rule.
+//! - Block comments do not nest: a nested opener is a hard error, tracked
+//!   well enough to still locate the real outer closer.
+//! - A string literal does not span lines, so a missing closing quote
+//!   reports at the newline rather than consuming the rest of the file.
+
 use crate::ast::*;
 
 pub fn lex(
@@ -236,6 +265,28 @@ fn lex_ident(
     let end = scan_ident_end(bytes, pos);
     match slice_text(source, pos, end, errors) {
         Some(text) => {
+            // A leading underscore is a discard, and Cinnabar has no discards.
+            //
+            // `_` as a match arm is the consequential one: a catch-all makes
+            // any match trivially exhaustive, so adding a variant to an enum
+            // would stop forcing anyone to handle it. `_` and `_name` as
+            // bindings are the same idea spelled differently — a value the
+            // program declines to account for.
+            //
+            // Rejected here, where casing is, because that catches every
+            // position at once: arm, binding, parameter, field. A value that
+            // is genuinely not needed means the surrounding code has the
+            // wrong shape, and the fix is to restructure it rather than to
+            // name it in a way the compiler ignores.
+            if text.starts_with('_') {
+                let message = if text == "_" {
+                    "discard pattern '_' is not allowed; bind the value with a real name and use it, or split the match arm so each variant has its own".to_string()
+                } else {
+                    format!("'{}' begins with an underscore, which marks a value as deliberately unused; bind it with a real name and use it", text)
+                };
+                push_error(errors, &message, file, pos as i64, end as i64);
+                return end;
+            }
             let name = intern(names, text);
             push_token(nodes, TOK_IDENT, name, NONE, pos as i64, end as i64, file);
             end
@@ -415,19 +466,59 @@ fn lex_string(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: 
         }
         if byte == b'\\' {
             if !append_run(&mut text, source, run, cursor, errors) {
-                return cursor + 2;
+                return cursor + 1;
             }
-            match escape_byte(byte_at(bytes, cursor + 1)) {
-                Some(decoded) => text.push(decoded as char),
+            // A backslash begins a two-byte escape only when a byte follows
+            // it that a literal could contain at all. At end of file none
+            // follows, and a newline bounds the literal rather than
+            // belonging to it. In both cases the backslash stands alone and
+            // must consume only itself: consuming a second byte it does not
+            // have would put the reported span past the last byte of the
+            // source, and consuming the newline would let the escape swallow
+            // the very byte that stops a missing quote from running on into
+            // the rest of the file.
+            //
+            // Advancing by one leaves the newline and end-of-file arms above
+            // to report the unterminated literal, so neither case needs its
+            // own copy of that diagnostic and every span stays in range.
+            let body = byte_at(bytes, cursor + 1);
+            if cursor + 1 >= bytes.len() || body == b'\n' {
+                push_error(errors, "incomplete escape in string literal", file, cursor as i64, (cursor + 1) as i64);
+                cursor += 1;
+                run = cursor;
+                continue;
+            }
+            match escape_byte(body) {
+                Some(decoded) => {
+                    // Every defined escape body is ASCII, so the escape is
+                    // exactly two bytes wide.
+                    text.push(decoded as char);
+                    cursor += 2;
+                }
                 None => {
-                    // Report the escape and keep scanning the same literal
-                    // rather than bailing out mid-string: bailing would
-                    // leave the closing quote to open a second literal and
-                    // report a spurious "unterminated" on the same line.
-                    push_error(errors, "unknown escape in string literal", file, cursor as i64, (cursor + 2) as i64);
+                    // An escape body is a character, not a byte. `"\é"` is a
+                    // typo someone will make, and assuming one byte both
+                    // ended the reported span inside the character and left
+                    // the next run starting on a continuation byte — which
+                    // `append_run` then rejects, so the user was handed an
+                    // internal invariant failure in place of their typo.
+                    //
+                    // Taking the body's real width keeps the span over the
+                    // whole escape and every run on a character boundary.
+                    //
+                    // Reported and scanning continues rather than bailing
+                    // mid-string: bailing would leave the closing quote to
+                    // open a second literal and report a spurious
+                    // "unterminated" on the same line.
+                    let body_width = match source.get(cursor + 1..).and_then(|rest| rest.chars().next()) {
+                        Some(character) => character.len_utf8(),
+                        None => 1,
+                    };
+                    let escape_end = cursor + 1 + body_width;
+                    push_error(errors, "unknown escape in string literal", file, cursor as i64, escape_end as i64);
+                    cursor = escape_end;
                 }
             }
-            cursor += 2;
             run = cursor;
             continue;
         }
@@ -439,9 +530,12 @@ fn lex_string(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: 
 
 // Appends the source text between two byte offsets of an unescaped run.
 // Both offsets fall on a character boundary: a run begins after the opening
-// quote or after an escape and ends at a quote or a backslash, and every one
-// of those delimiters is ASCII.  `source.get` rather than an index so a
-// broken invariant is an internal diagnostic, never a panic.
+// quote or after a whole escape and ends at a quote or a backslash. The
+// quote and the backslash are ASCII, and an escape is consumed by whole
+// characters — including an undefined one, whose body may be any character
+// at all — so no run can start part-way through a multi-byte sequence.
+// `source.get` rather than an index so a broken invariant is an internal
+// diagnostic, never a panic.
 fn append_run(text: &mut String, source: &str, from: usize, to: usize, errors: &mut Vec<Diag>) -> bool {
     match source.get(from..to) {
         Some(part) => {
@@ -855,5 +949,92 @@ mod tests {
             Some(diag) => assert!(diag.0.contains("unterminated string")),
             None => assert!(false),
         }
+    }
+
+    // Every span a lexical error carries has to address bytes the file
+    // actually has. A span reaching past the last byte cannot be rendered
+    // against the source it names, so this asserts the offsets rather than
+    // the wording.
+    fn assert_spans_addressable(source: &str, errors: &[Diag]) {
+        let mut idx = 0usize;
+        while idx < errors.len() {
+            match errors.get(idx) {
+                Some(diag) => {
+                    assert!(
+                        diag.2 >= 0 && diag.3 >= diag.2 && diag.3 <= source.len() as i64,
+                        "span {}..{} of '{}' leaves a {}-byte source",
+                        diag.2,
+                        diag.3,
+                        diag.0,
+                        source.len()
+                    );
+                }
+                None => break,
+            }
+            idx += 1;
+        }
+    }
+
+    #[test]
+    fn trailing_backslash_at_eof_stays_inside_the_source() {
+        // A backslash as the last byte of the file has no escape body.
+        // Reading one anyway put both the escape span and the following
+        // unterminated-literal span one byte past the end of the source.
+        let source = "val x = \"runs off\\";
+        let errors = lex_errors(source);
+        assert!(errors.len() > 0, "a literal ending in a backslash must be rejected");
+        assert_spans_addressable(source, &errors);
+    }
+
+    #[test]
+    fn an_undefined_escape_over_a_multibyte_body_reports_the_typo() {
+        // An escape body is a character, not a byte. Assuming one byte ended
+        // the span inside `é` and left the next run on a continuation byte,
+        // so the literal failed an internal boundary check and the user was
+        // told the compiler had broken its own invariant instead of being
+        // told they had mistyped an escape.
+        let source = "val x = \"a\\éb\"\n";
+        let errors = lex_errors(source);
+        assert_eq!(errors.len(), 1, "expected exactly the typo: {:?}", errors);
+        match errors.first() {
+            Some(diag) => {
+                assert!(
+                    diag.0.contains("unknown escape"),
+                    "reported something other than the escape: {}",
+                    diag.0
+                );
+                assert!(
+                    !diag.0.contains("character boundary"),
+                    "a user typo produced an internal invariant diagnostic: {}",
+                    diag.0
+                );
+            }
+            None => assert!(false, "no diagnostic reported"),
+        }
+        assert_spans_addressable(source, &errors);
+    }
+
+    #[test]
+    fn backslash_before_newline_does_not_swallow_the_next_line() {
+        // A newline is never an escape body — it bounds the literal. Taking
+        // it as one carried the scan onto the following line, so the line
+        // after an unterminated literal vanished into that literal instead
+        // of being lexed as the source it is.
+        let source = "val x = \"open\\\nval y = 1\n";
+        let mut names: Vec<String> = Vec::new();
+        let mut nodes: Vec<i64> = Vec::new();
+        let mut errors: Vec<Diag> = Vec::new();
+        let ok = lex(&mut names, &mut nodes, source, 0, &mut errors);
+        assert!(!ok, "an unterminated literal must be rejected");
+        assert_spans_addressable(source, &errors);
+        let mut saw_following_binding = false;
+        let mut idx = 0i64;
+        while idx < nodes.len() as i64 / NODE_STRIDE {
+            if tok_is_name(&nodes, &names, idx, "y") {
+                saw_following_binding = true;
+            }
+            idx += 1;
+        }
+        assert!(saw_following_binding, "the line after the literal must still be lexed");
     }
 }

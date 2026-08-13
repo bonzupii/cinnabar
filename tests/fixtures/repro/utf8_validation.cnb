@@ -53,7 +53,6 @@ pub const B_F4: U8 = 0xF4  # 4-byte lead; F4 90..BF exceeds U+10FFFF
 #! A Usize-typed zero for comparing payloads against (a bare literal
 #! would infer as I64), and an impossible value for consuming the
 #! unreachable numeric payloads below.
-pub const ZERO_USIZE: Usize = 0
 pub const SENTINEL_USIZE: Usize = 999999
 
 #! True when the error is exactly InvalidUtf8.  Every Error variant is

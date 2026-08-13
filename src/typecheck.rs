@@ -1,4 +1,46 @@
+//! Type checking, constant evaluation, and fact attachment.
+//!
+//! `typecheck` runs as an explicit sequence of sub-passes over one shared
+//! `State` — collect types, check function signatures, collect consts, then
+//! check function bodies including generic ones. Typing is structural and
+//! unification-free, keyed by canonical **type keys**: `TYD_*` rows
+//! interned and deduplicated through `canon_tyinfo`, with generic
+//! substitution implemented once in `subst_key`/`subst_list` and reused,
+//! rather than rewritten per call site.
+//!
+//! This is the stage that computes what the rest of the compiler consumes,
+//! which is why it is the largest file in the tree. Enum variant tags
+//! (`NODE_VARFACT`), struct field offsets (`NODE_FIELDKEY`), trait dispatch
+//! targets (`NODE_TRAIT`), and one `NODE_INST` per instantiated generic are
+//! all established here. So is linearity: every type key is marked linear
+//! or not — a native handle by declaration, an aggregate if any member is,
+//! and a bare type parameter conservatively, since its instantiation is
+//! unknown at definition time and requiring exactly-once consumption is the
+//! only sound default.
+//!
+//! The arithmetic rules live here too. `/` and `%` reject a provably-zero
+//! divisor and are otherwise typed `Result(T, DivError)` with Euclidean
+//! semantics; a compile-time-constant array index is range-checked and
+//! typed as the bare element type, while a runtime or slice index is
+//! `Result(T, IndexError)`; no operator admits an implicit conversion, the
+//! sole sanctioned coercion being `&[T; N]` to `&[T]`. An integer literal
+//! is not yet a value of any type and adopts one from context; a string
+//! literal adopts nothing and is `&[U8]`.
+//!
+//! **Invariants:**
+//! - A type is decided here once. The borrow checker and codegen read the
+//!   attached canonical key; neither re-infers one of its own.
+//! - Linearity is a property of a type key, stored on the type descriptor
+//!   row itself — never a name-keyed side table, and never re-derived
+//!   downstream by asking what a type is called.
+//! - The literal-adoption rule is implemented in one place
+//!   (`int_literal_expr`/`binary_operand_expected`) and called by both
+//!   `check_binary` and the constant folder, so the same literal text
+//!   cannot type one way in a `const` and another in a `var`.
+
 use crate::ast::*;
+use crate::resolver::NS_VALUE;
+use crate::suggest;
 
 const IMPL_STRIDE: i64 = 3;
 
@@ -19,6 +61,12 @@ type State<'a> = (
     i64,
     i64,
     &'a mut Vec<bool>,
+    // Secondary notes tied to the errors this stage reports (definition-site
+    // labels and hedged name suggestions), indexed like the borrow checker's.
+    &'a mut Vec<Note>,
+    // The return-type node of the function currently being checked, so a
+    // return-type mismatch can label the declaration it violates.
+    i64,
 );
 
 pub fn typecheck(
@@ -26,6 +74,7 @@ pub fn typecheck(
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
     errors: &mut Vec<Diag>,
+    notes: &mut Vec<Note>,
     root: i64,
     ext_mods: &[(i64, i64)],
 ) -> (bool, i64) {
@@ -58,6 +107,8 @@ pub fn typecheck(
         0,
         0,
         &mut local_fact_sources,
+        notes,
+        0,
     );
 
     collect_types(&mut state, root);
@@ -232,30 +283,36 @@ fn pop_scope(env: &mut Vec<Vec<i64>>) {
 }
 
 fn entry_at(scope: &[i64], idx: i64, slot: i64) -> i64 {
-    match scope.get((idx * 3 + slot) as usize) {
+    match scope.get((idx * 4 + slot) as usize) {
         Some(value) => *value,
         None => NONE,
     }
 }
 
-fn bind(env: &mut [Vec<i64>], name: i64, key: i64, is_mut: i64) {
+fn bind(env: &mut [Vec<i64>], name: i64, key: i64, is_mut: i64, decl: i64) {
     if let Some(scope) = env.last_mut() {
         scope.push(name);
         scope.push(key);
         scope.push(is_mut);
+        scope.push(decl);
     }
 }
 
 fn lookup(env: &[Vec<i64>], name: i64) -> (i64, i64) {
+    let full = lookup_full(env, name);
+    (full.0, full.1)
+}
+
+fn lookup_full(env: &[Vec<i64>], name: i64) -> (i64, i64, i64) {
     let mut depth = env.len();
     while depth > 0 {
         depth -= 1;
         match env.get(depth) {
             Some(scope) => {
                 let mut idx = 0i64;
-                while idx < scope.len() as i64 / 3 {
+                while idx < scope.len() as i64 / 4 {
                     if entry_at(scope, idx, 0) == name {
-                        return (entry_at(scope, idx, 1), entry_at(scope, idx, 2));
+                        return (entry_at(scope, idx, 1), entry_at(scope, idx, 2), entry_at(scope, idx, 3));
                     }
                     idx += 1;
                 }
@@ -263,7 +320,7 @@ fn lookup(env: &[Vec<i64>], name: i64) -> (i64, i64) {
             None => break,
         }
     }
-    (NONE, 0)
+    (NONE, 0, NONE)
 }
 
 fn attach_local_facts(state: &mut State, source: i64) {
@@ -291,7 +348,7 @@ fn attach_local_facts(state: &mut State, source: i64) {
         match state.4.get(depth) {
             Some(scope) => {
                 let mut idx = 0i64;
-                while idx < scope.len() as i64 / 3 {
+                while idx < scope.len() as i64 / 4 {
                     let name = entry_at(scope, idx, 0);
                     let mut shadowed = false;
                     let mut fact_idx = 0usize;
@@ -404,7 +461,7 @@ fn bind_type_params(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], env: &mut [Vec
             let bound = node_c(nodes, param);
             let key = param_decl_key(nodes, lists, owner, name, bound);
             ty_set_key(nodes, param, key);
-            bind(env, name, key, 0);
+            bind(env, name, key, 0, NONE);
         }
         idx += 1;
     }
@@ -1195,12 +1252,12 @@ fn verify_impl_method(state: &mut State, trait_sym: i64, for_key: i64, method: i
     while pidx < t_count {
         let t_param = list_get(state.2, t_params, pidx);
         if node_tag(state.1, t_param) == NODE_TY && node_a(state.1, t_param) == TY_PARAM {
-            bind(state.4, node_b(state.1, t_param), fresh_var_local(&mut t_vars), 0);
+            bind(state.4, node_b(state.1, t_param), fresh_var_local(&mut t_vars), 0, NONE);
         }
         pidx += 1;
     }
     let self_var = fresh_var_local(&mut t_vars);
-    bind(state.4, intern(state.0, "Self"), self_var, 0);
+    bind(state.4, intern(state.0, "Self"), self_var, 0, NONE);
     let t_params = node_c(state.1, trait_method);
     let i_params = node_c(state.1, method);
     let tn = list_len(state.2, t_params);
@@ -1386,11 +1443,13 @@ fn check_fn(state: &mut State, fn_node: i64, self_key: i64, is_main: i64) {
         let param = list_get(state.2, params, idx);
         let param_ty = node_b(state.1, param);
         let key = canon_ty(state, param_ty, self_key, 1);
-        bind(state.4, node_a(state.1, param), key, 0);
+        bind(state.4, node_a(state.1, param), key, 0, param);
         idx += 1;
     }
     let ret_ty = node_d(state.1, fn_node);
     let ret = canon_ty(state, ret_ty, self_key, 1);
+    let saved_ret_ty_node = state.17;
+    state.17 = ret_ty;
     // The program entry point (`SYM_FUN_MAIN`, set by the resolver) must
     // return a builtin scalar, Unit, or an exit-status enum (MANIFESTO):
     // codegen derives the process exit code only from those two layouts.
@@ -1414,6 +1473,7 @@ fn check_fn(state: &mut State, fn_node: i64, self_key: i64, is_main: i64) {
     }
     check_tail_calls(state, fn_node);
     pop_scope(state.4);
+    state.17 = saved_ret_ty_node;
 }
 
 // The exit-status enum contract (MANIFESTO): 2 or 3 variants shaped
@@ -1623,12 +1683,20 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
             let ok = unify_key(state.1, state.2, state.6, ikey, dkey);
             if !ok && key_kind(state.1, ikey) != TYD_UNKNOWN && key_kind(state.1, dkey) != TYD_UNKNOWN {
                 push_error(state.3, &format!("cannot assign '{}' to '{}'", render_key(state.0, state.1, state.2, state.6, state.7, ikey), render_key(state.0, state.1, state.2, state.6, state.7, dkey)), file, start, end);
+                push_note_for_last(
+                    state.3,
+                    state.16,
+                    "declared type here",
+                    node_file(state.1, declared),
+                    node_start(state.1, declared),
+                    node_end(state.1, declared),
+                );
             }
             dkey
         } else {
             check_expr(state, init, NONE, ret, impure, self_key)
         };
-        bind(state.4, name, binding_key, is_mut);
+        bind(state.4, name, binding_key, is_mut, stmt);
         stmt_set_ty(state.1, stmt, binding_key);
         return binding_key;
     }
@@ -1640,6 +1708,17 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
         let ok = unify_key(state.1, state.2, state.6, vkey, tkey);
         if !ok && key_kind(state.1, vkey) != TYD_UNKNOWN && key_kind(state.1, tkey) != TYD_UNKNOWN {
             push_error(state.3, &format!("cannot assign '{}' to '{}'", render_key(state.0, state.1, state.2, state.6, state.7, vkey), render_key(state.0, state.1, state.2, state.6, state.7, tkey)), file, start, end);
+            let declared_ty = assign_target_declared_type(state, target);
+            if declared_ty != NONE {
+                push_note_for_last(
+                    state.3,
+                    state.16,
+                    "declared type here",
+                    node_file(state.1, declared_ty),
+                    node_start(state.1, declared_ty),
+                    node_end(state.1, declared_ty),
+                );
+            }
         }
         stmt_set_ty(state.1, stmt, tkey);
         return tkey;
@@ -1688,6 +1767,16 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
             let ok = unify_key(state.1, state.2, state.6, key, ret);
             if !ok && key_kind(state.1, key) != TYD_UNKNOWN && key_kind(state.1, ret) != TYD_UNKNOWN {
                 push_error(state.3, &format!("return type mismatch: expected '{}', found '{}'", render_key(state.0, state.1, state.2, state.6, state.7, ret), render_key(state.0, state.1, state.2, state.6, state.7, key)), file, start, end);
+                if state.17 != NONE {
+                    push_note_for_last(
+                        state.3,
+                        state.16,
+                        "declared return type here",
+                        node_file(state.1, state.17),
+                        node_start(state.1, state.17),
+                        node_end(state.1, state.17),
+                    );
+                }
             }
         }
         stmt_set_ty(state.1, stmt, key);
@@ -1706,11 +1795,170 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
     let key = check_expr(state, expr, NONE, ret, impure, self_key);
     if is_result_key(state.1, key) {
         push_error(state.3, "unhandled Result value: use try or match", file, start, end);
+        let origin = call_result_origin(state, expr);
+        if origin != NONE {
+            push_note_for_last(
+                state.3,
+                state.16,
+                "declared return type here",
+                node_file(state.1, origin),
+                node_start(state.1, origin),
+                node_end(state.1, origin),
+            );
+        }
     } else if is_option_key(state.1, key) {
         push_error(state.3, "unhandled Option value: use try or match", file, start, end);
+        let origin = call_result_origin(state, expr);
+        if origin != NONE {
+            push_note_for_last(
+                state.3,
+                state.16,
+                "declared return type here",
+                node_file(state.1, origin),
+                node_start(state.1, origin),
+                node_end(state.1, origin),
+            );
+        }
     }
     stmt_set_ty(state.1, stmt, key);
     key
+}
+
+// The scope the resolver attached to `source` (a SCOPE_AT fact), so a
+// suggestion reads the scope the resolver already computed rather than
+// reconstructing one.
+fn scope_of(nodes: &[i64], source: i64) -> i64 {
+    let count = nodes.len() as i64 / NODE_STRIDE;
+    let mut idx = 0i64;
+    while idx < count {
+        if node_tag(nodes, idx) == NODE_SCOPEFACT
+            && node_a(nodes, idx) == SCOPE_AT
+            && node_b(nodes, idx) == source
+        {
+            return node_c(nodes, idx);
+        }
+        idx += 1;
+    }
+    NONE
+}
+
+// The return-type node of the function a call resolves to, when the call's
+// Result/Option value is directly that function's return value.  A division
+// or index result has no declared function to point at, so it yields NONE.
+fn call_result_origin(state: &mut State, expr: i64) -> i64 {
+    if node_tag(state.1, expr) != NODE_EXPR || node_a(state.1, expr) != EXPR_CALL {
+        return NONE;
+    }
+    let callee = node_b(state.1, expr);
+    if node_tag(state.1, callee) != NODE_EXPR || node_a(state.1, callee) != EXPR_PATH {
+        return NONE;
+    }
+    let sym = expr_sym_of(state.1, callee);
+    if sym == NONE {
+        return NONE;
+    }
+    let kind = sym_kind(state.1, sym);
+    if kind != SYM_FUN && kind != SYM_NATIVE_FUN {
+        return NONE;
+    }
+    let decl = sym_decl(state.1, sym);
+    if decl == NONE || node_tag(state.1, decl) != NODE_ITEM {
+        return NONE;
+    }
+    let fn_node = node_d(state.1, decl);
+    let ret_ty = node_d(state.1, fn_node);
+    if node_file(state.1, ret_ty) == NO_FILE {
+        return NONE;
+    }
+    ret_ty
+}
+
+// The declared type node of the binding an assignment target names, when the
+// target is a bare local with a declared type (`var x: I64 = ...`).
+fn assign_target_declared_type(state: &mut State, target: i64) -> i64 {
+    if node_tag(state.1, target) != NODE_EXPR || node_a(state.1, target) != EXPR_PATH {
+        return NONE;
+    }
+    let segs = node_b(state.1, target);
+    if list_len(state.2, segs) != 1 {
+        return NONE;
+    }
+    let name = list_first(state.2, segs);
+    let full = lookup_full(state.4, name);
+    let decl = full.2;
+    if decl != NONE && node_tag(state.1, decl) == NODE_STMT && node_a(state.1, decl) == STMT_LET && node_d(state.1, decl) != NONE {
+        return node_d(state.1, decl);
+    }
+    NONE
+}
+
+// Offer a hedged "did you mean" note for an unresolved value name, drawn
+// from the locals in the live environment and the value-namespace names the
+// resolver materialized for the source's scope.  The error must already be
+// pushed so the note attaches to it.
+fn suggest_value_name(state: &mut State, source: i64, misspelled: i64) {
+    let text = name_text(state.0, misspelled);
+    let mut entries: Vec<(String, i64, i64, i64)> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    let mut depth = state.4.len();
+    while depth > 0 {
+        depth -= 1;
+        match state.4.get(depth) {
+            Some(scope) => {
+                let mut idx = 0i64;
+                while idx < scope.len() as i64 / 4 {
+                    let name = entry_at(scope, idx, 0);
+                    let decl = entry_at(scope, idx, 3);
+                    let text_name = name_text(state.0, name);
+                    if decl != NONE && node_file(state.1, decl) != NO_FILE && !seen.contains(&text_name) {
+                        seen.push(text_name.clone());
+                        entries.push((text_name, node_file(state.1, decl), node_start(state.1, decl), node_end(state.1, decl)));
+                    }
+                    idx += 1;
+                }
+            }
+            None => break,
+        }
+    }
+    let scope = scope_of(state.1, source);
+    let count = state.1.len() as i64 / NODE_STRIDE;
+    let mut nidx = 0i64;
+    while nidx < count {
+        if node_tag(state.1, nidx) == NODE_SCOPEFACT
+            && node_a(state.1, nidx) == SCOPE_VISIBLE
+            && node_b(state.1, nidx) == scope
+            && node_e(state.1, nidx) == NS_VALUE
+        {
+            let name = node_c(state.1, nidx);
+            let sym = node_d(state.1, nidx);
+            let decl = sym_decl(state.1, sym);
+            let text_name = name_text(state.0, name);
+            if decl != NONE && node_tag(state.1, decl) == NODE_ITEM && node_file(state.1, decl) != NO_FILE && !seen.contains(&text_name) {
+                seen.push(text_name.clone());
+                entries.push((text_name, node_file(state.1, decl), node_start(state.1, decl), node_end(state.1, decl)));
+            }
+        }
+        nidx += 1;
+    }
+    let mut candidates: Vec<suggest::Candidate> = Vec::new();
+    let mut idx = 0usize;
+    while idx < entries.len() {
+        match entries.get(idx) {
+            Some(entry) => {
+                candidates.push(suggest::Candidate {
+                    name: entry.0.clone(),
+                    file: entry.1,
+                    start: entry.2,
+                    end: entry.3,
+                });
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    if let Some(suggestion) = suggest::suggest(&text, &candidates) {
+        push_note_for_last(state.3, state.16, &suggestion.message, suggestion.file, suggestion.start, suggestion.end);
+    }
 }
 
 fn collect_consts(state: &mut State, list: i64) {
@@ -1749,6 +1997,14 @@ fn collect_const_item(state: &mut State, item: i64) {
     // is suppressed (Single-Fact: fold_const owns the error return key).
     if !ok && key_kind(state.1, key) != TYD_UNKNOWN && key_kind(state.1, declared) != TYD_UNKNOWN {
         push_error(state.3, &format!("constant initializer type mismatch: expected '{}', found '{}'", render_key(state.0, state.1, state.2, state.6, state.7, declared), render_key(state.0, state.1, state.2, state.6, state.7, key)), file, start, end);
+        push_note_for_last(
+            state.3,
+            state.16,
+            "declared type here",
+            node_file(state.1, decl_ty),
+            node_start(state.1, decl_ty),
+            node_end(state.1, decl_ty),
+        );
     }
     alloc_node(state.1, &[NODE_CONSTVAL, NO_FILE, NO_FILE, NO_FILE, sym, value, NONE, NONE, NONE, NONE]);
     expr_set_ty(state.1, value_expr, key);
@@ -2740,11 +2996,23 @@ fn check_assign_target(state: &mut State, target: i64, ret: i64, impure: i64, se
         let found = lookup(state.4, first);
         if found.0 == NONE {
             push_error(state.3, &format!("unknown symbol '{}'", name_text(state.0, first)), file, start, end);
+            suggest_value_name(state, target, first);
             return recover_ty(state, target, NONE);
         }
         if count == 1 {
             if found.1 == 0 {
                 push_error(state.3, &format!("cannot assign to '{}': assignment requires var", name_text(state.0, first)), file, start, end);
+                let decl = lookup_full(state.4, first).2;
+                if decl != NONE && node_file(state.1, decl) != NO_FILE {
+                    push_note_for_last(
+                        state.3,
+                        state.16,
+                        "declared here",
+                        node_file(state.1, decl),
+                        node_start(state.1, decl),
+                        node_end(state.1, decl),
+                    );
+                }
             }
             expr_set_ty(state.1, target, found.0);
             return found.0;
@@ -2775,8 +3043,20 @@ fn check_assign_target(state: &mut State, target: i64, ret: i64, impure: i64, se
             let found = lookup(state.4, first);
             if found.0 == NONE {
                 push_error(state.3, &format!("unknown symbol '{}'", name_text(state.0, first)), file, start, end);
+                suggest_value_name(state, base, first);
             } else if found.1 == 0 {
                 push_error(state.3, &format!("cannot assign to field '{}' of '{}': assignment requires var", name_text(state.0, field), name_text(state.0, first)), file, start, end);
+                let decl = lookup_full(state.4, first).2;
+                if decl != NONE && node_file(state.1, decl) != NO_FILE {
+                    push_note_for_last(
+                        state.3,
+                        state.16,
+                        "declared here",
+                        node_file(state.1, decl),
+                        node_start(state.1, decl),
+                        node_end(state.1, decl),
+                    );
+                }
             }
         } else {
             push_error(state.3, &format!("cannot assign to field '{}': the target is not a mutable place", name_text(state.0, field)), file, start, end);
@@ -2911,6 +3191,7 @@ fn check_local_chain(state: &mut State, expr: i64, expected: i64) -> i64 {
     let found = lookup(state.4, first);
     if found.0 == NONE {
         push_error(state.3, &format!("unknown symbol '{}'", name_text(state.0, first)), file, start, end);
+        suggest_value_name(state, expr, first);
         return recover_ty(state, expr, expected);
     }
     let mut current = found.0;
@@ -3137,12 +3418,14 @@ fn check_unresolved_callee(state: &mut State, expr: i64, expected: i64) -> i64 {
         let found = lookup(state.4, first);
         if found.0 == NONE {
             push_error(state.3, &format!("unknown symbol '{}'", name_text(state.0, first)), file, start, end);
+            suggest_value_name(state, expr, first);
         } else {
             push_error(state.3, "cannot call a field", file, start, end);
         }
     } else {
         let first = list_get(state.2, segs, 0);
         push_error(state.3, &format!("unknown function '{}'", name_text(state.0, first)), file, start, end);
+        suggest_value_name(state, expr, first);
     }
     // The callee could not be resolved and an error was already reported;
     // the call recovers to the expected key (or TYD_UNKNOWN) so the
@@ -3767,7 +4050,7 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64) -> i64 {
     let end = node_end(state.1, pat);
     if kind == PAT_BIND {
         let name = node_b(state.1, pat);
-        bind(state.4, name, s_key, 0);
+        bind(state.4, name, s_key, 0, pat);
         pat_set_ty(state.1, pat, s_key);
         return s_key;
     }
@@ -3855,7 +4138,7 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64) -> i64 {
     let rest = node_c(state.1, pat);
     if rest != NONE {
         let rest_key = rest_type_of(state.1, state.2, s_key, inner);
-        bind(state.4, rest, rest_key, 0);
+        bind(state.4, rest, rest_key, 0, pat);
         pat_set_rest_key(state.1, pat, rest_key);
     }
     pat_set_ty(state.1, pat, s_key);

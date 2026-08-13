@@ -1,3 +1,28 @@
+//! Entry-file loading and sibling-module discovery.
+//!
+//! Cinnabar has no package manager and no import search path. A `use X.y`
+//! whose first segment `X` is not a `mod` already declared in the importing
+//! file names a sibling file `X.cnb` next to it, which is read, lexed, and
+//! parsed in turn — a worklist walk that terminates when no newly parsed
+//! file introduces an unseen sibling. What comes back is the root item
+//! list, one `ext_mods` entry per externally loaded file for the resolver
+//! to wire in as a scope, and every `(path, source)` pair the driver needs
+//! to render a diagnostic against the right file.
+//!
+//! `load_with_overlay` is the same walk with in-memory sources preferred
+//! over the file system, which is how the language server analyzes unsaved
+//! buffers without writing them to disk. Overlay paths are compared
+//! component-wise, so `a/b.cnb` and `a\b.cnb` name one entry.
+//!
+//! **Invariants:**
+//! - A file that cannot be read is a diagnostic carrying the span of the
+//!   `use` that asked for it — not a panic, and not a silent omission that
+//!   would resurface later as an unresolved name.
+//! - The overlay is consulted by both read paths or by neither; a module
+//!   reachable only through an unsaved buffer must load exactly as one on
+//!   disk would, or the server would analyze a different program than the
+//!   editor is showing.
+
 use crate::ast::*;
 use std::path::Path;
 

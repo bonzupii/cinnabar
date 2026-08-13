@@ -40,6 +40,7 @@ pub mod Collections
     pub EmptySlice
     pub InvalidUtf8
     pub EndOfInput
+    pub ReadFailed(Usize)
   end
 
   pub nat fun string_len(value: &String) Usize
@@ -108,6 +109,7 @@ fun check_end_of_input() impure I64
     Err(Collections.KeyNotFound) => return 33
     Err(Collections.EmptySlice) => return 34
     Err(Collections.InvalidUtf8) => return 35
+    Err(Collections.ReadFailed(errno)) => return 36
   end
 end
 

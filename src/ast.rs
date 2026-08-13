@@ -1,3 +1,40 @@
+//! The flat node arena, and the accessors every stage reads it through.
+//!
+//! The whole compiler state is three allocation-only buffers rather than a
+//! tree of heap-boxed Rust enums: `nodes`, a single arena of fixed-width
+//! `NODE_STRIDE` rows holding every entity there is (tokens, items,
+//! functions, types, expressions, statements, patterns, resolved symbols,
+//! canonical type descriptors, monomorphization instances, trait-dispatch
+//! facts, variant tags, field offsets); `names`, an interning table
+//! addressed by integer id; and `lists`, an arena of variable-length id
+//! lists. Every reference between entities is an integer index into one of
+//! the three — there is no `Box`, and nothing here is walked recursively as
+//! a Rust value.
+//!
+//! A row's meaning comes from its `NODE_TAG` plus, for most tags, a
+//! secondary opcode in a payload slot (`ITEM_STRUCT`, `TY_REF`,
+//! `EXPR_BINARY`/`BIN_ADD`, `STMT_IF`). The generic `node_a`..`node_f`
+//! accessors and their `node_set_*` mutators are the only way rows are read
+//! and written, which is what lets a later stage attach a fact to an entity
+//! an earlier stage allocated without either of them owning a struct
+//! definition the other has to be kept in step with.
+//!
+//! `Diag` and `Note` live here for the same reason: a diagnostic and its
+//! supporting notes are facts about arena rows, and every stage produces
+//! them in one shape for the driver to render.
+//!
+//! **Invariants:**
+//! - A fact with nowhere of its own to live goes in an otherwise-unused
+//!   payload slot of the row it describes, never in a new side table. That
+//!   is what keeps the Single-Fact Rule cheap enough to actually follow as
+//!   the language grows.
+//! - `NO_FILE` marks a genuinely source-less fact. Every other span is the
+//!   real origin of the thing it describes, carried unmodified from lexing
+//!   through codegen; no stage may substitute a placeholder.
+//! - A `Note` span is a site the producing stage actually visited — a
+//!   binding site, a path's last move, a branch exit — never one invented
+//!   to have something to point at.
+
 pub type Diag = (String, i64, i64, i64);
 
 // A secondary explanatory note attached to a primary diagnostic:

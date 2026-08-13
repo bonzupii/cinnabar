@@ -1,3 +1,21 @@
+//! The language server, driven as a real subprocess over stdio.
+//!
+//! These tests spawn the built `cinnabar-lsp` binary and speak actual
+//! JSON-RPC to it — initialize, open documents, request hover, read
+//! published diagnostics, shut down. Nothing here calls into
+//! `cinnabar::analysis` directly, because what is being pinned are
+//! properties of the *server*: that a hover on a large source file answers
+//! within a bound, that a hover issued while diagnostics are in flight is
+//! answered without a duplicate analysis, and that overlay diagnostics,
+//! hover, and shutdown all work within one session.
+//!
+//! **Invariants:**
+//! - Every read from the server is bounded by a timeout. A language server
+//!   bug typically presents as silence, and a test that waited forever
+//!   would hang the suite rather than fail it.
+//! - The server is exercised through the protocol only. Reaching past it
+//!   into the library would stop testing the layer that can actually break.
+
 use serde_json::{json, Value};
 use std::error::Error;
 use std::io::{BufRead, BufReader, Read, Write};

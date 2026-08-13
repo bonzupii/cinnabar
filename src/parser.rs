@@ -1,3 +1,29 @@
+//! Recursive-descent parsing over the lexer's token rows.
+//!
+//! Hand-rolled, with no parser generator or PEG crate. The token rows the
+//! lexer left in the arena are consumed in place and `NODE_ITEM`, `NODE_FN`,
+//! `NODE_TY`, `NODE_EXPR`, `NODE_STMT`, and `NODE_PAT` rows are emitted
+//! through the small `alloc_*` helpers. Indentation carries no meaning:
+//! blocks close with `end`, newlines separate statements, and a multi-line
+//! expression is permitted anywhere inside `()`, `[]`, or `{}`.
+//!
+//! Error recovery is line-based (`recover_line`), so one malformed
+//! statement does not abort the file and a single invocation can report
+//! many parse errors — which is what makes a file that is mid-edit usable
+//! in the editor rather than a wall of one error at a time.
+//!
+//! `#!` doc comments are attached here, as `NODE_DOC` rows pointing at the
+//! item that follows. The API documentation renderer reads those rows
+//! rather than re-scanning source text for comment syntax.
+//!
+//! **Invariants:**
+//! - The parser records structure, never meaning. It does not resolve a
+//!   name, decide a type, or evaluate a constant: a syntactically valid but
+//!   semantically nonsensical program parses cleanly and is rejected by the
+//!   stage that owns the fact it violates.
+//! - Every row allocated here carries the real span of the source text it
+//!   came from; spans start here and are carried forward, never rebuilt.
+
 use crate::ast::*;
 
 pub fn parse(

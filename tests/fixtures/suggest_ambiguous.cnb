@@ -1,0 +1,11 @@
+pub fun post(value: I64) I64
+  return value
+end
+
+pub fun fort(value: I64) I64
+  return value
+end
+
+pub fun main() I64
+  return port(1)
+end

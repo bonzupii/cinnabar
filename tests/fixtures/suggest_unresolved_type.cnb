@@ -1,0 +1,11 @@
+pub type Point
+  pub x: I64
+end
+
+pub fun use_point(p: Poit) I64
+  return 0
+end
+
+pub fun main() I64
+  return 0
+end

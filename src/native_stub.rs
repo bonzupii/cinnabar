@@ -1,3 +1,21 @@
+//! Generation of a Cinnabar native surface from a small IDL.
+//!
+//! Reads a line-oriented description — one `module`, then `type` and `fun`
+//! declarations — and emits the corresponding `pub nat type` and
+//! `pub nat fun` declarations wrapped in a `pub mod`. Ownership and the
+//! actual implementation are the host's to supply; what is generated is
+//! only the declaration surface the compiler needs in order to typecheck
+//! calls into it.
+//!
+//! **Invariants:**
+//! - The language's casing rules are enforced here, at generation time, on
+//!   module, type, function, and parameter names. Emitting a declaration
+//!   the resolver would reject would push a diagnostic onto a file the
+//!   author did not write and cannot fix.
+//! - Delimiters in a type expression are balance-checked before emission,
+//!   so a malformed IDL fails as an IDL error naming its line rather than
+//!   as a parse error in generated source.
+
 use std::path::Path;
 
 pub fn generate_from_idl(source: &str) -> Result<String, String> {

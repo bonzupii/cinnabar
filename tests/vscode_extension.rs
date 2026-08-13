@@ -1,16 +1,21 @@
-// Runs the editor extension's own suite as part of `cargo test`.
-//
-// The extension restates parts of the language that are not generated from
-// anything: the grammar's keyword lists, the comment tokens, the file
-// extension, the server binary name.  Its suite compares those against the
-// compiler's own tables and drives a real LSP session against the built
-// server.  Left to `npm test` alone none of it would ever run, and the drift
-// it exists to catch would surface as wrong highlighting or a silent editor
-// rather than as a failure.
-//
-// It hangs off `cargo test` rather than a new step in `pre_commit_check.sh`
-// because that script is not ours to edit (AGENTS.md), and the gate already
-// runs the Cargo suite.
+//! The editor extension's own suite, run as part of `cargo test`.
+//!
+//! The extension restates parts of the language that are not generated from
+//! anything: the grammar's keyword lists, the comment tokens, the file
+//! extension, the server binary name. Its suite compares those against the
+//! compiler's own tables and drives a real LSP session against the built
+//! server.
+//!
+//! It hangs off `cargo test` rather than a new step in
+//! `pre_commit_check.sh` because that script is not ours to edit
+//! (AGENTS.md), and the gate already runs the Cargo suite.
+//!
+//! **Invariants:**
+//! - The extension's suite must run somewhere the gate reaches. Left to
+//!   `npm test` alone none of it would ever run, and the drift it exists to
+//!   catch would surface as wrong highlighting or a silent editor rather
+//!   than as a failure.
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

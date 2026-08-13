@@ -1,15 +1,28 @@
-// cinnabar-lsp: a Language Server Protocol server over the compiler's
-// attached facts.
-//
-// The server is a thin JSON-RPC shell around `cinnabar::analysis`: every
-// request re-runs the real front-end pipeline over the open buffers (via
-// the module loader's overlay) and answers from the attachments the
-// pipeline computed.  There is no second implementation of name
-// resolution, type inference, or borrow checking anywhere in this file.
-//
-// Protocol payloads are built as raw JSON values: the server speaks the
-// small, stable subset of the protocol it implements, and the analysis
-// layer keeps every language-aware decision.
+//! The `cinnabar-lsp` binary: a language server over the attached facts.
+//!
+//! A thin JSON-RPC shell around `cinnabar::analysis`. Every request re-runs
+//! the real front-end pipeline over the open buffers, through the module
+//! loader's overlay, and answers from the attachments that pipeline
+//! computed. Document sync is full-text.
+//!
+//! The bookkeeping that is genuinely this file's own: mapping each open
+//! module back to its analysis root, owning the published URI set per root
+//! so a file that stops having diagnostics gets them cleared, debouncing
+//! checks off the protocol loop, and rejecting stale generations before
+//! publication so a slow analysis cannot overwrite a newer one. The borrow
+//! checker's explanatory notes ride along as `relatedInformation` and code
+//! lenses.
+//!
+//! Protocol payloads are built as raw JSON values: the server speaks the
+//! small, stable subset of the protocol it implements.
+//!
+//! **Invariants:**
+//! - There is no second implementation of name resolution, type inference,
+//!   or borrow checking anywhere in this file. Every language-aware
+//!   decision belongs to the analysis layer.
+//! - A published diagnostic set is either current or not published. Stale
+//!   generations are dropped rather than sent, because an editor showing
+//!   errors from a previous keystroke is worse than one showing none.
 
 use cinnabar::analysis::{
     analyze, completions, definition, file_id_of, file_text_of, hover, offset_to_position,
@@ -664,7 +677,10 @@ fn register_document(state: &mut ServerState, path: &str) -> String {
     if state.roots.contains(&path.to_string()) {
         return path.to_string();
     }
-    if let Some(entry_path) = project::entry_for_source(std::path::Path::new(path)) {
+    // A file that belongs to no project is the ordinary case for an editor —
+    // a scratch buffer, a fixture opened on its own — so the failure is the
+    // answer "no project", not something to report to the user.
+    if let Ok(entry_path) = project::entry_for_source(std::path::Path::new(path)) {
         let entry = entry_path.to_string_lossy().to_string();
         state.doc_entries.push((path.to_string(), entry.clone()));
         if !state.roots.contains(&entry) {

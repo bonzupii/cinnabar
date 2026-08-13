@@ -5,10 +5,10 @@
 //! its socket wrappers, because an allocator and a `sockaddr` marshaller
 //! are real code rather than thin syscall shims. The `Memory`, `Terminal`,
 //! and `File` surfaces do not go through it. They issue the kernel entry
-//! point directly, which is what Milestone 4 asks for and what makes those
-//! three surfaces auditable end to end: the instruction that leaves user
-//! space is visible in the emitted IR, with nothing between the Cinnabar
-//! declaration and the kernel.
+//! point directly, which is what makes those three surfaces auditable end
+//! to end: the instruction that leaves user space is visible in the
+//! emitted IR, with nothing between the Cinnabar declaration and the
+//! kernel.
 //!
 //! Everything architecture-specific is in this file and derived from the
 //! module's target triple: the instruction, the register constraints, and
@@ -26,6 +26,15 @@
 //! This is why the syscall path needs no `__errno_location` (which the libc
 //! wrappers, and so the `Net` surface, still use): the error arrives in the
 //! value itself.
+//!
+//! **Invariants:**
+//! - An architecture with no implemented table is a compile error naming
+//!   the triple, never a guessed syscall number. A wrong number here would
+//!   not fail to build; it would silently call something else.
+//! - The register constraints are part of the ABI data, not incidental:
+//!   x86_64 passes the fourth argument in `r10` rather than `rcx` because
+//!   `syscall` overwrites `rcx`. `openat` is used on both architectures
+//!   because AArch64 has no `open`.
 
 use crate::codegen::error::*;
 use inkwell::context::Context;

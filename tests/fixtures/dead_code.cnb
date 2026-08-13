@@ -1,0 +1,28 @@
+#!|
+  A private function and a private constant, both declared and never used.
+
+  This is rejected. Reachability is required of every item — public and
+  private alike, functions, constants, types, and native declarations — and
+  an item nothing reachable from `main` needs has no reason to have been
+  written.
+
+  `pub` is not an exemption. Exempting it would make one word the way to
+  silence this diagnostic, and Cinnabar grants no mechanism to bypass,
+  suppress, weaken, or defer an invariant. That is why an earlier attempt at
+  this check was reverted: it exempted `pub`, and the only remedy it left
+  anyone was to mark demonstration code public until the compiler stopped
+  objecting.
+
+  Both diagnostics are asserted in `tests/rejection_diagnostics.rs`, so
+  losing either one fails rather than passing on its sibling.
+|#
+
+fun unused_helper() I64
+  return 1
+end
+
+const UNUSED_CONST: I64 = 5
+
+pub fun main() I64
+  return 0
+end

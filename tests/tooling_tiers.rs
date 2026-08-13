@@ -1,3 +1,20 @@
+//! The CLI tool surfaces, exercised end to end through the built binary.
+//!
+//! Drives the compiler executable as a subprocess across the tool commands:
+//! the project and inspection surfaces, the attached-fact and formatter
+//! flags, and the documentation and playground servers over real HTTP on an
+//! OS-assigned loopback port. It also checks that the editor package
+//! references language assets that actually exist.
+//!
+//! **Invariants:**
+//! - Each server test binds a port the OS chooses and stops its child
+//!   afterward, so the suite stays runnable in parallel and leaves nothing
+//!   listening behind it.
+//! - Scratch directories are unique per process and per invocation.
+//! - These go through the CLI rather than the library. A flag that parses
+//!   but is wired to nothing is exactly the failure they exist to catch,
+//!   and only the real binary can show it.
+
 use serde_json::Value;
 use std::error::Error;
 use std::io::{Read, Write};
@@ -112,7 +129,7 @@ fn tier_five_and_six_commands_work_end_to_end() -> Result<(), Box<dyn Error>> {
     assert!(initialized.status.success(), "Mushlings init failed: {}", text(&initialized));
     let verified = run(compiler, &["mushlings", "verify", &path_text(&lessons)])?;
     assert!(verified.status.success(), "Mushlings verify failed: {}", text(&verified));
-    assert!(text(&verified).contains("0 solved, 7 pending"));
+    assert!(text(&verified).contains("0 solved, 9 pending"));
 
     let failure = directory.join("fuzz_fail_7.cnb");
     let minimized = directory.join("fuzz_fail_7.min.cnb");
@@ -172,18 +189,18 @@ fn documentation_and_playground_servers_work_over_http() -> Result<(), Box<dyn E
     std::fs::write(&fixture_path, "#! Playground documentation\npub fun main() I32\n  return 0\nend\n")?;
     let fixture = path_text(&fixture_path);
 
-    let book_address = free_address()?;
-    let mut book = Command::new(compiler)
-        .args(["book", &fixture, "--address", &book_address])
+    let burn_address = free_address()?;
+    let mut burn = Command::new(compiler)
+        .args(["burn", &fixture, "--address", &burn_address])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    let book_result = request(&book_address, b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-    stop_server(&mut book)?;
-    let book_response = book_result?;
-    assert!(book_response.contains("200 OK"));
-    assert!(book_response.contains("Cinnabook"));
-    assert!(book_response.contains(env!("CARGO_PKG_VERSION")));
+    let burn_result = request(&burn_address, b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    stop_server(&mut burn)?;
+    let burn_response = burn_result?;
+    assert!(burn_response.contains("200 OK"));
+    assert!(burn_response.contains("Cinnabook"));
+    assert!(burn_response.contains(env!("CARGO_PKG_VERSION")));
 
     let playground_address = free_address()?;
     let mut playground = Command::new(compiler)

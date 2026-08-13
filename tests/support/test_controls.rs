@@ -1,3 +1,20 @@
+//! Test-profile controls shared by the heavier suites.
+//!
+//! `full`, `balanced`, and `smoke` are selected by cargo feature, and the
+//! helpers here turn that choice into concrete budgets — a per-profile
+//! constant, or an environment-overridable one under the reduced profiles.
+//! `evenly_selected` is the sampler those budgets feed.
+//!
+//! **Invariants:**
+//! - `evenly_selected` takes exactly `budget` cases spread across the whole
+//!   ordered corpus, never a prefix. A prefix would systematically miss the
+//!   later shapes, so a reduced run would report green while an entire
+//!   region of the corpus went unexecuted.
+//! - The two reduced profiles are mutually exclusive, asserted rather than
+//!   silently resolved in favour of one of them.
+//! - Selection arithmetic is done in `u128`, so a large corpus and budget
+//!   cannot overflow into a wrong selection.
+
 use std::env::VarError;
 
 #[derive(Clone, Copy)]

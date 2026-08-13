@@ -51,6 +51,27 @@
 - No functions whose only job is to make a value appear "used" without the result affecting behavior. If code review can't explain what control-flow or output changes because a value was read, it isn't really used.
 - Preserve typed errors end-to-end. Only the final diagnostic may stringify an error; every intermediate stage carries a typed error with a real span.
 - `Span` fields must always reflect the real source origin of the fact they describe. Never fabricate a placeholder location such as `Span::new(0, 0, 1, 1)`, including for compiler-generated runtime bodies, builtin declarations, synthesized module wrappers, inferred types, or tool/infrastructure failures. If a fact has no Cinnabar source origin, represent that source-less origin explicitly in the diagnostic/error model; do not assign it a fake source location. Source-derived facts must carry their actual span from lexing through codegen without substitution.
+
+### File header comments
+Every `.rs` file in `src/`, `tests/`, and `build.rs` opens with an inner doc comment (`//!`) in this shape, before any `use` or item:
+
+```rust
+//! <One sentence naming what this file is. A noun phrase, ends with a period.>
+//!
+//! <Free prose. What this file owns, which earlier stage's facts it reads,
+//! why it exists in the shape it does, and what it deliberately does not
+//! do. Wrap at roughly 76 columns.>
+//!
+//! **Invariants:**
+//! - <A rule a reviewer can check a diff against.>
+```
+
+- **First line is mandatory and fixed in form**: one sentence, a noun phrase, ending in a period. `grep -rn '^//! [A-Z].*\.$' src tests build.rs` must yield a one-line index of the tree, so no other line may take that shape at the top of a file.
+- **The body is free prose**, in the voice of the surrounding code — explain the design and its reasons, not a restatement of the file's own name or path. "Purpose: the typed error type" is not worth a line.
+- **No stage numbers, milestone numbers, or other project-tracking labels**, in the first line or the body. `Stage 4:` and `Milestone 8 —` are positions in a plan, not descriptions of code: they go stale when the plan is reorganized, they mean nothing to a reader who has not read the plan, and they take the place of the sentence that would have said what the file does. Describe the work — "Name resolution, scope construction, and casing enforcement." A pointer to `ROADMAP.md` for a genuine open follow-up is fine; a number worn as a label is not.
+- **The `**Invariants:**` block is included only where the file carries a hard rule** worth pinning — a Single-Fact Rule boundary, a no-fabricated-span rule, a "derived, never hand-maintained" table. Omit it entirely rather than filling it with restated obviousness.
+- Doc comments on individual items (`///`) are unaffected by this and stay where they are.
+
 ## Generalization Over Special-Casing (STRICT)
 - **Zero String-Name Semantics**: No pass in `typecheck`, `borrow`, or `codegen` may ever check a string name (e.g. `name == "Block"` or `name == "Memory.allocate"`) to decide how a type lowers, how linearity is tracked, or how code is generated. All semantics MUST derive strictly from node tags, canonical type descriptors (`TYD_*`), or symbol metadata (`sym_kind`, `is_linear`, `sym_native_op`).
 - **Category-Level Fixes Only**: When an error or crash occurs on a fixture, you are strictly forbidden from fixing "just that fixture" or "just those names." You MUST state the general language law that applies to ALL $N$ items of that category, and implement the general law.

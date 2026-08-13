@@ -1,12 +1,24 @@
-// Locates musl's static libc.a (and the crt start objects that a fully
-// static link requires for `_start`) and stages them into Cargo's OUT_DIR,
-// where src/codegen/mod.rs embeds them with include_bytes!.  Nothing binary
-// ever lives in the source tree; every archive is staged dynamically at
-// build time from the discovery order below:
-//   1. the MUSL_LIBC_A environment variable,
-//   2. the nix store (pkgs.musl, as provisioned by the flake dev shell),
-//   3. standard host musl paths,
-//   4. the rustc sysroot.
+//! Staging of a static musl libc into `OUT_DIR` at crate build time.
+//!
+//! Locates musl's `libc.a` — and the crt start objects a fully static link
+//! needs for `_start` — and copies them into Cargo's `OUT_DIR`, where
+//! `src/codegen/mod.rs` embeds them with `include_bytes!`. That embedding
+//! is what lets a compiled Cinnabar program link `-static -nostdlib` with
+//! no dependency on the host's libc.
+//!
+//! Discovery runs in this order:
+//!   1. the `MUSL_LIBC_A` environment variable,
+//!   2. the nix store (`pkgs.musl`, as provisioned by the flake dev shell),
+//!   3. standard host musl paths,
+//!   4. the rustc sysroot.
+//!
+//! **Invariants:**
+//! - No binary artifact ever lives in the source tree. Every archive is
+//!   staged dynamically at build time from the order above.
+//! - Staging copies are atomic (temp file, then rename), because nix store
+//!   paths are read-only and a partially written archive would fail at
+//!   link time rather than here.
+//! - This script generates no Rust code; it only stages files.
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};

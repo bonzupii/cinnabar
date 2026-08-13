@@ -4,7 +4,7 @@ pub mod Tools
   end
 
   pub fun visible() I64
-    return 2
+    return secret() + 1
   end
 end
 
@@ -21,5 +21,8 @@ fun branch_locals(flag: Bool) I64
 end
 
 pub fun main() I64
+  if branch_locals(false) != 2
+    return 1
+  end
   return 0
 end

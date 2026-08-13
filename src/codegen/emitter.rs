@@ -1,3 +1,40 @@
+//! Lowering of the typed arena to LLVM IR.
+//!
+//! `emit_program` locates `main` through the `SYM_FUN_MAIN` tag the
+//! resolver attached, then monomorphizes and emits every reachable function
+//! (`get_or_emit_fn`), lowering expressions, statements, and match arms to
+//! inkwell builder calls. The user's `main` — which may return a scalar
+//! exit code or an exit-status enum — is wrapped in a real C
+//! `int main(void)`.
+//!
+//! It also implements the native surface: heap memory through `malloc` and
+//! `free`, BSD sockets through real libc entry points (`socket`, `bind`,
+//! `listen`, `accept`, `send`, `close` — networking is a first-class native
+//! surface here, not a userland abstraction), and the `Vec`, `String`, and
+//! `HashMap` intrinsics with `errno`-based error mapping via
+//! `__errno_location`. Which operation a call is dispatches on the `NAT_*`
+//! opcode assigned during resolution.
+//!
+//! Self-tail-recursive calls are marked `tail` at emission time. Tailness
+//! propagates only through the value expression of a tail-positioned match
+//! arm — never through an argument subexpression or a match scrutinee — and
+//! that marking is what lets LLVM's `-O2` deliver the language's
+//! O(1)-call-stack recursion guarantee with no runtime stack check anywhere
+//! in the emitted binary.
+//!
+//! **Invariants:**
+//! - Nothing is re-derived here. Types come from the typechecker's
+//!   canonical keys, symbols from the resolver, variant tags from
+//!   `NODE_VARFACT`, field offsets from `NODE_FIELDKEY`. Codegen never
+//!   re-resolves a name or re-infers a type.
+//! - No semantic decision reads a string name. Native dispatch is by
+//!   `NAT_*` opcode and `main` is found by tag, so renaming a function in
+//!   Cinnabar source cannot change how it lowers.
+//! - Every size, offset, and slot count is derived from the declared type,
+//!   never hardcoded to the shapes the current fixtures happen to contain.
+//! - A failure is a typed `CodegenError` carrying a real span, never a
+//!   panic.
+
 use crate::ast::*;
 use crate::codegen::error::*;
 use crate::codegen::syscall;
@@ -46,6 +83,7 @@ pub struct Protocol {
     pub read_only: i64,
     pub write_truncate: i64,
     pub end_of_input: i64,
+    pub read_failed: i64,
 }
 
 pub fn protocol_of(names: &[String]) -> Protocol {
@@ -65,6 +103,7 @@ pub fn protocol_of(names: &[String]) -> Protocol {
         read_only: find_name(names, "ReadOnly"),
         write_truncate: find_name(names, "WriteTruncate"),
         end_of_input: find_name(names, "EndOfInput"),
+        read_failed: find_name(names, "ReadFailed"),
     }
 }
 
@@ -3726,9 +3765,16 @@ fn native_runtime_args<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<
 // input with nothing read is `Err(EndOfInput)` rather than an empty
 // string, so a program can tell "a blank line" from "no more lines". Bytes
 // already read followed by end of input are returned as a final line.
+//
+// The bytes are validated as UTF-8 before they become a `String`, through
+// the same scan `string_from_slice` runs. Standard input is the least
+// controlled source a string can have, and the language validates string
+// construction from any slice whose contents are not settled at compile
+// time; a line is one of those.
 fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
     let i64_ty = sess.0.i64_type();
     let str_key = result_arg_key(sess, ret_key, 0);
+    let err_key = result_arg_key(sess, ret_key, 1);
     let capacity = alloca_raw(sess, i64_ty.into(), "cap", span)?;
     let length = alloca_raw(sess, i64_ty.into(), "len", span)?;
     let buffer = alloca_raw(sess, ptr_ty(sess).into(), "buf", span)?;
@@ -3752,14 +3798,7 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     sess.2.build_conditional_branch(null, alloc_failed, scan).map_err(builder_fail)?;
 
     sess.2.position_at_end(alloc_failed);
-    let err_key = result_arg_key(sess, ret_key, 1);
-    let alloc_tag = variant_tag_of(sess, err_key, sess.12.alloc_failed, span)?;
-    let alloc_payload = variant_payload_key(sess, err_key, alloc_tag, 0, span)?;
-    let alloc_slot = declare_local(sess, alloc_payload, "need", span)?;
-    store_key(sess, alloc_slot, start_capacity.into())?;
-    let alloc_val = build_enum_value(sess, err_key, alloc_tag, &[(alloc_payload, alloc_slot)], span)?;
-    let alloc_result = build_result_err(sess, ret_key, err_key, alloc_val, span)?;
-    copy_to_out(sess, ret_key, out, alloc_result, span)?;
+    emit_payload_error(sess, ret_key, err_key, sess.12.alloc_failed, start_capacity, out, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
 
     sess.2.position_at_end(scan);
@@ -3798,12 +3837,27 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
             return Err(builder_error(span.0, span.1, span.2, &format!("internal: realloc returned void ({:?})", inst.get_opcode())));
         }
     };
-    // `realloc` returning null leaves the old block valid, so the line so
-    // far is kept and returned rather than lost: a short line is a better
-    // outcome than a leak plus an error.
+    // `realloc` returning null leaves the old block valid, so it is freed
+    // here rather than leaked.
+    //
+    // The line so far is *not* returned. The byte that triggered the growth
+    // has already been taken off the descriptor and cannot be put back, so
+    // there is no line left to hand over: returning `Ok` with the bytes that
+    // happened to fit would drop that byte and every byte after it while
+    // reporting success, and no caller could tell that truncated line from a
+    // complete one. An allocation that failed is reported as one, exactly as
+    // the initial allocation is.
     let grow_failed = is_null_ptr(sess, grown)?;
+    let grow_fail_block = new_block(sess, f, "line_grow_fail");
     let grow_ok = new_block(sess, f, "line_grow_ok");
-    sess.2.build_conditional_branch(grow_failed, finish, grow_ok).map_err(builder_fail)?;
+    sess.2.build_conditional_branch(grow_failed, grow_fail_block, grow_ok).map_err(builder_fail)?;
+
+    sess.2.position_at_end(grow_fail_block);
+    let free_partial = extern_free(sess);
+    sess.2.build_call(free_partial, &[into_meta(old.into())], "").map_err(builder_fail)?;
+    emit_payload_error(sess, ret_key, err_key, sess.12.alloc_failed, doubled, out, span)?;
+    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+
     sess.2.position_at_end(grow_ok);
     store_key(sess, buffer, grown.into())?;
     store_key(sess, capacity, doubled.into())?;
@@ -3820,6 +3874,31 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     sess.2.position_at_end(finish);
     let final_len = load_i64(sess, length)?;
     let final_buf = load_ptr(sess, buffer)?;
+
+    // A failed read is a failed read, not the end of the stream.
+    //
+    // `finish` is reached three ways: the read returned zero, the read
+    // failed, or a newline arrived. Reporting the middle one as
+    // `EndOfInput` told a caller the stream had ended cleanly when the
+    // device had in fact errored, and returning the bytes read so far as
+    // `Ok` handed back a line that was never terminated — the same defect
+    // the allocation path was fixed for, one screen up.
+    //
+    // The syscall returns a negated errno, so negating it back is the errno
+    // itself.
+    let read_failed = sess.2.build_int_compare(IntPredicate::SLT, got, i64_ty.const_zero(), "").map_err(builder_fail)?;
+    let failed_block = new_block(sess, f, "line_read_failed");
+    let ended_block = new_block(sess, f, "line_ended");
+    sess.2.build_conditional_branch(read_failed, failed_block, ended_block).map_err(builder_fail)?;
+
+    sess.2.position_at_end(failed_block);
+    let free_failed = extern_free(sess);
+    sess.2.build_call(free_failed, &[into_meta(final_buf.into())], "").map_err(builder_fail)?;
+    let errno = sess.2.build_int_neg(got, "").map_err(builder_fail)?;
+    emit_payload_error(sess, ret_key, err_key, sess.12.read_failed, errno, out, span)?;
+    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+
+    sess.2.position_at_end(ended_block);
     let ended = sess.2.build_int_compare(IntPredicate::SLE, got, i64_ty.const_zero(), "").map_err(builder_fail)?;
     let empty = sess.2.build_int_compare(IntPredicate::EQ, final_len, i64_ty.const_zero(), "").map_err(builder_fail)?;
     let at_end = sess.2.build_and(ended, empty, "").map_err(builder_fail)?;
@@ -3839,6 +3918,27 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
 
     sess.2.position_at_end(line_block);
+    // A line arrives from outside the process, so its bytes are precisely the
+    // "a slice can come from anywhere" case the language validates on string
+    // construction — no different from `string_from_slice`, and rather more
+    // exposed. Storing them unchecked would let `read_line` be the one
+    // constructor able to hand back a `String` holding malformed UTF-8, and
+    // every reader of that string would inherit a guarantee the language
+    // states but this path never established.
+    let line_valid = new_block(sess, f, "line_utf8_ok");
+    let line_invalid = new_block(sess, f, "line_utf8_bad");
+    emit_utf8_scan(sess, f, final_buf, final_len, line_valid, line_invalid, span)?;
+
+    sess.2.position_at_end(line_invalid);
+    let free_malformed = extern_free(sess);
+    sess.2.build_call(free_malformed, &[into_meta(final_buf.into())], "").map_err(builder_fail)?;
+    let invalid_tag = variant_tag_of(sess, err_key, sess.12.invalid_utf8, span)?;
+    let invalid_val = build_enum_value(sess, err_key, invalid_tag, &[], span)?;
+    let invalid_result = build_result_err(sess, ret_key, err_key, invalid_val, span)?;
+    copy_to_out(sess, ret_key, out, invalid_result, span)?;
+    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+
+    sess.2.position_at_end(line_valid);
     let line = declare_local(sess, str_key, "line", span)?;
     init_native_handle(sess, str_key, line, span)?;
     let line_data = struct_gep(sess, str_key, line, 0, "", span)?;
@@ -3854,6 +3954,33 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
 
 /// Starting capacity for a `read_line` buffer, doubled as needed.
 const READ_LINE_CAPACITY: u64 = 128;
+
+// Writes `Err(<variant>(payload))` into the caller's return slot, for the
+// error variants that carry exactly one integer.
+//
+// `read_line` has two allocation sites — the initial buffer and every
+// doubling — and both report failure the same way. Building that error in
+// one place keeps the variant and its payload derived from the declared
+// surface once: two copies could drift into naming different variants, or
+// into one site carrying the byte count it asked for while the other carried
+// the count it already had.
+fn emit_payload_error<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    ret_key: i64,
+    err_key: i64,
+    variant: i64,
+    payload: IntValue<'ctx>,
+    out: PointerValue<'ctx>,
+    span: (i64, i64, i64),
+) -> Result<(), CodegenError> {
+    let tag = variant_tag_of(sess, err_key, variant, span)?;
+    let payload_key = variant_payload_key(sess, err_key, tag, 0, span)?;
+    let slot = declare_local(sess, payload_key, "payload", span)?;
+    store_key(sess, slot, payload.into())?;
+    let value = build_enum_value(sess, err_key, tag, &[(payload_key, slot)], span)?;
+    let result = build_result_err(sess, ret_key, err_key, value, span)?;
+    copy_to_out(sess, ret_key, out, result, span)
+}
 
 fn net_fd_of_handle<'ctx>(sess: &mut Session<'ctx, '_, '_>, sock_key: i64, handle: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
     let fd_slot = struct_gep(sess, sock_key, handle, 1, "", span)?;
@@ -4094,16 +4221,32 @@ fn emit_cont_step<'ctx>(
     Ok(ok2)
 }
 
-fn native_string_from_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
-    let p0 = get_local(locals, 0, span)?;
-    let data = slice_data(sess, p0)?;
-    let len = slice_len_of(sess, p0)?;
+// Emits the UTF-8 well-formedness scan over the `len` bytes at `data`.
+//
+// Control leaves through exactly one of the two blocks the caller supplies:
+// `valid_block` once every sequence in the range has been accepted, and
+// `invalid_block` at the first one that is not. The caller positions the
+// builder at each and decides what a well-formed or malformed buffer means
+// for it; the scan has no opinion about where the bytes came from.
+//
+// Every construction of a `Collections.String` from bytes that are not
+// settled at compile time runs this one scan, which is what makes "a String
+// holds well-formed UTF-8" a single fact rather than one per constructor.
+// A second copy would be free to drift — accepting an overlong encoding
+// here and rejecting it there — while the language promises one answer.
+fn emit_utf8_scan<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    f: FunctionValue<'ctx>,
+    data: PointerValue<'ctx>,
+    len: IntValue<'ctx>,
+    valid_block: BasicBlockId<'ctx>,
+    invalid_block: BasicBlockId<'ctx>,
+    span: (i64, i64, i64),
+) -> Result<(), CodegenError> {
     let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "i", span)?;
     store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
     let loop_cond = new_block(sess, f, "utf8_cond");
     let loop_body = new_block(sess, f, "utf8_body");
-    let valid_block = new_block(sess, f, "utf8_valid");
-    let invalid_block = new_block(sess, f, "utf8_invalid");
     sess.2.build_unconditional_branch(loop_cond).map_err(builder_fail)?;
     sess.2.position_at_end(loop_cond);
     let i = load_i64(sess, i_slot)?;
@@ -4235,6 +4378,16 @@ fn native_string_from_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionV
     sess.2.build_unconditional_branch(loop_cond).map_err(builder_fail)?;
     sess.2.position_at_end(bad);
     sess.2.build_unconditional_branch(invalid_block).map_err(builder_fail)?;
+    Ok(())
+}
+
+fn native_string_from_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
+    let p0 = get_local(locals, 0, span)?;
+    let data = slice_data(sess, p0)?;
+    let len = slice_len_of(sess, p0)?;
+    let valid_block = new_block(sess, f, "utf8_valid");
+    let invalid_block = new_block(sess, f, "utf8_invalid");
+    emit_utf8_scan(sess, f, data, len, valid_block, invalid_block, span)?;
     sess.2.position_at_end(invalid_block);
     let err_key = result_arg_key(sess, ret_key, 1);
     let invalid_tag = variant_tag_of(sess, err_key, sess.12.invalid_utf8, span)?;

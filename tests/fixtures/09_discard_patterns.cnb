@@ -1,0 +1,33 @@
+#!| Discard patterns, in all three spellings, each rejected.
+
+    A leading underscore marks a value the program declines to account for,
+    and Cinnabar has none. The match arm is the consequential case: a
+    catch-all makes any match trivially exhaustive, so adding a variant to
+    an enum would stop forcing anyone to handle it — the guarantee would
+    still be stated and would no longer hold.
+
+    A value that is genuinely not needed means the surrounding code has the
+    wrong shape. The fix is to restructure it, not to spell the binding in a
+    way the compiler agrees to ignore.
+
+    Rejected in the lexer, where casing is, so every position is covered by
+    one rule: arm, binding, parameter, field.
+|#
+
+pub type Colour
+  pub Red
+  pub Green
+end
+
+pub fun classify(value: Colour) I64
+  match value
+    Red => return 1
+    _ => return 0
+  end
+end
+
+pub fun main() I64
+  val _ = 5
+  val _unused = 7
+  return classify(Red)
+end

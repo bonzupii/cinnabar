@@ -1,3 +1,21 @@
+//! HTML rendering for the API documentation and the Cinnabook.
+//!
+//! `render_api_docs` walks the parsed item lists and emits one article per
+//! public declaration, taking the prose from the `NODE_DOC` rows the parser
+//! attached to each item. `render_cinnabook` folds that output together
+//! with the manifesto into a single version-pinned page, and
+//! `serve_cinnabook` serves a rendered page over HTTP.
+//!
+//! **Invariants:**
+//! - Visibility is read from the parsed item, never re-decided here. A
+//!   declaration that is not `pub` does not appear, and neither does its
+//!   doc text.
+//! - Documentation prose comes from parser attachments. This file never
+//!   re-scans source for comment syntax, so what gets published is what the
+//!   compiler actually attached to the item.
+//! - Every interpolated value is HTML-escaped, the embedded manifesto
+//!   included — it is published as text, not as markup.
+
 use crate::ast::*;
 use std::io::{Read, Write};
 use std::net::TcpListener;

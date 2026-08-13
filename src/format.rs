@@ -1,9 +1,16 @@
-// Canonical source formatting for Cinnabar.
-//
-// Indentation and blank lines are not semantic in Cinnabar, so this module
-// deliberately leaves tokens and comment contents unchanged. It recognizes
-// only structural syntax needed to choose indentation; it does not resolve
-// names, infer types, or duplicate any compiler-owned semantic fact.
+//! Canonical source formatting for Cinnabar.
+//!
+//! Indentation and blank lines carry no meaning in Cinnabar, which is what
+//! makes a formatter safe to write at this level: it recognizes only the
+//! structural syntax needed to choose an indentation level, and leaves
+//! tokens and comment contents exactly as written.
+//!
+//! **Invariants:**
+//! - Formatting is not a semantic pass. It does not resolve a name, infer
+//!   a type, or reproduce any compiler-owned fact — a formatter that
+//!   understood types would be a second front end to keep in step.
+//! - Token text and comment bodies survive a round trip unchanged. Only
+//!   the whitespace between them is this file's to decide.
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BlockKind {

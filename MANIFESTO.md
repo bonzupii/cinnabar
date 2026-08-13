@@ -1,6 +1,10 @@
 # The Cinnabar Manifesto
 
-Cinnabar is a systems programming language designed for building compilers, runtimes, and low-level infrastructure. It exists because existing systems languages force an unacceptable trade-off: either accept hidden complexity (implicit lifetimes, dereferencing, warnings-as-errors theater) or abandon safety. Cinnabar rejects both.
+Cinnabar is a zero-trust systems language for durable software. It assumes that code authors may optimize for immediate task completion rather than long-term correctness, whether they are humans under pressure or AI code-generating systems. Cinnabar therefore grants no mechanism to bypass, suppress, weaken, or defer its safety, ownership, failure-handling, and explicitness invariants. Programs must express valid designs within those invariants; designs that require an exception are not representable in Cinnabar.
+
+It is designed for building compilers, runtimes, and low-level infrastructure. It exists because existing systems languages force an unacceptable trade-off: either accept hidden complexity (implicit lifetimes, dereferencing, warnings-as-errors theater) or abandon safety. Cinnabar rejects both.
+
+Every principle below follows from the paragraph above. Where one of them looks inconvenient, that is the paragraph working as intended: the inconvenience is a design that has not been expressed yet, not a rule to be relaxed. A language that can be talked out of an invariant does not have that invariant — it has a default.
 
 ## Core Principles
 
@@ -282,7 +286,25 @@ Cinnabar must be able to compile itself. The language's own data structures, con
 Memory safety without garbage collection. Resource safety without RAII magic. Concurrency safety without mutexes (message passing and linear handles). The language must be suitable for writing kernels, embedded firmware, network stacks, and compilers — domains where GC pauses, implicit allocations, and runtime overhead are unacceptable.
 
 ### Compile-Time Correctness
-Every invariant that can be checked at compile time must be checked at compile time. Exhaustive matching. Linear consumption. Borrow exclusivity. Visibility. Casing. Unused imports. Unhandled `Result`/`Option` values. Constant division by zero. Type mismatches. Effect purity. If the compiler accepts a program, the program satisfies all stated invariants — and, by the Crucible Rule, runs without crashing. Runtime checks exist only for genuinely dynamic conditions (bounds checking on native surfaces, UTF-8 validation on string construction).
+Every invariant that can be checked at compile time must be checked at compile time. Exhaustive matching. Linear consumption. Borrow exclusivity. Visibility. Casing. Unused imports. Reachability. Absence of discards. Unhandled `Result`/`Option` values. Constant division by zero. Type mismatches. Effect purity. If the compiler accepts a program, the program satisfies all stated invariants — and, by the Crucible Rule, runs without crashing. Runtime checks exist only for genuinely dynamic conditions (bounds checking on native surfaces, UTF-8 validation on string construction).
+
+### No Discards
+
+There is no discard. An identifier may not be `_`, and may not begin with `_`, in any position — match arm, binding, parameter, or field. A leading underscore is the conventional way to tell a compiler that a value is deliberately unaccounted for, and this language has no way to say that.
+
+The match arm is the consequential case. A catch-all makes any match trivially exhaustive, so adding a variant to an enum would stop forcing anyone to handle it: exhaustive matching would still be claimed and would no longer hold. A rule that can be switched off per match is not an invariant.
+
+For a value that is genuinely not needed there are two ways, and no third. Bind it with a real name and use it, or restructure so it never arrives — split a shared match arm so each variant has its own producer, or change the signature that hands it over. A value nothing needs means the surrounding code has the wrong shape; naming it in a way the compiler ignores hides that rather than fixing it.
+
+Enforced in the lexer, where casing is. One rule covers every position at once, rather than each place someone remembered to check, and it holds in a file that would fail later for other reasons.
+
+### Reachability
+
+Every declared item must be reachable from `main`: functions, constants, structs, enums, traits, and native declarations alike. An item nothing reachable needs is a compile error, not a warning and not a lint.
+
+`pub` is not an exemption. It describes who may name a thing, not whether anything does — and exempting it would make one word the way to silence this diagnostic, which is the suppression mechanism this language does not have. A public function nobody calls is dead in exactly the way a private one is.
+
+Two consequences follow. A compilation unit with no `main` — a module on its own, or a `build.cnb` manifest — is not a whole program, so the rule does not apply to it; nothing that can be built into a binary escapes that way. And a diagnostic about reachability is reported only after type and borrow checking have run, because a program that does not type-check should be told what is wrong with it rather than which of its functions nothing calls.
 
 ### Minimal Surface Area
 Every feature must justify its existence against the needs of general-purpose systems programming — kernels, firmware, network stacks, runtimes, and compilers. Features that exist only for ergonomics, convention, or compatibility with other languages are rejected. The language is small because the problem domain demands precision, not expressiveness.

@@ -1,4 +1,34 @@
+//! Name resolution, scope construction, and casing enforcement.
+//!
+//! `resolve` builds a scope tree over two separate namespaces, `NS_TYPE`
+//! and `NS_VALUE`, then rewrites every unresolved `EXPR_PATH`, `TY_PATH`,
+//! and `PAT_PATH` segment into a `NODE_SYM` reference. It seeds the
+//! built-in primitives and native surfaces, hoists top-level declarations
+//! so declaration order does not matter, wires in each sibling module's
+//! scope from the loader's `ext_mods`, and resolves `use` imports including
+//! `as` aliases.
+//!
+//! The compiler-checked casing rules are enforced here, on the hoisted
+//! declaration rather than at every use: a mis-cased identifier is one
+//! resolver error and never reaches the typechecker.
+//!
+//! Two tags are assigned at this point precisely so that no later stage has
+//! to recognize something by its name — the program's entry point
+//! (`SYM_FUN_MAIN`) and each native operation's `NAT_*` opcode.
+//!
+//! **Invariants:**
+//! - The symbol a name resolves to is decided here and nowhere else. A
+//!   later stage that needs it reads the attached `NODE_SYM`; it does not
+//!   re-walk the path and re-match segments with parallel logic.
+//! - Downstream semantics key off `SYM_FUN_MAIN` and the `NAT_*` opcodes,
+//!   never off a string comparison against `"main"` or a native function's
+//!   name. Attaching the tag here is what makes that rule keepable.
+//! - A name that does not resolve produces a diagnostic at the use site's
+//!   real span, optionally carrying a hedged suggestion. It never quietly
+//!   resolves to a plausible neighbour.
+
 use crate::ast::*;
+use crate::suggest;
 
 pub const NS_TYPE: i64 = 0;
 pub const NS_VALUE: i64 = 1;
@@ -14,22 +44,66 @@ type State<'a> = (
     &'a mut Vec<i64>,
     &'a mut Vec<(i64, i64)>,
     &'a mut Vec<i64>,
+    // Secondary notes tied to the errors this stage reports (definition-site
+    // labels and hedged name suggestions), indexed like the borrow checker's.
+    &'a mut Vec<Note>,
+    // The item whose body is currently being resolved, innermost last.
+    &'a mut Vec<i64>,
+    // `(from, to)` edges between item symbols: every symbol resolved inside
+    // an item is something that item depends on. Reachability is a graph
+    // walk over these from `main`, not a "was this name mentioned anywhere"
+    // flag — two dead functions that call each other are still dead.
+    &'a mut Vec<(i64, i64)>,
 );
+
+/// The owner of references that belong to no nameable item.
+///
+/// An `impl` extends the type it is for rather than being something anyone
+/// calls by name, and trait methods are reached by dispatch rather than by a
+/// resolved path. Attributing their references here — and treating this as
+/// permanently reached — keeps everything they mention alive.
+///
+/// That is deliberately conservative. Rejecting a program that is actually
+/// correct is far worse than missing one dead impl, so the analysis errs
+/// toward keeping things.
+const ROOT_OWNER: i64 = -2;
+
+/// Resolves names, and separately reports which items nothing reaches.
+///
+/// `deferred` receives the unused-item diagnostics rather than `errors`.
+/// Reachability is a whole-program property, not a name-resolution one, and
+/// reporting it here would stop the pipeline before the type checker ran —
+/// so a file with a type error would be told its functions are unused and
+/// never told what was actually wrong with them. The caller reports these
+/// once the later stages have had their say.
+/// Where this stage puts what it has to say.
+///
+/// The three travel together because they are one decision — what the user
+/// is told — split only by when it is said.
+pub struct Diagnostics<'a> {
+    pub errors: &'a mut Vec<Diag>,
+    pub notes: &'a mut Vec<Note>,
+    /// Reported by the caller once the later stages have run, not here.
+    pub deferred: &'a mut Vec<Diag>,
+}
 
 pub fn resolve(
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
-    errors: &mut Vec<Diag>,
+    diagnostics: Diagnostics,
     root: i64,
     ext_mods: &[(i64, i64)],
 ) -> bool {
+    let Diagnostics { errors, notes, deferred } = diagnostics;
     let mut scopes: Vec<Vec<i64>> = Vec::new();
     let mut parents: Vec<i64> = Vec::new();
     let mut pubs: Vec<i64> = Vec::new();
     let mut prefixes: Vec<i64> = Vec::new();
     let mut item_scopes: Vec<(i64, i64)> = Vec::new();
     let mut used: Vec<i64> = Vec::new();
+    let mut owners: Vec<i64> = Vec::new();
+    let mut edges: Vec<(i64, i64)> = Vec::new();
     let empty_prefix = alloc_list(lists);
     let root_scope = alloc_scope(&mut scopes, &mut parents, &mut pubs, &mut prefixes, NONE, empty_prefix, 1);
     let mut state: State = (
@@ -43,6 +117,9 @@ pub fn resolve(
         &mut prefixes,
         &mut item_scopes,
         &mut used,
+        notes,
+        &mut owners,
+        &mut edges,
     );
     seed_builtins(&mut state, root_scope, root);
 
@@ -106,6 +183,23 @@ pub fn resolve(
     }
 
     materialize_scope_facts(&mut state);
+
+    // Reachability last, and only if nothing else failed. A program whose
+    // names do not resolve has no dependency graph worth walking, and
+    // reporting every item as unused on top of the real error would bury it.
+    if state.3.is_empty()
+        && let Some(reached) = reachable_from_main(&state)
+    {
+        report_unreachable(&mut state, root, &reached, deferred);
+        idx = 0;
+        while idx < ext_mods.len() {
+            match ext_mods.get(idx) {
+                Some(pair) => report_unreachable(&mut state, pair.1, &reached, deferred),
+                None => break,
+            }
+            idx += 1;
+        }
+    }
 
     state.3.is_empty()
 }
@@ -509,6 +603,19 @@ fn insert_decl(state: &mut State, scope: i64, name: i64, sym: i64, ns: i64, casi
         span
     };
     push_error(state.3, &message, report_span.0, report_span.1, report_span.2);
+    // A duplicate of two real declarations: point at the first one so the
+    // developer sees both sites of the clash in one diagnostic.  A builtin
+    // redeclaration has no source origin to point at, so it gets no note.
+    if !builtin_collision && existing_decl != NONE {
+        push_note_for_last(
+            state.3,
+            state.10,
+            "first declared here",
+            node_file(state.1, existing_decl),
+            node_start(state.1, existing_decl),
+            node_end(state.1, existing_decl),
+        );
+    }
     0
 }
 
@@ -690,6 +797,16 @@ fn insert_hoisted(state: &mut State, scope: i64, name: i64, sym: i64, decl: i64)
         return;
     }
     push_error(state.3, &format!("duplicate symbol '{}'", name_text(state.0, name)), node_file(state.1, decl), node_start(state.1, decl), node_end(state.1, decl));
+    if existing_decl != NONE && node_file(state.1, existing_decl) != NO_FILE {
+        push_note_for_last(
+            state.3,
+            state.10,
+            "first declared here",
+            node_file(state.1, existing_decl),
+            node_start(state.1, existing_decl),
+            node_end(state.1, existing_decl),
+        );
+    }
 }
 
 fn collect_trait_methods(state: &mut State, sub: i64, trait_full: i64, item: i64) {
@@ -1095,7 +1212,184 @@ fn resolve_path(state: &mut State, scope: i64, segs: i64, final_ns: i64) -> i64 
     if sym != NONE && src != NONE {
         mark_used(state.9, src);
     }
+    record_dependency(state, sym);
     sym
+}
+
+// Records that the item currently being resolved depends on `sym`.
+//
+// A reference outside any item — there are none today, but the stack is
+// empty before the first item and after the last — is attributed to the
+// permanent root rather than dropped, so it can only ever keep something
+// alive, never kill it.
+fn record_dependency(state: &mut State, sym: i64) {
+    if sym == NONE {
+        return;
+    }
+    let owner = match state.11.last() {
+        Some(value) => *value,
+        None => ROOT_OWNER,
+    };
+    if owner == sym {
+        return;
+    }
+    if !state.12.iter().any(|edge| edge.0 == owner && edge.1 == sym) {
+        state.12.push((owner, sym));
+    }
+}
+
+/// Every item symbol reachable from `main`, or `None` when there is no
+/// `main` to reach from.
+///
+/// A compilation unit without an entry point is not a whole program, and
+/// reachability is a whole-program property: `build.cnb` is three `pub const`
+/// declarations, and a module compiled on its own is a module. Answering
+/// "everything is unreachable" for either would be answering a question
+/// nobody asked.
+///
+/// This is not an escape hatch. A program with no `main` cannot be built
+/// into a binary at all, so nothing that ships can take this path.
+fn reachable_from_main(state: &State) -> Option<Vec<i64>> {
+    let mut reached: Vec<i64> = vec![ROOT_OWNER];
+    let mut found_main = false;
+    let mut idx = 0i64;
+    while idx < state.1.len() as i64 / NODE_STRIDE {
+        // The kind matters as well as the flag: `SYM_FUN_MAIN` is 1, and the
+        // `f` slot means something else for other symbol kinds, so without
+        // the kind check any symbol whose `f` happened to hold 1 counted as
+        // an entry point.
+        if node_tag(state.1, idx) == NODE_SYM
+            && node_a(state.1, idx) == SYM_FUN
+            && node_f(state.1, idx) == SYM_FUN_MAIN
+        {
+            reached.push(idx);
+            found_main = true;
+        }
+        idx += 1;
+    }
+    if !found_main {
+        return None;
+    }
+    // Fixpoint rather than a single pass: an item pulled in by a later edge
+    // brings its own dependencies with it.
+    let mut grew = true;
+    while grew {
+        grew = false;
+        let mut edge_idx = 0usize;
+        while edge_idx < state.12.len() {
+            match state.12.get(edge_idx) {
+                Some(edge) => {
+                    if contains_i64(&reached, edge.0) && !contains_i64(&reached, edge.1) {
+                        reached.push(edge.1);
+                        grew = true;
+                    }
+                }
+                None => break,
+            }
+            edge_idx += 1;
+        }
+    }
+    Some(reached)
+}
+
+/// The word for an item kind in an "unused ..." diagnostic, and whether the
+/// kind is one reachability applies to at all.
+fn unreachable_label(kind: i64) -> Option<&'static str> {
+    if kind == ITEM_FUN {
+        Some("function")
+    } else if kind == ITEM_NATIVE_FUN {
+        Some("native function")
+    } else if kind == ITEM_CONST {
+        Some("constant")
+    } else if kind == ITEM_STRUCT {
+        Some("struct")
+    } else if kind == ITEM_ENUM {
+        Some("enum")
+    } else if kind == ITEM_TRAIT {
+        Some("trait")
+    } else if kind == ITEM_NATIVE_TYPE {
+        Some("native type")
+    } else {
+        // Modules are namespaces, `use` items have their own unused check,
+        // and impls extend the type they are for.
+        None
+    }
+}
+
+/// Whether any variant of the enum declared by `item` is reached.
+fn enum_variant_reached(state: &State, item: i64, reached: &[i64]) -> bool {
+    let variants = node_e(state.1, item);
+    let count = list_len(state.2, variants);
+    let mut idx = 0i64;
+    while idx < count {
+        let variant = list_get(state.2, variants, idx);
+        if contains_i64(reached, variant_sym_of(state.1, variant)) {
+            return true;
+        }
+        idx += 1;
+    }
+    false
+}
+
+/// Reports every declared item that nothing reachable from `main` needs.
+///
+/// Public and private alike: `pub` describes who may name a thing, not
+/// whether anything does. Exempting it would make `pub` the one-word way to
+/// silence this diagnostic, which is the suppression mechanism the language
+/// does not have.
+fn report_unreachable(state: &mut State, list: i64, reached: &[i64], deferred: &mut Vec<Diag>) {
+    let count = list_len(state.2, list);
+    let mut idx = 0i64;
+    while idx < count {
+        let item = list_get(state.2, list, idx);
+        idx += 1;
+        if node_tag(state.1, item) != NODE_ITEM {
+            continue;
+        }
+        let kind = node_a(state.1, item);
+        if kind == ITEM_MODULE {
+            report_unreachable(state, node_e(state.1, item), reached, deferred);
+            continue;
+        }
+        // A seeded builtin has no Cinnabar source behind it — `Result`,
+        // `Option`, `DivError` and `IndexError` are injected by the resolver,
+        // carry `NO_FILE`, and cannot be deleted by anyone. Telling a
+        // three-line program that `Result` is unused would be reporting the
+        // compiler's own declarations back at its user.
+        if node_file(state.1, item) == NO_FILE {
+            continue;
+        }
+        let label = match unreachable_label(kind) {
+            Some(text) => text,
+            None => continue,
+        };
+        let sym = item_sym_of(state.1, item);
+        if sym == NONE || contains_i64(reached, sym) {
+            continue;
+        }
+        // Constructing a variant reaches the enum. `[T1(4), T2(3, 4), T0]`
+        // never names `Tag`, but an enum whose variants are in use is not
+        // dead — the type is exactly what those constructions produce.
+        if kind == ITEM_ENUM && enum_variant_reached(state, item, reached) {
+            continue;
+        }
+        if node_f(state.1, sym) == SYM_FUN_MAIN {
+            continue;
+        }
+        let name = if kind == ITEM_FUN || kind == ITEM_NATIVE_FUN {
+            node_a(state.1, node_d(state.1, item))
+        } else {
+            node_d(state.1, item)
+        };
+        let text = format!("unused {} '{}'", label, name_text(state.0, name));
+        push_error(
+            deferred,
+            &text,
+            node_file(state.1, item),
+            node_start(state.1, item),
+            node_end(state.1, item),
+        );
+    }
 }
 
 fn mark_used(used: &mut Vec<i64>, use_item: i64) {
@@ -1103,6 +1397,7 @@ fn mark_used(used: &mut Vec<i64>, use_item: i64) {
         used.push(use_item);
     }
 }
+
 
 fn join_segs(names: &[String], lists: &[Vec<i64>], segs: i64) -> String {
     let mut text = String::new();
@@ -1163,6 +1458,19 @@ fn walk_item(state: &mut State, scope: i64, item: i64) {
         return;
     }
     let kind = node_a(state.1, item);
+    // A module is a namespace rather than a thing to keep alive: its
+    // children are each checked on their own, so it owns nothing.
+    let owner = if kind == ITEM_MODULE {
+        NONE
+    } else if kind == ITEM_IMPL {
+        ROOT_OWNER
+    } else {
+        let sym = item_sym_of(state.1, item);
+        if sym == NONE { ROOT_OWNER } else { sym }
+    };
+    if owner != NONE {
+        state.11.push(owner);
+    }
     let item_scope = if kind == ITEM_MODULE {
         item_scope_of(state.8, item)
     } else {
@@ -1185,6 +1493,9 @@ fn walk_item(state: &mut State, scope: i64, item: i64) {
     } else if kind == ITEM_CONST {
         walk_type(state, scope, node_e(state.1, item));
         walk_expr(state, scope, node_f(state.1, item));
+    }
+    if owner != NONE {
+        state.11.pop();
     }
 }
 
@@ -1458,6 +1769,10 @@ fn walk_struct_lit(state: &mut State, scope: i64, expr: i64) {
     let sym = resolve_path(state, scope, segs, NS_TYPE);
     if sym == NONE {
         push_error(state.3, &format!("unknown type '{}'", join_segs(state.0, state.2, segs)), file, start, end);
+        let first = list_first(state.2, segs);
+        if first != NONE {
+            suggest_type_name(state, scope, first);
+        }
         return;
     }
     if !is_visible(state.5, state.6, state.1, scope, sym) {
@@ -1546,11 +1861,17 @@ fn resolve_type_name(state: &mut State, scope: i64, ty: i64, name: i64) {
     let (sym, src) = lookup_walk(state.4, state.5, scope, name, NS_TYPE);
     if sym == NONE {
         push_error(state.3, &format!("unknown type '{}'", name_text(state.0, name)), node_file(state.1, ty), node_start(state.1, ty), node_end(state.1, ty));
+        suggest_type_name(state, scope, name);
         return;
     }
     if src != NONE {
         mark_used(state.9, src);
     }
+    // A single-identifier type never goes through `resolve_path`, so the
+    // dependency has to be recorded here too. Without it a function's own
+    // return type counts for nothing, and `main() ExitCode` reports
+    // `ExitCode` as unused.
+    record_dependency(state, sym);
     if !is_visible(state.5, state.6, state.1, scope, sym) {
         push_error(state.3, &format!("cannot access type '{}' here", name_text(state.0, name)), node_file(state.1, ty), node_start(state.1, ty), node_end(state.1, ty));
         return;
@@ -1563,6 +1884,12 @@ fn resolve_type_path(state: &mut State, scope: i64, ty: i64) {
     let sym = resolve_path(state, scope, segs, NS_TYPE);
     if sym == NONE {
         push_error(state.3, &format!("cannot resolve type '{}'", join_segs(state.0, state.2, segs)), node_file(state.1, ty), node_start(state.1, ty), node_end(state.1, ty));
+        if list_len(state.2, segs) == 1 {
+            let first = list_first(state.2, segs);
+            if first != NONE {
+                suggest_type_name(state, scope, first);
+            }
+        }
         return;
     }
     if !is_visible(state.5, state.6, state.1, scope, sym) {
@@ -1615,3 +1942,79 @@ fn check_unused(names: &[String], nodes: &[i64], lists: &[Vec<i64>], errors: &mu
         node_end(nodes, item),
     );
 }
+
+// ---------------------------------------------------------------------------
+// Dead code and unresolved-name suggestions
+// ---------------------------------------------------------------------------
+
+// The visible type-namespace names from `scope` up through its parents, as
+// (name, file, start, end) for the declaration each name points at.  This
+// reads the resolver's own scope table — the same entries `resolve_type_name`
+// walks — so a suggestion is offered from the names actually in scope rather
+// than from a second, parallel registry.
+fn visible_type_names(state: &State, scope: i64) -> Vec<(String, i64, i64, i64)> {
+    let mut out: Vec<(String, i64, i64, i64)> = Vec::new();
+    let mut seen: Vec<i64> = Vec::new();
+    let mut current = scope;
+    while current != NONE {
+        let entries = match state.4.get(current as usize) {
+            Some(value) => value,
+            None => break,
+        };
+        let count = entries.len() as i64 / 4;
+        let mut idx = 0i64;
+        while idx < count {
+            let name = entry_get(entries, idx, 0);
+            let sym = entry_get(entries, idx, 1);
+            let ns = entry_get(entries, idx, 2);
+            if ns == NS_TYPE
+                && sym != NONE
+                && !contains_i64(&seen, name)
+                && is_visible(state.5, state.6, state.1, scope, sym)
+            {
+                seen.push(name);
+                let decl = sym_decl_of(state.1, sym);
+                if decl != NONE && node_tag(state.1, decl) == NODE_ITEM && node_file(state.1, decl) != NO_FILE {
+                    out.push((
+                        name_text(state.0, name),
+                        node_file(state.1, decl),
+                        node_start(state.1, decl),
+                        node_end(state.1, decl),
+                    ));
+                }
+            }
+            idx += 1;
+        }
+        current = parent_of(state.5, current);
+    }
+    out
+}
+
+// Offer a hedged "did you mean" note for an unresolved type name, pointing
+// at the candidate declaration when the match is unambiguous.  The error
+// must already be pushed so the note attaches to it.
+fn suggest_type_name(state: &mut State, scope: i64, misspelled: i64) {
+    let text = name_text(state.0, misspelled);
+    let entries = visible_type_names(state, scope);
+    let mut candidates: Vec<suggest::Candidate> = Vec::new();
+    let mut idx = 0usize;
+    while idx < entries.len() {
+        match entries.get(idx) {
+            Some(entry) => {
+                candidates.push(suggest::Candidate {
+                    name: entry.0.clone(),
+                    file: entry.1,
+                    start: entry.2,
+                    end: entry.3,
+                });
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    if let Some(suggestion) = suggest::suggest(&text, &candidates) {
+        push_note_for_last(state.3, state.10, &suggestion.message, suggestion.file, suggestion.start, suggestion.end);
+    }
+}
+
+

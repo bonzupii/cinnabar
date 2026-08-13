@@ -1,74 +1,39 @@
+//! The fixture corpus, run for exit codes and for stream contents.
+//!
+//! Compiles every case in `repro_corpus` and checks the exit code it
+//! produces, then separately runs the `STREAM_CASES` to check that terminal
+//! output and command-line arguments carry their contents byte for byte.
+//! Children run under a timeout with stdin closed, and both output streams
+//! are drained on their own threads so a fixture that writes more than a
+//! pipe buffer holds cannot deadlock the harness.
+//!
+//! Corpus size is chosen by the test profile rather than by editing the
+//! table, so a reduced run covers the same corpus more thinly instead of
+//! covering a different, smaller one.
+//!
+//! **Invariants:**
+//! - The corpus lives in `tests/support/repro_corpus.rs` and is shared with
+//!   `sanitizer_gate`. A second copy would drift, and the two suites would
+//!   quietly stop covering the same programs.
+//! - A fixture never reads the harness's own standard input.
+//! - A reduced profile samples evenly across the corpus, never a prefix.
+
 #[path = "support/test_controls.rs"]
 mod test_controls;
+#[path = "support/repro_corpus.rs"]
+mod repro_corpus;
+#[path = "support/stream_cases.rs"]
+mod stream_cases;
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use repro_corpus::EXPECT_OK;
+use stream_cases::{StreamCase, STREAM_CASES};
 use test_controls::{
     evenly_selected, profile_name, profile_usize, reduced_usize_control, test_profile,
 };
 
-const EXPECT_OK: &[(&str, i32)] = &[
-    ("hello", 0),
-    ("net_primitives", 0),
-    ("liveness_many_bindings", 100),
-    ("mini", 0),
-    ("array_test", 0),
-    ("borrow_index", 0),
-    ("enum_array_index", 0),
-    ("idx10d_mut_disjoint", 30),
-    ("idx10e_same_expr_disjoint", 30),
-    ("rec_test", 120),
-    ("tail_rec", 64),
-    ("mem_probe", 0),
-    ("mem_byte_access", 0),
-    ("hanoi", 255),
-    ("head", 10),
-    ("enum_test", 0),
-    ("mem2", 0),
-    ("vm2", 1),
-    ("vm3", 1),
-    ("vm4", 1),
-    ("vm6", 1),
-    ("vm7", 5),
-    ("vm8", 1),
-    ("vm9", 5),
-    ("vm11", 4),
-    ("vm", 120),
-    ("continue_test", 9),
-    ("jump_test", 3),
-    ("jump2", 3),
-    ("jump3", 3),
-    ("jump4", 1),
-    ("nested_continue_test", 109),
-    ("elif_test", 1),
-    ("elif_chain", 3),
-    ("modulo", 42),
-    ("div_runtime", 7),
-    ("int_min_neg1", 0),
-    ("shift_mask", 0),
-    ("int_width_grid", 0),
-    ("int_literal_context", 0),
-    ("string_literal", 0),
-    ("string_print", 0),
-    ("string_static_borrow", 0),
-    ("file_roundtrip", 0),
-    ("runtime_io", 0),
-    ("empty_block", 0),
-    ("utf8_validation", 0),
-    ("multiline_const", 30),
-    ("fib", 155),
-    ("linear_branch_consume", 0),
-    ("linear_loop_consume", 0),
-    ("linear_field_reinit", 0),
-    ("linear_ref_swap", 0),
-    ("linear_field_consume", 0),
-    ("linear_ref_nonlinear_read", 14),
-    ("ret_borrow_shared_twice", 0),
-    ("ret_borrow_single_origin", 0),
-    ("slice_test", 0),
-    ("vec_pop_drain", 0),
-    ("hash_map_remove_drain", 0),
-];
 
 const EXPECT_REJECTED: &[&str] = &[
     "index_oob_const",
@@ -273,13 +238,18 @@ fn repro_config() -> ReproConfig {
 }
 
 fn run_binary(bin: &Path, timeout_secs: u64) -> i32 {
-    let mut child = match Command::new(bin)
+    let child = match Command::new(bin)
         // A fixture must never read the harness's own standard input.
         // `Terminal.read_line` blocks until a line or end of input arrives,
         // so an inherited descriptor would make a fixture's exit code
         // depend on whether the suite was run from a terminal, a pipe, or
         // CI. A null stdin is at end of input immediately, which is a
         // definite state every run agrees on.
+        //
+        // A fixture that means to be read rather than merely counted names
+        // its input in `STREAM_CASES` and runs under `run_with_streams`,
+        // which supplies exactly those bytes — still a definite state, just
+        // a richer one than "nothing".
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -291,6 +261,10 @@ fn run_binary(bin: &Path, timeout_secs: u64) -> i32 {
             return 139;
         }
     };
+    wait_with_timeout(child, timeout_secs)
+}
+
+fn wait_with_timeout(mut child: std::process::Child, timeout_secs: u64) -> i32 {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
         match child.try_wait() {
@@ -333,8 +307,11 @@ fn run_binary(bin: &Path, timeout_secs: u64) -> i32 {
     }
 }
 
-fn temp_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("cinnabar_repro_{}", std::process::id()))
+// One directory per test: the tests in this file run concurrently, so a
+// shared per-process directory would let the first one to finish delete the
+// binaries the others are still running.
+fn temp_dir(label: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("cinnabar_repro_{}_{}", std::process::id(), label))
 }
 
 // Removes the harness temp dir even when an assertion fails mid-run: a
@@ -351,6 +328,157 @@ impl Drop for TempDirGuard {
     }
 }
 
+/// Drains one of a child's output streams to end of file, on its own
+/// thread.
+///
+/// A program that fills a pipe buffer blocks until someone reads it, so
+/// draining the two streams in sequence would deadlock against a fixture
+/// that writes enough to both. The thread is started before anything is
+/// written to the child's standard input for the same reason.
+fn drain<R: Read + Send + 'static>(
+    pipe: Option<R>,
+    stream: &'static str,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        match pipe {
+            Some(mut source) => match source.read_to_end(&mut buffer) {
+                Ok(count) => assert_eq!(count, buffer.len(), "short read from {}", stream),
+                Err(err) => assert!(false, "cannot read {}: {}", stream, err),
+            },
+            None => assert!(false, "{} was not piped", stream),
+        }
+        buffer
+    })
+}
+
+fn collect(handle: std::thread::JoinHandle<Vec<u8>>, stream: &str) -> Vec<u8> {
+    match handle.join() {
+        Ok(bytes) => bytes,
+        Err(failure) => {
+            let detail = match failure.downcast_ref::<String>() {
+                Some(text) => text.clone(),
+                None => "no message".to_string(),
+            };
+            assert!(false, "the {} reader failed: {}", stream, detail);
+            Vec::new()
+        }
+    }
+}
+
+struct StreamOutcome {
+    exit: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn run_with_streams(bin: &Path, case: &StreamCase, timeout_secs: u64) -> StreamOutcome {
+    let mut child = match Command::new(bin)
+        .args(case.args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => {
+            eprintln!("spawn failed: {}", err);
+            return StreamOutcome { exit: 139, stdout: Vec::new(), stderr: Vec::new() };
+        }
+    };
+    let out_reader = drain(child.stdout.take(), "standard output");
+    let err_reader = drain(child.stderr.take(), "standard error");
+    // The input is written and its descriptor closed before the wait.
+    // `read_line` blocks until a line or end of input arrives, so a standard
+    // input left open would hang the fixture that reads past its last line —
+    // the exact fixture this table exists to run.
+    match child.stdin.take() {
+        Some(mut pipe) => match pipe.write_all(case.stdin) {
+            Ok(()) => {}
+            Err(err) => assert!(false, "{}: cannot write standard input: {}", case.name, err),
+        },
+        None => assert!(false, "{}: standard input was not piped", case.name),
+    }
+    let exit = wait_with_timeout(child, timeout_secs);
+    StreamOutcome {
+        exit,
+        stdout: collect(out_reader, "standard output"),
+        stderr: collect(err_reader, "standard error"),
+    }
+}
+
+/// Renders a stream for a failure message, so a mismatch reads as text
+/// rather than as a byte array. Escaped rather than lossy: a dropped or
+/// added terminator is the defect being looked for, and it has to be
+/// visible in the message.
+fn shown(bytes: &[u8]) -> String {
+    let mut text = String::new();
+    for byte in bytes {
+        match byte {
+            b'\n' => text.push_str("\\n"),
+            b'\t' => text.push_str("\\t"),
+            printable if printable.is_ascii_graphic() || *printable == b' ' => {
+                text.push(*printable as char)
+            }
+            other => text.push_str(&format!("\\x{:02x}", other)),
+        }
+    }
+    text
+}
+
+fn assert_stream(case: &StreamCase, stream: &str, want: &[u8], got: &[u8]) {
+    assert!(
+        want == got,
+        "{}: {} was \"{}\", want \"{}\"",
+        case.name,
+        stream,
+        shown(got),
+        shown(want)
+    );
+}
+
+/// What each fixture writes, to which descriptor, and what it makes of what
+/// it was given — none of which the exit-code corpus can see.
+#[test]
+fn terminal_streams_and_arguments_carry_their_contents() {
+    let cinnabar = env!("CARGO_BIN_EXE_cinnabar");
+    let config = repro_config();
+    let dir = temp_dir("streams");
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => {}
+        Err(err) => {
+            // Not a silent return: this test carries the only assertions of
+            // terminal byte behaviour, and passing without making them would
+            // report coverage that did not run.
+            assert!(false, "cannot create temp dir: {}", err);
+            return;
+        }
+    }
+    let guard = TempDirGuard(dir.clone());
+
+    let mut idx = 0usize;
+    while idx < STREAM_CASES.len() {
+        let case = match STREAM_CASES.get(idx) {
+            Some(case) => case,
+            None => break,
+        };
+        let bin = dir.join(format!("{}_bin", case.name));
+        let compile_code = compile_and_link(cinnabar, &fixture_path(case.name), &bin);
+        assert_eq!(compile_code, 0, "{} failed to compile (code {})", case.name, compile_code);
+        let outcome = run_with_streams(&bin, case, config.run_timeout_secs);
+        assert_stream(case, "standard output", case.stdout, &outcome.stdout);
+        assert_stream(case, "standard error", case.stderr, &outcome.stderr);
+        assert_eq!(
+            outcome.exit, case.exit,
+            "{} ran with exit {} (want {})",
+            case.name, outcome.exit, case.exit
+        );
+        idx += 1;
+    }
+
+    drop(guard);
+}
+
 #[test]
 fn repro_corpus_baseline() {
     let cinnabar = env!("CARGO_BIN_EXE_cinnabar");
@@ -363,7 +491,7 @@ fn repro_corpus_baseline() {
         config.record_cases,
         config.link_compile_only
     );
-    let dir = temp_dir();
+    let dir = temp_dir("baseline");
     match std::fs::create_dir_all(&dir) {
         Ok(()) => {}
         Err(err) => {

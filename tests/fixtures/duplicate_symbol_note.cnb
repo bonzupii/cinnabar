@@ -1,0 +1,16 @@
+#!| Two declarations of one name, deliberately far apart.
+    The distance is the point: a note that collapsed onto the error site
+    would render only the second declaration, so a test can tell the two
+    apart by which source lines the diagnostic shows. |#
+
+pub const VALUE: I64 = 1
+
+pub fun spacer() I64
+  return 0
+end
+
+pub const VALUE: I64 = 2
+
+pub fun main() I64
+  return 0
+end
