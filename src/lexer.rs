@@ -265,6 +265,28 @@ fn lex_ident(
     let end = scan_ident_end(bytes, pos);
     match slice_text(source, pos, end, errors) {
         Some(text) => {
+            // A leading underscore is a discard, and Cinnabar has no discards.
+            //
+            // `_` as a match arm is the consequential one: a catch-all makes
+            // any match trivially exhaustive, so adding a variant to an enum
+            // would stop forcing anyone to handle it. `_` and `_name` as
+            // bindings are the same idea spelled differently — a value the
+            // program declines to account for.
+            //
+            // Rejected here, where casing is, because that catches every
+            // position at once: arm, binding, parameter, field. A value that
+            // is genuinely not needed means the surrounding code has the
+            // wrong shape, and the fix is to restructure it rather than to
+            // name it in a way the compiler ignores.
+            if text.starts_with('_') {
+                let message = if text == "_" {
+                    "discard pattern '_' is not allowed; bind the value with a real name and use it, or split the match arm so each variant has its own".to_string()
+                } else {
+                    format!("'{}' begins with an underscore, which marks a value as deliberately unused; bind it with a real name and use it", text)
+                };
+                push_error(errors, &message, file, pos as i64, end as i64);
+                return end;
+            }
             let name = intern(names, text);
             push_token(nodes, TOK_IDENT, name, NONE, pos as i64, end as i64, file);
             end

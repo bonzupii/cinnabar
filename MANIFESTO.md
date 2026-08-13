@@ -286,7 +286,17 @@ Cinnabar must be able to compile itself. The language's own data structures, con
 Memory safety without garbage collection. Resource safety without RAII magic. Concurrency safety without mutexes (message passing and linear handles). The language must be suitable for writing kernels, embedded firmware, network stacks, and compilers — domains where GC pauses, implicit allocations, and runtime overhead are unacceptable.
 
 ### Compile-Time Correctness
-Every invariant that can be checked at compile time must be checked at compile time. Exhaustive matching. Linear consumption. Borrow exclusivity. Visibility. Casing. Unused imports. Reachability. Unhandled `Result`/`Option` values. Constant division by zero. Type mismatches. Effect purity. If the compiler accepts a program, the program satisfies all stated invariants — and, by the Crucible Rule, runs without crashing. Runtime checks exist only for genuinely dynamic conditions (bounds checking on native surfaces, UTF-8 validation on string construction).
+Every invariant that can be checked at compile time must be checked at compile time. Exhaustive matching. Linear consumption. Borrow exclusivity. Visibility. Casing. Unused imports. Reachability. Absence of discards. Unhandled `Result`/`Option` values. Constant division by zero. Type mismatches. Effect purity. If the compiler accepts a program, the program satisfies all stated invariants — and, by the Crucible Rule, runs without crashing. Runtime checks exist only for genuinely dynamic conditions (bounds checking on native surfaces, UTF-8 validation on string construction).
+
+### No Discards
+
+There is no discard. An identifier may not be `_`, and may not begin with `_`, in any position — match arm, binding, parameter, or field. A leading underscore is the conventional way to tell a compiler that a value is deliberately unaccounted for, and this language has no way to say that.
+
+The match arm is the consequential case. A catch-all makes any match trivially exhaustive, so adding a variant to an enum would stop forcing anyone to handle it: exhaustive matching would still be claimed and would no longer hold. A rule that can be switched off per match is not an invariant.
+
+For a value that is genuinely not needed there are two ways, and no third. Bind it with a real name and use it, or restructure so it never arrives — split a shared match arm so each variant has its own producer, or change the signature that hands it over. A value nothing needs means the surrounding code has the wrong shape; naming it in a way the compiler ignores hides that rather than fixing it.
+
+Enforced in the lexer, where casing is. One rule covers every position at once, rather than each place someone remembered to check, and it holds in a file that would fail later for other reasons.
 
 ### Reachability
 

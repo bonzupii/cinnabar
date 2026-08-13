@@ -1,30 +1,17 @@
-#!|
-  Discard patterns, and the exercise that cannot be written from them yet.
+#!| Discard patterns, in all three spellings, each rejected.
 
-  Milestone 7 originally listed discard patterns among the failure classes to
-  source a Mushling from, saying each "already has a real compiler
-  diagnostic" and to use it verbatim. That was not true of this one, and the
-  roadmap no longer claims it. Every form below compiles and the program
-  exits zero:
+    A leading underscore marks a value the program declines to account for,
+    and Cinnabar has none. The match arm is the consequential case: a
+    catch-all makes any match trivially exhaustive, so adding a variant to
+    an enum would stop forcing anyone to handle it — the guarantee would
+    still be stated and would no longer hold.
 
-    - a bare underscore as a match arm, which is the consequential one: a
-      catch-all makes any match trivially exhaustive, so adding a variant to
-      an enum stops forcing anyone to handle it.
-    - a binding named with a bare underscore, discarding its value outright.
-    - the underscore-prefixed form.
+    A value that is genuinely not needed means the surrounding code has the
+    wrong shape. The fix is to restructure it, not to spell the binding in a
+    way the compiler agrees to ignore.
 
-  MANIFESTO.md does not ban them either. The prohibition lives in AGENTS.md,
-  which governs this compiler's own Rust source rather than the language it
-  compiles; the two were conflated when the roadmap entry was written.
-
-  So this file is not wired into `exercises()`. An exercise teaches a rule by
-  showing its diagnostic, and there is no rule here yet to teach. Whether
-  Cinnabar rejects discards is a language decision: it belongs in
-  MANIFESTO.md first, and the exercise follows the rule rather than the other
-  way round.
-
-  `tests/language_questions.rs` asserts this compiles, so the record cannot
-  rot unnoticed — it was broken for two commits before anything checked it.
+    Rejected in the lexer, where casing is, so every position is covered by
+    one rule: arm, binding, parameter, field.
 |#
 
 pub type Colour
@@ -42,11 +29,5 @@ end
 pub fun main() I64
   val _ = 5
   val _unused = 7
-  if classify(Red) != 1
-    return 1
-  end
-  if classify(Green) != 0
-    return 2
-  end
-  return 0
+  return classify(Red)
 end

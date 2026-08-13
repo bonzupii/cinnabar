@@ -88,6 +88,19 @@ const BUNDLES: &[Bundle] = &[
         path: "tests/fixtures/repro/const_div_zero_cascade.cnb",
         diagnostics: &["division by zero in constant", "modulo by zero in constant"],
     },
+    // All three spellings of a discard, each rejected. The match arm is
+    // the consequential one: a catch-all would make any match trivially
+    // exhaustive, so a new enum variant would stop forcing anyone to handle
+    // it. Rejected in the lexer, so all three report before anything else
+    // in the file is considered.
+    Bundle {
+        path: "tests/fixtures/09_discard_patterns.cnb",
+        diagnostics: &[
+            "discard pattern '_' is not allowed; bind the value with a real name and use it, or split the match arm so each variant has its own",
+            "discard pattern '_' is not allowed; bind the value with a real name and use it, or split the match arm so each variant has its own",
+            "'_unused' begins with an underscore, which marks a value as deliberately unused; bind it with a real name and use it",
+        ],
+    },
     // Reachability applies to public and private items alike, so both the
     // function and the constant must be reported. Losing either would leave
     // the fixture still failing on its sibling.

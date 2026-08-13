@@ -129,7 +129,7 @@ fn tier_five_and_six_commands_work_end_to_end() -> Result<(), Box<dyn Error>> {
     assert!(initialized.status.success(), "Mushlings init failed: {}", text(&initialized));
     let verified = run(compiler, &["mushlings", "verify", &path_text(&lessons)])?;
     assert!(verified.status.success(), "Mushlings verify failed: {}", text(&verified));
-    assert!(text(&verified).contains("0 solved, 8 pending"));
+    assert!(text(&verified).contains("0 solved, 9 pending"));
 
     let failure = directory.join("fuzz_fail_7.cnb");
     let minimized = directory.join("fuzz_fail_7.min.cnb");
