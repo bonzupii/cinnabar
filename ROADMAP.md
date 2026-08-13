@@ -140,9 +140,12 @@ builtin against redeclaration.
    division and the defined `MIN / -1` edge hold at every signed width.
 
 ### Implementation across the pipeline
-- **`ast.rs`:** add the new builtin kinds; extend `is_int_key`, a signedness predicate
-  (`key_is_signed` must cover every signed width, not only `Int`), and a bit-width function
-  (returning 16 for the 16-bit types).
+- **`ast.rs`:** add the new builtin kinds, and the width and signedness functions every stage
+  reads them through — `builtin_int_width`, `builtin_int_is_signed`, `builtin_int_mask`
+  (the width function returning 16 for the 16-bit types).
+- **`typecheck.rs`:** `is_int_key` and the signedness predicate live here, over those
+  descriptors; `codegen/emitter.rs` reads the same descriptors through its own `key_is_signed`,
+  which must cover every signed width rather than only `Int`.
 - **`typecheck.rs`:** seed all new builtins; generalize `from_u8` into the width/sign-aware
   conversion native; add literal range-checking; verify division/`Result` and arithmetic/comparison
   typing hold for every width.
