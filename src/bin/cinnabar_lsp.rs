@@ -20,6 +20,7 @@ use cinnabar::ast::{
     NO_FILE, SYM_CONST, SYM_ENUM, SYM_FUN, SYM_IMPL_METHOD, SYM_MODULE, SYM_NATIVE_FUN,
     SYM_STRUCT, SYM_TRAIT, SYM_TRAIT_METHOD, SYM_TYPE, SYM_VARIANT,
 };
+use cinnabar::format::format_source;
 use cinnabar::project;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde_json::{json, Value};
@@ -73,7 +74,8 @@ fn main() -> Result<(), String> {
         "referencesProvider": true,
         "completionProvider": { "triggerCharacters": ["."] },
         "signatureHelpProvider": { "triggerCharacters": ["(", ","] },
-        "codeLensProvider": { "resolveProvider": false }
+        "codeLensProvider": { "resolveProvider": false },
+        "documentFormattingProvider": true
     });
     // lsp-server wraps this value in the InitializeResult's `capabilities`
     // field itself.
@@ -183,6 +185,10 @@ fn dispatch_request(connection: &Connection, state: &ServerState, req: Request) 
     }
     if method == "textDocument/codeLens" {
         let result = on_code_lens(state, &req.params);
+        return send_ok(connection, req.id, result);
+    }
+    if method == "textDocument/formatting" {
+        let result = on_formatting(state, &req.params);
         return send_ok(connection, req.id, result);
     }
     let resp = Response::new_err(
@@ -318,12 +324,104 @@ fn completion_kind_code(kind: i64) -> i64 {
     }
 }
 
+// An identifier spliced in after a trailing dot purely so the path parses.
+// It is never shown: completion filters on the text *before* the cursor, and
+// the analysis it produces is discarded with the request.
+const COMPLETION_STUB: &str = "cnb_completion_stub";
+
+// True when the cursor sits after a dot that terminates an identifier path.
+//
+// The identifier requirement is what keeps the retry below from being paid for
+// on every dot in the file: `1.`, a decimal point, or a dot typed in open space
+// can never name a module, so re-analyzing for them would be a stall with no
+// possible answer.
+fn follows_identifier_dot(analysis: &Analysis, file: i64, offset: i64) -> bool {
+    if offset <= 0 {
+        return false;
+    }
+    let text = file_text_of(analysis, file);
+    let bytes = text.as_bytes();
+    match bytes.get((offset - 1) as usize) {
+        Some(byte) => {
+            if *byte != b'.' {
+                return false;
+            }
+        }
+        None => return false,
+    }
+    // Walk back over the path and require it to start where an identifier
+    // could: a leading digit means a numeric literal, not a module.
+    let mut start = (offset - 1) as usize;
+    while start > 0 {
+        let byte = match bytes.get(start - 1) {
+            Some(value) => *value,
+            None => break,
+        };
+        if byte == b'.' || byte == b'_' || byte.is_ascii_alphanumeric() {
+            start -= 1;
+            continue;
+        }
+        break;
+    }
+    match bytes.get(start) {
+        Some(byte) => byte.is_ascii_alphabetic() || *byte == b'_',
+        None => false,
+    }
+}
+
+// Re-runs the front end over the open buffers with `COMPLETION_STUB` spliced
+// in at the cursor, then completes at the same offset.
+//
+// A buffer ending in `Memory.` is a syntax error, so the parse that would have
+// named the module never happens and no scope facts exist to resolve against.
+// That is precisely the moment an editor asks what follows the dot.  Splicing
+// an identifier in makes the path parse, which costs one extra front-end run
+// on a keystroke that would otherwise answer with nothing usable.
+fn completions_with_stub(state: &ServerState, path: &str, offset: i64) -> Option<Vec<(String, i64)>> {
+    let mut docs = state.docs.clone();
+    let doc = docs.iter_mut().find(|doc| doc.0 == path)?;
+    let at = offset as usize;
+    if at > doc.1.len() || !doc.1.is_char_boundary(at) {
+        return None;
+    }
+    doc.1.insert_str(at, COMPLETION_STUB);
+    let entry = entry_of_doc(state, path);
+    let analysis = analyze(&entry, &docs);
+    let file = file_id_of(&analysis, path);
+    if file == NONE_ID {
+        return None;
+    }
+    Some(completions(&analysis, file, offset))
+}
+
 fn on_completion(state: &ServerState, params: &Value) -> Value {
     let (analysis, file, offset) = match positional(state, params) {
         Some(found) => found,
         None => return Value::Null,
     };
-    let items = completions(analysis, file, offset);
+    let mut items = completions(analysis, file, offset);
+    // Keywords are what whole-scope completion falls back to, and none of them
+    // may follow a dot; that combination means the qualified path failed to
+    // resolve, so retry with a parseable buffer before answering with noise.
+    // `all` holds vacuously on an empty result, which would make every dot the
+    // analysis cannot answer pay for a second front-end run on each keystroke.
+    // Requiring something to have been offered keeps the retry to the case it
+    // was written for: a resolvable path answered with keywords.
+    let keywords_only =
+        !items.is_empty() && items.iter().all(|item| item.1 == COMPLETE_KEYWORD);
+    if keywords_only && follows_identifier_dot(analysis, file, offset) {
+        let path = params
+            .get("textDocument")
+            .and_then(|doc| doc.get("uri"))
+            .and_then(Value::as_str)
+            .and_then(uri_to_path);
+        if let Some(path) = path
+            && let Some(retry) = completions_with_stub(state, &path, offset)
+            && !retry.is_empty()
+        {
+            items = retry;
+        }
+    }
     let mut out: Vec<Value> = Vec::new();
     let mut idx = 0usize;
     while idx < items.len() {
@@ -337,6 +435,46 @@ fn on_completion(state: &ServerState, params: &Value) -> Value {
         idx += 1;
     }
     Value::Array(out)
+}
+
+// Whole-document formatting through the same `format_source` the `cinnabar
+// fmt` subcommand uses, so the editor and the CLI cannot disagree about what
+// formatted source looks like.
+//
+// The open buffer is the input, not the file on disk: formatting must apply to
+// what the user is looking at, including unsaved edits.  Formatting is
+// deliberately independent of analysis -- it is pure text in, text out, so it
+// still works on a buffer the front-end has rejected, which is exactly when
+// reformatting tends to be asked for.
+fn on_formatting(state: &ServerState, params: &Value) -> Value {
+    let uri = match params.get("textDocument").and_then(|doc| doc.get("uri")).and_then(Value::as_str)
+    {
+        Some(value) => value,
+        None => return Value::Null,
+    };
+    let path = match uri_to_path(uri) {
+        Some(value) => value,
+        None => return Value::Null,
+    };
+    let source = match state.docs.iter().find(|doc| doc.0 == path) {
+        Some(doc) => doc.1.clone(),
+        None => return Value::Null,
+    };
+    let formatted = format_source(&source);
+    // An unchanged buffer returns no edits rather than a no-op replacement of
+    // the whole document, which would otherwise dirty the file and reset the
+    // cursor every time the editor formats on save.
+    if formatted == source {
+        return Value::Array(Vec::new());
+    }
+    let (end_line, end_character) = offset_to_position(&source, source.len() as i64);
+    Value::Array(vec![json!({
+        "range": {
+            "start": { "line": 0, "character": 0 },
+            "end": { "line": end_line, "character": end_character }
+        },
+        "newText": formatted
+    })])
 }
 
 fn on_signature_help(state: &ServerState, params: &Value) -> Value {
