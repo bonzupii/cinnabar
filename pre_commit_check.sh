@@ -132,5 +132,5 @@ rm -f tests/fixtures/spec tests/fixtures/constructor_parse tests/fixtures/pub_us
 
 echo ""
 echo -e "${GREEN}=================================================="
-echo "====== All pre-commit checks passed cleanly! ====="
+echo "====== All pre-commit checks passed cleanly ======"
 echo -e "==================================================${NC}"
