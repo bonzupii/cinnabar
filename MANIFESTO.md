@@ -1,6 +1,10 @@
 # The Cinnabar Manifesto
 
-Cinnabar is a systems programming language designed for building compilers, runtimes, and low-level infrastructure. It exists because existing systems languages force an unacceptable trade-off: either accept hidden complexity (implicit lifetimes, dereferencing, warnings-as-errors theater) or abandon safety. Cinnabar rejects both.
+Cinnabar is a zero-trust systems language for durable software. It assumes that code authors may optimize for immediate task completion rather than long-term correctness, whether they are humans under pressure or AI code-generating systems. Cinnabar therefore grants no mechanism to bypass, suppress, weaken, or defer its safety, ownership, failure-handling, and explicitness invariants. Programs must express valid designs within those invariants; designs that require an exception are not representable in Cinnabar.
+
+It is designed for building compilers, runtimes, and low-level infrastructure. It exists because existing systems languages force an unacceptable trade-off: either accept hidden complexity (implicit lifetimes, dereferencing, warnings-as-errors theater) or abandon safety. Cinnabar rejects both.
+
+Every principle below follows from the paragraph above. Where one of them looks inconvenient, that is the paragraph working as intended: the inconvenience is a design that has not been expressed yet, not a rule to be relaxed. A language that can be talked out of an invariant does not have that invariant — it has a default.
 
 ## Core Principles
 
