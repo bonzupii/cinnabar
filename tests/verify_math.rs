@@ -1,3 +1,22 @@
+//! Hand-derived oracles for the arithmetic the `verify_math` fixtures run.
+//!
+//! Every expected value here is computed independently, in Rust, from the
+//! same declared constants the Cinnabar fixtures use: the checksums, the
+//! little-endian byte combining, the range and port workflows, the option
+//! and loop flows, the bitflags, and Euclidean division and modulo. Two of
+//! the tests go further and compare a compiled fixture's actual stdout
+//! against an oracle string built in this file.
+//!
+//! **Invariants:**
+//! - The oracle is derived, never transcribed. Its whole value is that it
+//!   comes from the specification's arithmetic rather than from what the
+//!   compiler currently prints — copying an observed output in here would
+//!   turn a correctness check into a change detector.
+//! - Euclidean division and modulo are written out explicitly, with the
+//!   sign correction applied to Rust's truncating operators rather than
+//!   assumed to agree with them. That difference is precisely what these
+//!   cases exist to pin.
+
 fn header_checksum(kind: u32, flags: u32) -> u32 {
     (kind << 16) ^ (flags << 8) ^ kind ^ flags
 }

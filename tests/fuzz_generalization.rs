@@ -1,4 +1,4 @@
-//! Fuzzes compiler generalization end-to-end.
+//! End-to-end fuzzing of the compiler's generalization.
 //!
 //! The positive corpus is built correct-by-construction: a generator-side
 //! scope table tracks every declared variable's type and expected value, so
@@ -18,7 +18,19 @@
 //! tests/fixtures/repro/fuzz_fail_<seed>.cnb and prints the seed to stderr.
 //! Cargo features select balanced or smoke coverage; without either feature,
 //! the full gate profile ignores local budget environment variables.  The
-//! CINNABAR_FUZZ_* controls can override reduced-profile corpus budgets.
+//! `CINNABAR_FUZZ_*` controls can override reduced-profile corpus budgets.
+//!
+//! **Invariants:**
+//! - The positive corpus is correct by construction, not by consulting the
+//!   compiler. The generator knows each program's expected final value
+//!   independently, so a compiler that agreed with itself but not with the
+//!   language would still fail.
+//! - The negative corpus uses randomized *custom* native handles, which is
+//!   what makes it evidence that linearity is tracked by type descriptor
+//!   rather than by a recognized name. A fixed set of handle names would
+//!   pass just as well against a name-keyed implementation.
+//! - A failure is reproducible: the seed is printed and the generated
+//!   source saved. A fuzz failure nobody can replay is not a bug report.
 
 #[path = "support/test_controls.rs"]
 mod test_controls;

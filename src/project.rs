@@ -1,3 +1,32 @@
+//! The `build.cnb` project manifest, and the project test runner.
+//!
+//! A manifest is not a configuration format. It is a Cinnabar program, read
+//! through the compiler's own front end: `load_manifest` analyzes it,
+//! refuses it if that analysis produced any diagnostic, and then reads its
+//! three fields — `NAME`, `ENTRY`, `TESTS` — as `pub const` declarations of
+//! type `&[U8]` whose values are the folded constants the typechecker
+//! already computed. There is no second parser here, no second casing rule,
+//! and no second notion of what a string literal is.
+//!
+//! Around that: `discover` walks upward from a path to the nearest
+//! manifest, `initialize` writes a new project, and `discover_tests` and
+//! `run_tests` compile and run each test file — comparing a rejection test
+//! against its stored diagnostic snapshot and a success test against its
+//! expected exit code.
+//!
+//! **Invariants:**
+//! - Manifest paths stay inside the project root. A value that escapes it,
+//!   or that names a reserved device, is a manifest error rather than a
+//!   path the tooling goes on to act on.
+//! - A manifest diagnostic carries the real span of the offending item,
+//!   because `build.cnb` is a real source file with real spans.
+//!   `ManifestError::source_less` exists for failures that genuinely have
+//!   no source origin, and is not a shortcut for the ones that do.
+//! - Whether a field exists is settled before whether its type is right.
+//!   The other order tells the author of `pub const VERSION: I64` to change
+//!   its type — asserting `VERSION` is a manifest field, which it is not,
+//!   and sending them to fix the wrong thing first.
+
 use crate::analysis;
 use crate::ast::*;
 use std::fs;

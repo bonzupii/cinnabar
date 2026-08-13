@@ -1,3 +1,25 @@
+//! Stage 7d: the backend driver, from printed IR to a linked executable.
+//!
+//! Takes the module's IR text and shells out to `opt` (running the
+//! `default<O2>`-class module pipeline), `llc -filetype=obj`, and
+//! `clang -static -nostdlib -no-pie`, working in a per-process temp
+//! directory that is cleaned up afterward. `--emit-llvm` and `--emit-obj`
+//! stop the sequence early, so what a developer inspects is exactly what a
+//! real build feeds forward rather than a separate debug path.
+//!
+//! The static link is against a musl `libc.a` staged into this binary at
+//! crate build time by `build.rs` and pulled in here with `include_bytes!`.
+//! That is what makes a compiled Cinnabar program independent of the host's
+//! libc with no dynamic-linker dependency — and it is why no archive is
+//! ever committed to the source tree.
+//!
+//! **Invariants:**
+//! - A failing external tool becomes a typed `CodegenError` naming the tool
+//!   and its exit status. It is never a panic, and never a silent
+//!   fallthrough into a later step that would fail more confusingly.
+//! - The temp directory is per-process, so concurrent builds cannot read
+//!   each other's intermediates.
+
 pub mod emitter;
 pub mod error;
 pub mod layout;

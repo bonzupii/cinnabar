@@ -1,9 +1,10 @@
-//! Two questions `MANIFESTO.md` does not answer, pinned at their current
-//! answer so that answering them is a deliberate act.
+//! The two open language questions, pinned at their current answer.
 //!
-//! Both were, at some point, answered accidentally by an implementation
-//! before anyone decided them, and both implementations were reverted. What
-//! is left is the behaviour as it stands — not an endorsement of it.
+//! `MANIFESTO.md` does not settle either one, and these tests exist so that
+//! settling them is a deliberate act rather than a side effect. Both were,
+//! at some point, answered accidentally by an implementation before anyone
+//! decided them, and both implementations were reverted. What is left is
+//! the behaviour as it stands — not an endorsement of it.
 //!
 //! Each is asserted on the compiler's **exit status** rather than on the
 //! absence of a particular word, so it fails whatever a future rejection
@@ -14,6 +15,15 @@
 //! sat broken for two commits — it did not compile, for reasons unrelated to
 //! discards — while being cited as the record of what discards do. A record
 //! nothing runs is not a record.
+//!
+//! **Invariants:**
+//! - Each question is asserted on the compiler's exit status, never on the
+//!   presence of a particular word, so the test survives whatever a future
+//!   rejection ends up being called.
+//! - Answering a question here is a language change and belongs in
+//!   `MANIFESTO.md` first. Changing one of these assertions to match a new
+//!   implementation, rather than to match a decision, is the exact failure
+//!   this file exists to prevent.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -1,3 +1,32 @@
+//! Stage 2: byte-level scanning into `NODE_TOKEN` rows.
+//!
+//! A hand-written scanner that writes tokens straight into the shared
+//! arena — there is no separate token type and no intermediate vector of
+//! lexemes. It handles the four comment forms (`#`, `#!` doc, `#| |#`
+//! block, `#!| |#` block doc), decimal and `0x` integer literals stored as
+//! raw bit patterns, double-quoted strings with the five escapes `\n`,
+//! `\t`, `\0`, `\"`, `\\`, and the one- and two-character operators.
+//!
+//! Two decisions here are load-bearing much further down. String literal
+//! bytes are interned into the same `names` table identifiers use, so equal
+//! literals collapse to a single name id and codegen can emit one `.rodata`
+//! global per distinct literal with no side table to keep in step. And
+//! unescaped text is copied out as whole `&str` runs rather than byte by
+//! byte, so multi-byte characters survive intact.
+//!
+//! **Invariants:**
+//! - Literal accumulation uses `checked_mul`/`checked_add`. An overflowing
+//!   literal is a lexical error, never a silently wrapped bit pattern.
+//! - Whether a literal fits its type is the typechecker's fact, not this
+//!   file's: the lexer does not yet know what type a literal will adopt.
+//! - Casing is tokenized, not judged. The resolver enforces the casing
+//!   rules, so a mis-cased identifier lexes cleanly and is rejected once,
+//!   in the one place that owns that rule.
+//! - Block comments do not nest: a nested opener is a hard error, tracked
+//!   well enough to still locate the real outer closer.
+//! - A string literal does not span lines, so a missing closing quote
+//!   reports at the newline rather than consuming the rest of the file.
+
 use crate::ast::*;
 
 pub fn lex(

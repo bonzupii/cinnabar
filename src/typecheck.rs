@@ -1,3 +1,43 @@
+//! Stage 5: type checking, constant evaluation, and fact attachment.
+//!
+//! `typecheck` runs as an explicit sequence of sub-passes over one shared
+//! `State` — collect types, check function signatures, collect consts, then
+//! check function bodies including generic ones. Typing is structural and
+//! unification-free, keyed by canonical **type keys**: `TYD_*` rows
+//! interned and deduplicated through `canon_tyinfo`, with generic
+//! substitution implemented once in `subst_key`/`subst_list` and reused,
+//! rather than rewritten per call site.
+//!
+//! This is the stage that computes what the rest of the compiler consumes,
+//! which is why it is the largest file in the tree. Enum variant tags
+//! (`NODE_VARFACT`), struct field offsets (`NODE_FIELDKEY`), trait dispatch
+//! targets (`NODE_TRAIT`), and one `NODE_INST` per instantiated generic are
+//! all established here. So is linearity: every type key is marked linear
+//! or not — a native handle by declaration, an aggregate if any member is,
+//! and a bare type parameter conservatively, since its instantiation is
+//! unknown at definition time and requiring exactly-once consumption is the
+//! only sound default.
+//!
+//! The arithmetic rules live here too. `/` and `%` reject a provably-zero
+//! divisor and are otherwise typed `Result(T, DivError)` with Euclidean
+//! semantics; a compile-time-constant array index is range-checked and
+//! typed as the bare element type, while a runtime or slice index is
+//! `Result(T, IndexError)`; no operator admits an implicit conversion, the
+//! sole sanctioned coercion being `&[T; N]` to `&[T]`. An integer literal
+//! is not yet a value of any type and adopts one from context; a string
+//! literal adopts nothing and is `&[U8]`.
+//!
+//! **Invariants:**
+//! - A type is decided here once. The borrow checker and codegen read the
+//!   attached canonical key; neither re-infers one of its own.
+//! - Linearity is a property of a type key, stored on the type descriptor
+//!   row itself — never a name-keyed side table, and never re-derived
+//!   downstream by asking what a type is called.
+//! - The literal-adoption rule is implemented in one place
+//!   (`int_literal_expr`/`binary_operand_expected`) and called by both
+//!   `check_binary` and the constant folder, so the same literal text
+//!   cannot type one way in a `const` and another in a `var`.
+
 use crate::ast::*;
 use crate::resolver::NS_VALUE;
 use crate::suggest;

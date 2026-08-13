@@ -1,3 +1,20 @@
+//! The CLI tool surfaces, exercised end to end through the built binary.
+//!
+//! Drives the compiler executable as a subprocess across the tool commands:
+//! the project and inspection surfaces, the attached-fact and formatter
+//! flags, and the documentation and playground servers over real HTTP on an
+//! OS-assigned loopback port. It also checks that the editor package
+//! references language assets that actually exist.
+//!
+//! **Invariants:**
+//! - Each server test binds a port the OS chooses and stops its child
+//!   afterward, so the suite stays runnable in parallel and leaves nothing
+//!   listening behind it.
+//! - Scratch directories are unique per process and per invocation.
+//! - These go through the CLI rather than the library. A flag that parses
+//!   but is wired to nothing is exactly the failure they exist to catch,
+//!   and only the real binary can show it.
+
 use serde_json::Value;
 use std::error::Error;
 use std::io::{Read, Write};

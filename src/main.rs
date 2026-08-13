@@ -1,3 +1,28 @@
+//! The CLI driver, and the `--dump-ast` arena pretty-printer.
+//!
+//! Wires the fixed pipeline together verbatim — load, resolve, typecheck,
+//! borrow-check, codegen — and owns everything about how a diagnostic
+//! reaches a terminal. Every stage's `Diag` tuples are rendered through
+//! ariadne's `Report`/`Label`/`Source` with an `FnCache` that looks up
+//! source text across the whole loaded module set, so a cross-file error
+//! points into the right file. `--dump-ast` short-circuits after parsing
+//! and prints the flat arena instead of continuing.
+//!
+//! The clap surface here is also the whole tool surface: the project
+//! commands, the documentation and playground servers, the Mushlings
+//! exercises, fuzz replay and minimization, the formatter, and the
+//! inspection flags all dispatch from this file into the library.
+//!
+//! **Invariants:**
+//! - This is the only place a typed error may become a string. Every stage
+//!   below carries its error, with a real span, until it arrives here.
+//! - `NO_FILE` renders as a genuinely source-less error rather than as a
+//!   location. A fact about a compiler-synthesized wrapper has no line in
+//!   the user's program to point at, and inventing one would be a lie the
+//!   user cannot act on.
+//! - The pipeline order is fixed and a reporting stage halts it, so no
+//!   stage ever runs on facts an earlier one failed to establish.
+
 use cinnabar::ast::*;
 use cinnabar::{advanced_tools, analysis, borrow, codegen, docs, module_loader, native_stub, project, resolver, typecheck};
 use ariadne::{Color, FnCache, Label, Report, ReportKind, Source};

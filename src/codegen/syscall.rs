@@ -26,6 +26,15 @@
 //! This is why the syscall path needs no `__errno_location` (which the libc
 //! wrappers, and so the `Net` surface, still use): the error arrives in the
 //! value itself.
+//!
+//! **Invariants:**
+//! - An architecture with no implemented table is a compile error naming
+//!   the triple, never a guessed syscall number. A wrong number here would
+//!   not fail to build; it would silently call something else.
+//! - The register constraints are part of the ABI data, not incidental:
+//!   x86_64 passes the fourth argument in `r10` rather than `rcx` because
+//!   `syscall` overwrites `rcx`. `openat` is used on both architectures
+//!   because AArch64 has no `open`.
 
 use crate::codegen::error::*;
 use inkwell::context::Context;

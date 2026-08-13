@@ -1,5 +1,4 @@
-//! Milestone 3 — native memory access widths and handle integrity,
-//! asserted against the emitted LLVM IR.
+//! Milestone 3: memory access widths and handle integrity, read from IR.
 //!
 //! An external memory checker cannot cover this. A Cinnabar binary is
 //! linked `-static -nostdlib -no-pie` against a musl `libc.a` embedded in
@@ -32,6 +31,15 @@
 //!    returning the bytes that fit. A failed `realloc` is unreachable from a
 //!    Cinnabar program for the same reason the checkers above are unusable,
 //!    so the path is asserted where it is written.
+//!
+//! **Invariants:**
+//! - These assertions read the emitted IR, which means they are coupled to
+//!   how it is written. That cost is deliberate: it buys coverage of
+//!   properties no runtime oracle here can observe, and the behavioural
+//!   fixture covers what a runtime oracle can.
+//! - An assertion belongs here only when a running program genuinely
+//!   cannot observe the property. Anything a fixture can detect at runtime
+//!   is pinned as a fixture instead.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

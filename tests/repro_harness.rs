@@ -1,3 +1,23 @@
+//! The fixture corpus, run for exit codes and for stream contents.
+//!
+//! Compiles every case in `repro_corpus` and checks the exit code it
+//! produces, then separately runs the `STREAM_CASES` to check that terminal
+//! output and command-line arguments carry their contents byte for byte.
+//! Children run under a timeout with stdin closed, and both output streams
+//! are drained on their own threads so a fixture that writes more than a
+//! pipe buffer holds cannot deadlock the harness.
+//!
+//! Corpus size is chosen by the test profile rather than by editing the
+//! table, so a reduced run covers the same corpus more thinly instead of
+//! covering a different, smaller one.
+//!
+//! **Invariants:**
+//! - The corpus lives in `tests/support/repro_corpus.rs` and is shared with
+//!   `sanitizer_gate`. A second copy would drift, and the two suites would
+//!   quietly stop covering the same programs.
+//! - A fixture never reads the harness's own standard input.
+//! - A reduced profile samples evenly across the corpus, never a prefix.
+
 #[path = "support/test_controls.rs"]
 mod test_controls;
 #[path = "support/repro_corpus.rs"]

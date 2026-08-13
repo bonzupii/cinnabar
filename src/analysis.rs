@@ -1,14 +1,27 @@
-// IDE-facing queries over the compiler's attached facts.
-//
-// This module runs the standard front-end pipeline (load -> resolve ->
-// typecheck -> borrow) over a file set — optionally overlaid with unsaved
-// editor buffers — and answers position queries (hover, definition,
-// references, completion, signature help) by reading the attachments the
-// pipeline already computed: resolved symbol ids on expression/pattern/type
-// rows, canonical type keys, field facts.  It never re-resolves a name or
-// re-infers a type with parallel logic (Single-Fact Rule); a question the
-// attachments cannot answer is answered with "nothing" rather than with a
-// second implementation.
+//! IDE-facing queries over the compiler's attached facts.
+//!
+//! `analyze` runs the standard front-end pipeline (load -> resolve ->
+//! typecheck -> borrow) over a file set — optionally overlaid with unsaved
+//! editor buffers — and answers position queries by reading the
+//! attachments the pipeline already computed: resolved symbol ids on
+//! expression, pattern, and type rows; canonical type keys; field facts.
+//!
+//! Hover reads the attached type key, the resolved signature, and the
+//! linearity flag. Definition and references follow resolver symbol ids
+//! across the module graph. Completion reads resolver-attached
+//! `NODE_SCOPEFACT` visibility rows, typechecker-attached `NODE_LOCALFACT`
+//! lexical snapshots, and `NODE_FIELDKEY` facts for members after a `.`.
+//! Byte-offset to line/UTF-16-column mapping lives here too, since that is
+//! the boundary where the compiler's spans meet the protocol's positions.
+//!
+//! **Invariants:**
+//! - No name is re-resolved and no type re-inferred here, ever. A question
+//!   the attachments cannot answer is answered with "nothing" rather than
+//!   with a second implementation that could drift from the first.
+//! - Answering "nothing" is a real answer, not a failure to handle a case.
+//!   An editor showing no hover is correct where a build would also have
+//!   no fact; an editor showing a *different* answer than the build would
+//!   be the bug this rule exists to prevent.
 
 use crate::ast::*;
 use crate::inspect::sym_kind_name;

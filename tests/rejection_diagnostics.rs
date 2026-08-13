@@ -11,6 +11,14 @@
 //! while a whole class of program has quietly become accepted. The
 //! fixtures below are exactly those bundles.
 //!
+//! **Invariants:**
+//! - Each bundled rejection is asserted individually. Asserting only the
+//!   exit code would let any one of them stop being reported without the
+//!   suite noticing, which is the specific gap this file closes.
+//! - A fixture that carries a single rejection does not belong here; the
+//!   exit code already covers it, and adding it would spend a wording
+//!   assertion where nothing needs one.
+//!
 //! The comparison is against the ordered list of messages, not a set of
 //! substrings that must appear somewhere. Order catches a reshuffle, and
 //! the length catches both a lost diagnostic and an unintended new one.

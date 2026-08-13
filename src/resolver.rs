@@ -1,3 +1,32 @@
+//! Stage 4: name resolution, scope construction, and casing enforcement.
+//!
+//! `resolve` builds a scope tree over two separate namespaces, `NS_TYPE`
+//! and `NS_VALUE`, then rewrites every unresolved `EXPR_PATH`, `TY_PATH`,
+//! and `PAT_PATH` segment into a `NODE_SYM` reference. It seeds the
+//! built-in primitives and native surfaces, hoists top-level declarations
+//! so declaration order does not matter, wires in each sibling module's
+//! scope from the loader's `ext_mods`, and resolves `use` imports including
+//! `as` aliases.
+//!
+//! The compiler-checked casing rules are enforced here, on the hoisted
+//! declaration rather than at every use: a mis-cased identifier is one
+//! resolver error and never reaches the typechecker.
+//!
+//! Two tags are assigned at this point precisely so that no later stage has
+//! to recognize something by its name — the program's entry point
+//! (`SYM_FUN_MAIN`) and each native operation's `NAT_*` opcode.
+//!
+//! **Invariants:**
+//! - The symbol a name resolves to is decided here and nowhere else. A
+//!   later stage that needs it reads the attached `NODE_SYM`; it does not
+//!   re-walk the path and re-match segments with parallel logic.
+//! - Downstream semantics key off `SYM_FUN_MAIN` and the `NAT_*` opcodes,
+//!   never off a string comparison against `"main"` or a native function's
+//!   name. Attaching the tag here is what makes that rule keepable.
+//! - A name that does not resolve produces a diagnostic at the use site's
+//!   real span, optionally carrying a hedged suggestion. It never quietly
+//!   resolves to a plausible neighbour.
+
 use crate::ast::*;
 use crate::suggest;
 

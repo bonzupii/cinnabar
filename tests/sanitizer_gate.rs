@@ -44,6 +44,15 @@
 //! than an aspiration. Valgrind costs 10-50x native runtime, so reduced
 //! profiles check fewer and print how many — a gate that silently checked four
 //! of sixty would read as coverage it does not have.
+//!
+//! **Invariants:**
+//! - `LinkMode::Instrumented` is for this gate alone. The shipped link stays
+//!   static and `-nostdlib`; no binary a user receives is built this way.
+//! - A reduced profile prints how much it skipped. A gate that quietly
+//!   narrows its own corpus reports coverage it does not have, which is
+//!   worse than reporting none.
+//! - No checker is claimed that nothing runs. UBSan and ASan are documented
+//!   as absent, with the reason, rather than listed as intended coverage.
 
 #[path = "support/test_controls.rs"]
 mod test_controls;

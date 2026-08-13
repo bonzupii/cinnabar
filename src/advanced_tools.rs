@@ -1,3 +1,31 @@
+//! Developer tools that sit beside the compiler rather than inside it.
+//!
+//! Five surfaces share this file because they share a shape — each drives
+//! the real compiler binary as a subprocess and reports what it did.
+//! `binary_report` shells out to the LLVM binutils for sections, symbols,
+//! and disassembly. The Mushlings exercises are initialized from real
+//! fixtures and verified by re-running the compiler over the learner's
+//! edits. `replay_fuzz` and `minimize_fuzz` reproduce and then shrink a
+//! failing artifact. `soundness_evidence` counts what the front end
+//! actually established and emits it as JSON. `serve_playground` compiles
+//! and runs submitted source over loopback HTTP.
+//!
+//! **Invariants:**
+//! - The playground binds only a loopback address, and a submitted program
+//!   runs under a wall-clock limit with its request body size capped. It
+//!   compiles and executes arbitrary code, so those are the boundaries
+//!   that make it a local tool rather than a remote one.
+//! - Minimization preserves the *failure signature*, not merely the
+//!   failure: a shrunk artifact that fails for a new reason is rejected as
+//!   a candidate, since it no longer reproduces the bug being minimized.
+//! - The soundness evidence states `formal_proof: false` and scopes itself
+//!   explicitly. It reports machine-checkable compiler facts, and must
+//!   never be worded to imply a mechanized preservation/progress proof it
+//!   does not have.
+//! - An exercise requires a real diagnostic to teach. Where the language
+//!   has not decided a rule, no exercise is written for it — see the note
+//!   above `initialize_mushlings` on discard patterns.
+
 use crate::ast::{node_tag, NODE_EXPR, NODE_INST, NODE_STRIDE, NODE_TRAIT, NODE_TY};
 use serde_json::json;
 use std::io::{Read, Write};

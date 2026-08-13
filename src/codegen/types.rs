@@ -1,3 +1,20 @@
+//! Stage 7a: lowering canonical type keys to LLVM types.
+//!
+//! `llvm_type`/`build_type` turn the typechecker's canonical keys into
+//! inkwell `BasicTypeEnum`s: builtins to LLVM integer and `i1` types,
+//! structs to LLVM structs, enums to tagged unions whose payload layout
+//! follows the enum's own declared variant order, and native handles to
+//! their opaque pointer-shaped representation. Lowering is memoized by
+//! type-key index, so a key lowers once per module.
+//!
+//! **Invariants:**
+//! - Layout is derived from the declared type every time. There is no
+//!   hand-maintained, name-keyed table of sizes or variant tags that could
+//!   drift out of step with the language.
+//! - A generic argument is lowered recursively: a `Vec(Int)` is not a
+//!   `Vec(String)`, and the element type drives both GEP and allocation
+//!   size.
+
 use crate::ast::*;
 use crate::codegen::error::*;
 use inkwell::context::Context;

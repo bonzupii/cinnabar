@@ -1,3 +1,44 @@
+//! Stage 6: flow-sensitive borrow, linearity, and container-state checking.
+//!
+//! A control-flow graph is built per function (`BLK_ENTRY`, `BLK_STMT`,
+//! `BLK_JOIN`, `BLK_EXIT`) and walked to a fixpoint, so a fact holds on
+//! every path rather than on the one the source happens to read like. Each
+//! binding moves through a state lattice — `ST_UNBOUND`, `ST_LIVE`,
+//! `ST_MOVED`, `ST_PARTIAL` — driven by the operations extracted from each
+//! statement and expression (`OP_READ`, `OP_MOVE`, `OP_BORROW`,
+//! `OP_BORROW_M`, `OP_ASSIGN`, `OP_BIND`, `OP_EXIT`, `OP_RET_REF`, and the
+//! `OP_CONT_*` continuation variants covering `return`, `break`, and `try`
+//! propagation). `apply_move` is the central transition.
+//!
+//! What it enforces: a linear value is consumed exactly once on every path
+//! out of its scope, and a moved value can be neither moved nor *borrowed*
+//! again — a borrow after the move reads a resource the move already
+//! released, which is the use-after-free shape. No two `&mut` borrows of
+//! one place are live at once, and no place is mutated through a shared
+//! borrow or moved while borrowed. A struct holding one linear field among
+//! several plain ones tracks that field individually, so moving it out
+//! leaves the rest of the struct usable.
+//!
+//! A returned borrow whose origin cannot be pinned to one input is
+//! rejected, which pushes the programmer to restructure the API rather than
+//! annotate a lifetime. The per-function summary records which parameters a
+//! returned borrow derives from, and an *empty* set means static: a string
+//! literal or a `const` of reference type has no loan to trace and outlives
+//! every caller, so one function can forward another's static result
+//! without the borrow becoming untraceable at the call.
+//!
+//! Because a borrow fact can depend on a callee, the whole function set is
+//! re-checked until no summary changes, bounded by a cap derived from the
+//! function and parameter counts rather than by a fixed round limit.
+//!
+//! **Invariants:**
+//! - Linearity is read here, never decided. It comes from the flag the
+//!   typechecker attached to the canonical type descriptor; this file never
+//!   infers a type of its own and never asks what a type is called.
+//! - Every diagnostic and every attached `Note` carries a span the walk
+//!   actually visited — a binding site, a path's last move, the
+//!   per-predecessor exit states behind a join inconsistency.
+
 use crate::ast::*;
 use crate::typecheck::render_type_key;
 

@@ -1,11 +1,17 @@
-// The typed-arena dump behind `--dump-typed-ast`.
-//
-// This serializes the compiler's entire state after the front-end has run:
-// the interning table, the list arena, and every node row with its raw
-// slots plus a symbolic annotation of what the row means — including the
-// attachments earlier stages computed (resolved symbols, canonical type
-// keys, linearity flags, variant tags, field facts).  It prints facts the
-// pipeline already attached; it never re-derives them.
+//! The typed-arena dump behind `--dump-typed-ast`.
+//!
+//! Serializes the compiler's entire state once the front end has run: the
+//! interning table, the list arena, and every node row with its raw slots
+//! plus a symbolic annotation of what that row means — including the
+//! attachments earlier stages computed, so resolved symbols, canonical type
+//! keys, linearity flags, variant tags, and field facts all appear as the
+//! stages left them.
+//!
+//! **Invariants:**
+//! - It prints facts the pipeline attached and never re-derives one. The
+//!   dump's whole value is that it shows the compiler's actual state; a
+//!   field this file computed for display would make it a second opinion
+//!   rather than a window.
 
 use crate::ast::*;
 use crate::typecheck::render_type_key;

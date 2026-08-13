@@ -1,12 +1,21 @@
-// The suggestion engine.
-//
-// Suggestions are hedged by construction: every message the engine produces
-// carries one of `HEDGE_PHRASES` and never states the developer's intent as
-// a fact.  An ambiguous match — two candidates equally close, or none close
-// enough — produces nothing, so the caller emits its plain error with no
-// candidate named.  The engine matches names only; the caller supplies the
-// candidates and their real source spans, so a suggestion can point at a
-// declaration without the engine ever inventing a location.
+//! The suggestion engine behind "did you mean" diagnostics.
+//!
+//! Suggestions are hedged by construction: every message carries one of
+//! `HEDGE_PHRASES` and never states the developer's intent as a fact. An
+//! ambiguous match — two candidates equally close, or none close enough —
+//! produces nothing at all, and the caller emits its plain error with no
+//! candidate named.
+//!
+//! The engine matches names and nothing else. Candidates and their real
+//! source spans come from the caller, which is what lets a suggestion point
+//! at a declaration without this file ever knowing where anything is.
+//!
+//! **Invariants:**
+//! - Producing nothing is the correct output whenever the match is not
+//!   clear. A confidently wrong suggestion costs the reader more than an
+//!   unadorned error does.
+//! - No message asserts what the programmer meant; the hedge is part of
+//!   the contract, not a stylistic softener.
 
 /// The phrases a suggestion message must contain.  Every message the engine
 /// returns is built around one of these, which is what keeps a suggestion a
