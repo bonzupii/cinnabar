@@ -84,7 +84,7 @@ expect_failure() {
 }
 
 echo "=================================================="
-echo "=== Cinnabar Toolchain Pre-Commit Test Suite ==="
+echo "==== Cinnabar Toolchain Pre-Commit Test Suite ===="
 echo "=================================================="
 echo ""
 
@@ -132,5 +132,5 @@ rm -f tests/fixtures/spec tests/fixtures/constructor_parse tests/fixtures/pub_us
 
 echo ""
 echo -e "${GREEN}=================================================="
-echo "=== All pre-commit checks passed cleanly! ==="
+echo "====== All pre-commit checks passed cleanly! ====="
 echo -e "==================================================${NC}"
