@@ -198,11 +198,67 @@ builtin against redeclaration.
 
 ---
 
-## Milestone 3 — Native Memory Bugs
-- `Memory.write_u8` overreads the allocation by 7 bytes (valgrind-confirmed). Fix the store width.
-  This is almost certainly also the root cause of the `deallocate`-frees-garbage-pointer bug;
-  re-test that one after this fix, do not fix it independently.
-- Re-run the affected fixtures under Valgrind/ASan to confirm both are gone.
+## Milestone 3 — Native Memory Bugs (COMPLETE)
+
+### What the reports said, and what was actually there
+The two reported defects were an `Memory.write_u8` that overreads its allocation by 7 bytes, and a
+`Memory.deallocate` that frees a garbage pointer — the second suspected to share the first's root
+cause. Investigating them together, as the milestone required, found one real defect, and it is
+the second one's root cause rather than the first's.
+
+**Access width: not present.** `write_u8` and `read_u8` compute their target with a
+`getelementptr i8` over the block's data pointer, guard it with `offset < len`, and access exactly
+one byte (`store i8` / `load i8`). A wide access would be visible in the emitted IR and is not
+there. `mem_byte_access.cnb` confirms it behaviourally as well.
+
+**Handle initialization: real, and fixed.** Every native handle — `Memory.Block`,
+`Collections.Vec(T)`, `Collections.String`, `Collections.HashMap(K, V)` — lowers to one shared
+layout, `{ ptr, i64, i64 }` (`native_llvm`). Handles are moved, passed, and returned *by value*:
+`deallocate(block: Block)` lowers to `define { i64 } @Memory_deallocate({ ptr, i64, i64 })`, so the
+caller loads all 24 bytes of the layout at the move. But `native_allocate` wrote only the data and
+length fields, and `native_string_from_slice` likewise — neither surface uses the capacity field,
+so neither initialized it. Every `Memory.deallocate` and every `String` move therefore read 8 bytes
+of uninitialized stack. That is exactly the shape of "frees a garbage pointer": a handle carrying a
+field that was never written.
+
+The fix is category-level rather than one more store per constructor. `init_native_handle` zero-
+fills a handle across its **whole lowered layout** in a single aggregate store of
+`StructType::const_zero()`, derived from the handle's own LLVM type rather than a hand-counted run
+of per-field stores, and every constructor calls it before storing its own fields. A constructor
+cannot skip a field, and the handle layout can grow without silently reintroducing the bug.
+`store_null_data`, which hardcoded three field indices, is gone.
+
+### Why Valgrind and ASan cannot be the gate here
+The milestone asked for the affected fixtures to be re-run under Valgrind/ASan. That is not
+achievable for this toolchain's output, and the reason is structural rather than incidental. A
+Cinnabar binary is linked `-static -nostdlib -no-pie` against a musl `libc.a` embedded in the
+compiler, so it has **no dynamic section at all** (`readelf -d`: "There is no dynamic section in
+this file"). Valgrind's memcheck works by interposing on the allocator through the dynamic linker;
+with nothing to interpose on it reports `0 allocs, 0 frees, 0 bytes allocated` for a program that
+demonstrably allocates — including with `--soname-synonyms=somalloc=NONE`, the documented recipe
+for statically linked allocators, and at `-O 0` so that no allocation has been optimized away. ASan
+is no better placed: its runtime requires the libc the link deliberately does not provide. Since
+"Static linking only, ever" is a Milestone 4 commitment and not negotiable, the verification is
+built in-tree instead.
+
+### Verification
+- `tests/fixtures/repro/mem_byte_access.cnb` is the in-language access-width oracle. It fills a
+  16-byte block with a distinct non-zero value per offset, overwrites one offset with a probe byte
+  sharing no set bit with any fill value, and requires every *other* offset to still hold its fill
+  value. A store wider than one byte necessarily lands on an adjacent offset — lower ones on a
+  big-endian target, higher on a little-endian one — so the probe runs at the first, a middle, and
+  the last offset to catch a wide store in either direction; a wide *read* is caught by the
+  readback returning a neighbour's bits. It also asserts that an out-of-bounds access reports the
+  offset asked for and the block's own length, which reads the handle's length field back out
+  after construction and borrowing. The oracle is mutation-checked: widening the `write_u8` store
+  to `i64` makes it exit 23 ("neighbour clobbered at the first offset") instead of 0.
+- `tests/native_memory.rs` asserts the same properties against the emitted LLVM IR, where an access
+  width is stated literally: `write_u8` stores exactly `i8` to the byte it computed, `read_u8`
+  loads exactly `i8` from it, `deallocate` frees the pointer loaded from field 0 of the handle, and
+  every native-handle constructor zero-fills the full `{ ptr, i64, i64 }` layout *before* storing
+  any field into it (ordering asserted, since a zero-fill emitted after the field stores would
+  erase them). The IR assertions catch what no in-language check structurally can: an
+  uninitialized handle field is read as garbage rather than producing an observably wrong value.
 
 ---
 

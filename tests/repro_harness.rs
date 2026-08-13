@@ -20,6 +20,7 @@ const EXPECT_OK: &[(&str, i32)] = &[
     ("rec_test", 120),
     ("tail_rec", 64),
     ("mem_probe", 0),
+    ("mem_byte_access", 0),
     ("hanoi", 255),
     ("head", 10),
     ("enum_test", 0),

@@ -2386,6 +2386,10 @@ fn native_allocate<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     sess.2.position_at_end(ok_block);
     let block_key = result_arg_key(sess, ret_key, 0);
     let block_val = declare_local(sess, block_key, "block", span)?;
+    // `Block` uses only the data and length fields of the shared handle
+    // layout; the rest is zeroed so moving the block by value never reads
+    // uninitialized stack.
+    init_native_handle(sess, block_key, block_val, span)?;
     let bd = struct_gep(sess, block_key, block_val, 0, "", span)?;
     store_key(sess, bd, data.into())?;
     let bl = struct_gep(sess, block_key, block_val, 1, "", span)?;
@@ -2491,21 +2495,43 @@ fn native_read_u8<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>
     Ok(())
 }
 
-fn store_null_data<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, ptr: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
-    let null_ptr = ptr_ty(sess).const_null();
-    let d = struct_gep(sess, key, ptr, 0, "", span)?;
-    store_key(sess, d, null_ptr.into())?;
-    let l = struct_gep(sess, key, ptr, 1, "", span)?;
-    store_key(sess, l, sess.0.i64_type().const_zero().into())?;
-    let c = struct_gep(sess, key, ptr, 2, "", span)?;
-    store_key(sess, c, sess.0.i64_type().const_zero().into())?;
+// The LLVM struct a native handle key lowers to.  Every native handle
+// shares one layout (`native_llvm`), so this is the single place the
+// emitter recovers it as a struct rather than assuming a field count.
+fn handle_struct_of<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, span: (i64, i64, i64)) -> Result<inkwell::types::StructType<'ctx>, CodegenError> {
+    let ty = llvm_of(sess, key, span)?;
+    match ty {
+        BasicTypeEnum::StructType(st) => Ok(st),
+        BasicTypeEnum::ArrayType(other) => Err(builder_error(span.0, span.1, span.2, &format!("native handle key {} lowered to non-struct type {:?}", key, other))),
+        BasicTypeEnum::FloatType(other) => Err(builder_error(span.0, span.1, span.2, &format!("native handle key {} lowered to non-struct type {:?}", key, other))),
+        BasicTypeEnum::IntType(other) => Err(builder_error(span.0, span.1, span.2, &format!("native handle key {} lowered to non-struct type {:?}", key, other))),
+        BasicTypeEnum::PointerType(other) => Err(builder_error(span.0, span.1, span.2, &format!("native handle key {} lowered to non-struct type {:?}", key, other))),
+        BasicTypeEnum::VectorType(other) => Err(builder_error(span.0, span.1, span.2, &format!("native handle key {} lowered to non-struct type {:?}", key, other))),
+        BasicTypeEnum::ScalableVectorType(other) => Err(builder_error(span.0, span.1, span.2, &format!("native handle key {} lowered to non-struct type {:?}", key, other))),
+    }
+}
+// Zero-fills a native handle across its whole lowered layout before any
+// field is stored into it.
+//
+// A native handle is moved, passed, and returned *by value*: `deallocate`
+// receives a `Block` as `{ ptr, i64, i64 }`, so the caller loads every byte
+// of the layout whether or not that particular native surface uses every
+// field.  A constructor that writes only the fields its own surface cares
+// about therefore leaves the rest as whatever was on the stack, and that
+// garbage is read at the first move.  Zeroing from the layout itself — one
+// aggregate store of `StructType::const_zero()`, not a hand-counted run of
+// per-field stores — makes it impossible for a constructor to miss a field
+// when the handle layout grows.
+fn init_native_handle<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, ptr: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
+    let zero = handle_struct_of(sess, key, span)?.const_zero();
+    store_key(sess, ptr, zero.into())?;
     Ok(())
 }
 
 fn native_vec_new<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let vec_key = result_arg_key(sess, ret_key, 0);
     let vec_val = declare_local(sess, vec_key, "vec", span)?;
-    store_null_data(sess, vec_key, vec_val, span)?;
+    init_native_handle(sess, vec_key, vec_val, span)?;
     let ok_result = build_result_ok(sess, ret_key, vec_key, vec_val, span)?;
     copy_to_out(sess, ret_key, out, ok_result, span)?;
     Ok(())
@@ -2707,7 +2733,7 @@ fn native_string_free<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'c
 fn native_hash_map_new<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let map_key = result_arg_key(sess, ret_key, 0);
     let map_val = declare_local(sess, map_key, "map", span)?;
-    store_null_data(sess, map_key, map_val, span)?;
+    init_native_handle(sess, map_key, map_val, span)?;
     let ok_result = build_result_ok(sess, ret_key, map_key, map_val, span)?;
     copy_to_out(sess, ret_key, out, ok_result, span)?;
     Ok(())
@@ -3434,6 +3460,10 @@ fn native_string_from_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionV
     sess.2.build_memcpy(raw, 1, data, 1, len).map_err(builder_fail)?;
     let str_key = result_arg_key(sess, ret_key, 0);
     let str_val = declare_local(sess, str_key, "str", span)?;
+    // `String` uses only the data and length fields of the shared handle
+    // layout; the rest is zeroed so moving the string by value never reads
+    // uninitialized stack.
+    init_native_handle(sess, str_key, str_val, span)?;
     let sd = struct_gep(sess, str_key, str_val, 0, "", span)?;
     store_key(sess, sd, raw.into())?;
     let sl = struct_gep(sess, str_key, str_val, 1, "", span)?;
