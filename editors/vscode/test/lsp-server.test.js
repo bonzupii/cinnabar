@@ -248,13 +248,17 @@ test("the language server the launcher names answers a real LSP session", async 
     `${rejected} is expected to be rejected but the server reported no diagnostics`
   );
 
-  // linear_branch_consume.cnb is listed in the harness's EXPECT_OK, so the
-  // server must report it clean.  Asserting the listing keeps the two in step.
+  // linear_branch_consume.cnb is listed in the expected-success corpus, so
+  // the server must report it clean.  Asserting the listing keeps the two in
+  // step.  The corpus lives in its own file because the repro harness and the
+  // sanitizer gate both run it; reading it here rather than the harness is
+  // what keeps this assertion pointed at the table itself.
   const accepted = path.join("tests", "fixtures", "repro", "linear_branch_consume.cnb");
-  const harness = fs.readFileSync(path.join(repositoryRoot, "tests", "repro_harness.rs"), "utf8");
+  const corpusPath = path.join(repositoryRoot, "tests", "support", "repro_corpus.rs");
+  const corpus = fs.readFileSync(corpusPath, "utf8");
   assert.ok(
-    /EXPECT_OK[\s\S]*?"linear_branch_consume"[\s\S]*?\];/.test(harness),
-    "linear_branch_consume is no longer in the harness EXPECT_OK list"
+    /EXPECT_OK[\s\S]*?"linear_branch_consume"[\s\S]*?\];/.test(corpus),
+    "linear_branch_consume is no longer in the expected-success corpus"
   );
   const acceptedUri = openFixture(child, accepted);
   const acceptedDiagnostics = await diagnosticsFor(reader, acceptedUri, accepted);

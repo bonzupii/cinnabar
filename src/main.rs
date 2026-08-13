@@ -22,6 +22,7 @@ struct CliArgs {
     emit_obj: bool,
     format_check: Option<bool>,
     check_only: bool,
+    instrumented: bool,
     tool_command: Option<ToolCommand>,
 }
 
@@ -129,6 +130,14 @@ fn parse_args() -> Option<CliArgs> {
                 .help("Optimize and assemble to a relocatable object file, skipping the link; default output is the input path with .o"),
         )
         .arg(
+            Arg::new("instrumented")
+                .long("instrumented")
+                .hide(true)
+                .action(ArgAction::SetTrue)
+                .conflicts_with_all(["dump_ast", "dump_typed_ast", "print_layout", "emit_llvm", "emit_obj", "check_only"])
+                .help("Link dynamically against the host libc so a memory checker can interpose; test infrastructure, never a release artifact"),
+        )
+        .arg(
             Arg::new("check_only")
                 .long("check-only")
                 .hide(true)
@@ -232,6 +241,7 @@ fn parse_args() -> Option<CliArgs> {
             emit_obj: false,
             format_check: Some(format_matches.get_flag("check")),
             check_only: false,
+            instrumented: false,
             tool_command: None,
         });
     }
@@ -279,6 +289,7 @@ fn parse_args() -> Option<CliArgs> {
                 emit_obj: false,
                 format_check: None,
                 check_only: false,
+                instrumented: false,
                 tool_command: Some(tool_command),
             });
         }
@@ -327,6 +338,7 @@ fn parse_args() -> Option<CliArgs> {
         emit_obj: matches.get_flag("emit_obj"),
         format_check: None,
         check_only: matches.get_flag("check_only"),
+        instrumented: matches.get_flag("instrumented"),
         tool_command: None,
     })
 }
@@ -336,7 +348,7 @@ fn target_arg() -> Arg {
 }
 
 fn tool_args(input: PathBuf, tool_command: ToolCommand, output: Option<PathBuf>) -> CliArgs {
-    CliArgs { input, output, dump_ast: false, dump_typed_ast: false, print_layout: false, explain_borrow: None, run: false, opt_level: "2".to_string(), emit_llvm: false, emit_obj: false, format_check: None, check_only: false, tool_command: Some(tool_command) }
+    CliArgs { input, output, dump_ast: false, dump_typed_ast: false, print_layout: false, explain_borrow: None, run: false, opt_level: "2".to_string(), emit_llvm: false, emit_obj: false, format_check: None, check_only: false, instrumented: false, tool_command: Some(tool_command) }
 }
 
 fn main() -> ExitCode {
@@ -425,9 +437,16 @@ fn main() -> ExitCode {
         Some(path) => path.clone(),
         None => default_out_path(&args.input),
     };
-    if let Err(codegen_err) =
-        compile_and_link(&names, &mut nodes, &mut lists, impls_list, &out, &args.opt_level, entry_span)
-    {
+    let target = codegen::BuildTarget {
+        out: &out,
+        opt_level: &args.opt_level,
+        mode: if args.instrumented {
+            codegen::LinkMode::Instrumented
+        } else {
+            codegen::LinkMode::Shipped
+        },
+    };
+    if let Err(codegen_err) = compile_and_link(&names, &mut nodes, &mut lists, impls_list, &target, entry_span) {
         return finish_with_codegen_error(&codegen_err, &files);
     }
     if args.run {

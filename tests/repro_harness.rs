@@ -1,75 +1,16 @@
 #[path = "support/test_controls.rs"]
 mod test_controls;
+#[path = "support/repro_corpus.rs"]
+mod repro_corpus;
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use repro_corpus::EXPECT_OK;
 use test_controls::{
     evenly_selected, profile_name, profile_usize, reduced_usize_control, test_profile,
 };
 
-const EXPECT_OK: &[(&str, i32)] = &[
-    ("hello", 0),
-    ("net_primitives", 0),
-    ("liveness_many_bindings", 100),
-    ("mini", 0),
-    ("array_test", 0),
-    ("borrow_index", 0),
-    ("enum_array_index", 0),
-    ("idx10d_mut_disjoint", 30),
-    ("idx10e_same_expr_disjoint", 30),
-    ("rec_test", 120),
-    ("tail_rec", 64),
-    ("mem_probe", 0),
-    ("mem_byte_access", 0),
-    ("hanoi", 255),
-    ("head", 10),
-    ("enum_test", 0),
-    ("mem2", 0),
-    ("vm2", 1),
-    ("vm3", 1),
-    ("vm4", 1),
-    ("vm6", 1),
-    ("vm7", 5),
-    ("vm8", 1),
-    ("vm9", 5),
-    ("vm11", 4),
-    ("vm", 120),
-    ("continue_test", 9),
-    ("jump_test", 3),
-    ("jump2", 3),
-    ("jump3", 3),
-    ("jump4", 1),
-    ("nested_continue_test", 109),
-    ("elif_test", 1),
-    ("elif_chain", 3),
-    ("modulo", 42),
-    ("div_runtime", 7),
-    ("int_min_neg1", 0),
-    ("shift_mask", 0),
-    ("int_width_grid", 0),
-    ("int_literal_context", 0),
-    ("string_literal", 0),
-    ("string_print", 0),
-    ("string_static_borrow", 0),
-    ("file_roundtrip", 0),
-    ("runtime_io", 0),
-    ("empty_block", 0),
-    ("utf8_validation", 0),
-    ("multiline_const", 30),
-    ("fib", 155),
-    ("linear_branch_consume", 0),
-    ("linear_loop_consume", 0),
-    ("linear_field_reinit", 0),
-    ("linear_ref_swap", 0),
-    ("linear_field_consume", 0),
-    ("linear_ref_nonlinear_read", 14),
-    ("ret_borrow_shared_twice", 0),
-    ("ret_borrow_single_origin", 0),
-    ("slice_test", 0),
-    ("vec_pop_drain", 0),
-    ("hash_map_remove_drain", 0),
-];
 
 const EXPECT_REJECTED: &[&str] = &[
     "index_oob_const",

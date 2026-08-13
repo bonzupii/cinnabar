@@ -26,22 +26,55 @@ const MUSL_CRT1_O: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crt1.o"));
 const MUSL_CRTI_O: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crti.o"));
 const MUSL_CRTN_O: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crtn.o"));
 
+/// How a program is linked.
+///
+/// `Shipped` is what this compiler exists to produce: static, `-nostdlib`,
+/// `-no-pie`, against the musl archive embedded at build time, carrying no
+/// dynamic section and no host libc dependency.
+///
+/// `Instrumented` is test infrastructure and never a release artifact. It
+/// links dynamically against the host libc for one reason: a memory checker
+/// needs something to interpose on. Against a shipped binary Valgrind's
+/// memcheck has no dynamic section to hook and reports `0 allocs, 0 frees`
+/// for a program that demonstrably allocates, and a sanitizer runtime wants
+/// exactly the libc the shipped link deliberately omits.
+///
+/// This does not relax the static-only rule for shipped output. It puts a
+/// second link mode beside it, used only by the sanitizer gate, so that the
+/// binaries a user receives are unchanged by the existence of the checks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinkMode {
+    Shipped,
+    Instrumented,
+}
+
+/// Where a linked build goes and how it is produced.
+///
+/// These three travel together — the output path, the optimization level it
+/// is assembled at, and the mode it is linked in — and naming them as one
+/// value keeps a call site from silently pairing an instrumented link with
+/// the path a shipped binary was meant to occupy.
+pub struct BuildTarget<'a> {
+    pub out: &'a Path,
+    pub opt_level: &'a str,
+    pub mode: LinkMode,
+}
+
 pub fn compile_and_link(
     names: &[String],
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
     impls_list: i64,
-    out: &Path,
-    opt_level: &str,
+    target: &BuildTarget,
     entry_span: (i64, i64, i64),
 ) -> Result<(), CodegenError> {
     let ir_text = emit_to_ir(names, nodes, lists, impls_list, entry_span)?;
     let temp_root = make_temp_root()?;
-    let ir_path = temp_path(out, "ll");
-    let obj_path = temp_path(out, "o");
+    let ir_path = temp_path(target.out, "ll");
+    let obj_path = temp_path(target.out, "o");
     let compiled = write_text(&ir_path, &ir_text)
-        .and_then(|()| assemble(&ir_path, &obj_path, opt_level))
-        .and_then(|()| link(&obj_path, out));
+        .and_then(|()| assemble(&ir_path, &obj_path, target.opt_level))
+        .and_then(|()| link(&obj_path, target.out, target.mode));
     finish_temp(&temp_root, compiled)
 }
 
@@ -277,7 +310,29 @@ fn opt_flags(level: &str) -> (String, String) {
     }
 }
 
-fn link(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
+fn link(obj_path: &Path, out: &Path, mode: LinkMode) -> Result<(), CodegenError> {
+    match mode {
+        LinkMode::Shipped => link_shipped(obj_path, out),
+        LinkMode::Instrumented => link_instrumented(obj_path, out),
+    }
+}
+
+// The emitted module defines `main`, which is what musl's `crt1.o` calls in
+// the shipped link and what the host toolchain's own startup files call
+// here. So the instrumented link needs no separate entry point: it is the
+// same object, handed to the driver with none of the flags that cut it off
+// from the host libc.
+// `-no-pie` for the same reason the shipped link passes it: `llc` produces a
+// non-relocatable object, so its absolute `.rodata` relocations cannot go
+// into a position-independent executable. The host toolchain defaults to
+// PIE, so leaving it off fails the link rather than producing a different
+// binary — and the point of this mode is that it is the *same* object,
+// linked differently.
+fn link_instrumented(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
+    run_tool("clang", &["-no-pie", "-o", &out.to_string_lossy(), &obj_path.to_string_lossy()])
+}
+
+fn link_shipped(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
     let libc_path = temp_path(out, "libc.a");
     let crt1_path = temp_path(out, "crt1.o");
     let crti_path = temp_path(out, "crti.o");
