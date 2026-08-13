@@ -23,7 +23,7 @@ end
 use Collections.vec_push
 use Collections.Vec
 
-pub fun push_twice<T>(vec: &mut Vec(T), element: T) impure Result(Unit, Collections.Error)
+fun push_twice<T>(vec: &mut Vec(T), element: T) impure Result(Unit, Collections.Error)
   try vec_push(vec, element)
   try vec_push(vec, element)
 end

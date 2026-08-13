@@ -656,8 +656,8 @@ mod tests {
     #[test]
     fn manifest_rejects_items_that_are_not_public_constants() {
         let message = rejected_manifest(
-            "private_type",
-            "type Extra\n  pub field: I64\nend\npub const ENTRY: &[U8] = \"main.cnb\"\n",
+            "private_const",
+            "const NAME: &[U8] = \"cinnabar\"\npub const ENTRY: &[U8] = \"main.cnb\"\n",
         );
         assert!(message.contains("build.cnb:1:1: manifest items must be pub const declarations"), "{}", message);
     }

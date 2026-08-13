@@ -196,7 +196,7 @@ fun append_int(vec: &mut Collections.Vec(U8), value: I64) impure Result(Unit, Co
 end
 
 #! Owns the vec in straight-line code only: build, view, string, print.
-pub fun print_int_inline(value: I64) impure Result(Unit, Collections.Error)
+fun print_int_inline(value: I64) impure Result(Unit, Collections.Error)
   val vec = try vec_new[U8]()
 
   val build_result = append_int(&mut vec, value)

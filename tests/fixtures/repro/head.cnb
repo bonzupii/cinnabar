@@ -378,12 +378,12 @@ end
 
 #! Compiler error if T does not implement Checksum:
 #! implement Checksum for T.
-pub fun checksum_value<T: Checksum>(value: &T) U32
+fun checksum_value<T: Checksum>(value: &T) U32
   return Checksum.checksum(value)
 end
 
 #! Groups magic bytes and expected magic value.
-pub fun magic_header() MagicHeader
+fun magic_header() MagicHeader
   return MagicHeader(
     bytes: [MAGIC_BYTE_0, MAGIC_BYTE_1, MAGIC_BYTE_2, MAGIC_BYTE_3],
     expected: MAGIC_U32
@@ -391,7 +391,7 @@ pub fun magic_header() MagicHeader
 end
 
 #! Groups memory test parameters.
-pub fun memory_plan() MemoryPlan
+fun memory_plan() MemoryPlan
   return MemoryPlan(
     size: MEMORY_SIZE,
     byte: MEMORY_BYTE
@@ -399,7 +399,7 @@ pub fun memory_plan() MemoryPlan
 end
 
 #! Groups expected checksum digests.
-pub fun checksum_expectation() ChecksumExpectation
+fun checksum_expectation() ChecksumExpectation
   return ChecksumExpectation(
     header: EXPECTED_HEADER_CHECKSUM,
     tag: EXPECTED_TAG_CHECKSUM
@@ -410,7 +410,7 @@ end
 #! Compiler errors:
 #! - using I64 where Port is expected: call port_from_int and handle Result
 #! - discarding this Result: use try or match both variants
-pub fun port_from_int(value: I64) Result(Port, PortError)
+fun port_from_int(value: I64) Result(Port, PortError)
   if value < MIN_PORT
     return Err(PortInvalid(value))
   end
@@ -422,7 +422,7 @@ pub fun port_from_int(value: I64) Result(Port, PortError)
   return Ok(Port(value))
 end
 
-pub fun port_value(port: Port) I64
+fun port_value(port: Port) I64
   match port
     Port(value) => return value
   end
@@ -450,7 +450,7 @@ end
 
 #! Compiler error if normalize or double_positive Result is discarded:
 #! use try or match both variants.
-pub fun range_workflow(input: I64) Result(I64, RangeError)
+fun range_workflow(input: I64) Result(I64, RangeError)
   val normalized = try normalize(input)
   val doubled = try double_positive(normalized)
   return Ok(doubled)
@@ -467,7 +467,7 @@ end
 
 #! Compiler error if RangeError is returned where AppError is expected:
 #! convert explicitly with range_to_app.
-pub fun app_workflow(input: I64) Result(I64, AppError)
+fun app_workflow(input: I64) Result(I64, AppError)
   val normalized = match normalize(input)
     Ok(value) => value
     Err(error) => return Err(range_to_app(error))
@@ -481,7 +481,7 @@ pub fun app_workflow(input: I64) Result(I64, AppError)
   return Ok(doubled)
 end
 
-pub fun half_if_even(value: I64) Option(I64)
+fun half_if_even(value: I64) Option(I64)
   if value == EVEN_TWO
     return Some(HALF_TWO)
   end

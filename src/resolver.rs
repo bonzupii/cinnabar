@@ -18,10 +18,6 @@ type State<'a> = (
     // Secondary notes tied to the errors this stage reports (definition-site
     // labels and hedged name suggestions), indexed like the borrow checker's.
     &'a mut Vec<Note>,
-    // Symbols a path resolved to, in resolution order.  A symbol absent from
-    // this list was declared but never referenced: the resolver's own fact
-    // about reference, read by the dead-code check instead of a second walk.
-    &'a mut Vec<i64>,
 );
 
 pub fn resolve(
@@ -39,7 +35,6 @@ pub fn resolve(
     let mut prefixes: Vec<i64> = Vec::new();
     let mut item_scopes: Vec<(i64, i64)> = Vec::new();
     let mut used: Vec<i64> = Vec::new();
-    let mut referenced: Vec<i64> = Vec::new();
     let empty_prefix = alloc_list(lists);
     let root_scope = alloc_scope(&mut scopes, &mut parents, &mut pubs, &mut prefixes, NONE, empty_prefix, 1);
     let mut state: State = (
@@ -54,7 +49,6 @@ pub fn resolve(
         &mut item_scopes,
         &mut used,
         notes,
-        &mut referenced,
     );
     seed_builtins(&mut state, root_scope, root);
 
@@ -118,16 +112,6 @@ pub fn resolve(
     }
 
     materialize_scope_facts(&mut state);
-
-    check_dead_code(&mut state, root);
-    idx = 0;
-    while idx < ext_mods.len() {
-        match ext_mods.get(idx) {
-            Some(pair) => check_dead_code(&mut state, pair.1),
-            None => break,
-        }
-        idx += 1;
-    }
 
     state.3.is_empty()
 }
@@ -1140,7 +1124,6 @@ fn resolve_path(state: &mut State, scope: i64, segs: i64, final_ns: i64) -> i64 
     if sym != NONE && src != NONE {
         mark_used(state.9, src);
     }
-    mark_referenced(state.11, sym);
     sym
 }
 
@@ -1150,11 +1133,6 @@ fn mark_used(used: &mut Vec<i64>, use_item: i64) {
     }
 }
 
-fn mark_referenced(referenced: &mut Vec<i64>, sym: i64) {
-    if sym != NONE && !contains_i64(referenced, sym) {
-        referenced.push(sym);
-    }
-}
 
 fn join_segs(names: &[String], lists: &[Vec<i64>], segs: i64) -> String {
     let mut text = String::new();
@@ -1753,57 +1731,4 @@ fn suggest_type_name(state: &mut State, scope: i64, misspelled: i64) {
     }
 }
 
-fn check_dead_code(state: &mut State, list: i64) {
-    let count = list_len(state.2, list);
-    let mut idx = 0i64;
-    while idx < count {
-        check_dead_item(state, list_get(state.2, list, idx));
-        idx += 1;
-    }
-}
 
-fn check_dead_item(state: &mut State, item: i64) {
-    if node_tag(state.1, item) != NODE_ITEM {
-        return;
-    }
-    let kind = node_a(state.1, item);
-    if kind == ITEM_MODULE {
-        check_dead_code(state, node_e(state.1, item));
-        return;
-    }
-    // A `pub` item is reachable API, not dead code; a native declaration is
-    // an external binding, not Cinnabar source to judge.  Only private
-    // Cinnabar functions and constants are checked.
-    if item_is_pub(state.1, item) == 1 {
-        return;
-    }
-    let sym = item_sym_of(state.1, item);
-    if sym == NONE {
-        return;
-    }
-    let label;
-    let name;
-    if kind == ITEM_FUN {
-        if node_f(state.1, sym) == SYM_FUN_MAIN {
-            return;
-        }
-        let fn_node = node_d(state.1, item);
-        name = node_a(state.1, fn_node);
-        label = "function";
-    } else if kind == ITEM_CONST {
-        name = node_d(state.1, item);
-        label = "constant";
-    } else {
-        return;
-    }
-    if contains_i64(state.11, sym) {
-        return;
-    }
-    push_error(
-        state.3,
-        &format!("unused {} '{}'", label, name_text(state.0, name)),
-        node_file(state.1, item),
-        node_start(state.1, item),
-        node_end(state.1, item),
-    );
-}
