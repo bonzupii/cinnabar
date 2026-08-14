@@ -7,7 +7,7 @@ import Markdown, { InlineMarkdown } from "@/components/Markdown";
 import Reveal from "@/components/Reveal";
 import { Callout, MarkedList, Panel, SourceNote } from "@/components/ui";
 import { BuildIcon, LinearIcon, StaticLinkIcon } from "@/components/brand/icons";
-import { ARENA_PROPERTIES, ARENAS, SINGLE_FACT_RULE, STAGES } from "@/content/pipeline";
+import { ARENAS, STAGES } from "@/content/pipeline";
 import { CONTAINER } from "@/lib/constants";
 import { ogImageMetadata } from "@/lib/og-image";
 import { readPageContent } from "@/lib/page-content";
@@ -32,7 +32,7 @@ export const metadata: Metadata = {
 
 /** Inline code inside a stage summary, which quotes identifiers in backticks. */
 const STAGE_PROSE =
-  "text-secondary text-[14.5px] leading-[1.65] text-pretty [&_code]:border [&_code]:border-[color:var(--hairline-strong)] [&_code]:px-[4px] [&_code]:font-mono [&_code]:text-[0.9em] [&_code]:text-[color:var(--bright)]";
+  "text-secondary text-[14.5px] leading-[1.65] text-pretty [&_code]:border [&_code]:border-hairline-strong [&_code]:px-[4px] [&_code]:font-mono [&_code]:text-[0.9em] [&_code]:text-bright";
 
 export default async function ArchitecturePage() {
   const [document, content] = await Promise.all([
@@ -51,9 +51,8 @@ export default async function ArchitecturePage() {
       />
 
       {/*
-        The stages as a run, in order, with each summary folded away.
-        ARCHITECTURE.md draws the pipeline as an ASCII column; the order is the
-        part worth seeing first, so the rows carry that and nothing else.
+        The pipeline as a figure before the prose. ARCHITECTURE.md draws it as
+        an ASCII column; at this width it reads better as a run of stages.
       */}
       <section className={`${CONTAINER} pt-16`}>
         <SectionHeading
@@ -62,39 +61,37 @@ export default async function ArchitecturePage() {
           icon={BuildIcon}
         />
 
-        <ol className="mt-11 flex list-none flex-col">
+        <ol className="rule-grid mt-11 grid list-none sm:grid-cols-2 lg:grid-cols-4">
           {STAGES.map((stage, index) => (
             <Reveal
               key={stage.name}
               as="li"
-              delay={Math.min(index * 0.03, 0.18)}
-              className="min-w-0"
+              delay={Math.min(index * 0.04, 0.2)}
+              className="bg-panel hover:bg-panel-raised panel-hover flex flex-col gap-4 p-7"
             >
-              <Disclosure summary={`${stage.index} — ${stage.name}`}>
-                <div className="flex flex-col gap-3 pt-1">
-                  <span className="text-label font-mono text-[11px] break-all">
-                    {stage.file}
-                  </span>
-                  <div className={`${STAGE_PROSE} max-w-[86ch]`}>
-                    <InlineMarkdown>{stage.summary}</InlineMarkdown>
-                  </div>
-                </div>
-              </Disclosure>
+              <span className="text-cinnabar-text font-mono text-[10px] tracking-[0.16em]">
+                {stage.index}
+              </span>
+              <h3 className="text-text text-[17px] font-bold tracking-[-0.015em]">
+                {stage.name}
+              </h3>
+              <span className="text-label font-mono text-[11px] break-all">
+                {stage.file}
+              </span>
+              <div className={STAGE_PROSE}>
+                <InlineMarkdown>{content.block(`stage-${stage.slug}`)}</InlineMarkdown>
+              </div>
             </Reveal>
           ))}
-        </ol>
 
-        {/* What the seven have in common, stated once under the run. */}
-        <Reveal className="mt-8">
-          <Panel className="bg-ground gap-4 p-6">
+          {/* The eighth cell states what the seven have in common. */}
+          <Reveal as="li" className="bg-ground flex flex-col justify-center gap-4 p-7">
             <LinearIcon size={22} className="text-cinnabar-text" />
-            <p className="text-bright max-w-[80ch] text-[14.5px] leading-[1.65] text-pretty">
-              A failure at any stage halts the pipeline and prints source-located
-              diagnostics. There is no partial output: a build either produces its
-              artifact or produces diagnostics.
-            </p>
-          </Panel>
-        </Reveal>
+            <div className="text-bright text-[14px] leading-[1.6] text-pretty [&_p:first-child]:mt-0">
+              <InlineMarkdown>{content.block("stages-halt")}</InlineMarkdown>
+            </div>
+          </Reveal>
+        </ol>
       </section>
 
       {/* The representation, which is the genuinely unusual part. */}
@@ -113,7 +110,7 @@ export default async function ArchitecturePage() {
             <div className="[&_p:first-child]:mt-0">
               <Markdown>{content.block("arena")}</Markdown>
             </div>
-            <MarkedList items={ARENA_PROPERTIES} accent className="mt-2" />
+            <MarkedList items={content.list("arena-properties")} accent className="mt-2" />
           </Reveal>
 
           <Reveal delay={0.06} className="rule-grid flex min-w-0 flex-col">
@@ -126,7 +123,7 @@ export default async function ArchitecturePage() {
                   <span className="text-label font-mono text-[13px]">{arena.type}</span>
                 </div>
                 <p className="text-secondary text-[14px] leading-[1.65] text-pretty">
-                  {arena.summary}
+                  {content.block(`arena-${arena.name}`)}
                 </p>
               </Panel>
             ))}
@@ -140,7 +137,7 @@ export default async function ArchitecturePage() {
           <Callout>
             <Eyebrow>The Single-Fact Rule</Eyebrow>
             <p className="text-bright text-[17px] leading-[1.7] text-pretty sm:text-[19px]">
-              {SINGLE_FACT_RULE}
+              {content.block("single-fact-rule")}
             </p>
           </Callout>
         </Reveal>

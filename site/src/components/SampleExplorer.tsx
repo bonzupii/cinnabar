@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import CodeBlock from "@/components/CodeBlock";
 import { SAMPLES } from "@/content/samples";
+import { ICON } from "@/lib/constants";
 
 /*
  * A tablist over the fixture samples.
@@ -11,7 +12,15 @@ import { SAMPLES } from "@/content/samples";
  * and selection together, Home/End jump to the ends, and only the selected tab
  * is in the tab sequence.
  */
-export default function SampleExplorer() {
+export default function SampleExplorer({
+  summaries,
+}: {
+  /**
+   * What each sample shows, keyed by sample id. Authored in the home route's
+   * content.md and passed down, because a client component cannot read a file.
+   */
+  summaries: Record<string, string>;
+}) {
   const [selected, setSelected] = useState(0);
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
@@ -58,6 +67,7 @@ export default function SampleExplorer() {
       >
         {SAMPLES.map((item, index) => {
           const active = index === selected;
+          const Icon = item.icon;
           return (
             <button
               key={item.id}
@@ -71,12 +81,19 @@ export default function SampleExplorer() {
               aria-controls={`sample-panel-${item.id}`}
               tabIndex={active ? 0 : -1}
               onClick={() => setSelected(index)}
-              className={`panel-hover -mb-px border-b-2 px-5 py-3 text-[13px] font-bold tracking-[0.1em] uppercase ${
+              className={`panel-hover -mb-px inline-flex items-center gap-2.5 border-b-2 px-5 py-3 text-[13px] font-bold tracking-widest uppercase ${
                 active
                   ? "border-cinnabar text-text"
                   : "text-secondary hover:text-text hover:border-hairline-strong border-transparent"
               }`}
             >
+              {/*
+                The same lock-up an Action uses: the plate 07 figure at the
+                16px step, then the label. Decorative — the label is the
+                accessible name, and repeating it in the icon would make every
+                tab announce itself twice.
+              */}
+              <Icon size={ICON.inline} />
               {item.label}
             </button>
           );
@@ -92,7 +109,7 @@ export default function SampleExplorer() {
         className="pt-8 focus-visible:outline-offset-4"
       >
         <p className="text-secondary mb-7 max-w-[70ch] text-[16px] leading-[1.7] text-pretty">
-          {sample.summary}
+          {summaries[sample.id]}
         </p>
         <CodeBlock
           code={sample.code}

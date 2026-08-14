@@ -100,7 +100,7 @@ export function ArrowLink({
   external?: boolean;
   className?: string;
 }) {
-  const classes = `text-cinnabar-text hover:text-text panel-hover group inline-flex w-fit items-center gap-1.5 text-[13px] font-bold tracking-[0.1em] uppercase${
+  const classes = `text-cinnabar-text hover:text-text panel-hover group inline-flex w-fit items-center gap-1.5 text-[13px] font-bold tracking-widest uppercase${
     className ? ` ${className}` : ""
   }`;
   /*
@@ -189,7 +189,7 @@ export function SourceNote({
 /** Inline code outside a markdown document. */
 export function Code({ children }: { children: ReactNode }) {
   return (
-    <code className="border-hairline bg-panel text-bright border px-[5px] py-[2px] font-mono text-[0.875em] break-words">
+    <code className="border-hairline bg-panel text-bright border px-[5px] py-[2px] font-mono text-[0.875em] wrap-break-word">
       {children}
     </code>
   );

@@ -21,7 +21,7 @@ export default function NavLinks() {
             key={item.href}
             href={item.href}
             aria-current={active ? "page" : undefined}
-            className={`panel-hover border-b-2 pb-[3px] text-[13px] font-bold tracking-[0.1em] uppercase ${
+            className={`panel-hover border-b-2 pb-[3px] text-[13px] font-bold tracking-widest uppercase ${
               active
                 ? "border-cinnabar text-text"
                 : // The hover previews the marker the current section carries,

@@ -18,19 +18,22 @@ import {
   GitHubIcon,
   LinearIcon,
 } from "@/components/brand/icons";
-import { HIGHLIGHTS } from "@/content/highlights";
+import { HIGHLIGHT_ICONS } from "@/content/highlights";
 import { STAGES } from "@/content/pipeline";
-import { MANIFEST_SAMPLE } from "@/content/samples";
+import { MANIFEST_SAMPLE, SAMPLES } from "@/content/samples";
+import { ICON } from "@/lib/constants";
 import { readPageContent } from "@/lib/page-content";
-import { BADGES, QUIP, REPO_URL, STATUS_BADGE } from "@/lib/site";
+import { BADGES, REPO_URL, STATUS_BADGE } from "@/lib/site";
 
 /** Social image copy, rendered by /og-image. The root layout points at it. */
 export const og = {
   eyebrow: "Systems language",
-  title: "A zero-trust systems language.",
+  title: "For compilers, runtimes, kernels and firmware.",
+  // No backticks: this string is also drawn into the social image by Satori,
+  // which has no markdown and would print them.
   description:
-    "Austral-style linear typing, checked by a flow-sensitive borrow checker. No garbage collector, no lifetime annotations, no reachable panics.",
-  alt: "Cinnabar — a statically-typed systems language with Austral-style linear typing.",
+    "Statically typed, compiled through LLVM 21 to static native binaries. Handles are linear, borrows are checked without lifetime annotations, and no flag turns a check off.",
+  alt: "Cinnabar — a linear-typed systems language for compilers, runtimes, kernels and firmware.",
 };
 
 const INSTALL_SHELL = [
@@ -60,32 +63,24 @@ export default async function Home() {
           />
         </h1>
 
-        <div className="mt-10 grid gap-8 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)] lg:gap-16">
-          <div className="flex flex-col gap-6">
-            <div className="text-text max-w-[46ch] text-[20px] leading-[1.4] tracking-[-0.015em] sm:text-[27px]">
-              <InlineMarkdown>{content.block("tagline")}</InlineMarkdown>
-            </div>
-            {/*
-              What it is, then what it is for. A reader deciding whether to
-              keep reading needs the domain and the implementation, and both
-              are stated in README.md's opening two paragraphs.
-            */}
-            <div className="text-secondary max-w-[62ch] text-[16px] leading-[1.7]">
-              <InlineMarkdown>{content.block("hero-why")}</InlineMarkdown>
-            </div>
+        {/*
+          The quip and the repository URL used to sit in a second column here.
+          Both are gone: the repository is one click away in the header and
+          again in the footer, and the hero's job is to say what the language
+          is, not to make a joke about another one.
+        */}
+        <div className="mt-10 flex flex-col gap-6">
+          <div className="text-text max-w-[46ch] text-[20px] leading-[1.4] tracking-[-0.015em] sm:text-[27px]">
+            <InlineMarkdown>{content.block("tagline")}</InlineMarkdown>
           </div>
-          <p className="text-secondary font-mono text-[13px] leading-[1.7] lg:self-end">
-            {QUIP}
-            <br />
-            <a
-              href={REPO_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-label hover:text-cinnabar-text panel-hover"
-            >
-              github.com/bonzupii/cinnabar
-            </a>
-          </p>
+          {/*
+            What it is, then what it is for. A reader deciding whether to keep
+            reading needs the domain and the implementation, and both are
+            stated in README.md's opening two paragraphs.
+          */}
+          <div className="text-secondary max-w-[62ch] text-[16px] leading-[1.7]">
+            <InlineMarkdown>{content.block("hero-why")}</InlineMarkdown>
+          </div>
         </div>
 
         {/* Plate 12's badge strip. */}
@@ -131,8 +126,14 @@ export default async function Home() {
 
       {/* The stance the rest of the language follows from — MANIFESTO.md's opening. */}
       <section className="border-hairline bg-panel border-y">
-        <Reveal className="mx-auto grid max-w-350 gap-8 px-6 py-20 sm:px-10 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] lg:gap-20">
-          <h2 className="text-text max-w-[16ch] text-[32px] leading-[1.03] font-bold tracking-[-0.03em] sm:text-[46px]">
+        {/*
+          One column, headline then body. It was a two-column split, which set
+          the headline against a body column narrower than the section it sits
+          in; the passage is the argument the whole language follows from and
+          reads better given the full measure.
+        */}
+        <Reveal className="mx-auto flex max-w-350 flex-col gap-8 px-6 py-20 sm:px-10">
+          <h2 className="text-text text-[32px] leading-[1.03] font-bold tracking-[-0.03em] sm:text-[46px]">
             {content.block("invariants-title")}
           </h2>
           <div className="[&_p]:max-w-none [&_p:first-child]:mt-0">
@@ -150,21 +151,31 @@ export default async function Home() {
         />
 
         <div className="rule-grid mt-11 grid sm:grid-cols-2 lg:grid-cols-4">
-          {HIGHLIGHTS.map(({ title, body, icon: Icon }, index) => (
-            <Reveal
-              key={title}
-              delay={Math.min(index * 0.04, 0.2)}
-              className="bg-panel hover:bg-panel-raised panel-hover flex flex-col gap-5 p-8"
-            >
-              <Icon size={24} className="text-text" />
-              <h3 className="text-text text-[17px] leading-snug font-bold tracking-[-0.015em]">
-                {title}
-              </h3>
-              <p className="text-secondary text-[14.5px] leading-[1.65] text-pretty">
-                {body}
-              </p>
-            </Reveal>
-          ))}
+          {content.items("highlights").map(({ slug, title, body }, index) => {
+            // Throws at build time if content.md gains a highlight that
+            // highlights.ts has no icon for, or reworders one it does.
+            const Icon = HIGHLIGHT_ICONS[slug];
+            if (!Icon) {
+              throw new Error(
+                `No icon bound for highlight "${slug}" in src/content/highlights.ts`,
+              );
+            }
+            return (
+              <Reveal
+                key={slug}
+                delay={Math.min(index * 0.04, 0.2)}
+                className="bg-panel hover:bg-panel-raised panel-hover flex flex-col gap-5 p-8"
+              >
+                <Icon size={ICON.card} className="text-text" />
+                <h3 className="text-text text-[17px] leading-snug font-bold tracking-[-0.015em]">
+                  {title}
+                </h3>
+                <p className="text-secondary text-[14.5px] leading-[1.65] text-pretty">
+                  {body}
+                </p>
+              </Reveal>
+            );
+          })}
         </div>
       </section>
 
@@ -177,7 +188,14 @@ export default async function Home() {
             icon={CodegenIcon}
           />
           <Reveal className="mt-11">
-            <SampleExplorer />
+            <SampleExplorer
+              summaries={Object.fromEntries(
+                SAMPLES.map((sample) => [
+                  sample.id,
+                  content.block(`sample-${sample.id}`),
+                ]),
+              )}
+            />
           </Reveal>
         </div>
       </section>
@@ -268,7 +286,14 @@ export default async function Home() {
               <Markdown>{content.block("closing")}</Markdown>
             </div>
           </div>
-          <div className="flex flex-wrap gap-4">
+          {/*
+            `lg:flex-none` is what keeps these two on one line: as a flex item
+            of the row above they were shrinkable, so the prose beside them
+            squeezed the pair until the second wrapped under the first. Below
+            `lg` the parent stacks and `flex-wrap` still applies, so a narrow
+            phone can wrap them rather than overflow.
+          */}
+          <div className="flex flex-wrap gap-4 lg:flex-none lg:flex-nowrap">
             <Action href="/roadmap/" variant="primary">
               Roadmap
             </Action>

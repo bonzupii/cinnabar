@@ -56,7 +56,7 @@ export default function Disclosure({
          * is set in both states, because a summary is a control whether the
          * section is open or closed.
          */
-        className="panel-hover text-text hover:text-cinnabar-text hover:bg-panel flex min-w-0 cursor-pointer list-none items-center gap-4 px-5 py-4 font-mono text-[11px] tracking-[0.16em] uppercase select-none marker:content-none focus-visible:outline-offset-[-2px] sm:px-6 sm:py-5 [&::-webkit-details-marker]:hidden"
+        className="panel-hover text-text hover:text-cinnabar-text hover:bg-panel flex min-w-0 cursor-pointer list-none items-center gap-4 px-5 py-4 font-mono text-[11px] tracking-[0.16em] uppercase select-none marker:content-none focus-visible:-outline-offset-2 sm:px-6 sm:py-5 [&::-webkit-details-marker]:hidden"
       >
         <span
           aria-hidden="true"

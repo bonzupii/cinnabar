@@ -49,7 +49,16 @@ export type WindowProps = {
 
 export default function Window({ path, title, children, className }: WindowProps) {
   return (
-    <figure className={`rule-grid window-frame flex min-w-0 flex-col ${className ?? ""}`}>
+    <figure
+      /*
+       * Marks this figure as window chrome. Not every <figure> on the site is
+       * a window — a diagram drawn in a repository document is a figure too —
+       * and tests/e2e/window.spec.ts asserts the bar's three slots, which only
+       * these have.
+       */
+      data-window=""
+      className={`rule-grid window-frame flex min-w-0 flex-col ${className ?? ""}`}
+    >
       {/*
         The centre column is centred against the bar rather than against the
         space left over beside the path, so the two side tracks are equal
@@ -138,9 +147,20 @@ export function WindowBody({
   return (
     <pre
       tabIndex={0}
-      // The gutter narrows on a phone: at 390px, 24px of padding either side
-      // costs a tenth of the line before any code is shown.
-      className={`w-full overflow-x-auto px-4 py-5 font-mono sm:px-6 sm:py-6 ${
+      /*
+       * The gutter narrows on a phone: at 390px, 24px of padding either side
+       * costs a tenth of the line before any code is shown.
+       *
+       * `flex-1` is load-bearing rather than cosmetic. A window placed in a
+       * grid or flex row is stretched to the height of the tallest column, but
+       * the bar and this body only add up to their own content — and the gap
+       * was filled by the frame's own background, which `.rule-grid` paints in
+       * `--hairline` so its 1px seams show as rules. The result was a grey
+       * band across the bottom of the frame. Growing the body means the
+       * terminal ground always reaches the frame's inner edge, for every
+       * window rather than for the one that was reported.
+       */
+      className={`w-full flex-1 overflow-x-auto px-4 py-5 font-mono sm:px-6 sm:py-6 ${
         BODY_TYPE[scale]
       } ${tone === "code" ? "bg-code-ground" : "bg-code-terminal"} ${
         className ?? ""

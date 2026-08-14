@@ -133,7 +133,7 @@ export default function MobileMenu() {
                         className="border-hairline hover:bg-panel-raised panel-hover border-b px-6 py-4"
                       >
                         <span
-                          className={`flex items-center gap-2.5 text-sm font-bold tracking-[0.1em] uppercase ${
+                          className={`flex items-center gap-2.5 text-sm font-bold tracking-widest uppercase ${
                             active ? "text-cinnabar-text" : "text-text"
                           }`}
                         >
@@ -151,7 +151,7 @@ export default function MobileMenu() {
                     target="_blank"
                     rel="noopener noreferrer"
                     onClick={close}
-                    className="text-text hover:bg-panel-raised panel-hover flex items-center gap-2 px-6 py-4 text-sm font-bold tracking-[0.1em] uppercase"
+                    className="text-text hover:bg-panel-raised panel-hover flex items-center gap-2 px-6 py-4 text-sm font-bold tracking-widest uppercase"
                   >
                     <GitHubIcon size={14} />
                     GitHub

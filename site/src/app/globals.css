@@ -315,25 +315,26 @@ body {
 }
 
 /*
- * The three controls, drawn as Tiger drew them: circular, with a specular
- * highlight up and to the left and the ground darkening towards the lower
- * rim. The base colour comes from a Tailwind `bg-*` token on the element, so
- * the gloss is one gradient reused across the accent and the two greys rather
- * than three hand-mixed fills — plate 05 allows one accent and five greys, and
- * a gloss painted in white-and-black alpha adds no hue to that.
+ * The three controls: circular, with a specular highlight up and to the left.
+ * The base colour comes from a Tailwind `bg-*` token on the element, so the
+ * gloss is one gradient reused across the accent and the two greys rather than
+ * three hand-mixed fills — plate 05 allows one accent and five greys, and a
+ * highlight painted in white alpha adds no hue to that.
  *
- * The gradient is the whole treatment — no inset ring. At 10px an inset edge
- * reads as a smudge on the rim rather than as a defined edge, and the site
- * owner asked for it gone.
+ * The gradient carries white only, and fades to fully transparent well before
+ * the edge. Reported twice as looking inset: the inset box-shadow was removed
+ * the first time, but the gradient's own dark stops (0.05 at 62%, 0.28 at 100%)
+ * were still darkening the rim, which at 10px is indistinguishable from an
+ * inset ring. There is no black in this fill at all now, so the rim is the
+ * element's flat base colour and nothing else.
  */
 .window-control {
   border-radius: 9999px;
   background-image: radial-gradient(
     circle at 34% 26%,
-    rgb(255 255 255 / 0.5) 0%,
-    rgb(255 255 255 / 0.14) 42%,
-    rgb(0 0 0 / 0.05) 62%,
-    rgb(0 0 0 / 0.28) 100%
+    rgb(255 255 255 / 0.55) 0%,
+    rgb(255 255 255 / 0.18) 40%,
+    rgb(255 255 255 / 0) 72%
   );
 }
 

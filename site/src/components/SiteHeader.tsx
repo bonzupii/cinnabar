@@ -18,7 +18,7 @@ export default function SiteHeader() {
     <header className="border-hairline bg-ground/95 sticky top-0 z-50 border-b backdrop-blur-sm">
       <a
         href="#main-content"
-        className="bg-cinnabar text-on-cinnabar sr-only px-4 py-2 text-sm font-bold tracking-[0.1em] uppercase focus:not-sr-only focus:fixed focus:top-4 focus:left-6 focus:z-100"
+        className="bg-cinnabar text-on-cinnabar sr-only px-4 py-2 text-sm font-bold tracking-widest uppercase focus:not-sr-only focus:fixed focus:top-4 focus:left-6 focus:z-100"
       >
         Skip to content
       </a>
@@ -50,7 +50,7 @@ export default function SiteHeader() {
             target="_blank"
             rel="noopener noreferrer"
             aria-label="Cinnabar on GitHub"
-            className="border-hairline-strong text-text hover:border-text hover:bg-panel panel-hover pressable hidden h-9 items-center gap-2 border px-3 text-xs font-bold tracking-[0.1em] uppercase sm:inline-flex"
+            className="border-hairline-strong text-text hover:border-text hover:bg-panel panel-hover pressable hidden h-9 items-center gap-2 border px-3 text-xs font-bold tracking-widest uppercase sm:inline-flex"
           >
             <GitHubIcon size={14} />
             GitHub

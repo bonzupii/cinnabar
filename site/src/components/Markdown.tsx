@@ -2,8 +2,10 @@ import type { ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSlug from "rehype-slug";
+import AsciiDiagram from "@/components/AsciiDiagram";
 import CodeBlock from "@/components/CodeBlock";
 import { PlainWindow } from "@/components/ShellBlock";
+import { isAsciiDiagram } from "@/lib/ascii-diagram";
 
 /*
  * Renders markdown in the brand's type scale (plate 06).
@@ -27,8 +29,11 @@ import { PlainWindow } from "@/components/ShellBlock";
  *
  * The documents tag blocks as `bash`, `lua`, `rust` and so on, and some not at
  * all. Whatever the fence says becomes the window title, so a reader can tell
- * a shell session from a diagram without the site inventing a theme for each
- * language — which plate 14's last misuse rule forbids anyway.
+ * a shell session from a config file without the site inventing a theme for
+ * each language — which plate 14's last misuse rule forbids anyway.
+ *
+ * Blocks that draw a figure never reach this: they are picked off above by
+ * `isAsciiDiagram` and rendered as figures rather than as windows.
  */
 function plainTitle(language: string | undefined): { path: string; title: string } {
   if (!language || language === "text") {
@@ -55,7 +60,7 @@ function components(inline: boolean): Components {
     h2: ({ children, id }) => (
       <h2
         id={id}
-        className="border-hairline text-text mt-20 scroll-mt-24 border-t pt-10 text-[28px] leading-tight font-bold tracking-tight break-words first:mt-0 sm:text-[34px]"
+        className="border-hairline text-text mt-20 scroll-mt-24 border-t pt-10 text-[28px] leading-tight font-bold tracking-tight wrap-break-word first:mt-0 sm:text-[34px]"
       >
         {children}
       </h2>
@@ -63,7 +68,7 @@ function components(inline: boolean): Components {
     h3: ({ children, id }) => (
       <h3
         id={id}
-        className="text-text mt-12 scroll-mt-24 text-[19px] leading-snug font-bold tracking-[-0.015em] break-words sm:text-[22px]"
+        className="text-text mt-12 scroll-mt-24 text-[19px] leading-snug font-bold tracking-[-0.015em] wrap-break-word sm:text-[22px]"
       >
         {children}
       </h3>
@@ -71,16 +76,16 @@ function components(inline: boolean): Components {
     h4: ({ children, id }) => (
       <h4
         id={id}
-        className="text-bright mt-10 scroll-mt-24 text-[16px] font-bold tracking-[-0.01em] break-words"
+        className="text-bright mt-10 scroll-mt-24 text-[16px] font-bold tracking-[-0.01em] wrap-break-word"
       >
         {children}
       </h4>
     ),
     p: ({ children }) =>
       inline ? (
-        <p className="[&:not(:first-child)]:mt-4">{children}</p>
+        <p className="not-first:mt-4">{children}</p>
       ) : (
-        <p className="text-secondary mt-5 text-[16.5px] leading-[1.75] break-words text-pretty">
+        <p className="text-secondary mt-5 text-[16.5px] leading-[1.75] wrap-break-word text-pretty">
           {children}
         </p>
       ),
@@ -106,7 +111,7 @@ function components(inline: boolean): Components {
       </ol>
     ),
     li: ({ children }) => (
-      <li className="text-secondary relative pl-6 text-[16.5px] leading-[1.7] break-words before:absolute before:top-[0.62em] before:left-0 before:h-[6px] before:w-[6px] before:bg-hairline-strong before:content-[''] [ol_&]:pl-0 [ol_&]:before:hidden">
+      <li className="text-secondary relative pl-6 text-[16.5px] leading-[1.7] wrap-break-word before:absolute before:top-[0.62em] before:left-0 before:h-[6px] before:w-[6px] before:bg-hairline-strong before:content-[''] in-[ol]:pl-0 in-[ol]:before:hidden">
         {children}
       </li>
     ),
@@ -132,7 +137,7 @@ function components(inline: boolean): Components {
       </th>
     ),
     td: ({ children }) => (
-      <td className="border-hairline text-secondary border-b px-5 py-3 align-top text-[14px] leading-relaxed break-words">
+      <td className="border-hairline text-secondary border-b px-5 py-3 align-top text-[14px] leading-relaxed wrap-break-word">
         {children}
       </td>
     ),
@@ -147,6 +152,15 @@ function components(inline: boolean): Components {
       if (!isBlock) return <code className={INLINE_CODE}>{children}</code>;
       if (language === "cinnabar") {
         return <CodeBlock code={text} path="fixture.cnb" className="my-8" />;
+      }
+      /*
+       * A block drawn from box characters is a figure, not output. It is
+       * recognised by its characters rather than by its text, so an edit
+       * upstream cannot quietly turn it back into a terminal window — and if
+       * it stops being a drawing, it falls through to the window below.
+       */
+      if (isAsciiDiagram(text)) {
+        return <AsciiDiagram text={text} className="my-8" />;
       }
       const plain = plainTitle(language);
       return (

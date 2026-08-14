@@ -31,8 +31,18 @@ const ibmPlexMono = IBM_Plex_Mono({
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
+  /*
+   * Names the mechanism and the audience, in that order, and nothing else.
+   *
+   * It read "a zero-trust systems language" — the repository's own framing,
+   * but as a page title it is an abstraction a reader has to be told the
+   * meaning of before it says anything. "Linear-typed" is checkable, and
+   * "compilers and kernels" tells someone in one glance whether this is aimed
+   * at them. The full domain list and the stance are in the description below,
+   * which has the room for them.
+   */
   title: {
-    default: "Cinnabar — a zero-trust systems language",
+    default: "Cinnabar — a linear-typed systems language for compilers and kernels",
     template: "%s · Cinnabar",
   },
   description: TAGLINE,
@@ -51,7 +61,7 @@ export const metadata: Metadata = {
   ],
   openGraph: {
     siteName: "Cinnabar",
-    title: "Cinnabar — a zero-trust systems language",
+    title: "Cinnabar — a linear-typed systems language for compilers and kernels",
     description: DESCRIPTION,
     type: "website",
     locale: "en_US",
@@ -60,7 +70,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "Cinnabar — a zero-trust systems language",
+    title: "Cinnabar — a linear-typed systems language for compilers and kernels",
     description: DESCRIPTION,
     images: [ogImage("/", og)],
   },

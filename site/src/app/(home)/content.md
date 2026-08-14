@@ -1,7 +1,8 @@
 <!-- @tagline -->
 
-A statically-typed systems language with Austral-style linear typing. No garbage
-collector. No lifetime annotations. No reachable panics.
+A statically-typed systems language with Austral-style linear types, checked by
+a flow-sensitive borrow checker. There is no `#[allow]`, and no flag that turns
+a check off.
 
 <!-- @hero-why -->
 
@@ -40,9 +41,77 @@ its absence is the feature.
 
 README.md · language highlights
 
+<!-- @highlights -->
+
+<!--
+  README.md's own list. Each heading is keyed by its slug to an icon in
+  src/content/highlights.ts; rewording a heading means updating that key.
+-->
+
+### Linear resource management
+
+Native handles — Memory.Block, Vec(T), String, HashMap(K, V) — must be consumed
+exactly once on every path. No double-free, no use-after-move, no leaks, checked
+statically.
+
+### No lifetime annotations
+
+Borrow scopes are flow-sensitive and inferred by the compiler. An ambiguous
+returned borrow is a compile error, resolved by restructuring the API, not by
+annotating.
+
+### No dereference operator
+
+There is no * and no ->. References are reached through field access, method
+calls and pattern matching; the compiler manages the indirection internally.
+
+### Errors only, never warnings
+
+There is no lint severity and no #[allow]. A program either compiles cleanly or
+is rejected with a real diagnostic.
+
+### No panics reachable from user code
+
+Division, modulo and dynamic indexing return Result instead of trapping.
+Provable zero-division and out-of-range constant indices are compile-time errors
+instead.
+
+### O(1) call-stack recursion
+
+Every self-recursive call must be in strict tail position. LLVM turns it into a
+jump, so there is no runtime stack guard and no stack-overflow crash.
+
+### Explicit everything
+
+val/var, pub, impure, try — and casing itself — are compiler-enforced grammar,
+not convention. A mis-cased identifier is a lexical error.
+
+### Static, freestanding binaries
+
+Every program links statically against a staged musl libc. No dynamic-linker
+dependency in the output binary, and no dependency on the host's libc.
+
 <!-- @samples-note -->
 
 Verbatim from tests/fixtures/
+
+<!-- @sample-hanoi -->
+
+Structs and strict tail position. hanoi_acc calls itself as the direct value of
+a return, which is the only self-recursive call the typechecker accepts; LLVM
+turns it into a jump at -O2.
+
+<!-- @sample-vec -->
+
+vec is a native handle, so it carries a consumption obligation. Both the error
+path and the success path have to discharge it — hence the fail_vec helper,
+which frees before returning.
+
+<!-- @sample-slice -->
+
+Array rest-patterns and a tail-recursive fold. Match is exhaustive: every
+variant, array length and rest pattern has to be covered, and there is no
+catch-all arm to cover them with.
 
 <!-- @diagnostics-note -->
 

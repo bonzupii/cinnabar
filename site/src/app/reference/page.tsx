@@ -7,16 +7,10 @@ import DataTable from "@/components/DataTable";
 import Reveal from "@/components/Reveal";
 import { ArrowLink, Callout, Prose } from "@/components/ui";
 import { BuildIcon, DocIcon, FmtIcon, RunIcon, TestIcon } from "@/components/brand/icons";
-import {
-  CLI_SECTIONS,
-  TEST_ENV,
-  TEST_LAYOUT,
-  TEST_PROFILES,
-  USAGE,
-} from "@/content/cli";
+import { CLI_SECTIONS, TEST_PROFILES, USAGE, type Row } from "@/content/cli";
 import { MANIFEST_SAMPLE } from "@/content/samples";
 import { ogImageMetadata } from "@/lib/og-image";
-import { readPageContent } from "@/lib/page-content";
+import { readPageContent, type PageContent } from "@/lib/page-content";
 import { REPO_URL } from "@/lib/site";
 
 /** Social image copy, rendered by ./og-image/route.tsx. */
@@ -37,6 +31,20 @@ export const metadata: Metadata = {
 };
 
 
+/**
+ * A `-rows` block, as table rows.
+ *
+ * Each `###` section is one row: the heading is the flag, command, file name
+ * or variable, and the paragraph under it is what it does. Writing them as one
+ * markdown section apiece is what keeps a name and its description from
+ * drifting — they are the same paragraph.
+ */
+function tableRows(content: PageContent, block: string): Row[] {
+  return content
+    .items(block)
+    .map((item) => ({ name: item.title, description: item.body }));
+}
+
 const SECTION_ICONS = {
   "single-file": BuildIcon,
   project: RunIcon,
@@ -56,33 +64,36 @@ export default async function ReferencePage() {
         lede={content.block("lede")}
       />
 
-      <div className="mx-auto flex max-w-350 flex-col gap-20 px-6 pt-16 sm:px-10 [&>*]:min-w-0">
+      <div className="mx-auto flex max-w-350 flex-col gap-20 px-6 pt-16 sm:px-10 *:min-w-0">
         <section>
           <Eyebrow>Usage</Eyebrow>
           <UsageBlock lines={USAGE.split("\n")} className="mt-5" />
         </section>
 
-        {CLI_SECTIONS.map((section) => (
-          <section key={section.id} className="min-w-0">
-            <SectionHeading
-              id={section.id}
-              title={section.title}
-              note={section.note}
-              icon={SECTION_ICONS[section.id as keyof typeof SECTION_ICONS]}
-            />
-            {section.intro ? (
-              <Reveal className="mt-8">
-                <p className="text-secondary max-w-[90ch] text-[16.5px] leading-[1.75] text-pretty">
-                  {section.intro}
-                </p>
-              </Reveal>
-            ) : null}
-            <DataTable
-              rows={section.rows}
-              nameHeading={section.id === "single-file" ? "Flag" : "Command"}
-            />
-          </section>
-        ))}
+        {CLI_SECTIONS.map((section) => {
+          const intro = content.optional(`${section.id}-intro`);
+          return (
+            <section key={section.id} className="min-w-0">
+              <SectionHeading
+                id={section.id}
+                title={content.block(`${section.id}-heading`)}
+                note={content.block(`${section.id}-note`)}
+                icon={SECTION_ICONS[section.id as keyof typeof SECTION_ICONS]}
+              />
+              {intro ? (
+                <Reveal className="mt-8">
+                  <p className="text-secondary max-w-[90ch] text-[16.5px] leading-[1.75] text-pretty">
+                    {intro}
+                  </p>
+                </Reveal>
+              ) : null}
+              <DataTable
+                rows={tableRows(content, `${section.id}-rows`)}
+                nameHeading={section.nameHeading}
+              />
+            </section>
+          );
+        })}
 
         <section className="min-w-0">
           <SectionHeading
@@ -91,7 +102,7 @@ export default async function ReferencePage() {
             note="build.cnb · Cinnabar source"
             icon={BuildIcon}
           />
-          <div className="mt-9 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start [&>*]:min-w-0">
+          <div className="mt-9 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start *:min-w-0">
             <Reveal>
               <Prose>{content.block("manifest")}</Prose>
             </Reveal>
@@ -108,7 +119,7 @@ export default async function ReferencePage() {
             note="cinnabar test decides from the file name"
             icon={TestIcon}
           />
-          <DataTable rows={TEST_LAYOUT} nameHeading="File" />
+          <DataTable rows={tableRows(content, "test-layout-rows")} nameHeading="File" />
           <Prose className="mt-8">{content.block("test-layout")}</Prose>
         </section>
 
@@ -136,13 +147,16 @@ export default async function ReferencePage() {
             ])}
           />
           <Prose className="mt-8">{content.block("profiles")}</Prose>
-          <DataTable rows={TEST_ENV} nameHeading="Environment variable" />
+          <DataTable
+            rows={tableRows(content, "test-env-rows")}
+            nameHeading="Environment variable"
+          />
         </section>
 
         <Reveal>
           <Callout>
             <Eyebrow>Every command documents itself</Eyebrow>
-            <Prose className="[&_p]:text-[17px] [&_p]:text-[color:var(--bright)]">
+            <Prose className="[&_p]:text-[17px] [&_p]:text-bright">
               {content.block("self-documenting")}
             </Prose>
             <ArrowLink

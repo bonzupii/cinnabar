@@ -17,7 +17,7 @@ import {
 } from "@/content/roadmap";
 import { CONTAINER, ICON } from "@/lib/constants";
 import { ogImageMetadata } from "@/lib/og-image";
-import { readPageContent } from "@/lib/page-content";
+import { readPageContent, type PageContent } from "@/lib/page-content";
 import { linkRepoFile, readRepoDoc } from "@/lib/repo-docs";
 
 /** Social image copy, rendered by ./og-image/route.tsx. */
@@ -40,12 +40,17 @@ export const metadata: Metadata = {
 /** One capability, as a cell in the hairline grid. */
 function CapabilityCard({
   capability,
+  content,
   delay,
 }: {
   capability: Capability;
+  /** Supplies the title and the description, from the `@capabilities` block. */
+  content: PageContent;
   delay: number;
 }) {
   const Icon = capability.icon;
+  // Throws at build time naming the slug if content.md has no section for it.
+  const { title, body } = content.item("capabilities", capability.slug);
   return (
     <Reveal
       delay={delay}
@@ -57,12 +62,10 @@ function CapabilityCard({
           href={capability.anchor}
           className="text-text hover:text-cinnabar-text panel-hover"
         >
-          {capability.title}
+          {title}
         </a>
       </h3>
-      <p className="text-secondary text-[14.5px] leading-[1.65] text-pretty">
-        {capability.detail}
-      </p>
+      <p className="text-secondary text-[14.5px] leading-[1.65] text-pretty">{body}</p>
     </Reveal>
   );
 }
@@ -112,8 +115,9 @@ export default async function RoadmapPage() {
         <div className="rule-grid mt-11 grid sm:grid-cols-2 lg:grid-cols-3">
           {SHIPPED_LEAD.map((capability, index) => (
             <CapabilityCard
-              key={capability.title}
+              key={capability.slug}
               capability={capability}
+              content={content}
               delay={Math.min(index * 0.03, 0.18)}
             />
           ))}
@@ -125,7 +129,12 @@ export default async function RoadmapPage() {
         <Disclosure summary={content.block("shipped-more")} className="mt-10">
           <div className="rule-grid mt-4 grid sm:grid-cols-2 lg:grid-cols-3">
             {SHIPPED_REST.map((capability) => (
-              <CapabilityCard key={capability.title} capability={capability} delay={0} />
+              <CapabilityCard
+                key={capability.slug}
+                capability={capability}
+                content={content}
+                delay={0}
+              />
             ))}
           </div>
         </Disclosure>
@@ -142,8 +151,9 @@ export default async function RoadmapPage() {
         <div className="rule-grid mt-9 grid sm:grid-cols-2">
           {IN_PROGRESS.map((capability, index) => (
             <CapabilityCard
-              key={capability.title}
+              key={capability.slug}
               capability={capability}
+              content={content}
               delay={index * 0.04}
             />
           ))}
@@ -161,10 +171,10 @@ export default async function RoadmapPage() {
           <Callout>
             <Eyebrow>Next</Eyebrow>
             <h3 className="text-text text-[28px] leading-tight font-bold tracking-tight sm:text-[36px]">
-              {HORIZON.title}
+              {content.item("horizon", HORIZON.slug).title}
             </h3>
             <p className="text-bright max-w-[80ch] text-[17px] leading-[1.7] text-pretty">
-              {HORIZON.detail}
+              {content.item("horizon", HORIZON.slug).body}
             </p>
             <ArrowLink href={HORIZON.anchor}>Read the reasoning</ArrowLink>
           </Callout>

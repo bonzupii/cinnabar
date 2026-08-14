@@ -59,7 +59,7 @@ function Step({
 /** Two columns that both clamp, so a wide transcript scrolls instead of pushing. */
 function SplitStep({ children }: { children: ReactNode }) {
   return (
-    <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start [&>*]:min-w-0">
+    <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start *:min-w-0">
       {children}
     </div>
   );
@@ -131,7 +131,7 @@ export default async function InstallPage() {
         lede={content.block("lede")}
       />
 
-      <div className="mx-auto flex max-w-350 flex-col gap-20 px-6 pt-16 sm:px-10 [&>*]:min-w-0">
+      <div className="mx-auto flex max-w-350 flex-col gap-20 px-6 pt-16 sm:px-10 *:min-w-0">
         <Step
           title="Nix — the supported path"
           note="The only setup that is tested"
@@ -190,7 +190,7 @@ export default async function InstallPage() {
           <Prose className="mt-8">{content.block("docker-volumes")}</Prose>
           <DataTable headings={["Data", "Container path", "Lifetime"]} data={VOLUMES} />
 
-          <div className="mt-10 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start [&>*]:min-w-0">
+          <div className="mt-10 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start *:min-w-0">
             <div>
               <Prose>{content.block("docker-configure")}</Prose>
               <ShellBlock
@@ -284,7 +284,7 @@ export default async function InstallPage() {
         <Step title="VS Code" note="Attached to the container" icon={LspIcon}>
           <Prose>{content.block("vscode-attach")}</Prose>
 
-          <div className="mt-9 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start [&>*]:min-w-0">
+          <div className="mt-9 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start *:min-w-0">
             <Prose>{content.block("vscode-config")}</Prose>
             <PlainWindow
               text={VSCODE_CONFIG}
@@ -293,7 +293,7 @@ export default async function InstallPage() {
             />
           </div>
 
-          <div className="mt-10 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start [&>*]:min-w-0">
+          <div className="mt-10 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start *:min-w-0">
             <Prose>{content.block("vscode-analyzer")}</Prose>
             <ShellBlock
               lines={[
@@ -304,7 +304,7 @@ export default async function InstallPage() {
             />
           </div>
 
-          <div className="mt-10 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start [&>*]:min-w-0">
+          <div className="mt-10 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start *:min-w-0">
             <Prose>{content.block("vscode-extension")}</Prose>
             <ShellBlock
               lines={[

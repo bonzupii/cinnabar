@@ -30,7 +30,7 @@ export default function NotFound() {
             href={item.href}
             className="bg-panel hover:bg-panel-raised panel-hover flex min-w-[240px] flex-col gap-1.5 px-6 py-5"
           >
-            <span className="text-text flex items-center gap-2.5 text-[13px] font-bold tracking-[0.1em] uppercase">
+            <span className="text-text flex items-center gap-2.5 text-[13px] font-bold tracking-widest uppercase">
               <Icon size={16} />
               {item.label}
             </span>

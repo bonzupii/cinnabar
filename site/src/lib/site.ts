@@ -20,9 +20,22 @@ export const SITE_URL =
   process.env.NEXT_PUBLIC_SITE_URL ?? process.env.URL ?? "http://localhost:4173";
 
 
-/** Plate 00 — the cover's positioning sentence. */
+/**
+ * The site's meta description, and the sentence the hero opens with.
+ *
+ * Plate 00's cover line is "A statically-typed systems language with
+ * Austral-style linear typing. No garbage collector. No lifetime annotations.
+ * No reachable panics." The three-part "No X. No Y. No Z." is a cadence rather
+ * than a fact, and a developer on the project rejected copy of that shape. The
+ * claims are kept and the cadence is not: the same sentence now names the
+ * checker that enforces them and quotes README.md's own blunt closing line.
+ *
+ * Kept in step with the `@tagline` block of src/app/(home)/content.md, which
+ * is the rendered copy; this is the string the <meta> tag needs, where
+ * markdown would appear verbatim.
+ */
 export const TAGLINE =
-  "A statically-typed systems language with Austral-style linear typing. No garbage collector. No lifetime annotations. No reachable panics.";
+  "A statically-typed systems language with Austral-style linear types, checked by a flow-sensitive borrow checker. There is no #[allow], and no flag that turns a check off.";
 
 /** Plate 00 and 11 — the line the dev put on the repo. */
 export const QUIP = "Probably better than Rust.";
@@ -38,7 +51,7 @@ export const QUIP = "Probably better than Rust.";
  * slogan. It now appears once, where linear typing is actually explained.
  */
 export const DESCRIPTION =
-  "A statically-typed systems language for compilers, runtimes, kernels and firmware. Austral-style linear typing, checked by a flow-sensitive borrow checker, with no garbage collector and no lifetime annotations.";
+  "A statically-typed systems language for compilers, runtimes, kernels, firmware and network stacks. Resource handles are linear and borrow-checked without lifetime annotations, there is no garbage collector, and there is no #[allow] to switch a check off.";
 
 /** Plate 12 — the metadata strip. */
 export const BADGES = ["Apache-2.0", "LLVM 21", "musl · static"] as const;

@@ -1,28 +1,41 @@
+import { BorrowIcon, LinearIcon, RunIcon } from "@/components/brand/icons";
+
 /*
  * Code samples.
  *
  * Every sample here is copied verbatim from the repository's known-good
  * fixture corpus, exactly as README.md presents them — none is hand-assembled
  * for the site. The `source` field names the fixture so a reader can check.
+ *
+ * Only the structure is here: the fixture text, which handles the typechecker
+ * marks linear, and which icon stands for the sample. The prose that explains
+ * each one is `src/app/(home)/content.md`, in a `@sample-<id>` block, because
+ * that is copy someone edits for wording rather than for behaviour.
  */
 
 export type Sample = {
   id: string;
   label: string;
   source: string;
-  summary: string;
   code: string;
+  /**
+   * The plate 07 icon the tab carries, chosen for what the sample shows:
+   * the run triangle for a call that becomes a jump, the linear figure for a
+   * consumption obligation, the two overlapping diamonds for a borrowed view.
+   */
+  icon: SampleIcon;
   /** Bindings the typechecker marks linear, for plate 09's dotted rule. */
   linearHandles?: readonly string[];
 };
+
+type SampleIcon = typeof LinearIcon;
 
 export const SAMPLES: readonly Sample[] = [
   {
     id: "hanoi",
     label: "Tail recursion",
     source: "tests/fixtures/repro/hanoi.cnb",
-    summary:
-      "Structs and strict tail position. hanoi_acc calls itself as the direct value of a return, which is the only self-recursive call the typechecker accepts; LLVM turns it into a jump at -O2.",
+    icon: RunIcon,
     code: `pub const DISKS: I64 = 8
 
 pub type MoveCount
@@ -53,8 +66,7 @@ end`,
     id: "vec",
     label: "Linear handles",
     source: "tests/fixtures/repro/vec_test.cnb",
-    summary:
-      "vec is a native handle, so it carries a consumption obligation. Both the error path and the success path have to discharge it — hence the fail_vec helper, which frees before returning.",
+    icon: LinearIcon,
     linearHandles: ["vec"],
     code: `use Collections.vec_new
 use Collections.vec_push
@@ -99,8 +111,7 @@ end`,
     id: "slice",
     label: "Slices and patterns",
     source: "tests/fixtures/repro/slice_test.cnb",
-    summary:
-      "Array rest-patterns and a tail-recursive fold. Match is exhaustive: every variant, array length and rest pattern has to be covered, and there is no catch-all arm to cover them with.",
+    icon: BorrowIcon,
     code: `pub mod Slice
   pub nat fun len<T>(view: &[T]) Usize
 end
