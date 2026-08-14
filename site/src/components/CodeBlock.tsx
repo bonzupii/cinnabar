@@ -1,5 +1,5 @@
 import Window, { WindowBody } from "@/components/Window";
-import { tokenizeCinnabar, type TokenKind } from "@/lib/cinnabar-syntax";
+import { TOKEN_STYLE, tokenizeCinnabar } from "@/lib/cinnabar-syntax";
 
 /*
  * Renders Cinnabar source in the "Cinnabar Dark" theme — plate 09.
@@ -12,20 +12,6 @@ import { tokenizeCinnabar, type TokenKind } from "@/lib/cinnabar-syntax";
  * specified against that ground, and plate 14's last misuse rule forbids
  * adding colours to it, so there is no light variant to invent.
  */
-
-const TOKEN_STYLE: Record<TokenKind, string> = {
-  keyword: "text-syn-keyword",
-  type: "text-syn-type font-medium",
-  constant: "text-syn-type",
-  function: "text-syn-type font-semibold",
-  identifier: "text-syn-identifier",
-  literal: "text-syn-literal",
-  string: "text-syn-literal",
-  punctuation: "text-syn-punctuation",
-  comment: "text-syn-comment italic",
-  "doc-comment": "text-syn-comment italic",
-  text: "",
-};
 
 export default function CodeBlock({
   code,

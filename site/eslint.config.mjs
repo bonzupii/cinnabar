@@ -52,6 +52,9 @@ const eslintConfig = defineConfig([
     ".netlify/**",
     // Brand design boards — hand-authored HTML, not part of the app.
     ".planning/**",
+    // wasm-bindgen's generated JS glue for crates/cinnabar-wasm — regenerated
+    // by a Rust build, not hand-authored. See src/generated/cinnabar-wasm/README.md.
+    "src/generated/**",
     // Tooling output.
     "playwright-report/**",
     "test-results/**",
