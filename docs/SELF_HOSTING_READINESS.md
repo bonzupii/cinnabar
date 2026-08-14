@@ -2,9 +2,12 @@
 
 An overnight full-repository audit (seven independent agents, one per subsystem: lexer/parser/AST,
 resolver/typecheck, borrow checker, codegen, CLI/LSP/infra, the tests/fixtures corpus, and the
-website) plus manual synthesis and fixing. This document is the result: what got fixed, what's
-still broken, and — the thing actually asked for — what stands between here and ROADMAP.md's
-"Self-Hosting" goal (Cinnabar compiling itself).
+website), followed by two rounds of fixes — an initial pass on the safely-verifiable front end, then
+a second, targeted pass (three more agents, in isolated git worktrees, on `opus` for the highest-
+stakes areas and `fable` for the more mechanical ones) that closed out nearly everything the audit
+had flagged but left open. This document is the result: what got fixed, what's still broken, and —
+the thing actually asked for — what stands between here and ROADMAP.md's "Self-Hosting" goal
+(Cinnabar compiling itself).
 
 Scope note on verification: this machine has `cargo`/`rustc` but no LLVM 21 and no Nix devshell, so
 `cargo build`/`cargo check` with the default `codegen` feature fails immediately (`llvm-sys` can't
@@ -93,110 +96,131 @@ committed separately with paths scoped to exactly those files.
 One thing worth knowing about even though it's not a bug: partway through this session `git status`
 showed a clean fast-forward pull landed on `main` from `origin` (one commit, "add native slice test
 fixture") — nobody here ran `git pull`; it just happened between turns. It's relevant because it
-fixed, on its own, the fixture-corpus problem in the next section before this document had to say
+fixed, on its own, the fixture-corpus problem in what was then §2 before this document had to say
 anything about it.
 
 ---
 
-## 2. Confirmed, not fixed here — do these next
+## 1b. Round two — everything else in §2, fixed or dispositioned
 
-Ranked by how directly they threaten correctness, independent of self-hosting.
+A follow-up pass (three targeted agents in isolated git worktrees — two on `opus` for the
+highest-stakes/most subtle areas, one on `fable` for the more mechanical tooling work — each merged
+back and re-verified here) closed out nearly everything §2 originally listed as open. What's below
+replaces that section; anything still genuinely open is now in §2 (renumbered).
 
-### 2.1 Borrow checker — two real memory-safety holes
+**Borrow checker — both memory-safety holes are fixed and permanently regression-tested**
+(`src/borrow.rs`, `src/typecheck.rs`):
+- The field-chain-borrow-after-move hole: `walk_field_chain`'s borrow branch now threads the real
+  field path through to `emit_op` instead of `NONE`, so `borrow_after_move_check` can actually see
+  it. Both trigger shapes (a specific field moved then borrowed; the whole struct moved by value
+  then a field of it borrowed) are now rejected.
+- The `Result(&T, E)`/aggregate-wrapped dangling-return hole: added `typecheck::type_contains_ref`,
+  a transitive "does this type carry a reference anywhere" walk mirroring `linear_of`'s existing
+  struct/enum-member traversal (reused by codegen too, see below), and gated the returned-borrow
+  obligation on it instead of the bare `TYD_REF`/`REF_MUT`/`SLICE` kind check.
+- Four permanent regression tests now live in `src/borrow.rs` (`mod tests`), driving the real front
+  end via `analysis::analyze` with no LLVM dependency — the same mechanism the LSP and playground
+  use. All pass; the full 76-test suite plus `clippy -D warnings` stayed clean throughout.
+- **Not done**: three more borrow-checker findings from the original audit (linear-element leaks
+  from stale container-emptiness facts on `vec_pop`/`hash_map_remove` results, and one from freeing
+  an unresolved/anonymous container expression) were out of scope for "the two memory-safety holes"
+  and weren't revisited in the follow-up pass either. They're leaks (a resource never gets consumed
+  on some path), not use-after-free — lower severity than what got fixed, but still real. Ask for
+  the borrow-checker audit transcript for the exact trigger shapes if you want to pick these up.
 
-The borrow checker is the single highest-value place in the compiler for a bug (a hole here means a
-binary the compiler calls sound but isn't), so these get top billing even though fixing them safely
-needs the real toolchain and fixture suite this machine doesn't have.
+**Codegen — both fixed, but this half is fundamentally unverifiable on this machine**
+(`src/codegen/emitter.rs`, `src/typecheck.rs`): nothing under `src/codegen/` can be compiled, type-
+checked, or even syntax-checked by `cargo` here (no LLVM 21 at all), so treat this pair as carefully
+reasoned and precedent-matched, not proven.
+- Tail-call marking: `mark_tail_call` is now the single place `set_tail_call(true)` is invoked, and
+  it withholds the marker unless every argument's canonical type is provably free of references,
+  transitively (reusing `type_contains_ref` again). LLVM's own tail-call-elimination pass re-derives
+  the marker from real escape analysis independent of this source-level flag, so a call that
+  genuinely doesn't leak the caller's frame should still get O(1)-stack treatment — but this is the
+  one change in tonight's whole set that has had zero runtime observation of any kind.
+  **Before trusting this, run `nix develop --command ./pre_commit_check.sh` and specifically watch
+  `tail_rec.cnb` (1M iterations) and `mem_probe.cnb` (500k-deep) for their expected exit codes**,
+  plus `--emit-llvm` on a `return f(&local)`-shaped fixture to confirm the IR is what's described.
+- The constant-Result-array-index Single-Fact violation: `check_index` now records an explicit
+  `IDX_ACCESS_IN_RANGE`/`IDX_ACCESS_FALLIBLE` fact directly on the `EXPR_INDEX` node (a confirmed-
+  spare payload slot) instead of codegen re-deriving fallibility from the attached type's shape;
+  `emitter.rs` reads it at both call sites that used to guess. The `typecheck.rs` half of this is
+  fully compiled/tested/clippied here and is solid; only the `emitter.rs` read side is unverified.
 
-- **Field-path borrows skip the use-after-move check entirely.** `walk_field_chain` emits every
-  dotted borrow (`&s.b`) with `path = NONE` (`src/borrow.rs:1318`), and `borrow_after_move_check`
-  returns immediately on `path < 0` (`src/borrow.rs:2580-2589`). The Milestone-4 fix that made
-  `OP_BORROW`/`OP_BORROW_M` check moved-state only ever applied to whole-binding borrows —
-  `borrow_after_move.cnb` pins exactly those, no field-chain shape. Concretely: move `s.b` (e.g.
-  `deallocate(s.b)`), then `Memory.read_u8(&s.b, 0)` — accepted, reads freed memory.
-- **`Result(&T, E)` / ref-in-struct returns bypass the ambiguous-returned-borrow rule entirely.**
-  The returned-borrow obligation is emitted only when the *declared return type itself* is
-  `TYD_REF`/`REF_MUT`/`SLICE` (`src/borrow.rs:934-940`, `:3291-3295`); a function returning
-  `Result(&T, E)` or a struct with a reference field emits no obligation at all, so returning a
-  borrow of a local wrapped in either is never checked — a dangling reference the caller can freely
-  read.
+**Resolver/typecheck — all three fixed, with one real fixture-corpus consequence worth knowing
+about** (`src/resolver.rs`, `src/typecheck.rs`):
+- Unused-`use` checking was completely dead (the item's own resolved-symbol slot was never written
+  on a successful import, so the guard that was supposed to gate the diagnostic was unconditionally
+  true). Fixed at the root — `finish_import` now sets the slot like every other item kind does — and
+  the diagnostic is deferred (reported after the rest of resolution, so it can't mask a later, more
+  specific error on the same program).
+- The order-dependent silent-shadowing bug (`use Other.Foo` before a local `struct Foo` hid the
+  conflict; the opposite order caught it) is fixed — `scope_lookup` now skips an unresolved-import
+  placeholder rather than treating it as a real, first-match entry, so the conflict check is
+  symmetric regardless of declaration order.
+- Incomplete trait `impl`s are now rejected at the `impl` site (every declared trait method — traits
+  here have no default/provided methods, confirmed from the parser — must have a corresponding impl
+  method; a missing one is reported by name).
+- **Enabling unused-import checking newly rejected 27 dead imports across 5 fixtures.** All 27 were
+  hand-verified as genuine (the imported name is never referenced, or only ever appears fully
+  qualified). Four fixtures were fixed (`mem_probe.cnb`, `slice_test.cnb`, `vec_pop_drain.cnb`,
+  `hash_map_remove_drain.cnb` — see the corresponding commit for why some needed more than deleting
+  the `use` line: an import was, in a few cases, the *only* thing keeping an otherwise fully-dead
+  native-declaration block reachable, since `resolve_imports` attributes every import edge to a
+  synthetic always-reachable root regardless of whether the name is ever called — deleting just the
+  import traded one diagnostic for a cascade of "unused native function" ones from the block it left
+  behind, so the whole unused block had to go too). **`tests/fixtures/repro/head.cnb` (18 of the 27)
+  was deliberately left alone** — it's a language-tour fixture that by design declares far more
+  surface than its trivial `main` exercises, and the same reachability cascade applies to nearly its
+  entire import list. Fixing it means deciding what the fixture is *for* (rewrite `main` to actually
+  exercise the tour, split it into a documentation-only file the compiler doesn't gate on, or accept
+  a narrower tour) — a content decision, not a mechanical one, and appropriately a human's call.
+  **This fixture currently fails `pre_commit_check.sh`'s full corpus run** until that decision is
+  made.
+- **One more resolver bug found in the process, not fixed (would again change what compiles):** a
+  `use` written *inside* a `mod ... end` block never resolves at all — `resolve_imports` only walks
+  the top-level item list, never recurses into `ITEM_MODULE` children, even though the placeholder
+  for such an import is correctly created. Confirmed empirically: a module-local `use Other.helper`
+  followed by a call to `helper()` reports "unknown function 'helper'". No fixture depends on this
+  working, and (because such an import never resolves) fixing the dead unused-import check above
+  didn't touch this path either way.
 
-Three more (linear-element leaks from stale container-emptiness facts, and one from an unresolved
-free target) are documented in full, with exact trigger shapes, in the transcript of the
-borrow-checker audit agent — ask for it if you want the complete writeup; it's long enough that
-inlining all five here would bury the two above.
+**Tooling/CLI/LSP — all five fixed** (`src/main.rs`, `src/project.rs`, `src/bin/cinnabar_lsp.rs`,
+`src/docs.rs`, `src/advanced_tools.rs`):
+- The Windows `\\?\`-verbatim-path bug is fixed with one shared helper (`comparable_path`) used
+  everywhere a canonicalized path is compared against a URI-decoded one; **the two previously-failing
+  tests now pass**, and the full suite (76 tests) is green.
+- `cinnabar --run` no longer risks a `$PATH` search for the just-built binary (main.rs; unverified
+  here, same LLVM constraint as the codegen items).
+- `cinnabar burn`/`playground`'s serve loops no longer die on the first misbehaving client — only a
+  bind failure is fatal now; per-connection errors are logged and the loop continues.
+- A `NO_FILE`-sourced diagnostic (e.g. an unreadable entry file) is now forwarded to the editor via
+  `window/showMessage` instead of silently vanishing.
+- `cinnabar test` now bounds both the compile and run steps with the same timeout pattern the
+  in-repo `cargo test` harness already uses, so one hanging test can no longer hang the whole run.
 
-### 2.2 Codegen — unverifiable here, two look real
+**Site**: nothing further — confirmed clean beyond §1's three fixes.
 
-Nothing in `src/codegen/` compiles on this machine at all (not even a syntax check — `llvm-sys`
-fails before reaching it), so treat these as leads, not diffs to apply blind:
+---
 
-- **`tail` is marked on every call in tail position with no check on what the arguments carry.**
-  `emit_call` (`src/codegen/emitter.rs:1889-1908`) sets LLVM's `tail` marker — a promise that the
-  callee never touches the caller's frame — on any tail call, including `return f(&x)` where `x` is
-  a local. That's IR whose behavior is undefined at `-O2`, and it directly contradicts the
-  Milestone 8 "no UB-shaped IR" claim. Needs `--emit-llvm` on a two-line fixture in `nix develop` to
-  confirm, then a fix scoped to "no argument's type can carry a frame pointer" (or a stated,
-  enforced rule for the genuinely hard case: a self-tail-call passing a borrow of the caller's own
-  local, which can't simultaneously reuse the frame *and* keep the borrow valid).
-- **A constant index into an array of `Result` elements takes the fallible-index codegen path.**
-  `typecheck.rs` attaches the bare element type to a proven-in-range constant index
-  (`typecheck.rs:2960-2968`), but `emitter.rs:1819-1822` decides fallibility from the *shape* of the
-  attached type rather than from a fact typecheck already computed — so `[Result(T, E); N]` indexed
-  by a constant either hits an internal-error diagnostic (if `E != IndexError`) or silently
-  re-wraps and copies the wrong byte range as if the element were `Result(T, IndexError)`. This is a
-  Single-Fact Rule violation with a real payload-corruption consequence; fix by attaching an explicit
-  fallible-index fact at typecheck instead of re-deriving it in codegen.
+## 2. Confirmed, not fixed — genuinely still open
 
-Full detail (plus a `HashMap` padding/`memcmp` issue and an under-aligned `sockaddr_in` store, both
-lower-confidence) is in the codegen audit transcript.
-
-### 2.3 Windows-specific — confirmed live on this machine
-
-- **The LSP is broken on Windows for any real project.** `project::load_manifest` canonicalizes
-  paths (`src/project.rs:83,170`), and on Windows `fs::canonicalize` returns
-  `\\?\C:\...`-prefixed paths — which then never equal the plain paths URIs decode to
-  (`uri_to_path`, `cinnabar_lsp.rs:1220-1240`). Consequence: the unsaved-editor-buffer overlay never
-  matches, and hover/go-to-definition/find-references/completion all silently return nothing for
-  project files. **This isn't hypothetical** — it's independently confirmed by two now-failing unit
-  tests surfaced while verifying tonight's fixes:
-  `project::tests::cinnabar_manifest_parses_folded_string_fields` and
-  `project::tests::omitted_tests_field_uses_tests_directory` (`cargo test --no-default-features
-  --lib`), both asserting a canonicalized path equals a plain one and both failing with exactly the
-  `\\?\` mismatch described above. Confirmed pre-existing (fails identically with tonight's other
-  changes stashed out). Fix at one boundary: strip the verbatim prefix and case-fold the drive
-  letter wherever a filesystem path and a URI-derived path are compared.
-- **`cinnabar file.cnb --run` with a bare output name runs via PATH lookup, not the binary just
-  built.** `default_out_path` strips `.cnb` with no leading `./` (`main.rs:1309-1315`), and
-  `Command::new(path)` on a separator-less path is a PATH search on Unix (masked on Windows, where
-  the cwd is searched first) — so `--run` can execute a *different* `main` if one happens to be on
-  `PATH`.
-
-### 2.4 Everything else confirmed, by area (not re-verified here, not applied)
-
-- **Resolver/typecheck**: unused-`use` checking is entirely dead (`resolver.rs:1979-1982` early-returns
-  before it can ever fire — not applied tonight because turning it on could newly reject anything in
-  the fixture corpus that has a genuinely-unused import today, and that needs the real test suite to
-  check); a `use`-imported type can silently shadow an earlier same-name local type depending on
-  source order; incomplete trait `impl`s are accepted until a missing method is actually called.
-- **Tooling/CLI/LSP**: `cinnabar burn`/`playground`'s serve loops die on the first client that closes
-  a connection mid-write instead of logging and continuing; a `NO_FILE`-sourced diagnostic (e.g. the
-  entry file itself being unreadable) is silently dropped by the LSP instead of surfaced; the VS
-  Code extension pushes `client.start()`'s `Promise<void>` into `context.subscriptions`, which throws
-  on deactivate under `vscode-languageclient` ^9; `cinnabar test` has no per-test timeout, so one
-  hanging test hangs the whole run (the in-repo `cargo test` harness has one, the user-facing runner
-  doesn't).
-- **Site**: nothing further beyond §1's fixes — the audit came back clean on the rest of the
-  finished-looking surface (all routes resolve, no orphaned components, a11y is mostly solid). Two
-  worth knowing about without fixing: diagnostic spans in the playground are indexed as UTF-16 code
-  units against UTF-8 byte offsets (display-only corruption, only reachable with non-ASCII source);
-  the sample-switcher tabs use `role="tablist"`/`role="tab"` without the rest of the ARIA tabs
-  contract (no arrow-key nav, no `aria-controls`).
-- **Tests/fixtures corpus**: now clean. The one real gap (`native_slice_view.cnb` registered
-  `EXPECT_OK` in three suites with no file on disk, and no commit ever adding one) was fixed by the
-  fast-forward pull mentioned in §1, before this document needed to ask for it. One genuinely dead
-  file remains: `tests/fixtures/native_surface.idl` is referenced nowhere — every `native-stub` test
-  generates or inlines its own IDL instead.
+- **Three lower-severity borrow-checker leaks** (linear-element leaks from stale container-emptiness
+  facts; freeing an unresolved container expression) — see 1b above.
+- **`repro/head.cnb`'s dead-import/dead-code cascade** — needs a human decision on what the fixture
+  is for before it can be fixed; currently fails the corpus gate. See 1b above.
+- **A `use` inside a `mod ... end` block never resolves** — newly found, not fixed, no fixture
+  depends on it. See 1b above.
+- **`emitter.rs`'s two fixes are unverified** — this machine cannot compile, type-check, or run
+  anything under `src/codegen/`. Run the real gate before trusting them. See 1b above.
+- **Everything else the original seven-agent audit found that neither pass touched**, still exactly
+  as first reported: a `HashMap` padding/`memcmp` correctness question and an under-aligned
+  `sockaddr_in` store in codegen (both lower-confidence, unverifiable here); the VS Code extension's
+  `client.start()`-into-`context.subscriptions` `Promise` mismatch (flagged in the original audit,
+  not in either fix pass's scope — worth folding into a future tooling pass); the playground's
+  UTF-16-vs-byte-offset diagnostic-span indexing and the sample-switcher's incomplete ARIA tabs
+  pattern (both site-side, low severity); `tests/fixtures/native_surface.idl`, a confirmed-dead file
+  now removed.
 
 ---
 
@@ -302,8 +326,9 @@ stay permanently native regardless (this matches the "marked-native boundary for
 Roughly cheapest-and-most-widely-useful first, each step independently valuable regardless of
 whether the ones after it ever happen:
 
-1. Fix the confirmed bugs in §2 — several of them (the borrow-checker holes especially) are real
-   soundness problems today, orthogonal to self-hosting, and shouldn't wait on it.
+1. Fix what's left in §2 — the borrow-checker leaks especially are real soundness problems today,
+   orthogonal to self-hosting, and shouldn't wait on it; the codegen fixes from 1b need the real
+   `nix develop` gate run before they're trusted, which is worth doing regardless of anything below.
 2. Add the `Process` native surface (§3.2.1) plus the `File` extensions (§3.2.2) — both are useful to
    ordinary Cinnabar programs immediately, not just to a future self-hosted compiler.
 3. Add a string-formatting surface (§3.2.3) — same argument, broadly useful on its own.
