@@ -26,6 +26,9 @@ The page pulls them by name (`content.block("lede")`). A missing block fails the
 build rather than rendering an empty section. Text before the first marker is
 the `body` block, which is all a prose-only page needs.
 
+The home page lives in a `(home)` route group so it has a folder of its own
+like every other route; a route group does not appear in the URL.
+
 Structured content that is rendered as components rather than prose — the CLI
 tables, the language highlights, the milestone list, the code samples — lives in
 `src/content/*.ts`, because a typed array is a better shape for a table than
@@ -94,7 +97,7 @@ npm run deploy
 `npm run deploy` runs `netlify deploy --build --prod`; `npm run deploy:preview`
 gives a draft URL without touching production.
 
-## Notes on three non-obvious choices
+## Notes on four non-obvious choices
 
 **Social images need a content-type header.** Next's `opengraph-image`
 convention emits an extension-less file (`out/opengraph-image`), which a static
@@ -102,6 +105,22 @@ host serves as a generic download — and every social scraper then rejects it.
 `netlify.toml` restores `image/png` for those paths; `tests/unit/netlify-config.test.ts`
 asserts the rules exist, since the local test server has no `netlify.toml` to
 read, and `scripts/verify-png.mjs` checks the built files are real PNGs.
+
+The copy each image renders is exported as `og` from that route's `page.tsx`,
+beside the page's other metadata, and imported by `opengraph-image.tsx` — Next
+requires the image to be its own file, but a route's title and description
+should not live in two places. The home page's image is at the root segment
+rather than inside `(home)`: Next appends a content hash to a metadata image
+declared inside a route group, which would break the stable path the header
+rule targets.
+
+**Fonts for those images come from npm.** `src/lib/og-fonts.ts` reads the
+static `.woff` faces out of `@fontsource`. It locates them by walking up
+`node_modules` rather than with `require.resolve`, because the bundler owns
+that function: pointed at a `.woff` it fails the build with "Unknown module
+type", and pointed at a package.json it returns an internal module id rather
+than a path. Satori reads ttf, otf and woff but not woff2, which is why the
+larger file is the right one here.
 
 **Entrance reveals must not hide content.** A scroll reveal needs a hidden state,
 and motion's `initial` prop renders that into the HTML — so without JavaScript

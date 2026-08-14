@@ -4,10 +4,11 @@ import PageHeader, { Eyebrow } from "@/components/PageHeader";
 import SectionHeading from "@/components/SectionHeading";
 import Markdown, { InlineMarkdown } from "@/components/Markdown";
 import Reveal from "@/components/Reveal";
+import { Callout, MarkedList, Panel, SourceNote } from "@/components/ui";
 import { BuildIcon, LinearIcon, StaticLinkIcon } from "@/components/brand/icons";
 import { ARENA_PROPERTIES, ARENAS, SINGLE_FACT_RULE, STAGES } from "@/content/pipeline";
 import { readPageContent } from "@/lib/page-content";
-import { readRepoDoc, REPO_URL } from "@/lib/repo-docs";
+import { linkRepoFile, readRepoDoc } from "@/lib/repo-docs";
 
 export const metadata: Metadata = {
   title: "Architecture",
@@ -15,6 +16,19 @@ export const metadata: Metadata = {
     "How the Cinnabar compiler is built: one fixed pipeline of seven stages over a flat node arena, with every fact computed exactly once.",
   alternates: { canonical: "/architecture/" },
 };
+
+/** Social image copy, consumed by ./opengraph-image.tsx. */
+export const og = {
+  eyebrow: "Compiler internals",
+  title: "One fixed pipeline.",
+  description:
+    "Seven stages over a flat node arena, where every fact is computed exactly once and attached for later stages to read.",
+  alt: "Cinnabar social card — the compiler internals.",
+};
+
+/** Inline code inside a stage summary, which quotes identifiers in backticks. */
+const STAGE_PROSE =
+  "text-secondary text-[14.5px] leading-[1.65] text-pretty [&_code]:border [&_code]:border-[color:var(--hairline-strong)] [&_code]:px-[4px] [&_code]:font-mono [&_code]:text-[0.9em] [&_code]:text-[color:var(--bright)]";
 
 export default async function ArchitecturePage() {
   const [document, content] = await Promise.all([
@@ -29,17 +43,12 @@ export default async function ArchitecturePage() {
         note="ARCHITECTURE.md · read from the source"
         icon={BuildIcon}
         title="One fixed pipeline."
-        lede={
-          <div className="text-secondary text-[18px] leading-[1.55] tracking-[-0.01em] text-pretty sm:text-[21px]">
-            <InlineMarkdown>{content.block("lede")}</InlineMarkdown>
-          </div>
-        }
+        lede={content.block("lede")}
       />
 
       {/*
         The pipeline as a figure before the prose. ARCHITECTURE.md draws it as
-        an ASCII column; at this width it reads better as a run of stages with
-        the flow between them made explicit.
+        an ASCII column; at this width it reads better as a run of stages.
       */}
       <section className="mx-auto max-w-[1400px] px-6 pt-16 sm:px-10">
         <SectionHeading
@@ -70,19 +79,14 @@ export default async function ArchitecturePage() {
               <span className="text-label font-mono text-[11px] break-all">
                 {stage.file}
               </span>
-              {/* The summaries quote identifiers with backticks, so they are
-                  rendered as markdown rather than printed literally. */}
-              <div className="text-secondary text-[14.5px] leading-[1.65] text-pretty [&_code]:border [&_code]:border-[color:var(--hairline-strong)] [&_code]:px-[4px] [&_code]:font-mono [&_code]:text-[0.9em] [&_code]:text-[color:var(--bright)]">
+              <div className={STAGE_PROSE}>
                 <InlineMarkdown>{stage.summary}</InlineMarkdown>
               </div>
             </Reveal>
           ))}
 
           {/* The eighth cell states what the seven have in common. */}
-          <Reveal
-            as="li"
-            className="bg-ground flex flex-col justify-center gap-4 p-7"
-          >
+          <Reveal as="li" className="bg-ground flex flex-col justify-center gap-4 p-7">
             <LinearIcon size={22} className="text-cinnabar-text" />
             <p className="text-bright text-[14px] leading-[1.6] text-pretty">
               A failure at any stage halts the pipeline and prints source-located
@@ -108,33 +112,22 @@ export default async function ArchitecturePage() {
             <div className="[&_p:first-child]:mt-0">
               <Markdown>{content.block("arena")}</Markdown>
             </div>
-            <ul className="mt-2 flex list-none flex-col gap-2.5 pl-0">
-              {ARENA_PROPERTIES.map((property) => (
-                <li
-                  key={property}
-                  className="text-secondary relative pl-6 text-[14.5px] leading-[1.6] before:absolute before:top-[0.55em] before:left-0 before:h-[6px] before:w-[6px] before:bg-[color:var(--cinnabar)] before:content-['']"
-                >
-                  {property}
-                </li>
-              ))}
-            </ul>
+            <MarkedList items={ARENA_PROPERTIES} accent className="mt-2" />
           </Reveal>
 
           <Reveal delay={0.06} className="rule-grid flex min-w-0 flex-col">
             {ARENAS.map((arena) => (
-              <div key={arena.name} className="bg-panel flex flex-col gap-3 p-7">
+              <Panel key={arena.name} className="gap-3 p-7">
                 <div className="flex items-baseline gap-3">
                   <span className="text-text font-mono text-[15px] font-semibold">
                     {arena.name}
                   </span>
-                  <span className="text-label font-mono text-[13px]">
-                    {arena.type}
-                  </span>
+                  <span className="text-label font-mono text-[13px]">{arena.type}</span>
                 </div>
                 <p className="text-secondary text-[14px] leading-[1.65] text-pretty">
                   {arena.summary}
                 </p>
-              </div>
+              </Panel>
             ))}
           </Reveal>
         </div>
@@ -142,26 +135,21 @@ export default async function ArchitecturePage() {
 
       {/* The governing rule, given the weight the document gives it. */}
       <section className="mx-auto max-w-[1400px] px-6 pt-24 sm:px-10">
-        <Reveal className="border-hairline bg-panel flex flex-col gap-5 border p-8 sm:p-12">
-          <Eyebrow>The Single-Fact Rule</Eyebrow>
-          <p className="text-bright text-[17px] leading-[1.7] text-pretty sm:text-[19px]">
-            {SINGLE_FACT_RULE}
-          </p>
+        <Reveal>
+          <Callout>
+            <Eyebrow>The Single-Fact Rule</Eyebrow>
+            <p className="text-bright text-[17px] leading-[1.7] text-pretty sm:text-[19px]">
+              {SINGLE_FACT_RULE}
+            </p>
+          </Callout>
         </Reveal>
       </section>
 
       <section className="mx-auto max-w-[1400px] px-6 pt-24 pb-12 sm:px-10">
         <SectionHeading title="Full walkthrough" note="ARCHITECTURE.md" />
-        <div className="border-cinnabar text-bright mt-10 border-l-2 pl-6 font-mono text-[13px] leading-[1.8] [&_a]:text-[color:var(--cinnabar-text)] [&_a]:underline [&_a]:underline-offset-[3px]">
-          <InlineMarkdown>
-            {content
-              .block("source")
-              .replace(
-                "`ARCHITECTURE.md`",
-                `[ARCHITECTURE.md](${REPO_URL}/blob/main/ARCHITECTURE.md)`,
-              )}
-          </InlineMarkdown>
-        </div>
+        <SourceNote className="mt-10">
+          {linkRepoFile(content.block("source"), "ARCHITECTURE.md")}
+        </SourceNote>
       </section>
 
       <DocBody markdown={document} tocLabel="Sections" />

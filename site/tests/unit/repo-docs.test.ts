@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { rewriteRepoLinks, stripLeadingHeading } from "@/lib/repo-docs";
+import { linkRepoFile, rewriteRepoLinks, stripLeadingHeading } from "@/lib/repo-docs";
 
 describe("rewriteRepoLinks", () => {
   it("points documents that have their own page at that page", () => {
@@ -79,5 +79,30 @@ describe("stripLeadingHeading", () => {
   it("keeps every later heading", () => {
     const stripped = stripLeadingHeading("# Title\n\n## Core Principles\n\nBody\n");
     expect(stripped).toBe("## Core Principles\n\nBody\n");
+  });
+});
+
+describe("linkRepoFile", () => {
+  it("links the named file where it appears as inline code", () => {
+    expect(linkRepoFile("Rendered from `MANIFESTO.md` at build time.", "MANIFESTO.md")).toBe(
+      "Rendered from [MANIFESTO.md](https://github.com/bonzupii/cinnabar/blob/main/MANIFESTO.md) at build time.",
+    );
+  });
+
+  it("leaves other inline code in the sentence alone", () => {
+    expect(
+      linkRepoFile("`ROADMAP.md` is rendered by `readRepoDoc`.", "ROADMAP.md"),
+    ).toBe(
+      "[ROADMAP.md](https://github.com/bonzupii/cinnabar/blob/main/ROADMAP.md) is rendered by `readRepoDoc`.",
+    );
+  });
+
+  it("is a no-op when the file is not mentioned", () => {
+    expect(linkRepoFile("No filename here.", "MANIFESTO.md")).toBe("No filename here.");
+  });
+
+  it("links only the first mention, which is where the reference belongs", () => {
+    const linked = linkRepoFile("`A.md` and `A.md`", "A.md");
+    expect(linked.match(/https:/g)).toHaveLength(1);
   });
 });

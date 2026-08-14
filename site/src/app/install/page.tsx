@@ -3,8 +3,9 @@ import type { ComponentType, ReactNode } from "react";
 import PageHeader from "@/components/PageHeader";
 import SectionHeading from "@/components/SectionHeading";
 import ShellBlock from "@/components/ShellBlock";
-import Markdown, { InlineMarkdown } from "@/components/Markdown";
+import TerminalFrame, { TerminalBody } from "@/components/TerminalFrame";
 import Reveal from "@/components/Reveal";
+import { ArrowLink, Callout, Code, Prose } from "@/components/ui";
 import {
   BuildIcon,
   CodegenIcon,
@@ -21,6 +22,15 @@ export const metadata: Metadata = {
   description:
     "Build the Cinnabar compiler with the project's Nix flake, run it from Docker on Windows, set up the language server, and verify a change against the repository's gate.",
   alternates: { canonical: "/install/" },
+};
+
+/** Social image copy, consumed by ./opengraph-image.tsx. */
+export const og = {
+  eyebrow: "Getting started",
+  title: "Build the compiler.",
+  description:
+    "LLVM 21 via a Nix flake, a static musl libc, the language server, and the repository's verification gate.",
+  alt: "Cinnabar social card — the getting-started guide.",
 };
 
 /** One step of the guide, with its own section rule. */
@@ -43,14 +53,20 @@ function Step({
   );
 }
 
-/** Prose at the document scale, filling its column. */
-function Prose({ children }: { children: string }) {
+/** Two columns that both clamp, so a wide transcript scrolls instead of pushing. */
+function SplitStep({ children }: { children: ReactNode }) {
   return (
-    <div className="max-w-[86ch] [&_p:first-child]:mt-0">
-      <Markdown>{children}</Markdown>
+    <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start [&>*]:min-w-0">
+      {children}
     </div>
   );
 }
+
+const NEOVIM_SETUP = `vim.lsp.start({
+  name = "cinnabar",
+  cmd = { "/path/to/cinnabar-lsp" },
+  root_dir = vim.fn.getcwd(),
+})`;
 
 export default async function InstallPage() {
   const content = await readPageContent("install");
@@ -73,27 +89,26 @@ export default async function InstallPage() {
         note="LLVM 21 · static musl libc"
         icon={BuildIcon}
         title="Build the compiler."
-        lede={
-          <div className="text-secondary text-[18px] leading-[1.55] tracking-[-0.01em] text-pretty sm:text-[21px] [&_code]:font-mono [&_code]:text-[0.9em]">
-            <InlineMarkdown>{content.block("lede")}</InlineMarkdown>
-          </div>
-        }
+        lede={content.block("lede")}
       />
 
       <div className="mx-auto flex max-w-[1400px] flex-col gap-20 px-6 pt-16 sm:px-10 [&>*]:min-w-0">
-        <Step title="Nix — the supported path" note="The only setup that is tested" icon={BuildIcon}>
+        <Step
+          title="Nix — the supported path"
+          note="The only setup that is tested"
+          icon={BuildIcon}
+        >
           <Prose>{content.block("nix")}</Prose>
           <ShellBlock
             lines={["nix develop", "cargo build --release"]}
+            cwd="~/src/cinnabar"
             className="mt-7 max-w-[760px]"
           />
-          <div className="mt-8">
-            <Prose>{withRepoLinks(content.block("nix-outside"))}</Prose>
-          </div>
+          <Prose className="mt-8">{withRepoLinks(content.block("nix-outside"))}</Prose>
         </Step>
 
-        <Step title="First program" note="cinnabar init · run · check" icon={RunIcon}>
-          <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start [&>*]:min-w-0">
+        <Step title="First program" note="init · run · check" icon={RunIcon}>
+          <SplitStep>
             <div>
               <Prose>{content.block("first-program")}</Prose>
               <ShellBlock
@@ -102,6 +117,7 @@ export default async function InstallPage() {
                   "cinnabar run hello",
                   "cinnabar check hello    # front end only, links nothing",
                 ]}
+                cwd="~/src"
                 className="mt-7"
               />
             </div>
@@ -113,10 +129,11 @@ export default async function InstallPage() {
                   "cargo run -- tests/fixtures/multi_file/main.cnb --run",
                   "cargo run -- my_program.cnb --dump-ast",
                 ]}
+                cwd="~/src/cinnabar"
                 className="mt-7"
               />
             </div>
-          </div>
+          </SplitStep>
         </Step>
 
         <Step
@@ -125,46 +142,42 @@ export default async function InstallPage() {
           icon={StaticLinkIcon}
         >
           <Prose>{content.block("docker")}</Prose>
-          <a
+          <ArrowLink
             href={`${REPO_URL}/blob/main/CONTAINER_DEVELOPMENT.md`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-cinnabar-text hover:text-text panel-hover mt-7 inline-block text-[13px] font-bold tracking-[0.1em] uppercase"
+            external
+            className="mt-7 inline-block"
           >
-            Container development guide →
-          </a>
+            Container development guide
+          </ArrowLink>
         </Step>
 
         <Step title="Language server" note="cinnabar-lsp · stdio" icon={LspIcon}>
-          <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start [&>*]:min-w-0">
+          <SplitStep>
             <Prose>{content.block("lsp")}</Prose>
             <div>
-              <ShellBlock lines={["cargo build --release --bin cinnabar-lsp"]} />
-              <div className="rule-grid mt-7 flex min-w-0">
-                <pre
-                  tabIndex={0}
-                  className="bg-code-terminal text-term-output w-full overflow-x-auto px-6 py-5 font-mono text-[12.5px] leading-[1.7]"
-                >
-                  <code>{`vim.lsp.start({
-  name = "cinnabar",
-  cmd = { "/path/to/cinnabar-lsp" },
-  root_dir = vim.fn.getcwd(),
-})`}</code>
-                </pre>
-              </div>
-              <div className="mt-6 [&_p]:text-[15px]">
-                <Prose>{content.block("lsp-vscode")}</Prose>
-              </div>
+              <ShellBlock
+                lines={["cargo build --release --bin cinnabar-lsp"]}
+                cwd="~/src/cinnabar"
+              />
+              <TerminalFrame cwd="~/.config/nvim" label="init.lua" className="mt-7">
+                <TerminalBody className="text-term-output text-[12.5px] leading-[1.7]">
+                  <code>{NEOVIM_SETUP}</code>
+                </TerminalBody>
+              </TerminalFrame>
+              <Prose className="mt-6 [&_p]:text-[15px]">
+                {content.block("lsp-vscode")}
+              </Prose>
             </div>
-          </div>
+          </SplitStep>
         </Step>
 
         <Step title="Verifying a change" note="nix develop --command" icon={TestIcon}>
-          <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start [&>*]:min-w-0">
+          <SplitStep>
             <div>
               <Prose>{withRepoLinks(content.block("gate"))}</Prose>
               <ShellBlock
                 lines={["nix develop --command ./pre_commit_check.sh"]}
+                cwd="~/src/cinnabar"
                 className="mt-7"
               />
             </div>
@@ -176,23 +189,24 @@ export default async function InstallPage() {
                   "nix develop --command cargo test --quiet --features test-profile-balanced",
                   "nix develop --command cargo test --quiet --features test-profile-smoke",
                 ]}
+                cwd="~/src/cinnabar"
                 className="mt-7"
               />
             </div>
-          </div>
+          </SplitStep>
         </Step>
 
-        <Reveal className="border-hairline bg-panel flex flex-col gap-5 border p-8 sm:p-10">
-          <CodegenIcon size={22} className="text-cinnabar-text" />
-          <p className="text-bright max-w-[70ch] text-[17px] leading-[1.6] text-pretty">
-            On success the compiler prints{" "}
-            <code className="border-hairline bg-ground text-bright border px-[5px] py-[2px] font-mono text-[0.875em]">
-              Successfully compiled &lt;input&gt; to &apos;&lt;output&gt;&apos;.
-            </code>{" "}
-            and exits 0. Any failure is rendered as source-located diagnostics and
-            exits non-zero. A build either produces its artifact or produces
-            diagnostics — never both, and never part of one.
-          </p>
+        <Reveal>
+          <Callout>
+            <CodegenIcon size={22} className="text-cinnabar-text" />
+            <p className="text-bright max-w-[70ch] text-[17px] leading-[1.6] text-pretty">
+              On success the compiler prints{" "}
+              <Code>Successfully compiled &lt;input&gt; to &apos;&lt;output&gt;&apos;.</Code>{" "}
+              and exits 0. Any failure is rendered as source-located diagnostics and
+              exits non-zero. A build either produces its artifact or produces
+              diagnostics — never both, and never part of one.
+            </p>
+          </Callout>
         </Reveal>
       </div>
     </article>

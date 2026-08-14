@@ -1,3 +1,4 @@
+import TerminalFrame, { TerminalBody } from "@/components/TerminalFrame";
 import {
   tokenizeShellLine,
   tokenizeUsageLine,
@@ -40,24 +41,18 @@ export type ShellLine = string | { out: string };
 
 export default function ShellBlock({
   lines,
-  caption,
+  cwd,
+  label,
   className,
 }: {
   lines: readonly ShellLine[];
-  caption?: string;
+  cwd?: string;
+  label?: string;
   className?: string;
 }) {
   return (
-    <figure className={`rule-grid flex min-w-0 flex-col ${className ?? ""}`}>
-      {caption ? (
-        <figcaption className="bg-panel text-label px-5 py-3 font-mono text-[11px] tracking-[0.14em] uppercase">
-          {caption}
-        </figcaption>
-      ) : null}
-      <pre
-        tabIndex={0}
-        className="bg-code-terminal w-full overflow-x-auto px-6 py-6 font-mono text-[13px] leading-[1.85] sm:text-[14px]"
-      >
+    <TerminalFrame cwd={cwd} label={label} className={className}>
+      <TerminalBody>
         <code>
           {lines.map((line, index) => {
             const isCommand = typeof line === "string";
@@ -71,12 +66,17 @@ export default function ShellBlock({
             );
           })}
         </code>
-      </pre>
-    </figure>
+      </TerminalBody>
+    </TerminalFrame>
   );
 }
 
-/** The synopsis shape `cinnabar --help` prints. */
+/**
+ * The synopsis shape `cinnabar --help` prints.
+ *
+ * No terminal chrome: this is a reference figure rather than a session, and
+ * dressing it as one would imply it had been run.
+ */
 export function UsageBlock({
   lines,
   className,

@@ -1,6 +1,5 @@
 import { ImageResponse } from "next/og";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
+import { loadOgFonts } from "@/lib/og-fonts";
 import {
   MARK_BLOCK,
   MARK_LETTER_POINTS,
@@ -12,10 +11,8 @@ import {
  * top-left, the metadata strip top-right, the title and description in the
  * lower half, and the quip against the repo URL at the foot.
  *
- * Schibsted Grotesk ships only as a variable font upstream, and Satori
- * resolves a variable font to its default instance — which would set the
- * wordmark at 400 instead of 800. The static instances beside this file were
- * cut from it with fontTools for that reason.
+ * The faces come from @fontsource at build time; see lib/og-fonts.ts for why
+ * they are not vendored here.
  */
 
 const GROUND = "#100E0D";
@@ -28,21 +25,6 @@ const CINNABAR = "#E0442A";
 export const ogSize = { width: 1200, height: 630 };
 export const ogContentType = "image/png";
 
-async function loadFonts() {
-  const dir = path.join(process.cwd(), "src", "app", "fonts");
-  const [grotesk800, grotesk700, grotesk400, mono500] = await Promise.all([
-    readFile(path.join(dir, "SchibstedGrotesk-800.ttf")),
-    readFile(path.join(dir, "SchibstedGrotesk-700.ttf")),
-    readFile(path.join(dir, "SchibstedGrotesk-400.ttf")),
-    readFile(path.join(dir, "IBMPlexMono-Medium.ttf")),
-  ]);
-  return [
-    { name: "Schibsted Grotesk", data: grotesk800, weight: 800 as const, style: "normal" as const },
-    { name: "Schibsted Grotesk", data: grotesk700, weight: 700 as const, style: "normal" as const },
-    { name: "Schibsted Grotesk", data: grotesk400, weight: 400 as const, style: "normal" as const },
-    { name: "IBM Plex Mono", data: mono500, weight: 500 as const, style: "normal" as const },
-  ];
-}
 
 /**
  * The wordmark: the drawn C followed by INNABAR.
@@ -86,7 +68,7 @@ export async function renderOgImage({
   title: string;
   description: string;
 }) {
-  const fonts = await loadFonts();
+  const fonts = await loadOgFonts();
 
   return new ImageResponse(
     (

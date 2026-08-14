@@ -2,18 +2,27 @@ import type { Metadata } from "next";
 import DocBody from "@/components/DocBody";
 import PageHeader from "@/components/PageHeader";
 import SectionHeading from "@/components/SectionHeading";
-import { InlineMarkdown } from "@/components/Markdown";
 import Reveal from "@/components/Reveal";
+import { Panel, SourceNote, Stat } from "@/components/ui";
 import { CheckIcon, DiagnosticIcon, RunIcon } from "@/components/brand/icons";
 import { MILESTONES, STATUS_LABEL, type MilestoneStatus } from "@/content/roadmap";
 import { readPageContent } from "@/lib/page-content";
-import { readRepoDoc, REPO_URL } from "@/lib/repo-docs";
+import { linkRepoFile, readRepoDoc } from "@/lib/repo-docs";
 
 export const metadata: Metadata = {
   title: "Roadmap",
   description:
     "What is resolved and what is planned in Cinnabar: eight milestones, their status, and why self-hosting is a goal rather than a gate.",
   alternates: { canonical: "/roadmap/" },
+};
+
+/** Social image copy, consumed by ./opengraph-image.tsx. */
+export const og = {
+  eyebrow: "Project status",
+  title: "Resolved, and planned.",
+  description:
+    "Eight milestones and their status, and why self-hosting is a completeness test rather than a gate.",
+  alt: "Cinnabar social card — the project status.",
 };
 
 /*
@@ -23,10 +32,7 @@ export const metadata: Metadata = {
  * state also has its own icon and fill treatment.
  */
 const STATUS_STYLE: Record<MilestoneStatus, { chip: string; node: string }> = {
-  complete: {
-    chip: "bg-cinnabar text-on-cinnabar",
-    node: "bg-cinnabar border-cinnabar",
-  },
+  complete: { chip: "bg-cinnabar text-on-cinnabar", node: "bg-cinnabar border-cinnabar" },
   partial: {
     chip: "border border-cinnabar text-cinnabar-text",
     node: "border-cinnabar bg-ground",
@@ -42,6 +48,12 @@ const STATUS_ICON = {
   partial: RunIcon,
   goal: DiagnosticIcon,
 } as const;
+
+const SUMMARY_STATES = [
+  ["complete", "Complete"],
+  ["partial", "Partial"],
+  ["goal", "Long-term goal"],
+] as const;
 
 export default async function RoadmapPage() {
   const [document, content] = await Promise.all([
@@ -61,42 +73,25 @@ export default async function RoadmapPage() {
         note="A milestone is done only when fixtures, gate and spec agree"
         icon={CheckIcon}
         title="Resolved, and planned."
-        lede={
-          <div className="text-secondary text-[18px] leading-[1.55] tracking-[-0.01em] text-pretty sm:text-[21px]">
-            <InlineMarkdown>{content.block("lede")}</InlineMarkdown>
-          </div>
-        }
+        lede={content.block("lede")}
       />
 
       {/* A count per state, so the shape of the project is legible at a glance. */}
       <section className="mx-auto max-w-[1400px] px-6 pt-14 sm:px-10">
         <div className="rule-grid grid grid-cols-2 sm:grid-cols-4">
-          {(
-            [
-              ["complete", "Complete"],
-              ["partial", "Partial"],
-              ["goal", "Long-term goal"],
-            ] as const
-          ).map(([status, label]) => (
-            <div key={status} className="bg-panel flex flex-col gap-2 p-6">
-              <span className="text-text text-[32px] leading-none font-bold tracking-[-0.03em]">
-                {counts[status] ?? 0}
-              </span>
-              <span className="text-label font-mono text-[10px] tracking-[0.16em] uppercase">
-                {label}
-              </span>
-            </div>
+          {SUMMARY_STATES.map(([status, label]) => (
+            <Stat key={status} value={counts[status] ?? 0} label={label} />
           ))}
-          <div className="bg-ground flex flex-col justify-center gap-2 p-6">
+          <Panel className="justify-center gap-2 bg-ground p-6">
             <span className="text-secondary text-[13px] leading-[1.55] text-pretty">
               Self-hosting is a completeness test, not a gate.
             </span>
-          </div>
+          </Panel>
         </div>
       </section>
 
-      {/* The timeline. A rail with a node per milestone, rather than cards in a
-          grid: the milestones are ordered, and the order is information. */}
+      {/* A rail rather than a grid: the milestones are ordered, and the order
+          is information. */}
       <section className="mx-auto max-w-[1400px] px-6 pt-20 sm:px-10">
         <SectionHeading
           title="Milestones"
@@ -115,9 +110,8 @@ export default async function RoadmapPage() {
                 key={milestone.number}
                 as="li"
                 delay={Math.min(index * 0.03, 0.18)}
-                className="relative grid grid-cols-[28px_minmax(0,1fr)] gap-x-6 sm:grid-cols-[64px_minmax(0,1fr)]"
+                className="grid grid-cols-[28px_minmax(0,1fr)] gap-x-6 sm:grid-cols-[64px_minmax(0,1fr)]"
               >
-                {/* The rail: a node, and a line down to the next one. */}
                 <div className="flex flex-col items-center">
                   <span
                     aria-hidden="true"
@@ -154,7 +148,7 @@ export default async function RoadmapPage() {
                     </a>
                   </h3>
 
-                  <p className="text-secondary mt-3 max-w-[80ch] text-[15.5px] leading-[1.7] text-pretty">
+                  <p className="text-secondary mt-3 max-w-[86ch] text-[15.5px] leading-[1.7] text-pretty">
                     {milestone.summary}
                   </p>
                 </div>
@@ -166,13 +160,9 @@ export default async function RoadmapPage() {
 
       <section className="mx-auto max-w-[1400px] px-6 pt-24 pb-12 sm:px-10">
         <SectionHeading title="Full roadmap" note="ROADMAP.md" />
-        <div className="border-cinnabar text-bright mt-10 border-l-2 pl-6 font-mono text-[13px] leading-[1.8] [&_a]:text-[color:var(--cinnabar-text)] [&_a]:underline [&_a]:underline-offset-[3px]">
-          <InlineMarkdown>
-            {content
-              .block("source")
-              .replace("`ROADMAP.md`", `[ROADMAP.md](${REPO_URL}/blob/main/ROADMAP.md)`)}
-          </InlineMarkdown>
-        </div>
+        <SourceNote className="mt-10">
+          {linkRepoFile(content.block("source"), "ROADMAP.md")}
+        </SourceNote>
       </section>
 
       <DocBody markdown={document} tocLabel="Sections" />

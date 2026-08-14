@@ -1,4 +1,5 @@
 import type { ComponentType } from "react";
+import { Lede } from "@/components/ui";
 
 /*
  * The page header.
@@ -19,8 +20,8 @@ export default function PageHeader({
   /** Optional mono note, right-aligned on the rule. */
   note?: string;
   title: string;
-  /** Rendered markdown, from the route's content.md. */
-  lede?: React.ReactNode;
+  /** Markdown, normally the route's `@lede` block. */
+  lede?: string;
   icon?: ComponentType<{ size?: number; className?: string }>;
 }) {
   return (
@@ -40,7 +41,11 @@ export default function PageHeader({
       <h1 className="text-text mt-11 max-w-[22ch] text-[40px] leading-[1.05] font-bold tracking-[-0.03em] text-balance sm:text-[58px]">
         {title}
       </h1>
-      {lede ? <div className="mt-7 max-w-[80ch]">{lede}</div> : null}
+      {lede ? (
+        <div className="mt-7 max-w-[80ch]">
+          <Lede>{lede}</Lede>
+        </div>
+      ) : null}
     </div>
   );
 }

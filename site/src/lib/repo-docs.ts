@@ -73,3 +73,15 @@ export async function readRepoDoc(name: RepoDocName): Promise<string> {
   const raw = await readFile(path.join(REPO_ROOT, name), "utf8");
   return rewriteRepoLinks(stripLeadingHeading(raw));
 }
+
+/**
+ * Turns a backticked filename in prose into a link to it on GitHub.
+ *
+ * The route content files name their source as `` `MANIFESTO.md` `` rather
+ * than spelling out a URL, so the copy stays readable and the repository URL
+ * is not repeated in five places. Only the named file is linked; any other
+ * inline code in the sentence is left alone.
+ */
+export function linkRepoFile(text: string, file: string): string {
+  return text.replace(`\`${file}\``, `[${file}](${BLOB_BASE}${file})`);
+}
