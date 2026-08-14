@@ -2,12 +2,14 @@
 
 An overnight full-repository audit (seven independent agents, one per subsystem: lexer/parser/AST,
 resolver/typecheck, borrow checker, codegen, CLI/LSP/infra, the tests/fixtures corpus, and the
-website), followed by two rounds of fixes — an initial pass on the safely-verifiable front end, then
-a second, targeted pass (three more agents, in isolated git worktrees, on `opus` for the highest-
-stakes areas and `fable` for the more mechanical ones) that closed out nearly everything the audit
-had flagged but left open. This document is the result: what got fixed, what's still broken, and —
-the thing actually asked for — what stands between here and ROADMAP.md's "Self-Hosting" goal
-(Cinnabar compiling itself).
+website), followed by three rounds of fixes: an initial pass on the safely-verifiable front end; a
+second, targeted pass (three more agents, in isolated git worktrees, on `opus` for the highest-stakes
+areas and `fable` for the more mechanical ones) that closed out nearly everything the audit had
+flagged but left open; and a third pass closing the handful of items that round two's own work
+surfaced (the remaining borrow-checker leaks, a newly-found resolver gap, and a fixture content
+decision, made explicitly rather than guessed). This document is the result: what got fixed, what's
+still broken, and — the thing actually asked for — what stands between here and ROADMAP.md's
+"Self-Hosting" goal (Cinnabar compiling itself).
 
 Scope note on verification: this machine has `cargo`/`rustc` but no LLVM 21 and no Nix devshell, so
 `cargo build`/`cargo check` with the default `codegen` feature fails immediately (`llvm-sys` can't
@@ -121,12 +123,20 @@ replaces that section; anything still genuinely open is now in §2 (renumbered).
 - Four permanent regression tests now live in `src/borrow.rs` (`mod tests`), driving the real front
   end via `analysis::analyze` with no LLVM dependency — the same mechanism the LSP and playground
   use. All pass; the full 76-test suite plus `clippy -D warnings` stayed clean throughout.
-- **Not done**: three more borrow-checker findings from the original audit (linear-element leaks
-  from stale container-emptiness facts on `vec_pop`/`hash_map_remove` results, and one from freeing
-  an unresolved/anonymous container expression) were out of scope for "the two memory-safety holes"
-  and weren't revisited in the follow-up pass either. They're leaks (a resource never gets consumed
-  on some path), not use-after-free — lower severity than what got fixed, but still real. Ask for
-  the borrow-checker audit transcript for the exact trigger shapes if you want to pick these up.
+- **Round three fixed the three remaining leaks too**: `b.8` (extraction-result-to-container pairs)
+  and `b.9` (bindings created by a native create call) were syntactic snapshots taken once at a
+  binding's own let/pattern-bind site and never invalidated afterward — refilling a container after
+  popping from it (or after moving it) left a stale "provably empty" fact in place, so a later free
+  accepted a leak. Fixed at the one place either fact can go stale: any call taking an existing
+  container by `&mut` outside an extraction native now prunes both facts for that binding
+  (`invalidate_container_facts`). Separately, `vec_free(make_full_vec())` — freeing a container
+  that's a call result rather than a named binding — skipped the drain check entirely, since it's
+  keyed on a binding and an anonymous expression has none; fixed by treating an unresolvable free
+  target as MayContain (an immediate error) unless it's directly and provably a fresh create call
+  itself, symmetric with how a by-value container parameter already starts MayContain. Five more
+  regression tests, same `analyze`-driven mechanism, all passing; checked against the fixture corpus
+  (the two `EXPECT_OK` fixtures that combine extraction and insertion on the same container,
+  `vec_pop_drain.cnb`/`hash_map_remove_drain.cnb`, still pass clean).
 
 **Codegen — both fixed, but this half is fundamentally unverifiable on this machine**
 (`src/codegen/emitter.rs`, `src/typecheck.rs`): nothing under `src/codegen/` can be compiled, type-
@@ -163,27 +173,26 @@ about** (`src/resolver.rs`, `src/typecheck.rs`):
   method; a missing one is reported by name).
 - **Enabling unused-import checking newly rejected 27 dead imports across 5 fixtures.** All 27 were
   hand-verified as genuine (the imported name is never referenced, or only ever appears fully
-  qualified). Four fixtures were fixed (`mem_probe.cnb`, `slice_test.cnb`, `vec_pop_drain.cnb`,
+  qualified). All 5 are now fixed (`mem_probe.cnb`, `slice_test.cnb`, `vec_pop_drain.cnb`,
   `hash_map_remove_drain.cnb` — see the corresponding commit for why some needed more than deleting
   the `use` line: an import was, in a few cases, the *only* thing keeping an otherwise fully-dead
   native-declaration block reachable, since `resolve_imports` attributes every import edge to a
   synthetic always-reachable root regardless of whether the name is ever called — deleting just the
   import traded one diagnostic for a cascade of "unused native function" ones from the block it left
-  behind, so the whole unused block had to go too). **`tests/fixtures/repro/head.cnb` (18 of the 27)
-  was deliberately left alone** — it's a language-tour fixture that by design declares far more
-  surface than its trivial `main` exercises, and the same reachability cascade applies to nearly its
-  entire import list. Fixing it means deciding what the fixture is *for* (rewrite `main` to actually
-  exercise the tour, split it into a documentation-only file the compiler doesn't gate on, or accept
-  a narrower tour) — a content decision, not a mechanical one, and appropriately a human's call.
-  **This fixture currently fails `pre_commit_check.sh`'s full corpus run** until that decision is
-  made.
-- **One more resolver bug found in the process, not fixed (would again change what compiles):** a
-  `use` written *inside* a `mod ... end` block never resolves at all — `resolve_imports` only walks
-  the top-level item list, never recurses into `ITEM_MODULE` children, even though the placeholder
-  for such an import is correctly created. Confirmed empirically: a module-local `use Other.helper`
-  followed by a call to `helper()` reports "unknown function 'helper'". No fixture depends on this
-  working, and (because such an import never resolves) fixing the dead unused-import check above
-  didn't touch this path either way.
+  behind, so the whole unused block had to go too). **`tests/fixtures/repro/head.cnb`** (18 of the
+  27) needed a real content decision — it's a language-tour fixture that had declared far more
+  surface than its trivial `main` exercised, and the same reachability cascade applied to nearly its
+  entire import list. Asked, and narrowed it (rather than rewriting `main` to exercise everything) to
+  what it actually demonstrates now: structs, trait-based polymorphism, bitwise math, and mutable
+  local state under loop control, with the header comment's claims trimmed to match. `main`'s
+  behavior is unchanged verbatim (`EXPECT_OK` exit 10).
+- **Round three also fixed the module-nested-`use` bug found in round two:** a `use` written
+  *inside* a `mod ... end` block never resolved at all — `resolve_imports` only walked the top-level
+  item list, never recursing into `ITEM_MODULE` children, even though the placeholder for such an
+  import was correctly created. Fixed by recursing into a module's own child list against its own
+  scope (`item_scope_of`), the identical lookup `walk_item`'s `ITEM_MODULE` arm already uses for
+  everything else inside a module. Two regression tests (resolves correctly; a genuine resolution
+  failure inside a module still reports, so the fix doesn't swallow real errors).
 
 **Tooling/CLI/LSP — all five fixed** (`src/main.rs`, `src/project.rs`, `src/bin/cinnabar_lsp.rs`,
 `src/docs.rs`, `src/advanced_tools.rs`):
@@ -205,16 +214,13 @@ about** (`src/resolver.rs`, `src/typecheck.rs`):
 
 ## 2. Confirmed, not fixed — genuinely still open
 
-- **Three lower-severity borrow-checker leaks** (linear-element leaks from stale container-emptiness
-  facts; freeing an unresolved container expression) — see 1b above.
-- **`repro/head.cnb`'s dead-import/dead-code cascade** — needs a human decision on what the fixture
-  is for before it can be fixed; currently fails the corpus gate. See 1b above.
-- **A `use` inside a `mod ... end` block never resolves** — newly found, not fixed, no fixture
-  depends on it. See 1b above.
-- **`emitter.rs`'s two fixes are unverified** — this machine cannot compile, type-check, or run
-  anything under `src/codegen/`. Run the real gate before trusting them. See 1b above.
-- **Everything else the original seven-agent audit found that neither pass touched**, still exactly
-  as first reported: a `HashMap` padding/`memcmp` correctness question and an under-aligned
+Everything from the original audit that had a mechanical, verifiable-here fix is now fixed — three
+rounds deep. What's left needs either the real LLVM toolchain or is genuinely low-priority:
+
+- **`emitter.rs`'s two codegen fixes are unverified** — this machine cannot compile, type-check, or
+  run anything under `src/codegen/`. Run the real gate before trusting them. See 1b above.
+- **Everything else the original seven-agent audit found that no fix pass has touched**, still
+  exactly as first reported: a `HashMap` padding/`memcmp` correctness question and an under-aligned
   `sockaddr_in` store in codegen (both lower-confidence, unverifiable here); the VS Code extension's
   `client.start()`-into-`context.subscriptions` `Promise` mismatch (flagged in the original audit,
   not in either fix pass's scope — worth folding into a future tooling pass); the playground's
@@ -326,9 +332,9 @@ stay permanently native regardless (this matches the "marked-native boundary for
 Roughly cheapest-and-most-widely-useful first, each step independently valuable regardless of
 whether the ones after it ever happen:
 
-1. Fix what's left in §2 — the borrow-checker leaks especially are real soundness problems today,
-   orthogonal to self-hosting, and shouldn't wait on it; the codegen fixes from 1b need the real
-   `nix develop` gate run before they're trusted, which is worth doing regardless of anything below.
+1. Run the real `nix develop` gate to confirm the codegen fixes from 1b — everything else that had a
+   mechanical fix is already done, so this is the one thing standing between "believed correct" and
+   "proven correct" for the whole three-round effort. Worth doing regardless of anything below.
 2. Add the `Process` native surface (§3.2.1) plus the `File` extensions (§3.2.2) — both are useful to
    ordinary Cinnabar programs immediately, not just to a future self-hosted compiler.
 3. Add a string-formatting surface (§3.2.3) — same argument, broadly useful on its own.
