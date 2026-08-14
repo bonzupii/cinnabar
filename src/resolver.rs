@@ -2429,15 +2429,16 @@ end
     }
 
     // Enabling the unused-import check newly rejected 27 dead imports across
-    // 5 fixtures in the corpus; four were fixed by deleting the dead import
+    // 5 fixtures in the corpus; each was fixed by deleting the dead import
     // (and, where the import was the only thing keeping an otherwise-unused
     // native declaration block reachable — resolve_imports attributes every
     // import edge to ROOT_OWNER regardless of whether it's ever called — by
     // deleting that block too, so removing the import doesn't just trade
     // one diagnostic for a cascade of "unused native function" ones). The
-    // fifth, repro/head.cnb, is a language-tour fixture that deliberately
-    // declares far more surface than its `main` exercises and needs a real
-    // content decision, not a mechanical deletion — left alone.
+    // fifth, repro/head.cnb, was a language-tour fixture that declared far
+    // more surface than its `main` exercised; narrowed to what it actually
+    // demonstrates rather than restructuring `main` to call through all of
+    // it (a real content decision, made explicitly rather than guessed).
     #[test]
     fn fixture_corpus_stays_clean_of_dead_imports() {
         let paths = [
@@ -2445,6 +2446,7 @@ end
             "tests/fixtures/repro/slice_test.cnb",
             "tests/fixtures/repro/vec_pop_drain.cnb",
             "tests/fixtures/repro/hash_map_remove_drain.cnb",
+            "tests/fixtures/repro/head.cnb",
         ];
         for path in paths {
             let result = crate::analysis::analyze(path, &[]);
