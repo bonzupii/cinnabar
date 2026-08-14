@@ -32,6 +32,11 @@
             gdb
 #            musl
             coq
+            # wasm32-unknown-unknown target support for crates/cinnabar-wasm:
+            # rustc already carries that target's std, but linking a cdylib
+            # for it needs a wasm-aware linker, which clang/llvm above don't
+            # provide on their own.
+            lld
           ];
 
           shellHook = ''
