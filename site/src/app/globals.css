@@ -315,27 +315,18 @@ body {
 }
 
 /*
- * The three controls: circular, with a specular highlight up and to the left.
- * The base colour comes from a Tailwind `bg-*` token on the element, so the
- * gloss is one gradient reused across the accent and the two greys rather than
- * three hand-mixed fills — plate 05 allows one accent and five greys, and a
- * highlight painted in white alpha adds no hue to that.
+ * The three window controls.
  *
- * The gradient carries white only, and fades to fully transparent well before
- * the edge. Reported twice as looking inset: the inset box-shadow was removed
- * the first time, but the gradient's own dark stops (0.05 at 62%, 0.28 at 100%)
- * were still darkening the rim, which at 10px is indistinguishable from an
- * inset ring. There is no black in this fill at all now, so the rim is the
- * element's flat base colour and nothing else.
+ * Round, and otherwise flat: the base colour comes from a `bg-*` token on the
+ * element and nothing is painted over it. A specular gradient was tried and
+ * removed — any shading across a 10px disc reads as a bevel, which is the one
+ * thing the identity does not do. Plate 05 is flat hard vector, no gradients.
+ *
+ * They are decoration and are aria-hidden: there is no window to close, and a
+ * control that does nothing is worse than no control.
  */
 .window-control {
   border-radius: 9999px;
-  background-image: radial-gradient(
-    circle at 34% 26%,
-    rgb(255 255 255 / 0.55) 0%,
-    rgb(255 255 255 / 0.18) 40%,
-    rgb(255 255 255 / 0) 72%
-  );
 }
 
 /*

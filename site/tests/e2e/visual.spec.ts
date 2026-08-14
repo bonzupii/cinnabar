@@ -3,6 +3,18 @@ import { preparePage } from "./prepare";
 import { ROUTES } from "./routes";
 
 /*
+ * The roadmap's commit feed refreshes itself from GitHub on load, so leaving
+ * the request to go through would mean a baseline that changes whenever
+ * someone pushes — and one that differs depending on whether the machine
+ * taking it is online. Blocking the request pins every capture to the list the
+ * build prerendered, which is also a standing check that the blocked case
+ * looks like a finished page: these baselines are taken in it.
+ */
+test.beforeEach(async ({ page }) => {
+  await page.route("**://api.github.com/**", (route) => route.abort("failed"));
+});
+
+/*
  * A full-page screenshot is taken by scrolling and stitching, and a sticky
  * element repaints at every step — so the page never settles and the capture
  * times out waiting for two identical frames. Pinning sticky elements in place

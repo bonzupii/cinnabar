@@ -1,21 +1,21 @@
 import type { Metadata } from "next";
+import ActivityFeed from "@/components/ActivityFeed";
 import Disclosure from "@/components/Disclosure";
 import DocBody from "@/components/DocBody";
 import PageHeader, { Eyebrow } from "@/components/PageHeader";
 import SectionHeading from "@/components/SectionHeading";
 import Reveal from "@/components/Reveal";
 import { ArrowLink, Callout, Panel, SourceNote, Stat } from "@/components/ui";
-import { CheckIcon, LinearIcon, RunIcon } from "@/components/brand/icons";
+import { CheckIcon, GitHubIcon, LinearIcon, RunIcon } from "@/components/brand/icons";
 import {
   HORIZON,
   IN_PROGRESS,
   MILESTONE_TALLY,
   SHIPPED,
-  SHIPPED_LEAD,
-  SHIPPED_REST,
   type Capability,
 } from "@/content/roadmap";
 import { CONTAINER, ICON } from "@/lib/constants";
+import { COMMITS_URL, fetchCommits } from "@/lib/github";
 import { ogImageMetadata } from "@/lib/og-image";
 import { readPageContent, type PageContent } from "@/lib/page-content";
 import { linkRepoFile, readRepoDoc } from "@/lib/repo-docs";
@@ -37,7 +37,16 @@ export const metadata: Metadata = {
   ...ogImageMetadata("/roadmap/", og),
 };
 
-/** One capability, as a cell in the hairline grid. */
+/**
+ * One capability, as a cell in the hairline grid.
+ *
+ * Deliberately small. There are fourteen of these on the page and the section
+ * they lead is answering one question — what can the language do — so a reader
+ * has to be able to take the set in at a glance rather than scroll a column of
+ * full-height cards. Hence the 20px icon rather than the 24px one the home
+ * page's highlights use, the tighter padding, and body copy a step down from
+ * the site's ordinary 14.5px.
+ */
 function CapabilityCard({
   capability,
   content,
@@ -54,10 +63,10 @@ function CapabilityCard({
   return (
     <Reveal
       delay={delay}
-      className="bg-panel hover:bg-panel-raised panel-hover flex flex-col gap-5 p-8"
+      className="bg-panel hover:bg-panel-raised panel-hover flex flex-col gap-3 p-5 sm:p-6"
     >
-      <Icon size={ICON.card} className="text-text" />
-      <h3 className="text-[17px] leading-snug font-bold tracking-[-0.015em]">
+      <Icon size={ICON.section} className="text-text" />
+      <h3 className="text-[15px] leading-snug font-bold tracking-[-0.015em]">
         <a
           href={capability.anchor}
           className="text-text hover:text-cinnabar-text panel-hover"
@@ -65,16 +74,38 @@ function CapabilityCard({
           {title}
         </a>
       </h3>
-      <p className="text-secondary text-[14.5px] leading-[1.65] text-pretty">{body}</p>
+      <p className="text-secondary text-[13px] leading-[1.6] text-pretty">{body}</p>
     </Reveal>
   );
 }
 
 export default async function RoadmapPage() {
-  const [document, content] = await Promise.all([
+  const [document, content, commits] = await Promise.all([
     readRepoDoc("ROADMAP.md"),
     readPageContent("roadmap"),
+    /*
+     * The build's copy of the commit feed, prerendered into the HTML so the
+     * section is correct without JavaScript and when GitHub cannot be reached.
+     * `fetchCommits` never rejects, so a build behind a firewall or with the
+     * API rate-limited produces the section's static fallback rather than
+     * failing the deploy. The timeout is what stops a hung request hanging it.
+     */
+    fetchCommits({ timeoutMs: 5000, revalidateSeconds: 900 }),
   ]);
+
+  /*
+   * A swallowed failure is invisible by construction, and this one already
+   * hid a real mistake once: an earlier version asked for `cache: "no-store"`,
+   * which Next rejects inside a statically exported page, so every build
+   * silently shipped the fallback. The page still renders — the fallback is a
+   * correct page, not a broken one — but the build says so.
+   */
+  if (commits.length === 0) {
+    console.warn(
+      "[roadmap] GitHub returned no commits at build time; the activity feed" +
+        " will ship its static fallback and fill in from the browser.",
+    );
+  }
 
   return (
     <article className="pb-28">
@@ -105,39 +136,34 @@ export default async function RoadmapPage() {
         </div>
       </section>
 
-      {/* What the language does today: six up front, six behind a fold. */}
+      {/*
+        Everything the language does today, in one grid.
+
+        Six of these used to lead and six sat behind a "the other six
+        capabilities" fold, which is the wrong trade for a list whose whole job
+        is to be complete: it made the language look half as capable as it is,
+        and it asked the reader to click before they knew whether clicking was
+        worth it. Four across at xl puts all twelve in three rows.
+      */}
       <section className={`${CONTAINER} pt-20`}>
         <SectionHeading
           title="What Cinnabar does today"
           note={content.block("shipped-note")}
           icon={CheckIcon}
         />
-        <div className="rule-grid mt-11 grid sm:grid-cols-2 lg:grid-cols-3">
-          {SHIPPED_LEAD.map((capability, index) => (
+        <div className="rule-grid mt-11 grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {SHIPPED.map((capability, index) => (
             <CapabilityCard
               key={capability.slug}
               capability={capability}
               content={content}
-              delay={Math.min(index * 0.03, 0.18)}
+              // Staggered by row rather than by card: twelve cards at 0.03s
+              // each would still be arriving a third of a second after the
+              // first one landed.
+              delay={Math.min(index * 0.02, 0.16)}
             />
           ))}
         </div>
-        {/*
-          Twelve cards at full height meant scrolling past all of them to find
-          out whether any mattered. Six lead; the rest are one click away.
-        */}
-        <Disclosure summary={content.block("shipped-more")} className="mt-10">
-          <div className="rule-grid mt-4 grid sm:grid-cols-2 lg:grid-cols-3">
-            {SHIPPED_REST.map((capability) => (
-              <CapabilityCard
-                key={capability.slug}
-                capability={capability}
-                content={content}
-                delay={0}
-              />
-            ))}
-          </div>
-        </Disclosure>
       </section>
 
       {/* The two partials, stated plainly rather than as open tickets. */}
@@ -178,6 +204,38 @@ export default async function RoadmapPage() {
             </p>
             <ArrowLink href={HORIZON.anchor}>Read the reasoning</ArrowLink>
           </Callout>
+        </Reveal>
+      </section>
+
+      {/*
+        Evidence, between the plan and the record: the plan above says what is
+        coming, the document below says what was decided, and this says the
+        work is happening. It sits on this page rather than on the home page
+        because this is the page a reader opens to ask whether the project is
+        alive, and one instance of it spends one of a reader's sixty
+        unauthenticated GitHub requests rather than two.
+      */}
+      <section className={`${CONTAINER} pt-24`}>
+        <SectionHeading
+          title="Recent activity"
+          note={content.block("activity-note")}
+          icon={GitHubIcon}
+        />
+        <Reveal className="mt-9">
+          <ActivityFeed
+            initial={commits}
+            fallback={content.block("activity-fallback")}
+          />
+          {/*
+            Outside the feed on purpose. It is the one thing in this section
+            that is true whatever GitHub answered, so it is the one thing that
+            is never conditional.
+          */}
+          <div className="mt-6">
+            <ArrowLink href={COMMITS_URL} external>
+              The full commit log
+            </ArrowLink>
+          </div>
         </Reveal>
       </section>
 

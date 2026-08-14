@@ -42,10 +42,18 @@ export type Capability = {
 };
 
 /**
- * The six a reader needs first — the properties that decide whether the
- * language is worth their time. Shown up front on the roadmap page.
+ * What the language and its toolchain do today.
+ *
+ * All twelve are shown at once. They were once six up front and six behind a
+ * fold, which made the list look shorter than it is and hid half the answer to
+ * the only question this section exists to answer. The cards are small enough
+ * that twelve of them read as a set rather than as a wall.
+ *
+ * The order is still an argument: the properties that decide whether the
+ * language is worth a reader's time come first, and the ones that fill the
+ * language out follow.
  */
-export const SHIPPED_LEAD: readonly Capability[] = [
+export const SHIPPED: readonly Capability[] = [
   { slug: "linear-types", icon: LinearIcon, anchor: "#resolved" },
   { slug: "o1-call-stack-recursion", icon: RunIcon, anchor: "#resolved" },
   {
@@ -64,10 +72,6 @@ export const SHIPPED_LEAD: readonly Capability[] = [
     anchor: "#milestone-4--native-os-surfaces-complete",
   },
   { slug: "language-server", icon: BorrowIcon, anchor: "#resolved" },
-] as const;
-
-/** The rest of what has shipped. Folded away on the page by default. */
-export const SHIPPED_REST: readonly Capability[] = [
   {
     slug: "fixed-width-integers",
     icon: CodegenIcon,
@@ -98,12 +102,6 @@ export const SHIPPED_REST: readonly Capability[] = [
     icon: TestIcon,
     anchor: "#milestone-8--verification-partial",
   },
-] as const;
-
-/** What the language and its toolchain do today. */
-export const SHIPPED: readonly Capability[] = [
-  ...SHIPPED_LEAD,
-  ...SHIPPED_REST,
 ] as const;
 
 /** Work the roadmap marks PARTIAL — shipped in part, still open in part. */

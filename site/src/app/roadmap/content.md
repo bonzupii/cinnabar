@@ -8,10 +8,6 @@ being widened, and what comes after that.
 
 Every entry cites the milestone that shipped it
 
-<!-- @shipped-more -->
-
-The other six capabilities
-
 <!-- @capabilities -->
 
 <!--
@@ -120,6 +116,15 @@ being widened. Neither blocks anything above.
 <!-- @horizon-note -->
 
 A completeness test, not a gate
+
+<!-- @activity-note -->
+
+api.github.com · read in your browser
+
+<!-- @activity-fallback -->
+
+Every change to the compiler lands in one public log, and that log is not
+mirrored here. GitHub serves it directly.
 
 <!-- @source -->
 
