@@ -431,6 +431,47 @@ fn extraction_container_of_binding(entries: &[(i64, i64)], binding: i64) -> i64 
     NONE
 }
 
+// `b.8` ("this binding's value came from an extraction call on that
+// container") and `b.9` ("this binding's value came from a native create
+// call") are syntactic snapshots taken once, at the binding's own
+// `STMT_LET`/pattern-bind site — they are consulted later (by
+// `create_provenance` and `extraction_container_of_binding`) as if they were
+// still true, with nothing keeping them in step with the container's actual
+// state. A container that was empty when a fact was recorded is not empty
+// forever: `let r = vec_pop(&mut v)` records `(r, v)` in `b.8`, and if `v` is
+// then refilled (`vec_push(&mut v, elem)`) before a later `match r` reads
+// `b.8`, the match's Err arm still (wrongly) proves `v` drained, and freeing
+// `v` afterward leaks whatever the intervening push added. Likewise `val v =
+// match vec_new()...` puts `v` in `b.9`, and a later `val w = v` after `v`
+// was refilled would otherwise inherit "provably empty" through `b.9`
+// unchanged.
+//
+// This is the one place either fact can go stale: any call that takes an
+// *existing* container by `&mut` outside of an extraction native. Pruning
+// both facts for that binding right here — rather than trying to make
+// `create_provenance`/`extraction_container_of_binding` themselves
+// flow-sensitive, which would need a full dataflow pass this single-walk
+// build phase doesn't have yet — keeps every later syntactic lookup honest
+// for the only way it can go wrong.
+fn invalidate_container_facts(b: &mut B, binding: i64) {
+    let mut idx = 0usize;
+    while idx < b.9.len() {
+        if b.9[idx] == binding {
+            b.9.remove(idx);
+        } else {
+            idx += 1;
+        }
+    }
+    let mut idx = 0usize;
+    while idx < b.8.len() {
+        if b.8[idx].1 == binding {
+            b.8.remove(idx);
+        } else {
+            idx += 1;
+        }
+    }
+}
+
 // Passing a linear-element container by &mut may fill it (an insertion native
 // or any callee could push), so the container state rises to MayContain.
 fn fill_container_if_mut_arg(f: &mut F, b: &mut B, ctx: &mut Ctx, arg: i64) {
@@ -441,6 +482,7 @@ fn fill_container_if_mut_arg(f: &mut F, b: &mut B, ctx: &mut Ctx, arg: i64) {
     let row = binding_at(f, binding);
     if container_has_linear_elem(ctx, row.1) {
         emit_op(f, OP_CONT_MAY, binding, NONE, (0, 0, 0), expr_span(ctx.1, arg));
+        invalidate_container_facts(b, binding);
     }
 }
 
@@ -1770,9 +1812,28 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
         prod.clear();
     }
     if op == NAT_VEC_FREE || op == NAT_HASH_MAP_FREE {
-        let container = container_binding_of(b, ctx, list_first(ctx.2, args));
+        let free_arg = list_first(ctx.2, args);
+        let container = container_binding_of(b, ctx, free_arg);
         if container >= 0 {
             emit_op(f, OP_CONT_FREE, container, NONE, (0, 0, 0), expr_span(ctx.1, expr));
+        } else if container_has_linear_elem(ctx, expr_ty_of(ctx.1, free_arg)) && create_provenance(ctx, b, free_arg) != 1 {
+            // The freed value isn't a named binding (e.g. `vec_free(make_full_vec())`,
+            // freeing a call result directly) — the drain check above is keyed by
+            // binding and has nothing to key off of here. `create_provenance` still
+            // clears an anonymous value that's directly and provably fresh (a native
+            // create call, or a match on one) the same way it does for a `let`
+            // binding; anything else unresolvable starts MayContain, symmetric with
+            // a by-value container *parameter* (see the OP_CONT_MAY emitted for one
+            // above) — there's no binding to attach a deferred OP_CONT_FREE to and
+            // no later point where one could become resolvable, so the answer has
+            // to be immediate.
+            push_error(
+                ctx.3,
+                "cannot free container holding linear elements: drain the container (pop all elements) before freeing",
+                node_file(ctx.1, expr),
+                node_start(ctx.1, expr),
+                node_end(ctx.1, expr),
+            );
         }
     }
     cur(b)
@@ -3807,5 +3868,222 @@ end
 "#;
         let errors = errors_for(source);
         assert!(errors.iter().any(|m| m.contains("returned borrow") || m.contains("does not outlive")));
+    }
+
+    const CONTAINER_NATIVES: &str = r#"
+pub mod Memory
+  pub nat type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+  end
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+end
+
+pub mod Collections
+  pub nat type Vec(T)
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+  end
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_push<T>(vec: &mut Vec(T), value: T) impure Result(Unit, Error)
+  pub nat fun vec_pop<T>(vec: &mut Vec(T)) impure Result(T, Error)
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
+end
+
+use Collections.vec_new
+use Collections.vec_free
+"#;
+
+    // Trimmed to only vec_new/vec_free: a test that never touches
+    // allocate/deallocate/vec_push/vec_pop can't import them either, since
+    // an import nothing calls is now itself rejected, and an import-free
+    // `nat fun` a nothing calls is unreachable from main -- exactly the
+    // cascade documented on resolver::tests::fixture_corpus_stays_clean_of_
+    // dead_imports.
+    const MINIMAL_CONTAINER_NATIVES: &str = r#"
+pub mod Memory
+  pub nat type Block
+end
+
+pub mod Collections
+  pub nat type Vec(T)
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+  end
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
+end
+
+use Collections.vec_new
+use Collections.vec_free
+"#;
+
+    // Trimmed to vec_new/vec_pop/vec_free/deallocate, for a test that
+    // extracts and consumes an element but never refills the container.
+    const POP_CONTAINER_NATIVES: &str = r#"
+pub mod Memory
+  pub nat type Block
+  pub nat fun deallocate(block: Block) impure Unit
+end
+
+pub mod Collections
+  pub nat type Vec(T)
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+  end
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_pop<T>(vec: &mut Vec(T)) impure Result(T, Error)
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
+end
+
+use Collections.vec_new
+use Collections.vec_free
+"#;
+
+    // Pins the fix to the stale-extraction-fact leak: `b.8` recorded that
+    // `popped` came from popping `v`, and nothing invalidated that record
+    // when `v` was refilled before the match on `popped` read it — so the
+    // match's Err arm still (wrongly) proved `v` drained, and `vec_free(v)`
+    // afterward leaked whatever the intervening push added.
+    #[test]
+    fn refilling_a_container_after_an_extraction_forgets_the_extraction_proved_it_empty() {
+        let source = format!(
+            "{}
+pub fun main() impure I64
+  var v = match vec_new[Memory.Block]()
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  val popped = Collections.vec_pop(&mut v)
+  val block = match Memory.allocate(1)
+    Ok(value) => value
+    Err(error) => return 2
+  end
+  match Collections.vec_push(&mut v, block)
+    Ok(Unit) => Unit
+    Err(error) => Unit
+  end
+  match popped
+    Ok(elem) => Memory.deallocate(elem)
+    Err(error) => Unit
+  end
+  vec_free(v)
+  return 0
+end
+",
+            CONTAINER_NATIVES
+        );
+        let errors = errors_for(&source);
+        assert!(errors.iter().any(|m| m.contains("cannot free container holding linear elements")), "{:?}", errors);
+    }
+
+    // Same category, the `b.9` half: `w` moved from `v`, which was fresh
+    // from `vec_new` when it was created but had since been refilled — `w`
+    // must not inherit `v`'s stale "provably empty" fact.
+    #[test]
+    fn moving_a_refilled_container_forgets_it_was_ever_provably_empty() {
+        let source = format!(
+            "{}
+pub fun main() impure I64
+  var v = match vec_new[Memory.Block]()
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  val block = match Memory.allocate(1)
+    Ok(value) => value
+    Err(error) => return 2
+  end
+  match Collections.vec_push(&mut v, block)
+    Ok(Unit) => Unit
+    Err(error) => Unit
+  end
+  val w = v
+  vec_free(w)
+  return 0
+end
+",
+            CONTAINER_NATIVES
+        );
+        let errors = errors_for(&source);
+        assert!(errors.iter().any(|m| m.contains("cannot free container holding linear elements")), "{:?}", errors);
+    }
+
+    // Negative control for both fixes above: a container that is genuinely
+    // never refilled must still free cleanly.
+    #[test]
+    fn freeing_a_container_that_was_never_refilled_is_still_accepted() {
+        let source = format!(
+            "{}
+pub fun main() impure I64
+  var v = match vec_new[Memory.Block]()
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  val popped = Collections.vec_pop(&mut v)
+  match popped
+    Ok(elem) => Memory.deallocate(elem)
+    Err(error) => Unit
+  end
+  vec_free(v)
+  return 0
+end
+",
+            POP_CONTAINER_NATIVES
+        );
+        let errors = errors_for(&source);
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    // Pins the fix to the anonymous-free hole: `vec_free`'s argument was a
+    // call result rather than a named binding, so `container_binding_of`
+    // returned NONE and the drain check — keyed entirely on a binding —
+    // never ran at all, silently accepting a leak of every element the
+    // returned vec held.
+    #[test]
+    fn freeing_an_unresolvable_container_expression_is_rejected() {
+        let source = format!(
+            "{}
+fun make_full_vec() impure Collections.Vec(Memory.Block)
+  return match vec_new[Memory.Block]()
+    Ok(v) => v
+    Err(error) => make_full_vec()
+  end
+end
+
+pub fun main() impure I64
+  vec_free(make_full_vec())
+  return 0
+end
+",
+            CONTAINER_NATIVES
+        );
+        let errors = errors_for(&source);
+        assert!(errors.iter().any(|m| m.contains("cannot free container holding linear elements")), "{:?}", errors);
+    }
+
+    // Negative control: a directly-freed anonymous expression that IS
+    // provably fresh (a create call itself, not wrapped in a user function)
+    // must still be accepted -- create_provenance recognizes it same as it
+    // would for a `let` binding.
+    #[test]
+    fn freeing_a_directly_provably_fresh_container_is_still_accepted() {
+        let source = format!(
+            "{}
+pub fun main() impure I64
+  match vec_new[Memory.Block]()
+    Ok(v) => vec_free(v)
+    Err(error) => Unit
+  end
+  return 0
+end
+",
+            MINIMAL_CONTAINER_NATIVES
+        );
+        let errors = errors_for(&source);
+        assert!(errors.is_empty(), "{:?}", errors);
     }
 }
