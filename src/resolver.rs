@@ -70,12 +70,13 @@ const ROOT_OWNER: i64 = -2;
 
 /// Resolves names, and separately reports which items nothing reaches.
 ///
-/// `deferred` receives the unused-item diagnostics rather than `errors`.
-/// Reachability is a whole-program property, not a name-resolution one, and
-/// reporting it here would stop the pipeline before the type checker ran —
-/// so a file with a type error would be told its functions are unused and
-/// never told what was actually wrong with them. The caller reports these
-/// once the later stages have had their say.
+/// `deferred` receives the unused-item and unused-import diagnostics rather
+/// than `errors`. What nothing uses is a whole-program property, not a
+/// name-resolution one, and reporting it here would stop the pipeline before
+/// the type checker ran — so a file with a type error would be told its
+/// functions and imports are unused and never told what was actually wrong
+/// with them. The caller reports these once the later stages have had their
+/// say.
 /// Where this stage puts what it has to say.
 ///
 /// The three travel together because they are one decision — what the user
@@ -173,11 +174,17 @@ pub fn resolve(
     classify_native_views(&mut state);
     link_extraction_surfaces(&mut state);
 
-    check_unused_imports(state.0, state.1, state.2, state.3, state.9, root);
+    // Deferred, for the same reason reachability is: "nothing names this
+    // import" is a statement about the finished program, and reporting it
+    // from here would return `false` and stop the pipeline — so a file with
+    // a type or borrow error would be told which of its imports look idle
+    // and never told what was actually wrong with it. The two diagnostics
+    // are the same kind of fact and are reported at the same moment.
+    check_unused_imports(state.0, state.1, state.2, deferred, state.9, root);
     idx = 0;
     while idx < ext_mods.len() {
         match ext_mods.get(idx) {
-            Some(pair) => check_unused_imports(state.0, state.1, state.2, state.3, state.9, pair.1),
+            Some(pair) => check_unused_imports(state.0, state.1, state.2, deferred, state.9, pair.1),
             None => break,
         }
         idx += 1;
@@ -348,6 +355,20 @@ fn push_entry(scopes: &mut [Vec<i64>], scope: i64, name: i64, sym: i64, ns: i64,
     }
 }
 
+/// The symbol a name binds to in one scope, and the `use` item that bound
+/// it there.
+///
+/// An entry still carrying `NONE` in its symbol slot binds nothing: it is
+/// the placeholder `collect_item` reserves for a `use` before the path that
+/// `use` names has been resolved, and the scan continues past it rather
+/// than answering "this name is taken". That is what makes this lookup give
+/// the same answer wherever in the file the `use` was written. A
+/// placeholder sitting ahead of a real declaration of the same name used to
+/// hide that declaration from `lookup_walk`, which then skipped to the
+/// enclosing scope, and from `finish_import`'s conflict check, which found
+/// its own placeholder and concluded the name was free — so an import
+/// written above a same-name local type silently shadowed it, while the
+/// same two declarations in the opposite order were correctly rejected.
 fn scope_lookup(scopes: &[Vec<i64>], scope: i64, name: i64, ns: i64) -> (i64, i64) {
     let entries = match scopes.get(scope as usize) {
         Some(entries) => entries,
@@ -355,7 +376,10 @@ fn scope_lookup(scopes: &[Vec<i64>], scope: i64, name: i64, ns: i64) -> (i64, i6
     };
     let mut idx = 0i64;
     while idx < entries.len() as i64 / 4 {
-        if entry_get(entries, idx, 0) == name && entry_get(entries, idx, 2) == ns {
+        if entry_get(entries, idx, 0) == name
+            && entry_get(entries, idx, 2) == ns
+            && entry_get(entries, idx, 1) != NONE
+        {
             return (entry_get(entries, idx, 1), entry_get(entries, idx, 3));
         }
         idx += 1;
@@ -1210,6 +1234,15 @@ fn finish_import(state: &mut State, scope: i64, item: i64, sym: i64, target_ns: 
         push_error(state.3, &format!("import '{}' conflicts with another symbol", name_text(state.0, entry_name)), span.0, span.1, span.2);
         return;
     }
+    // The `use` item's own symbol slot records what it resolved to, exactly
+    // as every other item kind's does. Only the scope *entry* used to be
+    // updated, so a `use` item's slot stayed at the parser's `NONE` forever
+    // — and `check_unused`, which reads the slot to tell an import that
+    // resolved from one that never did, returned on every single import
+    // before it could report anything. An import that failed to resolve, or
+    // that lost a conflict, still has no symbol and is still skipped there:
+    // it has already been told what is wrong with it.
+    item_set_sym(state.1, item, sym);
     rewrite_import(state.4, scope, item, sym, target_ns);
 }
 
@@ -1967,23 +2000,33 @@ fn resolve_type_path(state: &mut State, scope: i64, ty: i64) {
     ty_set_sym(state.1, ty, sym);
 }
 
-fn check_unused_imports(names: &[String], nodes: &[i64], lists: &[Vec<i64>], errors: &mut Vec<Diag>, used: &[i64], list: i64) {
+fn check_unused_imports(names: &[String], nodes: &[i64], lists: &[Vec<i64>], deferred: &mut Vec<Diag>, used: &[i64], list: i64) {
     let count = list_len(lists, list);
     let mut idx = 0i64;
     while idx < count {
         let item = list_get(lists, list, idx);
-        check_unused(names, nodes, lists, errors, used, item);
+        check_unused(names, nodes, lists, deferred, used, item);
         idx += 1;
     }
 }
-fn check_unused(names: &[String], nodes: &[i64], lists: &[Vec<i64>], errors: &mut Vec<Diag>, used: &[i64], item: i64) {
+
+/// Reports a `use` that resolved to something no name in the file went on
+/// to reach.
+///
+/// The symbol slot is what separates the two failures a `use` can have: an
+/// import that never resolved has none, and has already been told so — it
+/// must not be told a second time that nothing uses what it does not name.
+/// `mark_used` records the item every time a lookup returns through its
+/// scope entry, so "used" here means a name actually resolved through this
+/// import, not that its text appears somewhere.
+fn check_unused(names: &[String], nodes: &[i64], lists: &[Vec<i64>], deferred: &mut Vec<Diag>, used: &[i64], item: i64) {
     if node_tag(nodes, item) != NODE_ITEM {
         return;
     }
     let kind = node_a(nodes, item);
     if kind == ITEM_MODULE {
         let children = node_e(nodes, item);
-        check_unused_imports(names, nodes, lists, errors, used, children);
+        check_unused_imports(names, nodes, lists, deferred, used, children);
         return;
     }
     if kind != ITEM_USE {
@@ -2003,7 +2046,7 @@ fn check_unused(names: &[String], nodes: &[i64], lists: &[Vec<i64>], errors: &mu
     let alias = node_e(nodes, item);
     let name = if alias != NONE { alias } else { list_last(lists, segs) };
     push_error(
-        errors,
+        deferred,
         &format!("unused import '{}'", name_text(names, name)),
         node_file(nodes, item),
         node_start(nodes, item),
@@ -2085,4 +2128,290 @@ fn suggest_type_name(state: &mut State, scope: i64, misspelled: i64) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    // Drives the real front end (module loading through borrow checking,
+    // the same path `analysis::analyze` gives the LSP and the playground)
+    // over an in-memory source, with no LLVM dependency — the only way to
+    // pin resolver behavior end to end on a machine without the LLVM
+    // toolchain `cargo test`'s fixture-linked suites need.
+    fn errors_for(source: &str) -> Vec<String> {
+        let overlay = [("scratch.cnb".to_string(), source.to_string())];
+        let result = crate::analysis::analyze("scratch.cnb", &overlay);
+        result.errors.iter().map(|d| d.0.clone()).collect()
+    }
+
+    // An import nothing names is an error (Manifesto, "Compile-Time
+    // Correctness": unused imports). `check_unused` reads the `use` item's
+    // own symbol slot to tell a resolved import from one that never
+    // resolved, and nothing ever wrote that slot — so the guard was true
+    // for every import in every program and this diagnostic could not fire
+    // at all. `finish_import` now records what the import resolved to.
+    #[test]
+    fn unused_import_is_rejected() {
+        let source = r#"
+pub mod Other
+  pub fun helper() I64
+    return 7
+  end
+  pub fun spare() I64
+    return 9
+  end
+end
+
+use Other.helper
+use Other.spare
+
+pub fun main() I64
+  return helper()
+end
+"#;
+        let errors = errors_for(source);
+        assert!(errors.iter().any(|m| m.contains("unused import 'spare'")), "{:?}", errors);
+    }
+
+    // The alias is what the diagnostic must name, since the alias is the
+    // name the program failed to use.
+    #[test]
+    fn unused_aliased_import_is_rejected_under_its_alias() {
+        let source = r#"
+pub mod Other
+  pub fun helper() I64
+    return 7
+  end
+  pub fun spare() I64
+    return 9
+  end
+end
+
+use Other.helper
+use Other.spare as reserve
+
+pub fun main() I64
+  return helper()
+end
+"#;
+        let errors = errors_for(source);
+        assert!(errors.iter().any(|m| m.contains("unused import 'reserve'")), "{:?}", errors);
+    }
+
+    // Negative control: an import the program actually uses stays accepted,
+    // and turning the check on must not make a clean program fail.
+    #[test]
+    fn used_import_is_accepted() {
+        let source = r#"
+pub mod Other
+  pub fun helper() I64
+    return 7
+  end
+end
+
+use Other.helper
+
+pub fun main() I64
+  return helper()
+end
+"#;
+        let errors = errors_for(source);
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    // An unused import must not answer a question nobody asked: a program
+    // with a real type error is told about the type error. This is why the
+    // check reports through `deferred` — reporting it from the resolver
+    // would return `false` and the later stages would never run at all.
+    #[test]
+    fn a_real_error_is_reported_ahead_of_an_unused_import() {
+        let source = r#"
+pub mod Other
+  pub fun helper() I64
+    return 7
+  end
+  pub fun spare() I64
+    return 9
+  end
+end
+
+use Other.helper
+use Other.spare
+
+pub fun main() I64
+  val flag: Bool = helper()
+  if flag
+    return 1
+  end
+  return 0
+end
+"#;
+        let errors = errors_for(source);
+        assert!(!errors.is_empty(), "{:?}", errors);
+        assert!(!errors.iter().any(|m| m.contains("unused import")), "{:?}", errors);
+    }
+
+    // A `use` that names a type only mentioned in a signature counts as
+    // used: `resolve_type_name` marks the import, so the check must not
+    // report an import consumed by anything other than a call.
+    #[test]
+    fn import_used_only_in_a_type_position_is_accepted() {
+        let source = r#"
+pub mod Other
+  pub type Payload
+    pub value: I64
+  end
+end
+
+use Other.Payload
+
+fun read(payload: &Payload) I64
+  return payload.value
+end
+
+pub fun main() I64
+  val payload = Payload(value: 4)
+  return read(&payload)
+end
+"#;
+        let errors = errors_for(source);
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    // An import that failed to resolve has already been told what is wrong
+    // with it; it must not also be reported as unused.
+    #[test]
+    fn unresolvable_import_reports_only_the_resolution_failure() {
+        let source = r#"
+pub mod Other
+  pub fun helper() I64
+    return 7
+  end
+end
+
+use Other.missing
+
+pub fun main() I64
+  return Other.helper()
+end
+"#;
+        let errors = errors_for(source);
+        assert!(errors.iter().any(|m| m.contains("cannot resolve import")), "{:?}", errors);
+        assert!(!errors.iter().any(|m| m.contains("unused import")), "{:?}", errors);
+    }
+
+    // A `use` of a type that shares its name with a local declaration is a
+    // conflict whichever order the two are written in. The import-first
+    // order used to be accepted silently, with every later mention of the
+    // name resolving to the imported type instead of the local one.
+    #[test]
+    fn import_before_local_type_of_the_same_name_conflicts() {
+        let source = r#"
+pub mod Other
+  pub type Shape
+    pub width: I64
+  end
+end
+
+use Other.Shape
+
+pub type Shape
+  pub height: I64
+end
+
+pub fun main() I64
+  val shape = Shape(height: 3)
+  return shape.height
+end
+"#;
+        let errors = errors_for(source);
+        assert!(errors.iter().any(|m| m.contains("import 'Shape' conflicts with another symbol")), "{:?}", errors);
+    }
+
+    // The same two declarations in the opposite order, which was already
+    // rejected: the diagnostic must be the same one, so that source order
+    // decides nothing.
+    #[test]
+    fn local_type_before_import_of_the_same_name_conflicts() {
+        let source = r#"
+pub mod Other
+  pub type Shape
+    pub width: I64
+  end
+end
+
+pub type Shape
+  pub height: I64
+end
+
+use Other.Shape
+
+pub fun main() I64
+  val shape = Shape(height: 3)
+  return shape.height
+end
+"#;
+        let errors = errors_for(source);
+        assert!(errors.iter().any(|m| m.contains("import 'Shape' conflicts with another symbol")), "{:?}", errors);
+    }
+
+    // The shadowing this rules out, stated as behavior rather than as a
+    // diagnostic: with the import written first, `Shape(height: 3)` used to
+    // resolve to `Other.Shape` and produce "no field 'height' on struct
+    // 'Other.Shape'" — the program was checked against a type its author
+    // never named, and the local `Shape` right above it was never reported
+    // as conflicting with anything.
+    #[test]
+    fn import_does_not_silently_shadow_a_later_local_type() {
+        let source = r#"
+pub mod Other
+  pub type Shape
+    pub width: I64
+  end
+end
+
+use Other.Shape
+
+pub type Shape
+  pub height: I64
+end
+
+pub fun main() I64
+  val shape = Shape(height: 3)
+  return shape.height
+end
+"#;
+        let errors = errors_for(source);
+        assert!(!errors.iter().any(|m| m.contains("Other.Shape")), "{:?}", errors);
+    }
+
+    // A local declaration and an import of an unrelated name in the same
+    // scope are not a conflict: the placeholder must not be read as
+    // occupying every name.
+    #[test]
+    fn import_beside_an_unrelated_local_type_is_accepted() {
+        let source = r#"
+pub mod Other
+  pub type Shape
+    pub width: I64
+  end
+end
+
+use Other.Shape
+
+pub type Box
+  pub height: I64
+end
+
+fun widen(shape: &Shape) I64
+  return shape.width
+end
+
+pub fun main() I64
+  val shape = Shape(width: 2)
+  val box = Box(height: 3)
+  return widen(&shape) + box.height
+end
+"#;
+        let errors = errors_for(source);
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+}
 

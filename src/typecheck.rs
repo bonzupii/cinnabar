@@ -1309,9 +1309,53 @@ fn collect_impl_item(state: &mut State, item: i64) {
         verify_impl_method(state, trait_sym, for_key, method);
         idx += 1;
     }
+    verify_impl_complete(state, trait_sym, for_key, item, methods);
     state.5.push(trait_sym);
     state.5.push(for_key);
     state.5.push(methods);
+}
+
+/// Reports every method the trait declares that this `impl` does not
+/// provide.
+///
+/// `verify_impl_method` checks the methods an impl *has* against the trait;
+/// nothing checked the ones it lacks, so a missing method surfaced only if
+/// some call site happened to dispatch it ("impl method not found"), and an
+/// incomplete impl that nothing fully exercised compiled cleanly. A trait
+/// method is a signature with no body — the parser gives trait methods no
+/// body at all, so the language has no default/provided methods for one to
+/// fall back on — which makes every declared method mandatory and this a
+/// plain set difference.
+fn verify_impl_complete(state: &mut State, trait_sym: i64, for_key: i64, item: i64, methods: i64) {
+    let trait_item = sym_decl(state.1, trait_sym);
+    if trait_item == NONE {
+        return;
+    }
+    let declared = node_e(state.1, trait_item);
+    let count = list_len(state.2, declared);
+    let file = node_file(state.1, item);
+    let start = node_start(state.1, item);
+    let end = node_end(state.1, item);
+    let mut idx = 0i64;
+    while idx < count {
+        let trait_method = list_get(state.2, declared, idx);
+        let name = node_a(state.1, trait_method);
+        if find_method_by_name(state.1, state.2, methods, name) == NONE {
+            push_error(
+                state.3,
+                &format!(
+                    "impl of trait '{}' for '{}' is missing method '{}'",
+                    name_text(state.0, sym_name(state.1, trait_sym)),
+                    render_key(state.0, state.1, state.2, state.6, state.7, for_key),
+                    name_text(state.0, name)
+                ),
+                file,
+                start,
+                end,
+            );
+        }
+        idx += 1;
+    }
 }
 
 fn verify_impl_method(state: &mut State, trait_sym: i64, for_key: i64, method: i64) {
@@ -4572,3 +4616,185 @@ fn origin_of(origins: &[(i64, i64, i64)], var: i64) -> (i64, i64, i64) {
         idx += 1;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // Drives the real front end (module loading through borrow checking,
+    // the same path `analysis::analyze` gives the LSP and the playground)
+    // over an in-memory source, with no LLVM dependency — the only way to
+    // pin typechecker behavior end to end on a machine without the LLVM
+    // toolchain `cargo test`'s fixture-linked suites need.
+    fn errors_for(source: &str) -> Vec<String> {
+        let overlay = [("scratch.cnb".to_string(), source.to_string())];
+        let result = crate::analysis::analyze("scratch.cnb", &overlay);
+        result.errors.iter().map(|d| d.0.clone()).collect()
+    }
+
+    // An `impl` that leaves one of the trait's methods out used to be
+    // accepted: only the methods it did provide were checked against the
+    // trait, so the omission surfaced solely at a call site that happened
+    // to dispatch the missing method. An impl nothing fully exercised
+    // compiled clean.
+    #[test]
+    fn impl_missing_a_trait_method_is_rejected() {
+        let source = r#"
+pub trait Measure
+  pub fun width(value: &Self) I64
+  pub fun height(value: &Self) I64
+end
+
+pub type Card
+  pub side: I64
+end
+
+pub impl Measure for Card
+  pub fun width(value: &Card) I64
+    return value.side
+  end
+end
+
+fun width_of<T: Measure>(value: &T) I64
+  return Measure.width(value)
+end
+
+pub fun main() I64
+  val card = Card(side: 3)
+  return width_of(&card)
+end
+"#;
+        let errors = errors_for(source);
+        assert!(
+            errors.iter().any(|m| m.contains("impl of trait 'Measure' for 'Card' is missing method 'height'")),
+            "{:?}",
+            errors
+        );
+    }
+
+    // Every missing method is named, not just the first: a diagnostic that
+    // stopped at one would have the developer rebuild to find the next.
+    #[test]
+    fn every_missing_trait_method_is_named() {
+        let source = r#"
+pub trait Measure
+  pub fun width(value: &Self) I64
+  pub fun height(value: &Self) I64
+  pub fun depth(value: &Self) I64
+end
+
+pub type Card
+  pub side: I64
+end
+
+pub impl Measure for Card
+  pub fun width(value: &Card) I64
+    return value.side
+  end
+end
+
+fun width_of<T: Measure>(value: &T) I64
+  return Measure.width(value)
+end
+
+pub fun main() I64
+  val card = Card(side: 3)
+  return width_of(&card)
+end
+"#;
+        let errors = errors_for(source);
+        assert!(errors.iter().any(|m| m.contains("missing method 'height'")), "{:?}", errors);
+        assert!(errors.iter().any(|m| m.contains("missing method 'depth'")), "{:?}", errors);
+    }
+
+    // Negative control, modelled on the trait/impl pair in
+    // `tests/fixtures/spec.cnb`: a complete impl stays accepted.
+    #[test]
+    fn complete_impl_is_accepted() {
+        let source = r#"
+pub trait Measure
+  pub fun width(value: &Self) I64
+  pub fun height(value: &Self) I64
+end
+
+pub type Card
+  pub side: I64
+end
+
+pub impl Measure for Card
+  pub fun width(value: &Card) I64
+    return value.side
+  end
+  pub fun height(value: &Card) I64
+    return value.side
+  end
+end
+
+fun width_of<T: Measure>(value: &T) I64
+  return Measure.width(value)
+end
+
+fun height_of<T: Measure>(value: &T) I64
+  return Measure.height(value)
+end
+
+pub fun main() I64
+  val card = Card(side: 3)
+  return width_of(&card) + height_of(&card)
+end
+"#;
+        let errors = errors_for(source);
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    // Completeness is per impl: one type implementing the trait fully does
+    // not excuse another that does not.
+    #[test]
+    fn a_second_incomplete_impl_is_rejected_on_its_own() {
+        let source = r#"
+pub trait Measure
+  pub fun width(value: &Self) I64
+  pub fun height(value: &Self) I64
+end
+
+pub type Card
+  pub side: I64
+end
+
+pub type Tile
+  pub edge: I64
+end
+
+pub impl Measure for Card
+  pub fun width(value: &Card) I64
+    return value.side
+  end
+  pub fun height(value: &Card) I64
+    return value.side
+  end
+end
+
+pub impl Measure for Tile
+  pub fun width(value: &Tile) I64
+    return value.edge
+  end
+end
+
+fun width_of<T: Measure>(value: &T) I64
+  return Measure.width(value)
+end
+
+pub fun main() I64
+  val card = Card(side: 3)
+  val tile = Tile(edge: 4)
+  return width_of(&card) + width_of(&tile)
+end
+"#;
+        let errors = errors_for(source);
+        assert!(
+            errors.iter().any(|m| m.contains("impl of trait 'Measure' for 'Tile' is missing method 'height'")),
+            "{:?}",
+            errors
+        );
+        assert!(!errors.iter().any(|m| m.contains("for 'Card' is missing")), "{:?}", errors);
+    }
+}
+
