@@ -70,7 +70,7 @@ fn lex_byte(
     } else if byte == b'"' {
         lex_string(names, nodes, bytes, pos, source, file, errors)
     } else {
-        lex_symbol(names, nodes, bytes, pos, file, errors)
+        lex_symbol(names, nodes, bytes, pos, source, file, errors)
     }
 }
 
@@ -325,7 +325,7 @@ fn lex_decimal(nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, file: i64, errors
     let end = scan_digits(bytes, pos);
     if let Some(value) = decimal_value(bytes, start, end, file, errors) {
         if is_ident_char(byte_at(bytes, end)) {
-            push_error(errors, "invalid character in integer literal", file, start as i64, end as i64);
+            push_error(errors, "invalid character in integer literal", file, start as i64, end as i64 + 1);
         } else {
             push_token(nodes, TOK_INT, NONE, value, start as i64, end as i64, file);
         }
@@ -346,7 +346,7 @@ fn decimal_value(bytes: &[u8], start: usize, end: usize, file: i64, errors: &mut
     while pos < end {
         let digit = (byte_at(bytes, pos) - b'0') as u64;
         {
-            let next = accumulate_digit(value, digit, 10, "integer literal is too large", (file, start as i64, pos as i64), errors)?;
+            let next = accumulate_digit(value, digit, 10, "integer literal is too large", (file, start as i64, pos as i64 + 1), errors)?;
             value = next
         }
         pos += 1;
@@ -366,7 +366,7 @@ fn lex_hex(nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, file: i64, errors: &m
         return end;
     }
     if is_ident_char(byte_at(bytes, end)) {
-        push_error(errors, "invalid digit in hexadecimal literal", file, start as i64, end as i64);
+        push_error(errors, "invalid digit in hexadecimal literal", file, start as i64, end as i64 + 1);
         return end;
     }
     if let Some(value) = hex_value(bytes, start + 2, end, file, errors) { push_token(nodes, TOK_HEX, NONE, value, start as i64, end as i64, file) }
@@ -387,7 +387,7 @@ fn hex_value(bytes: &[u8], start: usize, end: usize, file: i64, errors: &mut Vec
         match hex_digit(byte_at(bytes, pos)) {
             Some(digit) => {
                 {
-                    let next = accumulate_digit(value, digit, 16, "hexadecimal literal is too large", (file, start as i64, pos as i64), errors)?;
+                    let next = accumulate_digit(value, digit, 16, "hexadecimal literal is too large", (file, start as i64, pos as i64 + 1), errors)?;
                     value = next
                 }
             }
@@ -567,25 +567,36 @@ fn escape_byte(byte: u8) -> Option<u8> {
     }
 }
 
-fn lex_symbol(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, file: i64, errors: &mut Vec<Diag>) -> usize {
+fn lex_symbol(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, source: &str, file: i64, errors: &mut Vec<Diag>) -> usize {
     let byte = byte_at(bytes, pos);
     let next = byte_at(bytes, pos + 1);
     match two_char_symbol(byte, next) {
         Some(text) => push_symbol(names, nodes, text, pos, pos + 2, file),
-        None => lex_one_char_symbol(names, nodes, bytes, pos, file, errors),
+        None => lex_one_char_symbol(names, nodes, bytes, pos, source, file, errors),
     }
 }
 
-fn lex_one_char_symbol(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, file: i64, errors: &mut Vec<Diag>) -> usize {
+fn lex_one_char_symbol(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, source: &str, file: i64, errors: &mut Vec<Diag>) -> usize {
     match one_char_symbol(byte_at(bytes, pos)) {
         Some(text) => push_symbol(names, nodes, text, pos, pos + 1, file),
-        None => report_unexpected(file, pos, errors),
+        None => report_unexpected(source, pos, file, errors),
     }
 }
 
-fn report_unexpected(file: i64, pos: usize, errors: &mut Vec<Diag>) -> usize {
-    push_error(errors, "unexpected character", file, pos as i64, pos as i64 + 1);
-    pos + 1
+fn char_len_at(source: &str, pos: usize) -> usize {
+    match source.get(pos..) {
+        Some(rest) => match rest.chars().next() {
+            Some(c) => c.len_utf8(),
+            None => 1,
+        },
+        None => 1,
+    }
+}
+
+fn report_unexpected(source: &str, pos: usize, file: i64, errors: &mut Vec<Diag>) -> usize {
+    let width = char_len_at(source, pos);
+    push_error(errors, "unexpected character", file, pos as i64, (pos + width) as i64);
+    pos + width
 }
 
 fn two_char_symbol(byte: u8, next: u8) -> Option<&'static str> {

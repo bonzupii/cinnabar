@@ -139,7 +139,19 @@ fn attach_docs(nodes: &mut Vec<i64>, target: i64, docs: i64) {
 }
 
 fn tok_text_is(nodes: &[i64], names: &[String], pos: i64, text: &str) -> bool {
+    // A keyword and a symbol are both looked up by interned text, but that
+    // interning table is shared with string-literal and doc-comment bodies:
+    // matching text alone would let a string literal like ")" or "end" be
+    // consumed as the punctuation/keyword it merely spells. Every text this
+    // is called with is either an all-letter keyword (TOK_IDENT) or pure
+    // punctuation (TOK_SYM), so the token kind expected is determined by the
+    // text itself.
+    let expected_kind = match text.chars().next() {
+        Some(c) if c.is_ascii_alphabetic() => TOK_IDENT,
+        _ => TOK_SYM,
+    };
     node_tag(nodes, pos) == NODE_TOKEN
+        && node_a(nodes, pos) == expected_kind
         && name_is(names, node_b(nodes, pos), text)
 }
 
@@ -1454,23 +1466,6 @@ fn arith_op_at(nodes: &[i64], names: &[String], pos: i64) -> Option<(i64, i64)> 
         Some((BIN_MOD, 9))
     } else {
         None
-    }
-}
-
-fn list_first(lists: &[Vec<i64>], id: i64) -> i64 {
-    match lists.get(id as usize) {
-        Some(items) => match items.first() {
-            Some(value) => *value,
-            None => NONE,
-        },
-        None => NONE,
-    }
-}
-
-fn list_len(lists: &[Vec<i64>], id: i64) -> i64 {
-    match lists.get(id as usize) {
-        Some(items) => items.len() as i64,
-        None => 0,
     }
 }
 

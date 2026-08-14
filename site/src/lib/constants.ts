@@ -73,34 +73,6 @@ export type BrandTheme = keyof typeof BRAND_THEMES;
 /** The page gutter and maximum content width, shared by every section. */
 export const CONTAINER = "mx-auto max-w-[1400px] px-6 sm:px-10";
 
-/** Vertical rhythm between major sections. */
-export const SECTION_PADDING = "py-24";
-
-/**
- * Line lengths.
- *
- * `measure` is the comfortable reading width for body copy; `wide` is for
- * text that sits beside a figure and can run longer without becoming hard to
- * track.
- */
-export const MEASURE = {
-  measure: "max-w-[86ch]",
-  wide: "max-w-[90ch]",
-  lede: "max-w-[80ch]",
-} as const;
-
-/**
- * Two-column splits, always with clamped tracks.
- *
- * A grid track defaults to `min-width: auto`, so a wide code block inside one
- * stretches the track instead of scrolling. Every split here clamps both.
- */
-export const SPLIT = {
-  even: "lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]",
-  figureLeft: "lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]",
-  proseLeft: "lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]",
-} as const;
-
 /* ------------------------------------------------------------------ type -- */
 
 /** Icon sizes, matching plate 07's 24 / 20 / 16 steps. */

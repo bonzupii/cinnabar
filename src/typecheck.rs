@@ -2268,10 +2268,22 @@ fn mask_int(value: u64, width: u32) -> u64 {
 fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, i64, i64), quiet: i64) -> (i64, i64) {
     let (file, start, end) = span;
     let bool_key = builtin_key_of(state.1, BUILTIN_BOOL);
-    if op == BIN_AND {
-        return (lv & rv, bool_key);
-    }
-    if op == BIN_OR {
+    if op == BIN_AND || op == BIN_OR {
+        // `check_binary` requires Bool operands for `&&`/`||`; folding must
+        // enforce the identical rule; otherwise `const C: Bool = 1 && 2`
+        // (folds `1 & 2` as if they were already Bool) and `val c: Bool = 1
+        // && 2` (rejected by check_binary) would disagree on the exact same
+        // source text, which is the divergence the literal-typing rule was
+        // written to rule out everywhere.
+        if !is_bool_key(state.1, key) {
+            if quiet == 0 {
+                push_error(state.3, &format!("logical operator '{}' requires Bool operands", op_text(op)), file, start, end);
+            }
+            return (0, unknown_key(state.1, state.2));
+        }
+        if op == BIN_AND {
+            return (lv & rv, bool_key);
+        }
         return (lv | rv, bool_key);
     }
     let sub = tyinfo_builtin_kind(state.1, key);
@@ -2613,7 +2625,15 @@ fn check_unary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
             if !inner_is_int {
                 push_error(state.3, "unary '-' requires an integer operand", file, start, end);
             }
-            if expected != NONE && is_int_key(state.1, expected) {
+            // Only a bare integer-literal operand is untyped and may adopt
+            // the expected width (`-5` types as I8 in `val x: I8 = -5`); a
+            // typed value (a path, call, index, field access, ...) already
+            // has a type and must never adopt another one through negation
+            // — that is exactly the implicit conversion the literal-typing
+            // rule forbids for every other operator, and unary '-' is not
+            // an exception.
+            let literal_operand = int_literal_expr(state.1, operand);
+            if literal_operand && expected != NONE && is_int_key(state.1, expected) {
                 // The negated literal adopts the expected width, so `-5` types
                 // as I8 in `val x: I8 = -5`; only signed widths may be negated.
                 if !key_is_signed(state.1, expected) {
@@ -2627,7 +2647,12 @@ fn check_unary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
                     key = expected;
                 }
             } else if inner_is_int {
-                key = inner;
+                if !key_is_signed(state.1, inner) {
+                    push_error(state.3, "unary '-' is not allowed on unsigned integer types", file, start, end);
+                    key = recover_ty(state, expr, expected);
+                } else {
+                    key = inner;
+                }
             } else {
                 key = recover_ty(state, expr, expected);
             }

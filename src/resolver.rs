@@ -1203,7 +1203,7 @@ fn finish_import(state: &mut State, scope: i64, item: i64, sym: i64, target_ns: 
     let last = list_last(state.2, segs);
     let alias = node_e(state.1, item);
     let entry_name = if alias != NONE { alias } else { last };
-    let casing = if target_ns == NS_TYPE { 2 } else { 1 };
+    let casing = import_casing_of(state.1, sym);
     report_casing(state.0, entry_name, casing, state.3, span.0, span.1, span.2);
     let conflict = scope_lookup(state.4, scope, entry_name, target_ns);
     if conflict.0 != NONE && conflict.1 != item && conflict.0 != sym {
@@ -1211,6 +1211,22 @@ fn finish_import(state: &mut State, scope: i64, item: i64, sym: i64, target_ns: 
         return;
     }
     rewrite_import(state.4, scope, item, sym, target_ns);
+}
+
+// The casing an imported name must satisfy is a property of the symbol's own
+// *kind* (function, constant, variant, type, ...), not of which namespace it
+// happens to resolve in: NS_VALUE holds snake_case functions but also
+// SCREAMING_SNAKE_CASE constants and PascalCase enum variants, so a blanket
+// per-namespace rule falsely rejects `use Config.MAX_LEN`/`use Colors.Red`.
+fn import_casing_of(nodes: &[i64], sym: i64) -> i64 {
+    let kind = sym_kind_of(nodes, sym);
+    if kind == SYM_CONST {
+        3
+    } else if kind == SYM_FUN || kind == SYM_NATIVE_FUN || kind == SYM_TRAIT_METHOD || kind == SYM_IMPL_METHOD {
+        1
+    } else {
+        2
+    }
 }
 
 fn sym_ns(nodes: &[i64], sym: i64) -> i64 {
