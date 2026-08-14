@@ -1,0 +1,48 @@
+version: 2
+updates:
+  # Pinned GitHub Actions used in .github/workflows/*.yml.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Root Cargo workspace — covers both the `cinnabar` crate and the
+  # `crates/cinnabar-wasm` member.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Nix flake inputs (nixpkgs, flake-utils) pinned in flake.nix/flake.lock.
+  - package-ecosystem: "nix"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # site/ (the project website).
+  - package-ecosystem: "npm"
+    directory: "/site"
+    schedule:
+      interval: "weekly"
+    groups:
+      site-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # editors/vscode/ (the VS Code extension).
+  - package-ecosystem: "npm"
+    directory: "/editors/vscode"
+    schedule:
+      interval: "weekly"
+    groups:
+      vscode-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]

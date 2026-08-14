@@ -1,5 +1,8 @@
 # Cinnabar
 
+[![CI](https://github.com/bonzupii/cinnabar/actions/workflows/ci.yml/badge.svg)](https://github.com/bonzupii/cinnabar/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/bonzupii/cinnabar/badge)](https://scorecard.dev/viewer/?uri=github.com/bonzupii/cinnabar)
+
 Cinnabar is a **zero-trust systems language for durable software**. It assumes that code authors may optimize for immediate task completion rather than long-term correctness, whether they are humans under pressure or AI code-generating systems. Cinnabar therefore grants no mechanism to bypass, suppress, weaken, or defer its safety, ownership, failure-handling, and explicitness invariants. Programs must express valid designs within those invariants; designs that require an exception are not representable in Cinnabar.
 
 Concretely, it is a from-scratch, statically-typed compiler written in Rust, targeting native machine code via LLVM, for building compilers, runtimes, kernels, firmware, and network stacks — domains where garbage collection, hidden control flow, and runtime panics are unacceptable.
@@ -424,6 +427,10 @@ Case budgets use an even sample across each ordered corpus instead of taking onl
 ## Status
 
 Cinnabar is under active early development. See [`ROADMAP.md`](ROADMAP.md) for what's resolved and what's planned next (string literals, native OS surfaces, diagnostic quality improvements, and formal verification work). Self-hosting — Cinnabar compiling itself — is a long-term goal and completeness test, not a gate for any individual feature.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to set up a dev environment, the conventions this repository holds itself to, and how to run the verification gate. Report security-relevant bugs (soundness holes, memory-safety issues) per [`SECURITY.md`](SECURITY.md) rather than in a public issue.
 
 ## License
 
