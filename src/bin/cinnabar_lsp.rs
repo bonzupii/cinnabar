@@ -73,6 +73,10 @@ struct ServerState {
     // generation. Positional requests consume this analysis; they never
     // invoke the compiler themselves.
     completed: Vec<AnalysisResult>,
+    // Source-less (`NO_FILE`) diagnostic messages last surfaced per root,
+    // so a `window/showMessage` fires when a message appears rather than on
+    // every republish of the same analysis.
+    source_less: Vec<(String, Vec<String>)>,
 }
 
 // A fatal transport failure surfaces through main's Result: there is no
@@ -114,6 +118,7 @@ fn main() -> Result<(), String> {
         analysis_tx,
         analysis_rx,
         completed: Vec::new(),
+        source_less: Vec::new(),
     };
     main_loop(&connection, &mut state)?;
     // The transport threads terminate when every channel endpoint is gone.
@@ -137,6 +142,19 @@ fn log_message(connection: &Connection, message: &str) -> Result<(), String> {
         .sender
         .send(Message::Notification(note))
         .map_err(|err| format!("send log message: {}", err))
+}
+
+// User-visible errors go through `window/showMessage` (type 1 = Error): the
+// same notification channel as `log_message`, but shown rather than filed.
+fn show_message(connection: &Connection, message: &str) -> Result<(), String> {
+    let note = Notification {
+        method: "window/showMessage".to_string(),
+        params: json!({ "type": 1, "message": message }),
+    };
+    connection
+        .sender
+        .send(Message::Notification(note))
+        .map_err(|err| format!("send show message: {}", err))
 }
 
 fn main_loop(connection: &Connection, state: &mut ServerState) -> Result<(), String> {
@@ -1047,6 +1065,7 @@ fn publish_analysis(
     analysis: &Analysis,
 ) -> Result<(), String> {
     reconcile_root_graph(state, entry_path, analysis);
+    forward_source_less_diagnostics(connection, state, entry_path, analysis)?;
     let mut fresh: Vec<String> = Vec::new();
     let mut file = 0i64;
     while (file as usize) < analysis.files.len() {
@@ -1087,6 +1106,60 @@ fn publish_analysis(
     }
     records.push((entry_path.to_string(), fresh));
     state.published = records;
+    Ok(())
+}
+
+// A diagnostic carrying `NO_FILE` genuinely has no source location — the
+// entry file itself could not be read, for example — so the per-file filter
+// in `file_diagnostics` can never select it and it used to vanish entirely,
+// leaving an unreadable project looking clean and error-free. It is
+// forwarded as a `window/showMessage` error instead, which is honest about
+// the diagnostic having no location to attach to. Each message fires when
+// it first appears for a root and again only after it has gone away, not on
+// every republish of the same analysis.
+fn forward_source_less_diagnostics(
+    connection: &Connection,
+    state: &mut ServerState,
+    entry_path: &str,
+    analysis: &Analysis,
+) -> Result<(), String> {
+    let mut current: Vec<String> = Vec::new();
+    let mut idx = 0usize;
+    while idx < analysis.errors.len() {
+        let diag = match analysis.errors.get(idx) {
+            Some(diag) => diag,
+            None => break,
+        };
+        if diag.1 == NO_FILE && !current.contains(&diag.0) {
+            current.push(diag.0.clone());
+        }
+        idx += 1;
+    }
+    let mut previous: Vec<String> = Vec::new();
+    let mut records: Vec<(String, Vec<String>)> = Vec::new();
+    while let Some(record) = state.source_less.pop() {
+        if record.0 == entry_path {
+            previous = record.1;
+        } else {
+            records.push(record);
+        }
+    }
+    idx = 0;
+    while idx < current.len() {
+        match current.get(idx) {
+            Some(message) => {
+                if !previous.contains(message) {
+                    show_message(connection, message)?;
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    if !current.is_empty() {
+        records.push((entry_path.to_string(), current));
+    }
+    state.source_less = records;
     Ok(())
 }
 
@@ -1233,7 +1306,12 @@ fn uri_to_path(uri: &str) -> Option<String> {
             && bytes.get(1).is_some_and(|byte| *byte == b':')
     };
     if is_drive {
-        Some(decoded)
+        // The same normalization `project` applies after canonicalizing:
+        // editors spell the drive letter in either case, while the paths the
+        // manifest loader stores are upper-cased, and the module loader's
+        // overlay lookup compares the two. On an already-plain path this
+        // changes nothing but the drive letter.
+        Some(project::comparable_path(std::path::Path::new(&decoded)).to_string_lossy().to_string())
     } else {
         Some(format!("/{}", decoded))
     }
@@ -1273,6 +1351,7 @@ mod tests {
             analysis_tx,
             analysis_rx,
             completed: Vec::new(),
+            source_less: Vec::new(),
         };
 
         start_due_analyses(&mut state);
@@ -1303,5 +1382,17 @@ mod tests {
     #[test]
     fn remote_file_authority_is_not_treated_as_local() {
         assert_eq!(uri_to_path("file://server/share/source.cnb"), None);
+    }
+
+    // VS Code sends drive letters lower-cased ("file:///c%3A/..."), while the
+    // manifest loader stores canonicalized paths with the drive upper-cased.
+    // The decoded path must land in the canonical spelling or the module
+    // loader's overlay never matches the open buffer.
+    #[test]
+    fn lowercase_drive_uri_decodes_to_canonical_drive_case() {
+        assert_eq!(
+            uri_to_path("file:///c%3A/project/main.cnb"),
+            Some("C:/project/main.cnb".to_string())
+        );
     }
 }

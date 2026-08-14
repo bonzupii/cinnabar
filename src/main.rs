@@ -1897,7 +1897,18 @@ fn bin_name(op: i64) -> &'static str {
 }
 
 fn run_binary(path: &Path) -> ExitCode {
-    match Command::new(path).status() {
+    // A separator-less program name — the default output for `main.cnb`
+    // compiled in its own directory — would make `Command::new` search
+    // `$PATH` instead of running the binary that was just built, silently
+    // executing whatever else happens to be called `main`. Qualifying it
+    // with the current directory makes it unambiguously a path to this
+    // file. The name on disk is unchanged; only the invocation is.
+    let invoked = if path.parent().is_some_and(|parent| !parent.as_os_str().is_empty()) {
+        path.to_path_buf()
+    } else {
+        Path::new(".").join(path)
+    };
+    match Command::new(&invoked).status() {
         Ok(status) => match status.code() {
             Some(code) => {
                 if code == 0 {
@@ -1909,7 +1920,7 @@ fn run_binary(path: &Path) -> ExitCode {
             None => ExitCode::FAILURE,
         },
         Err(err) => {
-            eprintln!("failed to execute '{}': {}", path.display(), err);
+            eprintln!("failed to execute '{}': {}", invoked.display(), err);
             ExitCode::FAILURE
         }
     }
