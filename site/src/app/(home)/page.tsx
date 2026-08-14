@@ -27,9 +27,9 @@ import { BADGES, QUIP, REPO_URL, STATUS_BADGE } from "@/lib/site";
 /** Social image copy, rendered by /og-image. The root layout points at it. */
 export const og = {
   eyebrow: "Systems language",
-  title: "Consumed exactly once.",
+  title: "A zero-trust systems language.",
   description:
-    "A statically-typed systems language with Austral-style linear typing. No garbage collector, no lifetime annotations, no reachable panics.",
+    "Austral-style linear typing, checked by a flow-sensitive borrow checker. No garbage collector, no lifetime annotations, no reachable panics.",
   alt: "Cinnabar — a statically-typed systems language with Austral-style linear typing.",
 };
 
@@ -45,7 +45,7 @@ export default async function Home() {
   return (
     <>
       {/* Hero — the cover of plate 00, and the README hero of plate 12. */}
-      <section className="mx-auto max-w-[1400px] px-6 pt-16 pb-20 sm:px-10 sm:pt-24 sm:pb-28">
+      <section className="mx-auto max-w-350 px-6 pt-16 pb-20 sm:px-10 sm:pt-24 sm:pb-28">
         {/*
           The wordmark is the page's heading — the home page's subject is the
           project itself. Wordmark carries the accessible name "Cinnabar", so
@@ -61,8 +61,18 @@ export default async function Home() {
         </h1>
 
         <div className="mt-10 grid gap-8 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)] lg:gap-16">
-          <div className="text-text max-w-[46ch] text-[20px] leading-[1.4] tracking-[-0.015em] sm:text-[27px]">
-            <InlineMarkdown>{content.block("tagline")}</InlineMarkdown>
+          <div className="flex flex-col gap-6">
+            <div className="text-text max-w-[46ch] text-[20px] leading-[1.4] tracking-[-0.015em] sm:text-[27px]">
+              <InlineMarkdown>{content.block("tagline")}</InlineMarkdown>
+            </div>
+            {/*
+              What it is, then what it is for. A reader deciding whether to
+              keep reading needs the domain and the implementation, and both
+              are stated in README.md's opening two paragraphs.
+            */}
+            <div className="text-secondary max-w-[62ch] text-[16px] leading-[1.7]">
+              <InlineMarkdown>{content.block("hero-why")}</InlineMarkdown>
+            </div>
           </div>
           <p className="text-secondary font-mono text-[13px] leading-[1.7] lg:self-end">
             {QUIP}
@@ -93,11 +103,18 @@ export default async function Home() {
           </span>
         </div>
 
-        <ShellBlock
-          lines={INSTALL_SHELL}
-          cwd="~/src"
-          className="mt-7 max-w-[760px]"
-        />
+        {/*
+          The three commands, beside what each one actually does. The shell
+          block on its own told a reader how to start but not what starting
+          would cost them — the flake, the build, the scaffold.
+        */}
+        <div className="mt-9 grid gap-8 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)] lg:gap-16">
+          <ShellBlock lines={INSTALL_SHELL} cwd="~/src" className="max-w-190" />
+          <div className="flex flex-col gap-5 [&_li]:text-[15px] [&_ul]:mt-0">
+            <Markdown>{content.block("hero-steps")}</Markdown>
+            <ArrowLink href="/install/">Full build instructions</ArrowLink>
+          </div>
+        </div>
 
         <div className="mt-9 flex flex-wrap items-center gap-4">
           <Action href="/manifesto/" variant="primary" icon={DocIcon}>
@@ -112,9 +129,9 @@ export default async function Home() {
         </div>
       </section>
 
-      {/* The claim the whole language is organised around. */}
+      {/* The stance the rest of the language follows from — MANIFESTO.md's opening. */}
       <section className="border-hairline bg-panel border-y">
-        <Reveal className="mx-auto grid max-w-[1400px] gap-8 px-6 py-20 sm:px-10 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] lg:gap-20">
+        <Reveal className="mx-auto grid max-w-350 gap-8 px-6 py-20 sm:px-10 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] lg:gap-20">
           <h2 className="text-text max-w-[16ch] text-[32px] leading-[1.03] font-bold tracking-[-0.03em] sm:text-[46px]">
             {content.block("invariants-title")}
           </h2>
@@ -125,7 +142,7 @@ export default async function Home() {
       </section>
 
       {/* Highlights — README's own list, in the board's hairline grid. */}
-      <section className="mx-auto max-w-[1400px] px-6 py-24 sm:px-10">
+      <section className="mx-auto max-w-350 px-6 py-24 sm:px-10">
         <SectionHeading
           title="Language highlights"
           note={content.block("highlights-note")}
@@ -153,7 +170,7 @@ export default async function Home() {
 
       {/* Samples, every one verbatim from the fixture corpus. */}
       <section className="border-hairline border-t">
-        <div className="mx-auto max-w-[1400px] px-6 py-24 sm:px-10">
+        <div className="mx-auto max-w-350 px-6 py-24 sm:px-10">
           <SectionHeading
             title="A taste of the language"
             note={content.block("samples-note")}
@@ -167,7 +184,7 @@ export default async function Home() {
 
       {/* Diagnostics — plate 10. */}
       <section className="border-hairline bg-panel border-t">
-        <div className="mx-auto max-w-[1400px] px-6 py-24 sm:px-10">
+        <div className="mx-auto max-w-350 px-6 py-24 sm:px-10">
           <SectionHeading
             title="Diagnostics"
             note={content.block("diagnostics-note")}
@@ -194,7 +211,7 @@ export default async function Home() {
 
       {/* The pipeline, as a strip. */}
       <section className="border-hairline border-t">
-        <div className="mx-auto max-w-[1400px] px-6 py-24 sm:px-10">
+        <div className="mx-auto max-w-350 px-6 py-24 sm:px-10">
           <SectionHeading
             title="One fixed pipeline"
             note={content.block("pipeline-note")}
@@ -225,10 +242,10 @@ export default async function Home() {
 
       {/* The manifest is Cinnabar source, which is worth showing. */}
       <section className="border-hairline bg-panel border-t">
-        <Reveal className="mx-auto grid max-w-[1400px] gap-12 px-6 py-24 sm:px-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-center">
+        <Reveal className="mx-auto grid max-w-350 gap-12 px-6 py-24 sm:px-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-center">
           <div className="flex flex-col gap-6">
             <Eyebrow>The manifest</Eyebrow>
-            <h2 className="text-text text-[28px] leading-tight font-bold tracking-[-0.025em] sm:text-[38px]">
+            <h2 className="text-text text-[28px] leading-tight font-bold tracking-tight sm:text-[38px]">
               {content.block("manifest-title")}
             </h2>
             <div className="[&_p:first-child]:mt-0">
@@ -242,9 +259,9 @@ export default async function Home() {
 
       {/* Close. */}
       <section className="border-hairline border-t">
-        <Reveal className="mx-auto flex max-w-[1400px] flex-col gap-8 px-6 py-24 sm:px-10 lg:flex-row lg:items-center lg:justify-between">
+        <Reveal className="mx-auto flex max-w-350 flex-col gap-8 px-6 py-24 sm:px-10 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex flex-col gap-4">
-            <h2 className="text-text max-w-[20ch] text-[28px] leading-tight font-bold tracking-[-0.025em] sm:text-[38px]">
+            <h2 className="text-text max-w-[20ch] text-[28px] leading-tight font-bold tracking-tight sm:text-[38px]">
               {content.block("closing-title")}
             </h2>
             <div className="[&_p:first-child]:mt-0">

@@ -18,6 +18,9 @@
   },
   "scripts": {
     "dev": "next dev",
+    "assets": "tsx scripts/generate-brand-assets.tsx && npm run assets:verify",
+    "assets:verify": "node scripts/verify-png.mjs --size 512x512 public/brand/cinnabar-mark-512-dark.png public/brand/cinnabar-mark-512-light.png --size 1024x1024 public/brand/cinnabar-mark-1024-dark.png public/brand/cinnabar-mark-1024-light.png --size 1024x300 public/brand/cinnabar-wordmark-1024-dark.png public/brand/cinnabar-wordmark-1024-light.png --size 1280x640 public/brand/cinnabar-banner-1280x640-dark.png public/brand/cinnabar-banner-1280x640-light.png",
+    "prebuild": "npm run assets",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
@@ -59,6 +62,7 @@
     "serve": "^14.2.6",
     "start-server-and-test": "^3.0.11",
     "tailwindcss": "^4",
+    "tsx": "^4.23.12",
     "typescript": "^5",
     "vitest": "^3.2.4"
   }

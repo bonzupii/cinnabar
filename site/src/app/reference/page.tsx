@@ -56,7 +56,7 @@ export default async function ReferencePage() {
         lede={content.block("lede")}
       />
 
-      <div className="mx-auto flex max-w-[1400px] flex-col gap-20 px-6 pt-16 sm:px-10 [&>*]:min-w-0">
+      <div className="mx-auto flex max-w-350 flex-col gap-20 px-6 pt-16 sm:px-10 [&>*]:min-w-0">
         <section>
           <Eyebrow>Usage</Eyebrow>
           <UsageBlock lines={USAGE.split("\n")} className="mt-5" />

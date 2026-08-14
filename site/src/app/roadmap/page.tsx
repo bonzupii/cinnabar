@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Disclosure from "@/components/Disclosure";
 import DocBody from "@/components/DocBody";
 import PageHeader, { Eyebrow } from "@/components/PageHeader";
 import SectionHeading from "@/components/SectionHeading";
@@ -10,6 +11,8 @@ import {
   IN_PROGRESS,
   MILESTONE_TALLY,
   SHIPPED,
+  SHIPPED_LEAD,
+  SHIPPED_REST,
   type Capability,
 } from "@/content/roadmap";
 import { CONTAINER, ICON } from "@/lib/constants";
@@ -20,7 +23,7 @@ import { linkRepoFile, readRepoDoc } from "@/lib/repo-docs";
 /** Social image copy, rendered by ./og-image/route.tsx. */
 export const og = {
   eyebrow: "Project status",
-  title: "Eight milestones down.",
+  title: "Six milestones complete, two partial.",
   description:
     "What the language and its toolchain do today, what is still being widened, and why self-hosting is a completeness test rather than a gate.",
   alt: "Cinnabar social card — the project status.",
@@ -29,11 +32,10 @@ export const og = {
 export const metadata: Metadata = {
   title: "Roadmap",
   description:
-    "What Cinnabar does today: linear types checked on every path, direct system calls, freestanding static binaries — and self-hosting on the horizon.",
+    "What Cinnabar does today: linear types checked on every path, direct system calls, freestanding static binaries — and self-hosting after that.",
   alternates: { canonical: "/roadmap/" },
   ...ogImageMetadata("/roadmap/", og),
 };
-
 
 /** One capability, as a cell in the hairline grid. */
 function CapabilityCard({
@@ -75,9 +77,9 @@ export default async function RoadmapPage() {
     <article className="pb-28">
       <PageHeader
         section="Roadmap"
-        note="A milestone is done only when fixtures, gate and spec agree"
+        note="ROADMAP.md · read from the source"
         icon={CheckIcon}
-        title="Eight milestones down."
+        title="Six milestones complete, two partial."
         lede={content.block("lede")}
       />
 
@@ -89,17 +91,18 @@ export default async function RoadmapPage() {
             value={`${MILESTONE_TALLY.complete} / ${MILESTONE_TALLY.total}`}
             label="Milestones complete"
           />
-          <Stat value={IN_PROGRESS.length} label="Still widening" />
+          <Stat value={IN_PROGRESS.length} label="Marked partial" />
+          {/* ROADMAP.md's own definition of done, rather than a fourth number. */}
           <Panel className="bg-ground justify-center gap-2 p-6">
             <span className="text-secondary text-[13px] leading-[1.55] text-pretty">
-              Self-hosting is the next horizon, and a completeness test rather than a
-              gate.
+              A milestone is done only when the fixtures, the sanitizer gate and
+              the spec all agree.
             </span>
           </Panel>
         </div>
       </section>
 
-      {/* What the language does today. */}
+      {/* What the language does today: six up front, six behind a fold. */}
       <section className={`${CONTAINER} pt-20`}>
         <SectionHeading
           title="What Cinnabar does today"
@@ -107,7 +110,7 @@ export default async function RoadmapPage() {
           icon={CheckIcon}
         />
         <div className="rule-grid mt-11 grid sm:grid-cols-2 lg:grid-cols-3">
-          {SHIPPED.map((capability, index) => (
+          {SHIPPED_LEAD.map((capability, index) => (
             <CapabilityCard
               key={capability.title}
               capability={capability}
@@ -115,6 +118,17 @@ export default async function RoadmapPage() {
             />
           ))}
         </div>
+        {/*
+          Twelve cards at full height meant scrolling past all of them to find
+          out whether any mattered. Six lead; the rest are one click away.
+        */}
+        <Disclosure summary={content.block("shipped-more")} className="mt-10">
+          <div className="rule-grid mt-4 grid sm:grid-cols-2 lg:grid-cols-3">
+            {SHIPPED_REST.map((capability) => (
+              <CapabilityCard key={capability.title} capability={capability} delay={0} />
+            ))}
+          </div>
+        </Disclosure>
       </section>
 
       {/* The two partials, stated plainly rather than as open tickets. */}
@@ -146,7 +160,7 @@ export default async function RoadmapPage() {
         <Reveal className="mt-11">
           <Callout>
             <Eyebrow>Next</Eyebrow>
-            <h3 className="text-text text-[28px] leading-tight font-bold tracking-[-0.025em] sm:text-[36px]">
+            <h3 className="text-text text-[28px] leading-tight font-bold tracking-tight sm:text-[36px]">
               {HORIZON.title}
             </h3>
             <p className="text-bright max-w-[80ch] text-[17px] leading-[1.7] text-pretty">
@@ -164,7 +178,16 @@ export default async function RoadmapPage() {
         </SourceNote>
       </section>
 
-      <DocBody markdown={document} tocLabel="Milestones" />
+      {/*
+        The document itself, folded. The capability cards above link to anchors
+        inside it; browsers expand a closed <details> when a fragment resolves
+        into it, so those links still land.
+      */}
+      <div className={CONTAINER}>
+        <Disclosure summary={content.block("document")}>
+          <DocBody markdown={document} tocLabel="Milestones" />
+        </Disclosure>
+      </div>
     </article>
   );
 }

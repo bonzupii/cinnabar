@@ -28,10 +28,11 @@ const ibmPlexMono = IBM_Plex_Mono({
   display: "swap",
 });
 
+
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
   title: {
-    default: "Cinnabar — consumed exactly once",
+    default: "Cinnabar — a zero-trust systems language",
     template: "%s · Cinnabar",
   },
   description: TAGLINE,
@@ -50,7 +51,7 @@ export const metadata: Metadata = {
   ],
   openGraph: {
     siteName: "Cinnabar",
-    title: "Cinnabar — consumed exactly once",
+    title: "Cinnabar — a zero-trust systems language",
     description: DESCRIPTION,
     type: "website",
     locale: "en_US",
@@ -59,7 +60,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "Cinnabar — consumed exactly once",
+    title: "Cinnabar — a zero-trust systems language",
     description: DESCRIPTION,
     images: [ogImage("/", og)],
   },

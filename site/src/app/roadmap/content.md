@@ -1,12 +1,16 @@
 <!-- @lede -->
 
-Cinnabar's first eight milestones are done. What follows is what the language
-and its toolchain do today, what is still being widened, and the one thing on
-the horizon.
+Six of the eight milestones in `ROADMAP.md` are complete; two are marked
+partial. Below is what the language and its toolchain do today, what is still
+being widened, and what comes after that.
 
 <!-- @shipped-note -->
 
-Every entry is a milestone the roadmap marks complete
+Every entry cites the milestone that shipped it
+
+<!-- @shipped-more -->
+
+The other six capabilities
 
 <!-- @progress -->
 
@@ -21,5 +25,9 @@ A completeness test, not a gate
 
 Milestones are justified by general-purpose systems programming — kernels,
 firmware, network stacks, runtimes and compilers — not by whether they help
-rewrite the compiler in Cinnabar. The full record is `ROADMAP.md`, rendered
-below at build time.
+rewrite the compiler in Cinnabar. `ROADMAP.md` is rendered below in full, at
+build time.
+
+<!-- @document -->
+
+ROADMAP.md, in full

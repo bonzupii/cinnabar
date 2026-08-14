@@ -42,6 +42,15 @@
   --label: #928a85;
   --cinnabar-text: #f26a4f;
 
+  /*
+   * The window frame's drop shadow. Not a palette entry — it is a black at low
+   * alpha rather than one of the five greys, so it stays outside the token
+   * table tests/unit/palette.test.ts reads (which only collects hex values).
+   * On the near-black ground a shadow can only read as depth if it is darker
+   * than the ground itself, so dark carries the heavier of the two.
+   */
+  --window-shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 6px 18px rgb(0 0 0 / 0.34);
+
   color-scheme: dark;
 }
 
@@ -72,6 +81,9 @@
     --label: #665d56;
     --cinnabar-text: #a82d1b;
 
+    /* Lighter on paper: a shadow that reads on #100E0D is a bruise on #F2EEEA. */
+    --window-shadow: 0 1px 2px rgb(22 19 15 / 0.14), 0 6px 18px rgb(22 19 15 / 0.1);
+
     color-scheme: light;
   }
 }
@@ -96,6 +108,8 @@
   --label: #665d56;
   --cinnabar-text: #a82d1b;
 
+  --window-shadow: 0 1px 2px rgb(22 19 15 / 0.14), 0 6px 18px rgb(22 19 15 / 0.1);
+
   color-scheme: light;
 }
 
@@ -118,6 +132,8 @@
 
   --label: #928a85;
   --cinnabar-text: #f26a4f;
+
+  --window-shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 6px 18px rgb(0 0 0 / 0.34);
 
   color-scheme: dark;
 }
@@ -268,6 +284,96 @@ body {
     border-color 120ms ease-out,
     background-color 120ms ease-out,
     color 120ms ease-out;
+}
+
+/*
+ * The window frame.
+ *
+ * The identity is flat and hard-edged, so the radius is the smallest one that
+ * still reads as a corner rather than as a rounding error, and the shadow is a
+ * soft ground shadow rather than a card lift. `overflow: hidden` is what makes
+ * the radius real: the body is a <pre> that paints its own ground right up to
+ * the frame, and without clipping its square corners sit proud of the rounded
+ * border.
+ */
+.window-frame {
+  border-radius: 5px;
+  overflow: hidden;
+  box-shadow: var(--window-shadow);
+  transition: border-color 160ms ease-out;
+}
+
+/*
+ * Hovering a window lifts its hairline to the stronger grey. `.rule-grid`
+ * paints the frame's border and the 1px seam between the bar and the body from
+ * the same colour, so both move together — the frame reads as one object being
+ * addressed, which is the point of the gesture.
+ */
+.window-frame:hover {
+  border-color: var(--hairline-strong);
+  background: var(--hairline-strong);
+}
+
+/*
+ * The three controls, drawn as Tiger drew them: circular, with a specular
+ * highlight up and to the left and the ground darkening towards the lower
+ * rim. The base colour comes from a Tailwind `bg-*` token on the element, so
+ * the gloss is one gradient reused across the accent and the two greys rather
+ * than three hand-mixed fills — plate 05 allows one accent and five greys, and
+ * a gloss painted in white-and-black alpha adds no hue to that.
+ *
+ * The gradient is the whole treatment — no inset ring. At 10px an inset edge
+ * reads as a smudge on the rim rather than as a defined edge, and the site
+ * owner asked for it gone.
+ */
+.window-control {
+  border-radius: 9999px;
+  background-image: radial-gradient(
+    circle at 34% 26%,
+    rgb(255 255 255 / 0.5) 0%,
+    rgb(255 255 255 / 0.14) 42%,
+    rgb(0 0 0 / 0.05) 62%,
+    rgb(0 0 0 / 0.28) 100%
+  );
+}
+
+/*
+ * An interactive cell in one of the hairline grids.
+ *
+ * Background alone was too quiet to register as "this is a link". The accent
+ * rule is drawn inset rather than as a border so the cell does not change size
+ * and the grid's hairlines do not shift by a pixel under the cursor.
+ */
+.panel-interactive {
+  box-shadow: inset 0 -2px 0 0 transparent;
+  transition:
+    background-color 140ms ease-out,
+    box-shadow 160ms ease-out,
+    transform 160ms ease-out;
+}
+
+.panel-interactive:hover,
+.panel-interactive:focus-within {
+  box-shadow: inset 0 -2px 0 0 var(--cinnabar);
+}
+
+/*
+ * A control that acknowledges being pressed. One pixel, on the press only —
+ * the brand's motion note is 120-200ms with no bounce, and this is the
+ * smallest gesture that still reads as a button going down.
+ */
+.pressable:active {
+  transform: translateY(1px);
+}
+
+/*
+ * Reduced motion removes the movement rather than shortening it. The colour
+ * changes stay: they are what carries the state, and they are not motion.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .pressable:active {
+    transform: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -50,7 +50,7 @@ export default function CodeBlock({
 
   return (
     <Window path={path} title={title} className={className}>
-      <WindowBody tone="code" className="text-[13.5px] leading-[1.75] sm:text-[15px]">
+      <WindowBody tone="code" scale="source">
         <code>
           {tokens.map((token, position) => {
             if (token.kind === "text") {

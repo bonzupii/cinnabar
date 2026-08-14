@@ -1,10 +1,12 @@
 import type { Metadata } from "next";
 import type { ComponentType, ReactNode } from "react";
+import DataTable from "@/components/DataTable";
+import Disclosure from "@/components/Disclosure";
 import PageHeader from "@/components/PageHeader";
 import SectionHeading from "@/components/SectionHeading";
 import ShellBlock, { PlainWindow } from "@/components/ShellBlock";
 import Reveal from "@/components/Reveal";
-import { ArrowLink, Callout, Code, Prose } from "@/components/ui";
+import { ArrowLink, Callout, Code, MarkedList, Prose } from "@/components/ui";
 import {
   BuildIcon,
   CodegenIcon,
@@ -22,18 +24,17 @@ export const og = {
   eyebrow: "Getting started",
   title: "Build the compiler.",
   description:
-    "LLVM 21 via a Nix flake, a static musl libc, the language server, and the repository's verification gate.",
+    "LLVM 21 via a Nix flake, a static musl libc, the language server, the Docker path for Windows, and the repository's verification gate.",
   alt: "Cinnabar social card — the getting-started guide.",
 };
 
 export const metadata: Metadata = {
   title: "Install",
   description:
-    "Build the Cinnabar compiler with the project's Nix flake, run it from Docker on Windows, set up the language server, and verify a change against the repository's gate.",
+    "Build the Cinnabar compiler with the project's Nix flake, run it from Docker on Windows, attach VS Code to the container, and verify a change against the repository's gate.",
   alternates: { canonical: "/install/" },
   ...ogImageMetadata("/install/", og),
 };
-
 
 /** One step of the guide, with its own section rule. */
 function Step({
@@ -70,6 +71,42 @@ const NEOVIM_SETUP = `vim.lsp.start({
   root_dir = vim.fn.getcwd(),
 })`;
 
+/* The attached-container configuration, verbatim from CONTAINER_DEVELOPMENT.md. */
+const VSCODE_CONFIG = `{
+  "workspaceFolder": "/workspace",
+  "extensions": [
+    "rust-lang.rust-analyzer"
+  ],
+  "settings": {
+    "terminal.integrated.defaultProfile.linux": "bash",
+    "rust-analyzer.server.path": "/workspace/container/bin/rust-analyzer-nix"
+  },
+  "remoteUser": "root"
+}`;
+
+/* Every Compose call takes the generated environment file and nothing else. */
+const COMPOSE = 'docker compose --env-file "container/local/main/worktree.env"';
+
+/** What survives a service recreation — CONTAINER_DEVELOPMENT.md's own table. */
+const VOLUMES = [
+  ["Selected checkout", "/workspace", "Host bind mount"],
+  ["Nix store and database", "/nix", "Shared volume"],
+  ["Nix flake fetch cache", "/root/.cache/nix", "Shared volume"],
+  ["Cargo home", "/root/.cargo", "Shared volume"],
+  ["Rust build output", "/workspace/target", "Volume, per worktree"],
+  ["VS Code Server", "/root/.vscode-server", "Shared volume"],
+  ["Gate log", "/workspace/pre_commit.log", "Selected host checkout"],
+] as const;
+
+const DOCKER_SAFETY = [
+  "Allocate at least 8 GiB to Docker Desktop; 12 GiB is preferable for the full gate.",
+  "Never share a target cache key between concurrently active worktrees.",
+  "Never run two branches through the single service at once.",
+  "Never rewrite a host .git pointer to a Linux path.",
+  "Do not run docker compose down --volumes during normal work — it deletes the reusable caches.",
+  "Read pre_commit.log from the selected host checkout after the gate exits.",
+] as const;
+
 export default async function InstallPage() {
   const content = await readPageContent("install");
 
@@ -94,7 +131,7 @@ export default async function InstallPage() {
         lede={content.block("lede")}
       />
 
-      <div className="mx-auto flex max-w-[1400px] flex-col gap-20 px-6 pt-16 sm:px-10 [&>*]:min-w-0">
+      <div className="mx-auto flex max-w-350 flex-col gap-20 px-6 pt-16 sm:px-10 [&>*]:min-w-0">
         <Step
           title="Nix — the supported path"
           note="The only setup that is tested"
@@ -104,7 +141,7 @@ export default async function InstallPage() {
           <ShellBlock
             lines={["nix develop", "cargo build --release"]}
             cwd="~/src/cinnabar"
-            className="mt-7 max-w-[760px]"
+            className="mt-7 max-w-190"
           />
           <Prose className="mt-8">{withRepoLinks(content.block("nix-outside"))}</Prose>
         </Step>
@@ -138,16 +175,84 @@ export default async function InstallPage() {
           </SplitStep>
         </Step>
 
+        {/*
+          Expanded from three sentences and a link. CONTAINER_DEVELOPMENT.md is
+          the source for every command here — a Windows contributor should be
+          able to reach a running gate without leaving the page.
+        */}
         <Step
           title="Docker Desktop and Windows worktrees"
           note="One reusable Compose service"
           icon={StaticLinkIcon}
         >
           <Prose>{content.block("docker")}</Prose>
+
+          <Prose className="mt-8">{content.block("docker-volumes")}</Prose>
+          <DataTable headings={["Data", "Container path", "Lifetime"]} data={VOLUMES} />
+
+          <div className="mt-10 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start [&>*]:min-w-0">
+            <div>
+              <Prose>{content.block("docker-configure")}</Prose>
+              <ShellBlock
+                lines={[
+                  './container/configure-worktree.sh --worktree "$PWD" --cache-key main',
+                ]}
+                cwd="~/src/cinnabar"
+                title="Configure a checkout"
+                className="mt-7"
+              />
+            </div>
+            <div>
+              <Prose>{content.block("docker-select")}</Prose>
+              <ShellBlock
+                lines={[
+                  `${COMPOSE} config`,
+                  `${COMPOSE} up -d --build`,
+                  `${COMPOSE} exec dev nix develop`,
+                  `${COMPOSE} exec dev nix develop --command ./pre_commit_check.sh`,
+                  "cat pre_commit.log",
+                ]}
+                cwd="~/src/cinnabar"
+                title="Select and start"
+                className="mt-7"
+              />
+            </div>
+          </div>
+
+          <Prose className="mt-10">{content.block("docker-switch")}</Prose>
+          <ShellBlock
+            lines={[
+              "./container/configure-worktree.sh --worktree /c/path/to/cinnabar-feature --cache-key feature",
+              'docker compose --env-file "container/local/feature/worktree.env" up -d --build',
+            ]}
+            cwd="~/src/cinnabar"
+            title="A linked worktree"
+            className="mt-7"
+          />
+
+          <Prose className="mt-10">{content.block("docker-safety")}</Prose>
+          <MarkedList items={DOCKER_SAFETY} className="mt-5" />
+
+          {/* Only a reader changing the container setup needs this. */}
+          <Disclosure summary="Verification checklist" className="mt-10">
+            <Prose className="mt-4">{content.block("docker-verify")}</Prose>
+            <ShellBlock
+              lines={[
+                "git status --short --branch",
+                "nix --version",
+                "nix develop --command rust-analyzer --version",
+                "nix develop --command ./pre_commit_check.sh",
+              ]}
+              cwd="/workspace"
+              title="Inside the container"
+              className="mt-7"
+            />
+          </Disclosure>
+
           <ArrowLink
             href={`${REPO_URL}/blob/main/CONTAINER_DEVELOPMENT.md`}
             external
-            className="mt-7 inline-block"
+            className="mt-8 inline-block"
           >
             Container development guide
           </ArrowLink>
@@ -161,12 +266,55 @@ export default async function InstallPage() {
                 lines={["cargo build --release --bin cinnabar-lsp"]}
                 cwd="~/src/cinnabar"
               />
-              <PlainWindow text={NEOVIM_SETUP} path="init.lua" title="Neovim" className="mt-7" />
-              <Prose className="mt-6 [&_p]:text-[15px]">
-                {content.block("lsp-vscode")}
-              </Prose>
+              <PlainWindow
+                text={NEOVIM_SETUP}
+                path="init.lua"
+                title="Neovim"
+                className="mt-7"
+              />
             </div>
           </SplitStep>
+        </Step>
+
+        {/*
+          VS Code gets its own step rather than one line under the language
+          server: attaching to the container, the rust-analyzer wrapper and the
+          Cinnabar extension are things a reader has to do in order.
+        */}
+        <Step title="VS Code" note="Attached to the container" icon={LspIcon}>
+          <Prose>{content.block("vscode-attach")}</Prose>
+
+          <div className="mt-9 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start [&>*]:min-w-0">
+            <Prose>{content.block("vscode-config")}</Prose>
+            <PlainWindow
+              text={VSCODE_CONFIG}
+              path="nameConfigs/dev.json"
+              title="Attached container configuration"
+            />
+          </div>
+
+          <div className="mt-10 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start [&>*]:min-w-0">
+            <Prose>{content.block("vscode-analyzer")}</Prose>
+            <ShellBlock
+              lines={[
+                'docker exec dev ps -eo pid,ppid,args | grep -E "rust-analyzer" | grep -v grep',
+              ]}
+              cwd="~/src/cinnabar"
+              title="Which rust-analyzer is running"
+            />
+          </div>
+
+          <div className="mt-10 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start [&>*]:min-w-0">
+            <Prose>{content.block("vscode-extension")}</Prose>
+            <ShellBlock
+              lines={[
+                `${COMPOSE} exec dev nix develop --command ./container/install-vscode-extension.sh`,
+                `docker exec dev sh -c 'readlink /proc/$(pgrep -f "cinnabar[-]lsp --stdio" | head -1)/exe'`,
+              ]}
+              cwd="~/src/cinnabar"
+              title="Install the extension, then check the server is not stale"
+            />
+          </div>
         </Step>
 
         <Step title="Verifying a change" note="nix develop --command" icon={TestIcon}>

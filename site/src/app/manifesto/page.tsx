@@ -41,7 +41,7 @@ export default async function ManifestoPage() {
         lede={content.block("lede")}
       />
 
-      <div className="mx-auto max-w-[1400px] px-6 sm:px-10">
+      <div className="mx-auto max-w-350 px-6 sm:px-10">
         <SourceNote className="mt-12 mb-14">
           {linkRepoFile(content.block("source"), "MANIFESTO.md")}
         </SourceNote>

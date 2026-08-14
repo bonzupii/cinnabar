@@ -79,7 +79,10 @@ export default function TableOfContents({
                 } ${
                   active
                     ? "border-cinnabar text-text"
-                    : "hover:text-text border-transparent text-[color:var(--label)]"
+                    : // The rail is a column of quiet grey; on hover the entry
+                      // takes its own rule, so the cursor picks one line out of
+                      // the list rather than merely brightening it.
+                      "text-label hover:text-text hover:border-hairline-strong border-transparent"
                 }`}
               >
                 {entry.text}

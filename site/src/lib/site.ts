@@ -27,9 +27,18 @@ export const TAGLINE =
 /** Plate 00 and 11 — the line the dev put on the repo. */
 export const QUIP = "Probably better than Rust.";
 
-/** Plate 11 — the social banner's longer description. */
+/**
+ * The site's social description.
+ *
+ * Plate 11's own banner line is "A systems language where every resource is
+ * consumed exactly once — checked at compile time, with no lifetime
+ * annotations and no garbage collector." It is deliberately not used here.
+ * "Consumed exactly once" is a property of linear types, and repeating it as
+ * the description of the whole project made every preview card read as a
+ * slogan. It now appears once, where linear typing is actually explained.
+ */
 export const DESCRIPTION =
-  "A systems language where every resource is consumed exactly once — checked at compile time, with no lifetime annotations and no garbage collector.";
+  "A statically-typed systems language for compilers, runtimes, kernels and firmware. Austral-style linear typing, checked by a flow-sensitive borrow checker, with no garbage collector and no lifetime annotations.";
 
 /** Plate 12 — the metadata strip. */
 export const BADGES = ["Apache-2.0", "LLVM 21", "musl · static"] as const;

@@ -35,16 +35,23 @@ test("every window has controls and a centred title", async ({ page }) => {
       // three controls. Every window carries all three.
       await expect(caption.locator("svg").first()).toBeAttached();
 
+      /*
+       * `textContent`, not `innerText`: some of these windows sit inside a
+       * collapsed Disclosure, and `innerText` is the rendered text, which is
+       * empty for anything the browser is not laying out. What is being
+       * asserted is that the markup carries a path and a title — which is also
+       * what a crawler sees — not that the block happens to be on screen.
+       */
       const path = caption.locator("> span").first();
       expect(
-        (await path.innerText()).trim().length,
+        ((await path.textContent()) ?? "").trim().length,
         `${path} window ${index} has no path`,
       ).toBeGreaterThan(0);
 
       const title = caption.locator("span.text-center");
       await expect(title).toHaveCount(1);
       expect(
-        (await title.innerText()).trim().length,
+        ((await title.textContent()) ?? "").trim().length,
         `window ${index} has no centre title`,
       ).toBeGreaterThan(0);
 

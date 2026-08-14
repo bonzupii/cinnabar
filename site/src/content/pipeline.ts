@@ -56,7 +56,7 @@ export const STAGES: readonly Stage[] = [
     name: "Borrow checker",
     file: "src/borrow.rs",
     summary:
-      "Flow-sensitive dataflow over a per-function CFG, enforcing exactly-once consumption on every path out of scope.",
+      "Flow-sensitive dataflow over a per-function CFG. Rejects double moves, use after move, leaks, and overlapping `&mut` borrows.",
   },
   {
     index: "07",

@@ -22,7 +22,7 @@ export const SAMPLES: readonly Sample[] = [
     label: "Tail recursion",
     source: "tests/fixtures/repro/hanoi.cnb",
     summary:
-      "Structs and strict tail position. Every self-recursive call must be a tail call, so LLVM turns this into a jump and the stack never grows.",
+      "Structs and strict tail position. hanoi_acc calls itself as the direct value of a return, which is the only self-recursive call the typechecker accepts; LLVM turns it into a jump at -O2.",
     code: `pub const DISKS: I64 = 8
 
 pub type MoveCount
@@ -54,7 +54,7 @@ end`,
     label: "Linear handles",
     source: "tests/fixtures/repro/vec_test.cnb",
     summary:
-      "A native handle owns a resource. The borrow checker walks every path out of the function and requires the handle to be consumed on each one, exactly once.",
+      "vec is a native handle, so it carries a consumption obligation. Both the error path and the success path have to discharge it — hence the fail_vec helper, which frees before returning.",
     linearHandles: ["vec"],
     code: `use Collections.vec_new
 use Collections.vec_push
@@ -100,7 +100,7 @@ end`,
     label: "Slices and patterns",
     source: "tests/fixtures/repro/slice_test.cnb",
     summary:
-      "Array rest-patterns and a tail-recursive fold. Match is exhaustive: every variant, array length and rest pattern must be covered.",
+      "Array rest-patterns and a tail-recursive fold. Match is exhaustive: every variant, array length and rest pattern has to be covered, and there is no catch-all arm to cover them with.",
     code: `pub mod Slice
   pub nat fun len<T>(view: &[T]) Usize
 end

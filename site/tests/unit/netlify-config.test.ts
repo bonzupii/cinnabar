@@ -39,6 +39,24 @@ describe("netlify.toml", () => {
     expect(CONFIG).toMatch(/NODE_VERSION\s*=\s*"22"/);
   });
 
+  it("skips the Next runtime plugin, which a static export cannot use", () => {
+    /*
+     * Netlify auto-installs @netlify/plugin-nextjs on any project with Next in
+     * its dependencies. That runtime exists to stand up a server — SSR
+     * handlers, the ISR cache, the image CDN — and this site is
+     * `output: "export"`, so there is no server build for its onPostBuild step
+     * to publish. It failed a real deploy with "Failed publishing static
+     * content" before this was set.
+     *
+     * This is not optional configuration: `npm run deploy` is
+     * `netlify deploy --prod`, and Netlify CLI 27 always builds before
+     * publishing, so every deploy goes through the path this flag disarms.
+     */
+    const environment = CONFIG.split("[build.environment]")[1]?.split("\n[")[0];
+    expect(environment, "no [build.environment] section").toBeDefined();
+    expect(environment).toMatch(/NETLIFY_NEXT_PLUGIN_SKIP\s*=\s*"true"/);
+  });
+
   it("serves the root social image as a PNG", () => {
     const rule = headerValues("/og-image");
     expect(rule, "no [[headers]] rule for /og-image").toBeDefined();

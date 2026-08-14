@@ -55,7 +55,7 @@ function components(inline: boolean): Components {
     h2: ({ children, id }) => (
       <h2
         id={id}
-        className="border-hairline text-text mt-20 scroll-mt-24 border-t pt-10 text-[28px] leading-tight font-bold tracking-[-0.025em] break-words first:mt-0 sm:text-[34px]"
+        className="border-hairline text-text mt-20 scroll-mt-24 border-t pt-10 text-[28px] leading-tight font-bold tracking-tight break-words first:mt-0 sm:text-[34px]"
       >
         {children}
       </h2>
@@ -106,7 +106,7 @@ function components(inline: boolean): Components {
       </ol>
     ),
     li: ({ children }) => (
-      <li className="text-secondary relative pl-6 text-[16.5px] leading-[1.7] break-words before:absolute before:top-[0.62em] before:left-0 before:h-[6px] before:w-[6px] before:bg-[color:var(--hairline-strong)] before:content-[''] [ol_&]:pl-0 [ol_&]:before:hidden">
+      <li className="text-secondary relative pl-6 text-[16.5px] leading-[1.7] break-words before:absolute before:top-[0.62em] before:left-0 before:h-[6px] before:w-[6px] before:bg-hairline-strong before:content-[''] [ol_&]:pl-0 [ol_&]:before:hidden">
         {children}
       </li>
     ),

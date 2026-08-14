@@ -24,7 +24,10 @@ export default function NavLinks() {
             className={`panel-hover border-b-2 pb-[3px] text-[13px] font-bold tracking-[0.1em] uppercase ${
               active
                 ? "border-cinnabar text-text"
-                : "text-secondary hover:text-text border-transparent"
+                : // The hover previews the marker the current section carries,
+                  // in grey rather than the accent — one accent per view, and
+                  // the page you are on owns it.
+                  "text-secondary hover:text-text hover:border-hairline-strong border-transparent"
             }`}
           >
             {item.label}

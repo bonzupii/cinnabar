@@ -7,6 +7,14 @@
 [build.environment]
   NODE_VERSION = "22"
 
+  # Netlify auto-installs @netlify/plugin-nextjs whenever it detects Next, and
+  # that runtime exists to wire up a server — SSR handlers, the ISR cache, the
+  # image CDN. This site is `output: "export"`: there is no server, `publish`
+  # is the static `out/` directory, and the plugin's onPostBuild step has no
+  # server build to publish, so it fails the deploy with "Failed publishing
+  # static content". Skipping it is the documented remedy for a static export.
+  NETLIFY_NEXT_PLUGIN_SKIP = "true"
+
 # Deploys are run by hand from this directory (`npm run deploy`), not on push.
 # This file only describes how a build would run if one were triggered.
 

@@ -1,5 +1,11 @@
 import { ImageResponse } from "next/og";
-import { BRAND, OG_SIZE, WORDMARK_METRICS } from "@/lib/constants";
+import {
+  BRAND_THEMES,
+  OG_SIZE,
+  WORDMARK_METRICS,
+  type BrandPalette,
+  type BrandTheme,
+} from "@/lib/constants";
 import { loadOgFonts } from "@/lib/og-fonts";
 import {
   MARK_BLOCK,
@@ -14,12 +20,17 @@ import {
  *
  * The faces come from @fontsource at build time; see lib/og-fonts.ts for why
  * they are not vendored here.
+ *
+ * The palette and the canvas are parameters rather than constants because
+ * scripts/generate-brand-assets.tsx renders the same banner as a downloadable
+ * PNG, at GitHub's social size and on both grounds. Everything else about the
+ * layout is shared, which is the point — there is one banner design, not two
+ * that have to be kept in step.
  */
-
-const { ground: GROUND, text: TEXT, secondary: SECONDARY, mute: MUTE, hairline: HAIRLINE, cinnabar: CINNABAR } = BRAND;
 
 export const ogSize = OG_SIZE;
 
+export type CanvasSize = { width: number; height: number };
 
 /**
  * The wordmark: the drawn C followed by INNABAR.
@@ -28,14 +39,20 @@ export const ogSize = OG_SIZE;
  * size so Satori — which has no em-relative sizing for an inline SVG — places
  * the letter on the same baseline the type sits on.
  */
-function Wordmark({ cap }: { cap: number }) {
+export function OgWordmark({
+  cap,
+  palette,
+}: {
+  cap: number;
+  palette: BrandPalette;
+}) {
   const height = cap * WORDMARK_METRICS.capHeight;
   const width = cap * WORDMARK_METRICS.width;
   return (
     <div style={{ display: "flex", alignItems: "center" }}>
       <svg width={width} height={height} viewBox={MARK_VIEWBOX_INLINE}>
-        <polygon points={MARK_LETTER_POINTS} fill={TEXT} />
-        <rect {...MARK_BLOCK} fill={CINNABAR} />
+        <polygon points={MARK_LETTER_POINTS} fill={palette.text} />
+        <rect {...MARK_BLOCK} fill={palette.cinnabar} />
       </svg>
       <span
         style={{
@@ -44,7 +61,7 @@ function Wordmark({ cap }: { cap: number }) {
           fontSize: cap,
           lineHeight: 1,
           letterSpacing: cap * -0.035,
-          color: TEXT,
+          color: palette.text,
           marginLeft: cap * WORDMARK_METRICS.sidebearing,
         }}
       >
@@ -58,19 +75,34 @@ export async function renderOgImage({
   eyebrow,
   title,
   description,
+  theme = "dark",
+  size = OG_SIZE,
 }: {
   eyebrow: string;
   title: string;
   description: string;
+  /** Defaults to dark, which is the brand's default and every route's card. */
+  theme?: BrandTheme;
+  /** Defaults to the 1.91:1 social card. */
+  size?: CanvasSize;
 }) {
   const fonts = await loadOgFonts();
+  const palette = BRAND_THEMES[theme];
+  const {
+    ground: GROUND,
+    text: TEXT,
+    secondary: SECONDARY,
+    mute: MUTE,
+    hairline: HAIRLINE,
+    cinnabar: CINNABAR,
+  } = palette;
 
   return new ImageResponse(
     (
       <div
         style={{
-          width: ogSize.width,
-          height: ogSize.height,
+          width: size.width,
+          height: size.height,
           display: "flex",
           flexDirection: "column",
           justifyContent: "space-between",
@@ -85,7 +117,7 @@ export async function renderOgImage({
             justifyContent: "space-between",
           }}
         >
-          <Wordmark cap={52} />
+          <OgWordmark cap={52} palette={palette} />
           <span
             style={{
               fontFamily: "IBM Plex Mono",
@@ -174,6 +206,6 @@ export async function renderOgImage({
         </div>
       </div>
     ),
-    { ...ogSize, fonts },
+    { ...size, fonts },
   );
 }

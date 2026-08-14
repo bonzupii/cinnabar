@@ -27,6 +27,47 @@ export const BRAND = {
   terminal: "#0B0A09",
 } as const;
 
+/**
+ * The same table for the light theme, mirroring globals.css.
+ *
+ * It exists for the raster brand assets, which are wanted on paper as well as
+ * on the dark ground — a README rendered in GitHub's light theme, a slide, a
+ * print. Every value here is the one the light theme already uses, so the PNGs
+ * and the site cannot drift apart.
+ *
+ * `terminal` is the exception and is deliberately the dark value: code
+ * surfaces keep their own ground in both themes, which is the rule globals.css
+ * states and plate 14's last misuse rule enforces.
+ */
+export const BRAND_LIGHT: BrandPalette = {
+  ground: "#F2EEEA",
+  panel: "#EAE5E0",
+  hairline: "#D5CEC7",
+  mute: "#8A827C",
+  grey: "#7E756E",
+  secondary: "#57504A",
+  bright: "#3A342F",
+  text: "#16130F",
+  cinnabar: "#C4351D",
+  cinnabarDeep: "#8F2413",
+  terminal: "#0B0A09",
+};
+
+/**
+ * A palette a brand asset can be painted in. `BRAND` is `as const`, so its own
+ * type is a table of string literals rather than of colours; this is the shape
+ * both tables share.
+ */
+export type BrandPalette = Record<keyof typeof BRAND, string>;
+
+/** The two grounds a brand asset can be rendered on. */
+export const BRAND_THEMES: Record<"dark" | "light", BrandPalette> = {
+  dark: BRAND,
+  light: BRAND_LIGHT,
+};
+
+export type BrandTheme = keyof typeof BRAND_THEMES;
+
 /* ---------------------------------------------------------------- layout -- */
 
 /** The page gutter and maximum content width, shared by every section. */

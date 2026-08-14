@@ -19,11 +19,12 @@ import {
  * milestones, each with its decisions and its verification. That is the right
  * shape for the people doing it and the wrong shape for someone deciding
  * whether to use the language, who wants to know what it can do today. The
- * document is still rendered in full further down the page; this is the
+ * document is still reachable in full further down the page; this is the
  * summary that reads first.
  *
  * Everything here is drawn from a milestone the roadmap marks COMPLETE, or
- * from its "Resolved" section.
+ * from its "Resolved" section. Titles name the thing rather than describe it:
+ * "Division and modulo", not "arithmetic that never traps".
  */
 
 export type Capability = {
@@ -34,92 +35,105 @@ export type Capability = {
   anchor: string;
 };
 
-/** What the language and its toolchain do today. */
-export const SHIPPED: readonly Capability[] = [
+/**
+ * The six a reader needs first — the properties that decide whether the
+ * language is worth their time. Shown up front on the roadmap page.
+ */
+export const SHIPPED_LEAD: readonly Capability[] = [
   {
-    title: "Linear types, checked on every path",
+    title: "Linear types",
     detail:
-      "Native handles must be consumed exactly once. Aliasing exclusivity, field-level partial moves, and rejection of ambiguous returned borrows all fall out of one flow-sensitive analysis.",
+      "Native handles carry a consumption obligation the borrow checker tracks on every path. Aliasing exclusivity, field-level partial moves and rejection of ambiguous returned borrows come out of the same flow-sensitive analysis.",
     icon: LinearIcon,
     anchor: "#resolved",
   },
   {
-    title: "The full fixed-width integer grid",
+    title: "O(1) call-stack recursion",
+    detail:
+      "Self-recursion must be in strict tail position, checked by the typechecker. LLVM turns those calls into jumps at -O2, and the runtime stack guard is gone: no per-entry checks, no getrlimit, no stack-overflow message.",
+    icon: RunIcon,
+    anchor: "#resolved",
+  },
+  {
+    title: "Division and modulo return Result",
+    detail:
+      "Euclidean semantics, so the remainder is never negative. A divisor the compiler can prove is zero is a compile error whatever the numerator; a runtime zero is Err(DivByZero).",
+    icon: CheckIcon,
+    anchor: "#resolved",
+  },
+  {
+    title: "Direct system calls",
+    detail:
+      "Memory, Terminal and File emit the kernel entry point as inline assembly rather than calling libc. Their fixtures compile to IR that declares no libc function at all.",
+    icon: StaticLinkIcon,
+    anchor: "#milestone-4--native-os-surfaces-complete",
+  },
+  {
+    title: "Static, freestanding binaries",
+    detail:
+      "Programs link against a musl libc staged into the compiler at build time. The output has no dynamic section and no dependency on the host's libc.",
+    icon: CodegenIcon,
+    anchor: "#milestone-4--native-os-surfaces-complete",
+  },
+  {
+    title: "Language server",
+    detail:
+      "cinnabar-lsp answers hover, go-to-definition, find-references and completion from the facts the compiler already attached. It contains no second implementation of name resolution or type inference.",
+    icon: BorrowIcon,
+    anchor: "#resolved",
+  },
+] as const;
+
+/** The rest of what has shipped. Folded away on the page by default. */
+export const SHIPPED_REST: readonly Capability[] = [
+  {
+    title: "Fixed-width integers",
     detail:
       "U8 through U64, I8 through I64, and pointer-sized Usize and Isize. Int was retired rather than kept as an alias, so no type has two spellings in a diagnostic.",
     icon: CodegenIcon,
     anchor: "#milestone-1--fixed-width-integer-suite-complete",
   },
   {
-    title: "O(1) call-stack recursion",
+    title: "String literals",
     detail:
-      "Self-recursion must be in strict tail position, enforced at compile time. LLVM turns it into a jump, and the runtime stack guard is gone entirely — no per-entry checks, no stack-overflow message.",
-    icon: RunIcon,
-    anchor: "#resolved",
-  },
-  {
-    title: "Arithmetic that never traps",
-    detail:
-      "Division and modulo return Result and use Euclidean semantics, so the remainder is never negative. A provably-zero divisor is a compile error, whatever the numerator.",
-    icon: CheckIcon,
-    anchor: "#resolved",
-  },
-  {
-    title: "String literals, fixed at lex time",
-    detail:
-      "Double-quoted, with exactly five escapes and no line spanning. The borrow checker learned that static data is an origin, which is what lets a function return a literal without an untraceable loan.",
+      "Double-quoted, five escapes, no line spanning, type &[U8]. The borrow checker learned that static data is an origin, which is what lets a function return a literal without an untraceable loan.",
     icon: FmtIcon,
     anchor: "#milestone-2--string-literals-complete",
   },
   {
-    title: "Direct system calls",
+    title: "build.cnb manifest",
     detail:
-      "Memory, Terminal and File issue the kernel entry point as inline assembly. Their fixtures compile to IR that declares no libc function at all.",
-    icon: StaticLinkIcon,
-    anchor: "#milestone-4--native-os-surfaces-complete",
-  },
-  {
-    title: "A manifest the compiler parses",
-    detail:
-      "build.cnb is Cinnabar source, read back through the front end rather than scanned by a key=value splitter — so a mistake in it is an ordinary diagnostic pointing at the line.",
+      "The manifest is Cinnabar source, read back through the compiler's own front end rather than scanned by a key=value splitter. A mistake in it is an ordinary diagnostic pointing at the line.",
     icon: BuildIcon,
     anchor: "#milestone-5--buildcnb-project-manifest-complete",
   },
   {
-    title: "Diagnostics that name the cause",
+    title: "Definition-site diagnostic labels",
     detail:
-      "Definition-site labels render by default, and near-match suggestions come from the resolver's own scope facts. Every suggestion is hedged, and an ambiguous match stays silent.",
+      "A duplicate symbol labels the first declaration; an immutable assignment labels the val binding; an unhandled Result labels the producing return type. Near-match suggestions come from the resolver's own scope facts and are always hedged.",
     icon: DiagnosticIcon,
     anchor: "#milestone-6--diagnostic-quality-partial",
   },
   {
     title: "Documentation and exercises",
     detail:
-      "cinnabar burn serves version-pinned documentation locally, and eight Mushlings exercises each teach through a real compiler diagnostic quoted verbatim.",
+      "cinnabar burn serves version-pinned documentation locally. Mushlings ships eight exercises, each sourced from a failure class with a real compiler diagnostic quoted verbatim.",
     icon: DocIcon,
     anchor: "#milestone-7--cinnabook-and-mushlings-complete",
   },
   {
-    title: "A memory-checker gate",
+    title: "Valgrind gate",
     detail:
-      "Every valid program in the corpus runs under Valgrind, through a second link mode that keeps the host libc — the shipped binary stays static, nostdlib and no-pie.",
+      "Every valid program in the corpus runs under memcheck, through a second link mode that keeps the host libc so there is an allocator to interpose on. Shipped binaries are unaffected: still static, nostdlib, no-pie.",
     icon: TestIcon,
     anchor: "#milestone-8--verification-partial",
   },
-  {
-    title: "A language server over the same pipeline",
-    detail:
-      "Hover, go-to-definition, find-references and completion are all read from the facts the compiler already attached. There is no second implementation of name resolution.",
-    icon: BorrowIcon,
-    anchor: "#resolved",
-  },
-  {
-    title: "Static, freestanding binaries",
-    detail:
-      "Every program links against a musl libc staged into the compiler at build time. The output has no dynamic section and no dependency on the host's libc.",
-    icon: CodegenIcon,
-    anchor: "#milestone-4--native-os-surfaces-complete",
-  },
+] as const;
+
+/** What the language and its toolchain do today. */
+export const SHIPPED: readonly Capability[] = [
+  ...SHIPPED_LEAD,
+  ...SHIPPED_REST,
 ] as const;
 
 /** Work the roadmap marks PARTIAL — shipped in part, still open in part. */
@@ -127,14 +141,14 @@ export const IN_PROGRESS: readonly Capability[] = [
   {
     title: "Diagnostic quality",
     detail:
-      "Definition-site labels and suggestions have shipped. What remains is widening that treatment to the rest of the front end's error surface.",
+      "Definition-site labels and near-match suggestions have shipped. Widening that treatment to the rest of the front end's error surface is the part still open.",
     icon: DiagnosticIcon,
     anchor: "#milestone-6--diagnostic-quality-partial",
   },
   {
     title: "Verification",
     detail:
-      "The memory-checker gate is in place. Proving the absence of undefined behaviour, rather than instrumenting for it, is the part still open.",
+      "The memcheck gate is in place. Type soundness — progress and preservation — has not been started, and cinnabar soundness reports formal_proof: false because it counts what the front end accepted rather than proving anything.",
     icon: TestIcon,
     anchor: "#milestone-8--verification-partial",
   },
@@ -152,6 +166,6 @@ export const MILESTONE_TALLY = { complete: 6, total: 8 } as const;
 export const HORIZON = {
   title: "Self-hosting",
   detail:
-    "Cinnabar compiling itself, and the compiler becoming a Cinnabar-emitted binary bound by every principle in the manifesto. It is a completeness test — it proves the language can express a real compiler — and a hardening exercise. It is deliberately not a gate: no feature above had to help get there in order to ship.",
+    "Cinnabar compiling itself, with the compiler becoming a Cinnabar-emitted binary bound by every principle in the manifesto. It is a completeness test — it proves the language can express a real compiler — and a hardening exercise. It is not a gate: no feature above had to help get there in order to ship.",
   anchor: "#self-hosting-a-goal-not-a-gate",
 } as const;

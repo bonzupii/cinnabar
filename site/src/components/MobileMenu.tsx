@@ -78,7 +78,7 @@ export default function MobileMenu() {
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
         aria-label={open ? "Close menu" : "Open menu"}
-        className="border-hairline-strong text-text hover:border-text panel-hover inline-flex h-9 w-9 items-center justify-center border lg:hidden"
+        className="border-hairline-strong text-text hover:border-text hover:bg-panel panel-hover pressable inline-flex h-9 w-9 items-center justify-center border lg:hidden"
       >
         <svg
           width="16"
@@ -111,7 +111,7 @@ export default function MobileMenu() {
                 aria-hidden="true"
                 data-testid="mobile-menu-backdrop"
                 onClick={close}
-                className="absolute inset-0 bg-[color:var(--ground)]/80"
+                className="bg-ground/80 absolute inset-0"
               />
               <div
                 ref={panelRef}

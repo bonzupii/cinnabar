@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 /*
  * Icon set — plate 07.
@@ -11,19 +11,38 @@ import type { ReactNode } from "react";
  * 16 px rendering is drawn at 1.8 rather than 1.6.
  */
 
-const ACCENT = "var(--cinnabar)";
+/**
+ * The colour of the part that carries the meaning.
+ *
+ * Indirected through a custom property so an icon can be dropped onto the
+ * accent fill without every glyph in the set growing its own variant: on a
+ * vermilion button the vermilion detail is invisible, so `onAccent` rebinds
+ * this to `currentColor` — the button's own text colour, `--on-cinnabar` — and
+ * the figure goes monochrome instead of losing half of itself.
+ */
+const ACCENT = "var(--icon-accent, var(--cinnabar))";
+
+/** Set on the SVG by `onAccent`; every accented part reads it. */
+const ON_ACCENT_STYLE = { "--icon-accent": "currentColor" } as CSSProperties;
 
 type IconProps = {
   size?: number;
   className?: string;
   /** Accessible name. Omitted icons are hidden from assistive technology. */
   title?: string;
+  /**
+   * Set when the icon sits on the accent fill. `Action`'s primary variant
+   * passes it automatically, so a caller placing an icon on a button never has
+   * to think about it.
+   */
+  onAccent?: boolean;
 };
 
 function Icon({
   size = 24,
   className,
   title,
+  onAccent,
   children,
 }: IconProps & { children: ReactNode }) {
   return (
@@ -40,7 +59,11 @@ function Icon({
       aria-label={title}
       aria-hidden={title ? undefined : true}
       focusable="false"
-      style={{ display: "block", flex: "none" }}
+      style={
+        onAccent
+          ? { display: "block", flex: "none", ...ON_ACCENT_STYLE }
+          : { display: "block", flex: "none" }
+      }
     >
       {title ? <title>{title}</title> : null}
       {children}

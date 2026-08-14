@@ -69,7 +69,7 @@ export default function ThemeToggle() {
       onClick={toggle}
       aria-label="Switch between light and dark theme"
       aria-pressed={theme === "dark"}
-      className="border-hairline-strong text-text hover:border-text panel-hover inline-flex h-9 w-9 items-center justify-center border"
+      className="border-hairline-strong text-text hover:border-text hover:bg-panel panel-hover pressable inline-flex h-9 w-9 items-center justify-center border"
     >
       <span className="theme-ic-dark items-center">
         <svg

@@ -74,7 +74,7 @@ export default function SampleExplorer() {
               className={`panel-hover -mb-px border-b-2 px-5 py-3 text-[13px] font-bold tracking-[0.1em] uppercase ${
                 active
                   ? "border-cinnabar text-text"
-                  : "text-secondary hover:text-text border-transparent"
+                  : "text-secondary hover:text-text hover:border-hairline-strong border-transparent"
               }`}
             >
               {item.label}

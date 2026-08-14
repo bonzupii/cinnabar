@@ -9,6 +9,8 @@
  * Column alignment is load-bearing and easy to break by hand, so it is stated
  * once here rather than being re-derived per line:
  *
+ *   - the rail sits at column 4, and the opening `╭` and closing `╯` sit in
+ *     that same column so the box closes;
  *   - the gutter is ` NN │` — five columns wide;
  *   - source text begins at column 8;
  *   - an underline sits under the span it marks, and its `┬` is the column its
@@ -53,7 +55,7 @@ export const BORROW_DIAGNOSTIC: readonly Segment[][] = [
     { role: "message", text: ": linear value 'vec' is consumed on some paths but not on all paths" },
   ],
   [
-    { role: "gutter", text: "   ─[ " },
+    { role: "gutter", text: "    ╭─[ " },
     { role: "flag", text: "src/main.cnb:14:5" },
     { role: "gutter", text: " ]" },
   ],
@@ -96,7 +98,7 @@ export const BORROW_DIAGNOSTIC: readonly Segment[][] = [
     { role: "gutter", text: "    │         " },
     { role: "secondary", text: "╰── consumed on the other path" },
   ],
-  [{ role: "gutter", text: "   ─╯" }],
+  [{ role: "gutter", text: "────╯" }],
   [
     { role: "message", text: "help" },
     { role: "secondary", text: ": consume 'vec' before returning, or restructure so both" },

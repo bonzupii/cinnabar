@@ -26,15 +26,21 @@ test("markdown headings carry ids so in-document anchors resolve", async ({ page
 test("repo-relative links are rewritten rather than left broken", async ({ page }) => {
   await page.goto("/architecture/");
 
+  /*
+   * Matched through the DOM rather than by role: the rendered document sits
+   * inside a collapsed Disclosure, so its links are not in the accessibility
+   * tree until it is opened. This is a check on how the markup is written —
+   * which is also what a crawler reads — not on what is on screen.
+   */
   // A document with its own page here links to that page...
   const manifestoLink = page
     .getByRole("main")
-    .getByRole("link", { name: "MANIFESTO.md" })
+    .locator("a", { hasText: /^MANIFESTO\.md$/ })
     .first();
   await expect(manifestoLink).toHaveAttribute("href", "/manifesto/");
 
   // ...and everything else goes to GitHub.
-  const sourceLink = page.getByRole("link", { name: "AGENTS.md" }).first();
+  const sourceLink = page.locator("a", { hasText: /^AGENTS\.md$/ }).first();
   await expect(sourceLink).toHaveAttribute(
     "href",
     /^https:\/\/github\.com\/bonzupii\/cinnabar\/blob\/main\//,
@@ -54,15 +60,18 @@ test("no rendered link points at a bare .md path", async ({ page }) => {
 
 test("the roadmap capability cards link into the rendered document", async ({ page }) => {
   await page.goto("/roadmap/");
-  const card = page.getByRole("link", {
-    name: "The full fixed-width integer grid",
-    exact: true,
-  });
+  /*
+   * Any card will do, and none is named here on purpose: what is being
+   * asserted is that a capability on the summary carries the reader down to
+   * the milestone that delivered it, not which capabilities the roadmap lists
+   * this week.
+   */
+  const card = page.getByRole("main").locator('a[href^="#milestone-"]').first();
   await expect(card).toBeVisible();
+
+  const target = (await card.getAttribute("href"))!.slice(1);
   await card.click();
-  await expect(
-    page.locator("#milestone-1--fixed-width-integer-suite-complete"),
-  ).toBeInViewport();
+  await expect(page.locator(`#${target}`)).toBeInViewport();
 });
 
 test("the roadmap leads with what the language does, not with milestone numbers", async ({

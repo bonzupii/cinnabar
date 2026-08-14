@@ -29,7 +29,10 @@ export const ROUTES = [
   {
     name: "roadmap",
     path: "/roadmap/",
-    heading: /Eight milestones down/,
+    // Loose on purpose: the roadmap's headline counts milestones, so pinning
+    // the sentence makes shipping one a test failure. What this file is for is
+    // identifying the page, not reviewing its copy.
+    heading: /milestones/i,
     og: "/roadmap/og-image",
   },
 ] as const;

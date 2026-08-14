@@ -83,7 +83,7 @@ export function UsageBlock({
 }) {
   return (
     <Window path="cinnabar --help" title="Usage" className={className}>
-      <WindowBody className="leading-[1.75]">
+      <WindowBody scale="usage">
         <code>
           {lines.map((line, index) => (
             <span key={index}>
@@ -116,7 +116,7 @@ export function PlainWindow({
 }) {
   return (
     <Window path={path} title={title} className={className}>
-      <WindowBody className="text-term-output text-[12.5px] leading-[1.7]">
+      <WindowBody scale="plain" className="text-term-output">
         <code>{text}</code>
       </WindowBody>
     </Window>
