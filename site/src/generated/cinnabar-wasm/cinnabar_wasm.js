@@ -18,6 +18,34 @@ export function check(source) {
         wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
     }
 }
+
+/**
+ * Markdown hover text (signature, resolved type, linearity) for the source
+ * position at `offset`, or `"null"` if nothing is attached there. Runs
+ * `analysis::analyze` fresh on every call rather than caching it across
+ * calls -- the playground's source is small enough that re-running the
+ * whole front end per hover costs nothing worth avoiding, and it keeps this
+ * crate free of any cross-call state to keep synchronized with the editor.
+ * Built from `cinnabar::analysis::hover`, the exact function the language
+ * server calls: the playground can't show a hover the LSP wouldn't.
+ * @param {string} source
+ * @param {number} offset
+ * @returns {string}
+ */
+export function hover(source, offset) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(source, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.hover(ptr0, len0, offset);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,

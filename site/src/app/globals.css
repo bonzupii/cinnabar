@@ -379,6 +379,24 @@ body {
   }
 }
 
+/*
+ * The playground's hover tooltip (`cinnabarHoverTooltip`, cinnabar-codemirror.ts)
+ * is styled entirely by that module's own inline styles on the card it
+ * returns from `create()` -- but `hoverTooltip()` wraps that card in an outer
+ * `.cm-tooltip.cm-tooltip-hover` host div of its own, and `@codemirror/view`'s
+ * built-in base theme paints that host with its own flat background (and, in
+ * light mode, a border), sized exactly to the card with no padding of its
+ * own. The result: the host's square corners and mismatched grey show through
+ * behind the card's rounded ones. Global, not scoped through
+ * `EditorView.theme()` -- the host mounts outside the subtree that would
+ * scope to (see the comment on `cinnabarHoverTooltip` itself).
+ */
+.cm-tooltip.cm-tooltip-hover {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
 /* Theme toggle icon swap, driven by the resolved theme. */
 .theme-ic-dark {
   display: none;

@@ -64,75 +64,88 @@ export default async function Home() {
         </h1>
 
         {/*
-          The quip and the repository URL used to sit in a second column here.
-          Both are gone: the repository is one click away in the header and
-          again in the footer, and the hero's job is to say what the language
-          is, not to make a joke about another one.
+          Text and CTA on the left, the terminal on the right, from the
+          wordmark down — not a narrow text column stacked above a full-width
+          terminal grid. That stack read as wasted space on a wide viewport:
+          the tagline/badges topped out under half the section's width while
+          the terminal below spanned all of it. A real two-column split uses
+          the same width consistently and gets the terminal above the fold.
         */}
-        <div className="mt-10 flex flex-col gap-6">
-          <div className="text-text max-w-[46ch] text-[20px] leading-[1.4] tracking-[-0.015em] sm:text-[27px]">
-            <InlineMarkdown>{content.block("tagline")}</InlineMarkdown>
+        <div className="mt-10 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:gap-16">
+          <div className="flex flex-col gap-6">
+            {/*
+              The quip and the repository URL used to sit in a second column
+              here. Both are gone: the repository is one click away in the
+              header and again in the footer, and the hero's job is to say
+              what the language is, not to make a joke about another one.
+            */}
+            <div className="text-text text-[20px] leading-[1.4] tracking-[-0.015em] sm:text-[27px]">
+              <InlineMarkdown>{content.block("tagline")}</InlineMarkdown>
+            </div>
+            {/*
+              What it is, then what it is for. A reader deciding whether to
+              keep reading needs the domain and the implementation, and both
+              are stated in README.md's opening two paragraphs. No max-width
+              cap: the column itself (half the section, minus the gap) is
+              already a comfortable measure.
+            */}
+            <div className="text-secondary text-[16px] leading-[1.7]">
+              <InlineMarkdown>{content.block("hero-why")}</InlineMarkdown>
+            </div>
+
+            {/*
+              Plate 12's badge strip.
+
+              `grow` on every badge is the same class of fix as the arena
+              stack on /architecture/ and the window body: a `.rule-grid`
+              paints `--hairline` as its own background, so any part of it
+              the children do not cover shows as a grey block rather than as
+              a rule. `w-fit` is `fit-content`, which clamps to the space
+              available — so on a phone the strip is as wide as the column
+              while its badges have wrapped onto two lines, and the tail of
+              the last line was left uncovered. Flex distributes free space
+              per line, so growing the badges fills whichever line is short
+              and changes nothing at a width where they all fit on one.
+            */}
+            <div className="rule-grid mt-5 flex w-fit flex-wrap">
+              {BADGES.map((badge) => (
+                <span
+                  key={badge}
+                  className="bg-ground text-secondary grow px-4 py-2.5 text-center font-mono text-xs"
+                >
+                  {badge}
+                </span>
+              ))}
+              <span className="bg-cinnabar text-on-cinnabar grow px-4 py-2.5 text-center font-mono text-xs font-medium">
+                {STATUS_BADGE}
+              </span>
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center gap-4">
+              <Action href="/manifesto/" variant="primary" icon={DocIcon}>
+                Read the manifesto
+              </Action>
+              <Action href="/install/" icon={BuildIcon}>
+                Install
+              </Action>
+              <Action href={REPO_URL} variant="ghost" icon={GitHubIcon} external>
+                Source
+              </Action>
+            </div>
           </div>
+
           {/*
-            What it is, then what it is for. A reader deciding whether to keep
-            reading needs the domain and the implementation, and both are
-            stated in README.md's opening two paragraphs.
+            The three commands, beside what each one actually does. The shell
+            block on its own told a reader how to start but not what starting
+            would cost them — the flake, the build, the scaffold.
           */}
-          <div className="text-secondary max-w-[62ch] text-[16px] leading-[1.7]">
-            <InlineMarkdown>{content.block("hero-why")}</InlineMarkdown>
+          <div className="flex flex-col gap-5">
+            <ShellBlock lines={INSTALL_SHELL} cwd="~/src" />
+            <div className="flex flex-col gap-5 [&_li]:text-[15px] [&_ul]:mt-0">
+              <Markdown>{content.block("hero-steps")}</Markdown>
+              <ArrowLink href="/install/">Full build instructions</ArrowLink>
+            </div>
           </div>
-        </div>
-
-        {/*
-          Plate 12's badge strip.
-
-          `grow` on every badge is the same class of fix as the arena stack on
-          /architecture/ and the window body: a `.rule-grid` paints `--hairline`
-          as its own background, so any part of it the children do not cover
-          shows as a grey block rather than as a rule. `w-fit` is `fit-content`,
-          which clamps to the space available — so on a phone the strip is as
-          wide as the section while its badges have wrapped onto two lines, and
-          the tail of the last line was left uncovered. Flex distributes free
-          space per line, so growing the badges fills whichever line is short
-          and changes nothing at a width where they all fit on one.
-        */}
-        <div className="rule-grid mt-11 flex w-fit flex-wrap">
-          {BADGES.map((badge) => (
-            <span
-              key={badge}
-              className="bg-ground text-secondary grow px-4 py-2.5 text-center font-mono text-xs"
-            >
-              {badge}
-            </span>
-          ))}
-          <span className="bg-cinnabar text-on-cinnabar grow px-4 py-2.5 text-center font-mono text-xs font-medium">
-            {STATUS_BADGE}
-          </span>
-        </div>
-
-        {/*
-          The three commands, beside what each one actually does. The shell
-          block on its own told a reader how to start but not what starting
-          would cost them — the flake, the build, the scaffold.
-        */}
-        <div className="mt-9 grid gap-8 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)] lg:gap-16">
-          <ShellBlock lines={INSTALL_SHELL} cwd="~/src" className="max-w-190" />
-          <div className="flex flex-col gap-5 [&_li]:text-[15px] [&_ul]:mt-0">
-            <Markdown>{content.block("hero-steps")}</Markdown>
-            <ArrowLink href="/install/">Full build instructions</ArrowLink>
-          </div>
-        </div>
-
-        <div className="mt-9 flex flex-wrap items-center gap-4">
-          <Action href="/manifesto/" variant="primary" icon={DocIcon}>
-            Read the manifesto
-          </Action>
-          <Action href="/install/" icon={BuildIcon}>
-            Install
-          </Action>
-          <Action href={REPO_URL} variant="ghost" icon={GitHubIcon} external>
-            Source
-          </Action>
         </div>
       </section>
 

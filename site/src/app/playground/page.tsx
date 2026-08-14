@@ -4,6 +4,16 @@ import PlaygroundEditor from "@/components/PlaygroundEditor";
 import { DiagnosticIcon } from "@/components/brand/icons";
 import { ogImageMetadata } from "@/lib/og-image";
 
+/**
+ * `PageHeader`'s own `lede` prop caps at 80ch, the reading width every other
+ * page's opening paragraph uses. This page's intro reads better at the
+ * width its own content area already commits to (the editor and its six
+ * samples are wide), so it's rendered here instead, inside the same
+ * `max-w-[1400px]` container as everything else on the page.
+ */
+const LEDE =
+  "This runs the compiler's real front end — lexing through borrow checking — compiled to WebAssembly, in your browser. Nothing is linked, executed, or sent to a server: it can only tell you whether what you typed is well-formed, the same way it would tell the compiler.";
+
 /** Social image copy, rendered by ./og-image/route.tsx. */
 export const og = {
   eyebrow: "Try it",
@@ -24,14 +34,10 @@ export const metadata: Metadata = {
 export default function PlaygroundPage() {
   return (
     <article className="pb-28">
-      <PageHeader
-        section="Playground"
-        title="Checked as you type."
-        icon={DiagnosticIcon}
-        lede="This runs the compiler's real front end — lexing through borrow checking — compiled to WebAssembly, in your browser. Nothing is linked, executed, or sent to a server: it can only tell you whether what you typed is well-formed, the same way it would tell the compiler."
-      />
+      <PageHeader section="Playground" title="Checked as you type." icon={DiagnosticIcon} />
 
       <div className="mx-auto max-w-[1400px] px-6 pt-14 sm:px-10">
+        <p className="text-secondary mb-10 text-[16px] leading-[1.7] text-pretty">{LEDE}</p>
         <PlaygroundEditor />
       </div>
     </article>

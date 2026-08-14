@@ -45,6 +45,31 @@ pub fn check(source: &str) -> String {
     }
 }
 
+/// Markdown hover text (signature, resolved type, linearity) for the source
+/// position at `offset`, or `"null"` if nothing is attached there. Runs
+/// `analysis::analyze` fresh on every call rather than caching it across
+/// calls -- the playground's source is small enough that re-running the
+/// whole front end per hover costs nothing worth avoiding, and it keeps this
+/// crate free of any cross-call state to keep synchronized with the editor.
+/// Built from `cinnabar::analysis::hover`, the exact function the language
+/// server calls: the playground can't show a hover the LSP wouldn't.
+#[wasm_bindgen]
+pub fn hover(source: &str, offset: i32) -> String {
+    let overlay = [(ENTRY_PATH.to_string(), source.to_string())];
+    let result = analysis::analyze(ENTRY_PATH, &overlay);
+    let value = match analysis::hover(&result, 0, offset as i64) {
+        Some((text, (file, start, end))) => json!({
+            "text": text,
+            "source": source_json(&result.files, file, start, end),
+        }),
+        None => Value::Null,
+    };
+    match serde_json::to_string(&value) {
+        Ok(rendered) => rendered,
+        Err(_) => "null".to_string(),
+    }
+}
+
 fn source_json(files: &[(String, String)], file: i64, start: i64, end: i64) -> Value {
     if file == NO_FILE {
         return Value::Null;
