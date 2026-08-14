@@ -1,6 +1,0 @@
-module Device
-type Handle
-type Buffer<T>
-type Error
-fun open(port: U16) Handle impure
-fun read<T>(handle: &Handle, out: &mut [T]) Result(Usize, Device.Error) impure
