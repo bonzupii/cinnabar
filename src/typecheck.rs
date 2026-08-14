@@ -893,6 +893,89 @@ fn linear_members_of(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, sym: i64, 
     0
 }
 
+// Whether a canonical type key's value can carry a reference anywhere in its
+// structure, not only when the key itself is bare `&T`/`&mut T`/`&[T]`. The
+// borrow checker's returned-borrow obligation (Manifesto principle 5) must
+// apply to a function returning `Result(&T, E)` or a struct with a reference
+// field the same way it applies to a bare `&T` return; gating on the key's
+// own bare kind let a dangling reference escape wrapped in either shape.
+// Mirrors `linear_of`'s struct/enum-member walk (identical substitution,
+// identical cycle guard) because it is the same question -- "does every
+// concrete instantiation of this type carry X" -- for a different X, so a
+// second, independent member-walk is not worth introducing for it. Callers
+// pass a fresh `seen` per top-level query; unlike `linear_of` this is not
+// memoized onto the tyinfo row (no spare payload slot for a second flag),
+// which is a bounded cost paid at case-fold, not at every use.
+pub fn type_contains_ref(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, key: i64, seen: &mut Vec<i64>) -> bool {
+    if key < 0 {
+        return false;
+    }
+    let row = find_tyinfo(nodes, key);
+    if row == NONE {
+        return false;
+    }
+    if has_value(seen, key) {
+        return false;
+    }
+    seen.push(key);
+    let kind = node_b(nodes, row);
+    if kind == TYD_REF || kind == TYD_REF_MUT || kind == TYD_SLICE {
+        return true;
+    }
+    if kind == TYD_ARRAY {
+        return type_contains_ref(nodes, lists, node_e(nodes, row), seen);
+    }
+    if kind == TYD_STRUCT || kind == TYD_ENUM {
+        return ref_members_of(nodes, lists, node_c(nodes, row), key, seen);
+    }
+    false
+}
+
+fn ref_members_of(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, sym: i64, key: i64, seen: &mut Vec<i64>) -> bool {
+    if sym == NONE {
+        return false;
+    }
+    let decl = sym_decl(nodes, sym);
+    if decl == NONE || node_tag(nodes, decl) != NODE_ITEM {
+        return false;
+    }
+    let kind = node_a(nodes, decl);
+    let row = find_tyinfo(nodes, key);
+    let args = if row == NONE { NONE } else { node_d(nodes, row) };
+    if kind == ITEM_STRUCT {
+        let fields = node_e(nodes, decl);
+        let count = list_len(lists, fields);
+        let mut idx = 0i64;
+        while idx < count {
+            let fty_node = node_b(nodes, list_get(lists, fields, idx));
+            let fty = subst_declared_key(nodes, lists, decl, args, ty_key_of(nodes, fty_node));
+            if type_contains_ref(nodes, lists, fty, seen) {
+                return true;
+            }
+            idx += 1;
+        }
+    } else if kind == ITEM_ENUM {
+        let variants = node_e(nodes, decl);
+        let count = list_len(lists, variants);
+        let mut idx = 0i64;
+        while idx < count {
+            let payload = node_b(nodes, list_get(lists, variants, idx));
+            let pcount = list_len(lists, payload);
+            let mut pidx = 0i64;
+            while pidx < pcount {
+                let pty_node = list_get(lists, payload, pidx);
+                let pty = subst_declared_key(nodes, lists, decl, args, ty_key_of(nodes, pty_node));
+                if type_contains_ref(nodes, lists, pty, seen) {
+                    return true;
+                }
+                pidx += 1;
+            }
+            idx += 1;
+        }
+    }
+    false
+}
+
 fn subst_declared_key(
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,

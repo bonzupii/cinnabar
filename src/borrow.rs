@@ -931,8 +931,16 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         }
         let mut prod: Vec<i64> = Vec::new();
         expr_effects(f, b, ctx, value, MODE_VALUE, ret, &mut prod);
-        let ret_kind = ty_kind_of(ctx.1, ret);
-        if (ret_kind == TYD_REF || ret_kind == TYD_REF_MUT || ret_kind == TYD_SLICE)
+        // The returned-borrow obligation must apply whenever the *declared
+        // return type* can carry a reference anywhere in its structure, not
+        // only when it is bare `&T`/`&mut T`/`&[T]`: a function returning
+        // `Result(&T, E)` or a struct with a reference field can return a
+        // dangling borrow of a local exactly the way a bare `&T`-returning
+        // one can, and `prod` already carries the right origin regardless of
+        // the wrapping shape (struct/variant construction propagates its
+        // arguments' own prod).
+        let mut seen: Vec<i64> = Vec::new();
+        if crate::typecheck::type_contains_ref(ctx.1, ctx.2, ret, &mut seen)
             && !static_rooted_ref(ctx, value)
         {
             let op = emit_op(f, OP_RET_REF, NONE, NONE, (0, 0, 0), span);
@@ -1315,7 +1323,15 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
         let op_kind = if mode == MODE_MUT { OP_BORROW_M } else { OP_BORROW };
         let loan_kind = if mode == MODE_MUT { L_MUT } else { L_SHARED };
         check_pending_conflict(f, b, ctx, binding, mode, span);
-        let op = emit_op(f, op_kind, binding, NONE, (0, 0, NONE), span);
+        // `final_path` (computed above) must be threaded through, not
+        // dropped as NONE: borrow_after_move_check reads an op's path to
+        // decide whether it observes a moved value, and a field-chain
+        // borrow with path NONE was therefore invisible to it — a borrow
+        // of an already-moved field (`&s.b` after `s.b` was moved, or
+        // `&s.n` after the whole of `s` was moved) compiled cleanly. This
+        // mirrors what the MODE_VALUE arm below already does with
+        // `final_path` for a field-chain *move*.
+        let op = emit_op(f, op_kind, binding, final_path, (0, 0, NONE), span);
         b.6 = op;
         let loan = alloc_loan(f, binding, loan_kind, 0, NONE);
         b.3.push(loan);
@@ -3286,12 +3302,13 @@ fn compute_summary(f: &F, ctx: &mut Ctx, entry: i64, fn_node: i64) -> Option<Vec
     None
 }
 
-// True when a function's declared return type is a reference or slice —
-// the types the returned-borrow rule applies to.
-fn returns_reference(ctx: &Ctx, fn_node: i64) -> bool {
+// True when a function's declared return type can carry a reference
+// anywhere in its structure — the types the returned-borrow rule applies
+// to, per `type_contains_ref`'s doc comment.
+fn returns_reference(ctx: &mut Ctx, fn_node: i64) -> bool {
     let ret = ty_key_of(ctx.1, node_d(ctx.1, fn_node));
-    let kind = ty_kind_of(ctx.1, ret);
-    kind == TYD_REF || kind == TYD_REF_MUT || kind == TYD_SLICE
+    let mut seen: Vec<i64> = Vec::new();
+    crate::typecheck::type_contains_ref(ctx.1, ctx.2, ret, &mut seen)
 }
 
 // Summary sets only grow: each round unions the newly computed return-origin
@@ -3619,5 +3636,176 @@ fn report(
             fn_span.1,
             fn_span.2,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Drives the real front end (module loading through borrow checking,
+    // the same path `analysis::analyze` gives the LSP and the playground)
+    // over an in-memory source, with no LLVM dependency — the only way to
+    // pin borrow-checker behavior end to end on a machine without the LLVM
+    // toolchain `cargo test`'s fixture-linked suites need.
+    fn errors_for(source: &str) -> Vec<String> {
+        let overlay = [("scratch.cnb".to_string(), source.to_string())];
+        let result = crate::analysis::analyze("scratch.cnb", &overlay);
+        result.errors.iter().map(|d| d.0.clone()).collect()
+    }
+
+    // Pins the fix to `walk_field_chain`: a field-chain borrow (`&s.b`) used
+    // to be emitted with path NONE, so `borrow_after_move_check` could never
+    // see it and a borrow of an already-moved field compiled cleanly into a
+    // real use-after-free.
+    #[test]
+    fn field_borrow_after_move_is_rejected() {
+        let source = r#"
+pub mod Memory
+  pub nat type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+  end
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+  pub nat fun touch(block: &Block) impure Unit
+end
+
+use Memory.allocate
+use Memory.deallocate
+use Memory.touch
+
+pub type Holder
+  pub block: Memory.Block
+  pub tag: I64
+end
+
+pub fun main() impure I64
+  val block = match allocate(1)
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  var holder = Holder(block: block, tag: 7)
+  deallocate(holder.block)
+  touch(&holder.block)
+  return 0
+end
+"#;
+        let errors = errors_for(source);
+        assert!(errors.iter().any(|m| m.contains("use of moved value")));
+    }
+
+    // Same fix, the other trigger shape from the same finding: the whole
+    // struct moved by value (not just one field), then a field of it
+    // borrowed. `mark_descendants` already marks every child path MOVED
+    // when the root moves, so this only needed the path to reach
+    // `borrow_after_move_check` at all.
+    #[test]
+    fn field_borrow_after_whole_struct_moved_is_rejected() {
+        let source = r#"
+pub mod Memory
+  pub nat type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+  end
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+  pub nat fun touch(block: &Block) impure Unit
+end
+
+use Memory.allocate
+use Memory.deallocate
+use Memory.touch
+
+pub type Holder
+  pub block: Memory.Block
+  pub tag: I64
+end
+
+fun consume(holder: Holder) impure Unit
+  deallocate(holder.block)
+  return Unit
+end
+
+pub fun main() impure I64
+  val block = match allocate(1)
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  val holder = Holder(block: block, tag: 7)
+  consume(holder)
+  touch(&holder.block)
+  return 0
+end
+"#;
+        let errors = errors_for(source);
+        assert!(errors.iter().any(|m| m.contains("use of moved value")));
+    }
+
+    // Negative control for both fixes above: borrowing a field before it is
+    // moved, and moving it after the borrow's last use, must stay accepted.
+    #[test]
+    fn field_borrow_before_move_is_still_accepted() {
+        let source = r#"
+pub mod Memory
+  pub nat type Block
+  pub type Error
+    pub AllocationFailed(Usize)
+  end
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+  pub nat fun touch(block: &Block) impure Unit
+end
+
+use Memory.allocate
+use Memory.deallocate
+use Memory.touch
+
+pub type Holder
+  pub block: Memory.Block
+  pub tag: I64
+end
+
+pub fun main() impure I64
+  val block = match allocate(1)
+    Ok(value) => value
+    Err(error) => return 1
+  end
+  var holder = Holder(block: block, tag: 7)
+  touch(&holder.block)
+  deallocate(holder.block)
+  return 0
+end
+"#;
+        let errors = errors_for(source);
+        assert!(errors.is_empty());
+    }
+
+    // Pins the fix to the returned-borrow obligation: it used to apply only
+    // when the declared return type's own kind was bare `&T`/`&mut T`/
+    // `&[T]`, so a function returning `Result(&T, E)` (or any other
+    // reference-carrying aggregate) could return a dangling borrow of a
+    // local with no diagnostic at all. `type_contains_ref` makes the check
+    // apply to the wrapped shape too.
+    #[test]
+    fn dangling_borrow_wrapped_in_result_is_rejected() {
+        let source = r#"
+pub type LookupError
+  pub OutOfBounds
+end
+
+fun dangling() Result(&I64, LookupError)
+  val a: [I64; 3] = [1, 2, 3]
+  return Ok(&a[0])
+end
+
+pub fun main() I64
+  match dangling()
+    Ok(value) => Unit
+    Err(error) => Unit
+  end
+  return 0
+end
+"#;
+        let errors = errors_for(source);
+        assert!(errors.iter().any(|m| m.contains("returned borrow") || m.contains("does not outlive")));
     }
 }
