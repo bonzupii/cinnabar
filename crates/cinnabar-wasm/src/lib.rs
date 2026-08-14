@@ -66,7 +66,12 @@ pub fn hover(source: &str, offset: i32) -> String {
     };
     match serde_json::to_string(&value) {
         Ok(rendered) => rendered,
-        Err(_) => "null".to_string(),
+        Err(serialize_error) => json!({
+            "text": Value::Null,
+            "source": Value::Null,
+            "serialization_error": serialize_error.to_string(),
+        })
+        .to_string(),
     }
 }
 
@@ -101,14 +106,15 @@ fn diagnostics_json(result: &analysis::Analysis) -> Vec<Value> {
         let mut explanations: Vec<Value> = Vec::new();
         let mut note_idx = 0usize;
         while note_idx < result.notes.len() {
-            match result.notes.get(note_idx) {
-                Some(note) if note.0 == error_idx as i64 => {
-                    explanations.push(json!({
-                        "message": note.1,
-                        "source": source_json(&result.files, note.2, note.3, note.4),
-                    }));
-                }
-                _ => {}
+            let note = match result.notes.get(note_idx) {
+                Some(value) => value,
+                None => break,
+            };
+            if note.0 == error_idx as i64 {
+                explanations.push(json!({
+                    "message": note.1,
+                    "source": source_json(&result.files, note.2, note.3, note.4),
+                }));
             }
             note_idx += 1;
         }

@@ -1013,7 +1013,7 @@ fn run_playground(address: &str) -> ExitCode {
         Err(message) => return source_less_failure(&message),
     };
     println!("Cinnabar playground is available at http://{}", address);
-    match advanced_tools::serve_playground(address, &executable) {
+    match advanced_tools::serve_playground(address, &executable, |message| eprintln!("{}", message)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => source_less_failure(&message),
     }
@@ -1052,7 +1052,7 @@ fn generate_documentation(path: &Path, output: Option<&Path>, serve: bool, addre
         };
         let page = docs::render_cinnabook(&api_html);
         println!("Cinnabook {} is available at http://{}", env!("CARGO_PKG_VERSION"), bind_address);
-        return match docs::serve_cinnabook(bind_address, &page) {
+        return match docs::serve_cinnabook(bind_address, &page, |message| eprintln!("{}", message)) {
             Ok(()) => ExitCode::SUCCESS,
             Err(message) => source_less_failure(&message),
         };

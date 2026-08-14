@@ -47,19 +47,21 @@ pub fn render_cinnabook(api_html: &str) -> String {
     page("Cinnabook", &body)
 }
 
-pub fn serve_cinnabook(address: &str, page_text: &str) -> Result<(), String> {
+pub fn serve_cinnabook(address: &str, page_text: &str, mut on_connection_error: impl FnMut(&str)) -> Result<(), String> {
     let listener = TcpListener::bind(address)
         .map_err(|bind_error| format!("cannot bind Cinnabook server to '{}': {}", address, bind_error))?;
     // Only the bind is fatal: once the socket is listening, a connection
     // that fails to accept, read, or write is that one visitor's problem —
     // a browser closing mid-response must not take the server down for
-    // every future visitor. Per-connection failures are logged and the
-    // loop moves on.
+    // every future visitor. Per-connection failures are reported to the
+    // caller through `on_connection_error` (never printed directly here —
+    // this is library code, and only the CLI entry point in `main.rs`
+    // decides how a message reaches the user) and the loop moves on.
     for incoming in listener.incoming() {
         let mut stream = match incoming {
             Ok(stream) => stream,
             Err(accept_error) => {
-                eprintln!("cannot accept Cinnabook connection: {}", accept_error);
+                on_connection_error(&format!("cannot accept Cinnabook connection: {}", accept_error));
                 continue;
             }
         };
@@ -67,7 +69,7 @@ pub fn serve_cinnabook(address: &str, page_text: &str) -> Result<(), String> {
         let bytes_read = match stream.read(&mut request) {
             Ok(count) => count,
             Err(read_error) => {
-                eprintln!("cannot read Cinnabook request: {}", read_error);
+                on_connection_error(&format!("cannot read Cinnabook request: {}", read_error));
                 continue;
             }
         };
@@ -80,7 +82,7 @@ pub fn serve_cinnabook(address: &str, page_text: &str) -> Result<(), String> {
             page_text
         );
         if let Err(write_error) = stream.write_all(response.as_bytes()) {
-            eprintln!("cannot write Cinnabook response: {}", write_error);
+            on_connection_error(&format!("cannot write Cinnabook response: {}", write_error));
         }
     }
     Ok(())
