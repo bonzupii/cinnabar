@@ -1,0 +1,405 @@
+@import "tailwindcss";
+
+/*
+ * Tokens come from the brand board
+ * (.planning/brand/designs/Cinnabar Brand.dc.html). One accent, five greys,
+ * nothing else.
+ *
+ * Two deliberate departures from the board, both recorded here:
+ *
+ * 1. Plate 05 says "the screen system stays dark" and the board has no screen
+ *    light theme. One is provided anyway, at the language owner's direction.
+ *    It is not invented: it uses plate 05's own "Light surface" set, which the
+ *    board scopes to print — #F2EEEA, #E4DED8, #C4351D, #16130F — extended
+ *    with the greys needed to carry text on it.
+ *
+ * 2. The board sets 10-11px mono labels in its two darkest greys, which
+ *    measure 3.47:1 and 4.25:1 on the ground — under WCAG AA's 4.5:1. The
+ *    lifted --label and --cinnabar-text carry text; the brand tokens are
+ *    unchanged and still describe rules, fills and the mark.
+ *
+ * tests/unit/palette.test.ts pins every ratio in both themes.
+ */
+
+:root {
+  /* Dark — the board's default, and this site's. */
+  --ground: #100e0d;
+  --panel: #171514;
+  --panel-raised: #242120;
+  --hairline: #302c2a;
+  --hairline-strong: #423d3a;
+
+  --mute: #6e6763;
+  --grey: #7c7570;
+  --secondary: #a29b96;
+  --bright: #c9c2bd;
+  --text: #ede9e6;
+
+  --cinnabar: #e0442a;
+  --cinnabar-deep: #a82d1b;
+  --on-cinnabar: #100e0d;
+
+  --label: #928a85;
+  --cinnabar-text: #f26a4f;
+
+  /*
+   * The window frame's drop shadow. Not a palette entry — it is a black at low
+   * alpha rather than one of the five greys, so it stays outside the token
+   * table tests/unit/palette.test.ts reads (which only collects hex values).
+   * On the near-black ground a shadow can only read as depth if it is darker
+   * than the ground itself, so dark carries the heavier of the two.
+   */
+  --window-shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 6px 18px rgb(0 0 0 / 0.34);
+
+  color-scheme: dark;
+}
+
+/*
+ * Light.
+ *
+ * Applied when the visitor's system asks for it, unless they have explicitly
+ * chosen dark here. An explicit choice always wins, in both directions.
+ */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --ground: #f2eeea;
+    --panel: #eae5e0;
+    --panel-raised: #e4ded8;
+    --hairline: #d5cec7;
+    --hairline-strong: #bdb4ac;
+
+    --mute: #8a827c;
+    --grey: #7e756e;
+    --secondary: #57504a;
+    --bright: #3a342f;
+    --text: #16130f;
+
+    --cinnabar: #c4351d;
+    --cinnabar-deep: #8f2413;
+    --on-cinnabar: #f2eeea;
+
+    --label: #665d56;
+    --cinnabar-text: #a82d1b;
+
+    /* Lighter on paper: a shadow that reads on #100E0D is a bruise on #F2EEEA. */
+    --window-shadow: 0 1px 2px rgb(22 19 15 / 0.14), 0 6px 18px rgb(22 19 15 / 0.1);
+
+    color-scheme: light;
+  }
+}
+
+:root[data-theme="light"] {
+  --ground: #f2eeea;
+  --panel: #eae5e0;
+  --panel-raised: #e4ded8;
+  --hairline: #d5cec7;
+  --hairline-strong: #bdb4ac;
+
+  --mute: #8a827c;
+  --grey: #7e756e;
+  --secondary: #57504a;
+  --bright: #3a342f;
+  --text: #16130f;
+
+  --cinnabar: #c4351d;
+  --cinnabar-deep: #8f2413;
+  --on-cinnabar: #f2eeea;
+
+  --label: #665d56;
+  --cinnabar-text: #a82d1b;
+
+  --window-shadow: 0 1px 2px rgb(22 19 15 / 0.14), 0 6px 18px rgb(22 19 15 / 0.1);
+
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --ground: #100e0d;
+  --panel: #171514;
+  --panel-raised: #242120;
+  --hairline: #302c2a;
+  --hairline-strong: #423d3a;
+
+  --mute: #6e6763;
+  --grey: #7c7570;
+  --secondary: #a29b96;
+  --bright: #c9c2bd;
+  --text: #ede9e6;
+
+  --cinnabar: #e0442a;
+  --cinnabar-deep: #a82d1b;
+  --on-cinnabar: #100e0d;
+
+  --label: #928a85;
+  --cinnabar-text: #f26a4f;
+
+  --window-shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 6px 18px rgb(0 0 0 / 0.34);
+
+  color-scheme: dark;
+}
+
+/*
+ * Code surfaces do not follow the theme.
+ *
+ * Plate 09's theme is called "Cinnabar Dark" and is specified against the dark
+ * ground; plate 14's last misuse rule forbids adding colours to it. Rather
+ * than invent a light variant, code keeps its own ground in both themes — so
+ * the keyword accent stays at the board's exact #E0442A and every measured
+ * ratio in the theme holds whichever theme the page is in.
+ */
+:root,
+:root[data-theme="light"],
+:root[data-theme="dark"] {
+  --code-ground: #100e0d;
+  --code-terminal: #0b0a09;
+
+  --syn-keyword: #e0442a;
+  --syn-type: #ede9e6;
+  --syn-identifier: #c9c2bd;
+  --syn-literal: #a29b96;
+  --syn-punctuation: #9a928d;
+  --syn-comment: #8a837e;
+
+  /* Terminal transcripts — plate 10's diagnostic roles. */
+  --term-prompt: #928a85;
+  --term-command: #ede9e6;
+  --term-flag: #c9c2bd;
+  --term-output: #a29b96;
+  --term-error: #e0442a;
+  --term-gutter: #928a85;
+}
+
+@theme inline {
+  --color-ground: var(--ground);
+  --color-panel: var(--panel);
+  --color-panel-raised: var(--panel-raised);
+  --color-hairline: var(--hairline);
+  --color-hairline-strong: var(--hairline-strong);
+
+  --color-mute: var(--mute);
+  --color-grey: var(--grey);
+  --color-secondary: var(--secondary);
+  --color-bright: var(--bright);
+  --color-text: var(--text);
+  --color-label: var(--label);
+
+  --color-cinnabar: var(--cinnabar);
+  --color-cinnabar-deep: var(--cinnabar-deep);
+  --color-cinnabar-text: var(--cinnabar-text);
+  --color-on-cinnabar: var(--on-cinnabar);
+
+  --color-code-ground: var(--code-ground);
+  --color-code-terminal: var(--code-terminal);
+
+  --color-syn-keyword: var(--syn-keyword);
+  --color-syn-type: var(--syn-type);
+  --color-syn-identifier: var(--syn-identifier);
+  --color-syn-literal: var(--syn-literal);
+  --color-syn-punctuation: var(--syn-punctuation);
+  --color-syn-comment: var(--syn-comment);
+
+  --color-term-prompt: var(--term-prompt);
+  --color-term-command: var(--term-command);
+  --color-term-flag: var(--term-flag);
+  --color-term-output: var(--term-output);
+  --color-term-error: var(--term-error);
+  --color-term-gutter: var(--term-gutter);
+
+  --font-sans: var(--font-schibsted-grotesk);
+  --font-mono: var(--font-ibm-plex-mono);
+}
+
+html {
+  background: var(--ground);
+}
+
+body {
+  background: var(--ground);
+  color: var(--text);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--cinnabar);
+  color: var(--on-cinnabar);
+}
+
+:focus-visible {
+  outline: 2px solid var(--cinnabar-text);
+  outline-offset: 2px;
+}
+
+/*
+ * The board's signature layout device: a 1px hairline showing through the gaps
+ * of a grid whose cells paint their own background. Crisper than a border per
+ * cell, and it never doubles up at a shared edge.
+ */
+.rule-grid {
+  background: var(--hairline);
+  border: 1px solid var(--hairline);
+  gap: 1px;
+}
+
+/* Plate 09: a linear handle is marked structurally, never chromatically. */
+.linear-handle {
+  border-bottom: 1.5px dotted var(--cinnabar);
+  padding-bottom: 1px;
+}
+
+/*
+ * Entrance reveals.
+ *
+ * The hidden state applies only when JavaScript is running — the `js` class is
+ * added by the pre-paint script — so a reader without it sees every section
+ * normally rather than a blank page. `Reveal` adds `is-in` when the element
+ * scrolls into view.
+ *
+ * Motion is restrained by design: 120-200ms, no bounce, no spin.
+ */
+.reveal {
+  transition:
+    opacity 280ms cubic-bezier(0.22, 0.61, 0.36, 1),
+    transform 280ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+:root.js .reveal:not(.is-in) {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+/*
+ * With reduced motion there is no hidden state at all. This is deliberately
+ * not "the same animation, faster": the content is simply present.
+ */
+@media (prefers-reduced-motion: reduce) {
+  :root.js .reveal:not(.is-in) {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.panel-hover {
+  transition:
+    border-color 120ms ease-out,
+    background-color 120ms ease-out,
+    color 120ms ease-out;
+}
+
+/*
+ * The window frame.
+ *
+ * The identity is flat and hard-edged, so the radius is the smallest one that
+ * still reads as a corner rather than as a rounding error, and the shadow is a
+ * soft ground shadow rather than a card lift. `overflow: hidden` is what makes
+ * the radius real: the body is a <pre> that paints its own ground right up to
+ * the frame, and without clipping its square corners sit proud of the rounded
+ * border.
+ */
+.window-frame {
+  border-radius: 5px;
+  overflow: hidden;
+  box-shadow: var(--window-shadow);
+  transition: border-color 160ms ease-out;
+}
+
+/*
+ * Hovering a window lifts its hairline to the stronger grey. `.rule-grid`
+ * paints the frame's border and the 1px seam between the bar and the body from
+ * the same colour, so both move together — the frame reads as one object being
+ * addressed, which is the point of the gesture.
+ */
+.window-frame:hover {
+  border-color: var(--hairline-strong);
+  background: var(--hairline-strong);
+}
+
+/*
+ * The three window controls.
+ *
+ * Round, and otherwise flat: the base colour comes from a `bg-*` token on the
+ * element and nothing is painted over it. A specular gradient was tried and
+ * removed — any shading across a 10px disc reads as a bevel, which is the one
+ * thing the identity does not do. Plate 05 is flat hard vector, no gradients.
+ *
+ * They are decoration and are aria-hidden: there is no window to close, and a
+ * control that does nothing is worse than no control.
+ */
+.window-control {
+  border-radius: 9999px;
+}
+
+/*
+ * An interactive cell in one of the hairline grids.
+ *
+ * Background alone was too quiet to register as "this is a link". The accent
+ * rule is drawn inset rather than as a border so the cell does not change size
+ * and the grid's hairlines do not shift by a pixel under the cursor.
+ */
+.panel-interactive {
+  box-shadow: inset 0 -2px 0 0 transparent;
+  transition:
+    background-color 140ms ease-out,
+    box-shadow 160ms ease-out,
+    transform 160ms ease-out;
+}
+
+.panel-interactive:hover,
+.panel-interactive:focus-within {
+  box-shadow: inset 0 -2px 0 0 var(--cinnabar);
+}
+
+/*
+ * A control that acknowledges being pressed. One pixel, on the press only —
+ * the brand's motion note is 120-200ms with no bounce, and this is the
+ * smallest gesture that still reads as a button going down.
+ */
+.pressable:active {
+  transform: translateY(1px);
+}
+
+/*
+ * Reduced motion removes the movement rather than shortening it. The colour
+ * changes stay: they are what carries the state, and they are not motion.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .pressable:active {
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Theme toggle icon swap, driven by the resolved theme. */
+.theme-ic-dark {
+  display: none;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .theme-ic-dark {
+    display: inline-flex;
+  }
+  :root:not([data-theme="light"]) .theme-ic-light {
+    display: none;
+  }
+}
+:root[data-theme="dark"] .theme-ic-dark {
+  display: inline-flex;
+}
+:root[data-theme="dark"] .theme-ic-light {
+  display: none;
+}
+:root[data-theme="light"] .theme-ic-dark {
+  display: none;
+}
+:root[data-theme="light"] .theme-ic-light {
+  display: inline-flex;
+}

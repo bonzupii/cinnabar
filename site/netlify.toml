@@ -1,0 +1,48 @@
+[build]
+  # The Netlify site is linked to this subdirectory, so the build runs here and
+  # publishes the static export beside it.
+  command = "npm run build"
+  publish = "out"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+  # Netlify auto-installs @netlify/plugin-nextjs whenever it detects Next, and
+  # that runtime exists to wire up a server — SSR handlers, the ISR cache, the
+  # image CDN. This site is `output: "export"`: there is no server, `publish`
+  # is the static `out/` directory, and the plugin's onPostBuild step has no
+  # server build to publish, so it fails the deploy with "Failed publishing
+  # static content". Skipping it is the documented remedy for a static export.
+  NETLIFY_NEXT_PLUGIN_SKIP = "true"
+
+# Deploys are run by hand from this directory (`npm run deploy`), not on push.
+# This file only describes how a build would run if one were triggered.
+
+# The social images are route handlers at /og-image, so the files they emit
+# have no extension and a static host has nothing to infer a type from — it
+# would serve them as a generic download, which every social scraper rejects.
+# These rules restore the real type. tests/e2e/metadata.spec.ts asserts the
+# images are valid PNGs and tests/unit/netlify-config.test.ts asserts these
+# rules exist, since the local test server has no netlify.toml to read.
+[[headers]]
+  for = "/og-image"
+  [headers.values]
+    Content-Type = "image/png"
+
+[[headers]]
+  for = "/*/og-image"
+  [headers.values]
+    Content-Type = "image/png"
+
+[[headers]]
+  for = "/_next/static/*"
+  [headers.values]
+    # Fingerprinted assets — safe to cache indefinitely.
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    X-Frame-Options = "DENY"

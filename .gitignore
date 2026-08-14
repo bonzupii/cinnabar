@@ -21,3 +21,6 @@ tests/fixtures/**
 !tests/fixtures/**/
 !tests/fixtures/**/*.cnb
 !tests/fixtures/**/*.idl
+
+# Local Netlify folder
+.netlify

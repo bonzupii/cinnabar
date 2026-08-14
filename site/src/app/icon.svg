@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-2.5 0 100 100" width="32" height="32">
+  <title>Cinnabar</title>
+  <rect x="-2.5" y="0" width="100" height="100" fill="#100E0D"/>
+  <polygon points="95,0 44,0 0,30 0,70 44,100 95,100 95,78.72 52.7,78.72 24.8,59.69 24.8,40.31 52.7,21.28 95,21.28" fill="#EDE9E6"/>
+  <rect x="52" y="33" width="34" height="34" fill="#E0442A"/>
+</svg>
