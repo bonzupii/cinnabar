@@ -3023,6 +3023,37 @@ fn index_result_key(state: &mut State, payload: i64) -> i64 {
     canon_tyinfo(state.1, state.2, TYD_ENUM, result_sym, args, NONE, NONE)
 }
 
+// Whether one specific index expression's access is fallible.  `check_index`
+// decides it once -- an index it proves in range against a fixed array
+// length reads the element directly, anything else goes through
+// `Result(T, IndexError)` -- and records it in the `EXPR_INDEX` row's third
+// operand slot, which the parser leaves at `NONE` because an index has only
+// a base and an index expression.  A spare slot on the node that owns the
+// fact, rather than a side table, for the same reason a type descriptor's
+// linearity flag rides in a spare slot of its own row.
+//
+// Codegen must read this instead of re-deriving fallibility from the shape
+// of the type attached to the node.  The shapes are not distinguishable: an
+// in-range constant index into `[Result(T, E); N]` attaches the bare element
+// key, and that key *is* a `Result` enum, so a shape test sends an
+// infallible access down the fallible path and copies the wrong bytes.
+pub const IDX_ACCESS_IN_RANGE: i64 = 0;
+pub const IDX_ACCESS_FALLIBLE: i64 = 1;
+
+// `NONE` for any node that is not an index expression, so a caller holding
+// an arbitrary expression id cannot mistake another expression kind's third
+// operand (a right-hand operand id, say) for this fact.
+pub fn index_access_of(nodes: &[i64], expr: i64) -> i64 {
+    if node_tag(nodes, expr) != NODE_EXPR || node_a(nodes, expr) != EXPR_INDEX {
+        return NONE;
+    }
+    node_d(nodes, expr)
+}
+
+fn index_set_access(nodes: &mut [i64], expr: i64, access: i64) -> bool {
+    node_set_d(nodes, expr, access)
+}
+
 fn check_index(state: &mut State, expr: i64, borrow: i64, expected: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     let base = node_b(state.1, expr);
     let index = node_c(state.1, expr);
@@ -3071,10 +3102,12 @@ fn check_index(state: &mut State, expr: i64, borrow: i64, expected: i64, ret: i6
             if value < 0 || value >= fixed_len {
                 push_error(state.3, &format!("array index out of bounds: index is {} but array length is {}", value, fixed_len), file, start, end);
             }
+            index_set_access(state.1, expr, IDX_ACCESS_IN_RANGE);
             expr_set_ty(state.1, expr, payload);
             return payload;
         }
     }
+    index_set_access(state.1, expr, IDX_ACCESS_FALLIBLE);
     let key = index_result_key(state, payload);
     expr_set_ty(state.1, expr, key);
     key
