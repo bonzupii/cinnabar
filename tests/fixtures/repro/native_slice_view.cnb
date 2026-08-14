@@ -1,0 +1,259 @@
+#! Signature-driven native slice views: the resolver assigns one category opcode
+#! to every native function whose first argument is a reference to a native
+#! handle and whose result is a slice.  This fixture deliberately gives three
+#! different spellings to that same operation: the standard vector view, a
+#! String view, and a custom view over Memory.Block.
+
+pub mod Slice
+  pub nat fun len<T>(view: &[T]) Usize
+end
+
+pub mod Collections
+  pub nat type Vec(T)
+  pub nat type String
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+    pub KeyNotFound
+    pub EmptySlice
+    pub InvalidUtf8
+  end
+
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_push<T>(vec: &mut Vec(T), value: T) impure Result(Unit, Error)
+  pub nat fun vec_view<T>(vec: &Vec(T)) &[T]
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
+  pub nat fun string_from_slice(view: &[U8]) impure Result(String, Error)
+  pub nat fun string_view(value: &String) &[U8]
+  pub nat fun string_free(value: String) impure Unit
+end
+
+pub mod Memory
+  pub nat type Block
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub AccessOutOfBounds(Usize, Usize)
+  end
+
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+  pub nat fun write_u8(block: &Block, offset: Usize, value: U8) impure Result(Unit, Error)
+  pub nat fun block_view(block: &Block) &[U8]
+end
+
+pub type Pair
+  pub first: U8
+  pub second: U8
+end
+
+pub const BYTE_A: U8 = 0x5A
+pub const BYTE_C: U8 = 0x43
+pub const BYTE_PAIR_FIRST: U8 = 0x11
+pub const BYTE_PAIR_SECOND: U8 = 0x22
+pub const BYTE_BLOCK: U8 = 0xA5
+pub const NUMBER_I64: I64 = 0x0102030405060708
+
+use Slice.len as slice_len
+use Collections.vec_new
+use Collections.vec_push
+use Collections.vec_view
+use Collections.vec_free
+use Collections.string_from_slice
+use Collections.string_view
+use Collections.string_free
+use Memory.allocate
+use Memory.deallocate
+use Memory.write_u8
+use Memory.block_view
+
+fun fail_u8_vec<T>(vec: Collections.Vec(U8), error: Collections.Error) impure Result(T, Collections.Error)
+  vec_free(vec)
+  return Err(error)
+end
+
+fun fail_i64_vec<T>(vec: Collections.Vec(I64), error: Collections.Error) impure Result(T, Collections.Error)
+  vec_free(vec)
+  return Err(error)
+end
+
+fun fail_pair_vec<T>(vec: Collections.Vec(Pair), error: Collections.Error) impure Result(T, Collections.Error)
+  vec_free(vec)
+  return Err(error)
+end
+
+fun fail_string_index(value: Collections.String, index: Usize, length: Usize) impure Result(I64, Collections.Error)
+  string_free(value)
+  return Err(Collections.IndexOutOfBounds(index + length))
+end
+
+fun fail_block_write(block: Memory.Block, error: Memory.Error) impure I64
+  deallocate(block)
+  match error
+    Memory.AllocationFailed(size) => return I64.from(size) + 60
+    Memory.AccessOutOfBounds(offset, size) => return I64.from(offset) + I64.from(size) + 70
+  end
+end
+
+fun fail_block_index(block: Memory.Block, index: Usize, length: Usize) impure I64
+  deallocate(block)
+  return I64.from(index) + I64.from(length) + 80
+end
+
+fun check_u8_view() impure Result(I64, Collections.Error)
+  val vec = try vec_new[U8]()
+  val pushed = vec_push[U8](&mut vec, BYTE_A)
+  match pushed
+    Ok(Unit) => Unit
+    Err(error) => return fail_u8_vec(vec, error)
+  end
+
+  val view = vec_view(&vec)
+  val length = slice_len(view)
+  val first = match view[0]
+    Ok(value) => value
+    Err(IndexOutOfBounds(index, actual_length)) =>
+      return fail_u8_vec(vec, Collections.IndexOutOfBounds(index + actual_length))
+  end
+  vec_free(vec)
+
+  if length == 1 && first == BYTE_A
+    return Ok(0)
+  end
+  return Ok(1)
+end
+
+fun check_i64_view() impure Result(I64, Collections.Error)
+  val vec = try vec_new[I64]()
+  val pushed = vec_push[I64](&mut vec, NUMBER_I64)
+  match pushed
+    Ok(Unit) => Unit
+    Err(error) => return fail_i64_vec(vec, error)
+  end
+
+  val view = vec_view(&vec)
+  val length = slice_len(view)
+  val first = match view[0]
+    Ok(value) => value
+    Err(IndexOutOfBounds(index, actual_length)) =>
+      return fail_i64_vec(vec, Collections.IndexOutOfBounds(index + actual_length))
+  end
+  vec_free(vec)
+
+  if length == 1 && first == NUMBER_I64
+    return Ok(0)
+  end
+  return Ok(1)
+end
+
+fun check_pair_view() impure Result(I64, Collections.Error)
+  val vec = try vec_new[Pair]()
+  val pushed = vec_push(&mut vec, Pair(first: BYTE_PAIR_FIRST, second: BYTE_PAIR_SECOND))
+  match pushed
+    Ok(Unit) => Unit
+    Err(error) => return fail_pair_vec(vec, error)
+  end
+
+  val view: &[Pair] = vec_view(&vec)
+  val length = slice_len(view)
+  val first: Pair = match view[0]
+    Ok(value) => value
+    Err(IndexOutOfBounds(index, actual_length)) =>
+      return fail_pair_vec(vec, Collections.IndexOutOfBounds(index + actual_length))
+  end
+  vec_free(vec)
+
+  if length == 1 && first.first == BYTE_PAIR_FIRST && first.second == BYTE_PAIR_SECOND
+    return Ok(0)
+  end
+  return Ok(1)
+end
+
+fun check_string_view() impure Result(I64, Collections.Error)
+  val vec = try vec_new[U8]()
+  val pushed = vec_push[U8](&mut vec, BYTE_C)
+  match pushed
+    Ok(Unit) => Unit
+    Err(error) => return fail_u8_vec(vec, error)
+  end
+
+  val source = vec_view(&vec)
+  val string = match string_from_slice(source)
+    Ok(value) => value
+    Err(error) => return fail_u8_vec(vec, error)
+  end
+  vec_free(vec)
+
+  val view = string_view(&string)
+  val length = slice_len(view)
+  val first = match view[0]
+    Ok(value) => value
+    Err(IndexOutOfBounds(index, actual_length)) =>
+      return fail_string_index(string, index, actual_length)
+  end
+  string_free(string)
+
+  if length == 1 && first == BYTE_C
+    return Ok(0)
+  end
+  return Ok(1)
+end
+
+fun collection_code(result: Result(I64, Collections.Error)) I64
+  match result
+    Ok(value) => return value
+    Err(Collections.AllocationFailed(size)) => return I64.from(size) + 20
+    Err(Collections.IndexOutOfBounds(index)) => return I64.from(index) + 30
+    Err(Collections.KeyNotFound) => return 40
+    Err(Collections.EmptySlice) => return 41
+    Err(Collections.InvalidUtf8) => return 42
+  end
+end
+
+fun check_custom_view() impure I64
+  val block = match allocate(1)
+    Ok(value) => value
+    Err(Memory.AllocationFailed(size)) => return I64.from(size) + 50
+  end
+
+  val written = write_u8(&block, 0, BYTE_BLOCK)
+  match written
+    Ok(Unit) => Unit
+    Err(error) => return fail_block_write(block, error)
+  end
+
+  val view = block_view(&block)
+  val length = slice_len(view)
+  val first = match view[0]
+    Ok(value) => value
+    Err(IndexOutOfBounds(index, actual_length)) =>
+      return fail_block_index(block, index, actual_length)
+  end
+  deallocate(block)
+
+  if length == 1 && first == BYTE_BLOCK
+    return 0
+  end
+  return 1
+end
+
+pub fun main() impure I64
+  val u8_code = collection_code(check_u8_view())
+  if u8_code != 0
+    return u8_code
+  end
+  val i64_code = collection_code(check_i64_view())
+  if i64_code != 0
+    return i64_code
+  end
+  val pair_code = collection_code(check_pair_view())
+  if pair_code != 0
+    return pair_code
+  end
+  val string_code = collection_code(check_string_view())
+  if string_code != 0
+    return string_code
+  end
+  return check_custom_view()
+end
