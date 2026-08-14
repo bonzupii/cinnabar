@@ -83,17 +83,29 @@ export default async function Home() {
           </div>
         </div>
 
-        {/* Plate 12's badge strip. */}
+        {/*
+          Plate 12's badge strip.
+
+          `grow` on every badge is the same class of fix as the arena stack on
+          /architecture/ and the window body: a `.rule-grid` paints `--hairline`
+          as its own background, so any part of it the children do not cover
+          shows as a grey block rather than as a rule. `w-fit` is `fit-content`,
+          which clamps to the space available — so on a phone the strip is as
+          wide as the section while its badges have wrapped onto two lines, and
+          the tail of the last line was left uncovered. Flex distributes free
+          space per line, so growing the badges fills whichever line is short
+          and changes nothing at a width where they all fit on one.
+        */}
         <div className="rule-grid mt-11 flex w-fit flex-wrap">
           {BADGES.map((badge) => (
             <span
               key={badge}
-              className="bg-ground text-secondary px-4 py-2.5 font-mono text-xs"
+              className="bg-ground text-secondary grow px-4 py-2.5 text-center font-mono text-xs"
             >
               {badge}
             </span>
           ))}
-          <span className="bg-cinnabar text-on-cinnabar px-4 py-2.5 font-mono text-xs font-medium">
+          <span className="bg-cinnabar text-on-cinnabar grow px-4 py-2.5 text-center font-mono text-xs font-medium">
             {STATUS_BADGE}
           </span>
         </div>

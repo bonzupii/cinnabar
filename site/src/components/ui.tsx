@@ -186,14 +186,6 @@ export function SourceNote({
   );
 }
 
-/** Inline code outside a markdown document. */
-export function Code({ children }: { children: ReactNode }) {
-  return (
-    <code className="border-hairline bg-panel text-bright border px-[5px] py-[2px] font-mono text-[0.875em] wrap-break-word">
-      {children}
-    </code>
-  );
-}
 
 /* --------------------------------------------------------------- surfaces -- */
 

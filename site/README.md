@@ -187,6 +187,31 @@ Use registered tokens. `bg-[color:var(--hairline-strong)]` and
 
 ## Components worth knowing about
 
+**A `.rule-grid` must be covered by its children.** The board's signature layout
+device paints `--hairline` as the *container's* background and separates its
+children by a 1px gap, so every rule a reader sees is the container showing
+through. That works only while the children cover it: anywhere they do not
+reach is not a 1px rule but a block of flat grey. It has now been got wrong
+three times, from three different causes:
+
+- A window stretched to the height of a taller column, whose bar and body only
+  add up to their own content. `WindowBody` is `flex-1`, which is right there —
+  a terminal's ground reaching the frame edge is what a terminal looks like.
+- The arena card stack on `/architecture/`, stretched the same way. The fix is
+  the opposite one — `self-start`, so it is not stretched at all — because a
+  card's height is its own content's, and growing these three would tie how
+  tall a card is to how long the prose in the *next column* happens to run.
+- The home page's badge strip. `w-fit` is `fit-content`, which clamps to the
+  space available, so on a phone the strip is as wide as the section while its
+  badges have wrapped onto a second line and left its tail bare. The badges
+  `grow`, and flex distributes free space per line, so a short line is filled
+  by the badges on it and a full line is unchanged.
+
+A `.rule-grid` placed in a grid or flex row is the thing to look at.
+`tests/e2e/rule-grid.spec.ts` measures every one of them on every route, at
+desktop and at 390px, and fails when a container's inner edge sits more than a
+pixel or so outside its children.
+
 **`Disclosure` is a native `<details>`,** not a button and a piece of state. The
 content is in the DOM whether the section is open or not, so a crawler and a
 reader without JavaScript get the whole document; the open/closed state, the
@@ -301,7 +326,8 @@ npm test             # vitest — pure functions: highlighters, link rewriting,
                      #   palette contrast, TOC, content bindings, GitHub feed
 npm run build        # the static export
 npm run test:e2e     # playwright — visual, a11y (axe), navigation, motion,
-                     #   graceful degradation of the commit feed
+                     #   hairline-grid coverage, graceful degradation of the
+                     #   commit feed
 npm run test:links   # linkinator over the built export
 npm run test:lighthouse
 ```

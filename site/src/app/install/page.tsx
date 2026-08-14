@@ -2,14 +2,14 @@ import type { Metadata } from "next";
 import type { ComponentType, ReactNode } from "react";
 import DataTable from "@/components/DataTable";
 import Disclosure from "@/components/Disclosure";
-import PageHeader from "@/components/PageHeader";
+import { InlineMarkdown } from "@/components/Markdown";
+import PageHeader, { Eyebrow } from "@/components/PageHeader";
 import SectionHeading from "@/components/SectionHeading";
 import ShellBlock, { PlainWindow } from "@/components/ShellBlock";
 import Reveal from "@/components/Reveal";
-import { ArrowLink, Callout, Code, MarkedList, Prose } from "@/components/ui";
+import { ArrowLink, Callout, MarkedList, Prose } from "@/components/ui";
 import {
   BuildIcon,
-  CodegenIcon,
   LspIcon,
   RunIcon,
   StaticLinkIcon,
@@ -342,16 +342,29 @@ export default async function InstallPage() {
           </SplitStep>
         </Step>
 
+        {/*
+          The page's closing statement, in the shape the site's other callouts
+          already use: an eyebrow, the claim, then how it is made good. It was
+          a lone 22px icon on its own line above a paragraph, which anchored
+          nothing and left the box reading half-empty — and the icon carried no
+          meaning the eyebrow does not carry in words, so it is gone rather
+          than moved. Compare the Single-Fact Rule on /architecture/ and the
+          horizon on /roadmap/, both eyebrow-first.
+
+          The prose is markdown rather than JSX because the sentence quotes
+          what the compiler prints, and a literal in backticks in content.md is
+          the same string the compiler emits — where the JSX spelled it with
+          five HTML entities.
+        */}
         <Reveal>
           <Callout>
-            <CodegenIcon size={22} className="text-cinnabar-text" />
-            <p className="text-bright max-w-[70ch] text-[17px] leading-[1.6] text-pretty">
-              On success the compiler prints{" "}
-              <Code>Successfully compiled &lt;input&gt; to &apos;&lt;output&gt;&apos;.</Code>{" "}
-              and exits 0. Any failure is rendered as source-located diagnostics and
-              exits non-zero. A build either produces its artifact or produces
-              diagnostics — never both, and never part of one.
-            </p>
+            <Eyebrow>What a build leaves you with</Eyebrow>
+            <h2 className="text-text max-w-[46ch] text-[28px] leading-tight font-bold tracking-tight text-balance sm:text-[36px]">
+              {content.block("outcome-title")}
+            </h2>
+            <div className="text-bright max-w-[80ch] text-[17px] leading-[1.6] text-pretty">
+              <InlineMarkdown>{content.block("outcome")}</InlineMarkdown>
+            </div>
           </Callout>
         </Reveal>
       </div>

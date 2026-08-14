@@ -171,3 +171,14 @@ randomized corpus sizes and the number of successful fixtures that are linked an
 executed. Rejected fixtures remain checked in every profile.
 
 Run the full gate with no profile override before submitting a change.
+
+<!-- @outcome-title -->
+
+A build either produces its artifact or produces diagnostics — never both, and
+never part of one.
+
+<!-- @outcome -->
+
+On success the compiler prints
+`Successfully compiled <input> to '<output>'.` and exits 0. Any failure is
+rendered as source-located diagnostics and exits non-zero.

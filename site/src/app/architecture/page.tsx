@@ -113,7 +113,24 @@ export default async function ArchitecturePage() {
             <MarkedList items={content.list("arena-properties")} accent className="mt-2" />
           </Reveal>
 
-          <Reveal delay={0.06} className="rule-grid flex min-w-0 flex-col">
+          {/*
+            `self-start` is load-bearing. A grid item is stretched to the height
+            of the tallest column, and this one is a `.rule-grid`, which paints
+            `--hairline` as its own background so the 1px seams between its
+            children read as rules. Three cards sized by their own text do not
+            grow with the column, and the uncovered remainder showed as a grey
+            band across the bottom of the stack.
+
+            The window frame solved the same problem by growing its body, which
+            is right there: a terminal's ground reaching the frame edge is what
+            a terminal looks like. It is the wrong answer here. A card's height
+            is its content's, and stretching these three — or distributing the
+            slack between them — would tie how tall a card is to how long the
+            prose in the *other* column happens to run. Not stretching is the
+            honest fix, and it is also self-correcting: below `lg` the columns
+            stack, nothing stretches, and `self-start` does nothing.
+          */}
+          <Reveal delay={0.06} className="rule-grid flex min-w-0 flex-col self-start">
             {ARENAS.map((arena) => (
               <Panel key={arena.name} className="gap-3 p-7">
                 <div className="flex items-baseline gap-3">
