@@ -2413,5 +2413,30 @@ end
         let errors = errors_for(source);
         assert!(errors.is_empty(), "{:?}", errors);
     }
+
+    // Enabling the unused-import check newly rejected 27 dead imports across
+    // 5 fixtures in the corpus; four were fixed by deleting the dead import
+    // (and, where the import was the only thing keeping an otherwise-unused
+    // native declaration block reachable — resolve_imports attributes every
+    // import edge to ROOT_OWNER regardless of whether it's ever called — by
+    // deleting that block too, so removing the import doesn't just trade
+    // one diagnostic for a cascade of "unused native function" ones). The
+    // fifth, repro/head.cnb, is a language-tour fixture that deliberately
+    // declares far more surface than its `main` exercises and needs a real
+    // content decision, not a mechanical deletion — left alone.
+    #[test]
+    fn fixture_corpus_stays_clean_of_dead_imports() {
+        let paths = [
+            "tests/fixtures/repro/mem_probe.cnb",
+            "tests/fixtures/repro/slice_test.cnb",
+            "tests/fixtures/repro/vec_pop_drain.cnb",
+            "tests/fixtures/repro/hash_map_remove_drain.cnb",
+        ];
+        for path in paths {
+            let result = crate::analysis::analyze(path, &[]);
+            let errors: Vec<String> = result.errors.iter().map(|d| d.0.clone()).collect();
+            assert!(errors.is_empty(), "{}: {:?}", path, errors);
+        }
+    }
 }
 

@@ -139,12 +139,6 @@ end
 Slices, array rest-patterns, and tail-recursive folds — [`tests/fixtures/repro/slice_test.cnb`](tests/fixtures/repro/slice_test.cnb):
 
 ```cinnabar
-pub mod Slice
-  pub nat fun len<T>(view: &[T]) Usize
-end
-
-use Slice.len as slice_len
-
 fun slice_sum_acc(view: &[U8], acc: Usize) Usize
   match view
     [] => return acc

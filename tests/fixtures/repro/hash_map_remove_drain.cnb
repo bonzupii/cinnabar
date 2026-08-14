@@ -37,7 +37,6 @@ use Collections.hash_map_new
 use Collections.hash_map_insert
 use Collections.hash_map_remove
 use Collections.hash_map_free
-use Collections.HashMap
 use Memory.allocate
 use Memory.deallocate
 

@@ -1,9 +1,3 @@
-pub mod Slice
-  pub nat fun len<T>(view: &[T]) Usize
-end
-
-use Slice.len as slice_len
-
 # The O(1) call-stack guarantee rejects non-tail self-recursion
 # (`Usize.from(first) + slice_sum(rest)` recurses as an operand of `+`),
 # so the sum is a tail-recursive accumulator folding each first byte
