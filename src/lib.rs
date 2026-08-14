@@ -16,6 +16,7 @@ pub mod analysis;
 pub mod advanced_tools;
 pub mod ast;
 pub mod borrow;
+#[cfg(feature = "codegen")]
 pub mod codegen;
 pub mod docs;
 pub mod format;
