@@ -31,7 +31,8 @@ use crate::analysis;
 use crate::ast::*;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, ExitStatus, Output};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::time::{Duration, Instant};
 
 pub const MANIFEST_FILE: &str = "build.cnb";
 
@@ -75,12 +76,47 @@ pub fn entry_for_source(source: &Path) -> Result<PathBuf, ManifestError> {
     discover(source).map(|manifest| manifest.entry)
 }
 
+/// The plainly comparable spelling of a path.
+///
+/// On Windows `fs::canonicalize` returns a verbatim path — `\\?\C:\...`,
+/// or `\\?\UNC\server\share\...` — which never compares equal to the plain
+/// spelling of the same file that editors, `file://` URIs, and manifest
+/// joins produce, whether the comparison is textual or component-wise.
+/// Every canonicalization in this module passes through here, and the
+/// language server normalizes editor-supplied paths the same way, so paths
+/// from both sources meet in one spelling. The drive letter is upper-cased
+/// because editors and the kernel disagree about its case; a path that is
+/// already plain changes in nothing else.
+pub fn comparable_path(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    let stripped = match text.strip_prefix(r"\\?\UNC\") {
+        Some(share) => format!(r"\\{}", share),
+        None => match text.strip_prefix(r"\\?\") {
+            Some(plain) => plain.to_string(),
+            None => text.to_string(),
+        },
+    };
+    let lower_drive = {
+        let bytes = stripped.as_bytes();
+        bytes.first().is_some_and(|first| first.is_ascii_lowercase())
+            && bytes.get(1).is_some_and(|second| *second == b':')
+    };
+    if !lower_drive {
+        return PathBuf::from(stripped);
+    }
+    let mut cased = stripped;
+    let drive = cased.remove(0).to_ascii_uppercase();
+    cased.insert(0, drive);
+    PathBuf::from(cased)
+}
+
 pub fn load_manifest(path: &Path) -> Result<ProjectManifest, ManifestError> {
     let root_source = match path.parent() {
         Some(parent) => parent,
         None => return Err(ManifestError::source_less(format!("manifest '{}' has no project directory", path.display()))),
     };
     let root = fs::canonicalize(root_source)
+        .map(|resolved| comparable_path(&resolved))
         .map_err(|resolve_error| format!("cannot resolve project root '{}': {}", root_source.display(), resolve_error))?;
     let manifest_path = path.to_string_lossy().to_string();
     let analyzed = analysis::analyze(&manifest_path, &[]);
@@ -346,6 +382,7 @@ fn manifest_span_error(analyzed: &analysis::Analysis, span: (i64, i64, i64), mes
 
 fn canonicalize_confined_existing(root: &Path, path: &Path, role: &str) -> Result<PathBuf, ManifestError> {
     let resolved = fs::canonicalize(path)
+        .map(|verbatim| comparable_path(&verbatim))
         .map_err(|resolve_error| format!("cannot resolve {} '{}': {}", role, path.display(), resolve_error))?;
     if !resolved.starts_with(root) {
         return Err(ManifestError::source_less(format!("{} '{}' resolves outside project root '{}'", role, path.display(), root.display())));
@@ -504,19 +541,29 @@ pub fn run_tests(executable: &Path, manifest: &ProjectManifest, update_snapshots
             .map_err(|prefix_error| format!("cannot relativize test '{}': {}", test.display(), prefix_error))?;
         let binary_name = test_relative.to_string_lossy().replace(['/', '\\'], "__");
         let binary = output_dir.join(binary_name).with_extension("bin");
-        let compile = Command::new(executable)
+        let mut compile_command = Command::new(executable);
+        compile_command
             .current_dir(&manifest.root)
             .arg(project_relative)
             .arg("-o")
-            .arg(&binary)
-            .output()
-            .map_err(|spawn_error| format!("cannot run compiler for '{}': {}", test.display(), spawn_error))?;
-        let snapshot = snapshot_path(test);
-        let rejection = is_rejection_test(test) || sidecar_present(&snapshot, "diagnostic snapshot")?;
-        let result = if rejection {
-            check_rejection(&manifest.root, test, &snapshot, &compile, update_snapshots)
-        } else {
-            check_success(&manifest.root, test, &binary, &compile)
+            .arg(&binary);
+        // A compile that hangs or cannot even start fails this one test;
+        // the rest of the run continues.
+        let result = match output_with_timeout(
+            &mut compile_command,
+            Duration::from_secs(TEST_COMPILE_TIMEOUT_SECS),
+            &format!("compiler for '{}'", test.display()),
+        ) {
+            Ok(compile) => {
+                let snapshot = snapshot_path(test);
+                let rejection = is_rejection_test(test) || sidecar_present(&snapshot, "diagnostic snapshot")?;
+                if rejection {
+                    check_rejection(&manifest.root, test, &snapshot, &compile, update_snapshots)
+                } else {
+                    check_success(&manifest.root, test, &binary, &compile)
+                }
+            }
+            Err(compile_failure) => Err(compile_failure),
         };
         match result {
             Ok(()) => passed += 1,
@@ -531,6 +578,92 @@ pub struct TestSummary {
     pub discovered: usize,
     pub passed: usize,
     pub failed: Vec<String>,
+}
+
+// The same category of protection the repro and fuzz harnesses apply to
+// every child process they spawn, with the same defaults: a hanging test
+// program (or a compiler wedged on one input) fails that test with a
+// timeout message instead of hanging the whole `cinnabar test` run.
+const TEST_COMPILE_TIMEOUT_SECS: u64 = 30;
+const TEST_RUN_TIMEOUT_SECS: u64 = 10;
+
+/// Waits for `child` until it exits or the deadline passes, killing it in
+/// the latter case. `Ok(true)` means it exited on its own; `Ok(false)`
+/// means it was killed for the timeout. The child is not yet reaped —
+/// the caller collects its status or output and owns the final verdict.
+fn wait_or_kill(child: &mut Child, limit: Duration, what: &str) -> Result<bool, ManifestError> {
+    let deadline = Instant::now() + limit;
+    loop {
+        let finished = child
+            .try_wait()
+            .map_err(|wait_error| format!("cannot monitor {}: {}", what, wait_error))?;
+        if finished.is_some() {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            match child.kill() {
+                Ok(()) => {}
+                Err(kill_error) => {
+                    // InvalidInput means the child exited between the
+                    // `try_wait` above and the kill; the caller's reap
+                    // will collect that exit normally.
+                    if kill_error.kind() != std::io::ErrorKind::InvalidInput {
+                        return Err(ManifestError::source_less(format!(
+                            "cannot stop timed-out {}: {}",
+                            what, kill_error
+                        )));
+                    }
+                }
+            }
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// `Command::output` with a deadline: stdout and stderr are piped and
+/// collected, and a child that outlives the deadline is killed and
+/// reported as a timeout failure rather than waited on forever.
+fn output_with_timeout(command: &mut Command, limit: Duration, what: &str) -> Result<Output, ManifestError> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|spawn_error| format!("cannot run {}: {}", what, spawn_error))?;
+    let exited = wait_or_kill(&mut child, limit, what)?;
+    let output = child
+        .wait_with_output()
+        .map_err(|collect_error| format!("cannot collect output of {}: {}", what, collect_error))?;
+    if !exited {
+        return Err(ManifestError::source_less(format!(
+            "{} exceeded the {} second limit; stderr: {}",
+            what,
+            limit.as_secs(),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(output)
+}
+
+/// `Command::status` with a deadline: the child inherits the test runner's
+/// stdio, and one that outlives the deadline is killed and reported as a
+/// timeout failure rather than waited on forever.
+fn status_with_timeout(command: &mut Command, limit: Duration, what: &str) -> Result<ExitStatus, ManifestError> {
+    let mut child = command
+        .spawn()
+        .map_err(|spawn_error| format!("cannot run {}: {}", what, spawn_error))?;
+    let exited = wait_or_kill(&mut child, limit, what)?;
+    let status = child
+        .wait()
+        .map_err(|reap_error| format!("cannot reap {}: {}", what, reap_error))?;
+    if !exited {
+        return Err(ManifestError::source_less(format!(
+            "{} exceeded the {} second limit",
+            what,
+            limit.as_secs()
+        )));
+    }
+    Ok(status)
 }
 
 fn is_rejection_test(path: &Path) -> bool {
@@ -574,13 +707,16 @@ fn check_success(root: &Path, test: &Path, binary: &Path, compile: &Output) -> R
     if !compile.status.success() {
         return Err(ManifestError::source_less(format!("{}: compilation failed\n{}", test.display(), String::from_utf8_lossy(&compile.stderr))));
     }
-    let run_status = Command::new(binary)
-        .current_dir(match test.parent() {
-            Some(parent) => parent,
-            None => test,
-        })
-        .status()
-        .map_err(|spawn_error| format!("cannot run test '{}': {}", test.display(), spawn_error))?;
+    let mut run_command = Command::new(binary);
+    run_command.current_dir(match test.parent() {
+        Some(parent) => parent,
+        None => test,
+    });
+    let run_status = status_with_timeout(
+        &mut run_command,
+        Duration::from_secs(TEST_RUN_TIMEOUT_SECS),
+        &format!("test '{}'", test.display()),
+    )?;
     let expected = expected_exit(root, test)?;
     status_matches(run_status, expected, test)
 }
@@ -705,6 +841,27 @@ mod tests {
         assert_eq!(manifest.name, "cinnabar");
         assert_eq!(manifest.entry, root.join("main.cnb"));
         assert_eq!(manifest.tests, root.join("tests"));
+    }
+
+    // `fs::canonicalize` on Windows answers with a `\\?\`-prefixed verbatim
+    // path, which compares equal to nothing an editor, URI, or manifest join
+    // ever produces. The stripping is what lets every other test in this
+    // module compare a canonicalized path against a plainly-joined one.
+    #[test]
+    fn comparable_path_strips_windows_verbatim_prefixes() {
+        assert_eq!(
+            comparable_path(Path::new(r"\\?\C:\project\main.cnb")),
+            PathBuf::from(r"C:\project\main.cnb")
+        );
+        assert_eq!(
+            comparable_path(Path::new(r"\\?\UNC\server\share\main.cnb")),
+            PathBuf::from(r"\\server\share\main.cnb")
+        );
+        assert_eq!(
+            comparable_path(Path::new(r"c:\project\main.cnb")),
+            PathBuf::from(r"C:\project\main.cnb")
+        );
+        assert_eq!(comparable_path(Path::new("/tmp/main.cnb")), PathBuf::from("/tmp/main.cnb"));
     }
 
     #[test]

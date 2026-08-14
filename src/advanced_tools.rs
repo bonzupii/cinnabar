@@ -359,17 +359,31 @@ pub fn serve_playground(address: &str, executable: &Path) -> Result<(), String> 
         return Err("the local playground may bind only to a loopback address".to_string());
     }
     let listener = TcpListener::bind(parsed).map_err(|bind_error| format!("cannot bind playground: {}", bind_error))?;
+    // Only the bind is fatal: once the socket is listening, a connection
+    // that fails to accept, read, or write is that one visitor's problem —
+    // a browser closing mid-response must not take the server down for
+    // every future visitor. Per-connection failures are logged and the
+    // loop moves on.
     for incoming in listener.incoming() {
-        let mut stream = incoming.map_err(|accept_error| format!("cannot accept playground connection: {}", accept_error))?;
+        let mut stream = match incoming {
+            Ok(stream) => stream,
+            Err(accept_error) => {
+                eprintln!("cannot accept playground connection: {}", accept_error);
+                continue;
+            }
+        };
         match handle_playground(&mut stream, executable) {
             Ok(()) => {}
             Err(request_error) => {
-                respond(
+                let written = respond(
                     &mut stream,
                     "400 Bad Request",
                     "text/plain; charset=utf-8",
                     request_error.as_bytes(),
-                )?;
+                );
+                if let Err(write_error) = written {
+                    eprintln!("cannot write playground error response: {}", write_error);
+                }
             }
         }
     }
