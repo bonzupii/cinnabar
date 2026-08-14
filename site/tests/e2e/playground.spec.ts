@@ -37,20 +37,21 @@ test("the default sample checks clean, typing invalid source reports it, and rel
   await expect(diagnostics).toContainText("No diagnostics.", { timeout: 10_000 });
 });
 
-test("loading the linear-handles sample reports its own real diagnostics", async ({ page }) => {
+test("every starter sample checks clean on its own", async ({ page }) => {
   await page.goto("/playground/");
   await preparePage(page);
 
   const diagnostics = page.locator("figure").filter({ hasText: "Diagnostics" });
+  const editor = page.locator(".cm-content");
   await expect(diagnostics).toContainText("No diagnostics.", { timeout: 15_000 });
 
-  await page.getByRole("tab", { name: "Linear handles" }).click();
-
-  // This sample is an excerpt from tests/fixtures/repro/vec_test.cnb for
-  // readability on the static pages, not a complete standalone program, so
-  // the checker correctly reports its Collections references as
-  // unresolved -- a real, accurate verdict on what was actually submitted.
-  await expect(diagnostics).toContainText("cannot resolve import 'Collections.vec_new'", {
-    timeout: 10_000,
-  });
+  // Unlike content/samples.ts's homepage excerpts -- trimmed for readability
+  // and never actually checked there -- every playground starter is a
+  // complete, verified-clean program (content/playground-samples.ts), so
+  // clicking through all three should never surface a diagnostic.
+  for (const label of ["Linear handles", "Slices and patterns", "Tail recursion"]) {
+    await page.getByRole("tab", { name: label }).click();
+    await expect(editor).not.toBeEmpty();
+    await expect(diagnostics).toContainText("No diagnostics.", { timeout: 10_000 });
+  }
 });

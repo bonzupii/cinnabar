@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { EditorView } from "@codemirror/view";
 import PlaygroundDiagnostics from "@/components/PlaygroundDiagnostics";
 import Window from "@/components/Window";
-import { SAMPLES } from "@/content/samples";
+import { PLAYGROUND_SAMPLES } from "@/content/playground-samples";
 import { cinnabarEditorTheme, cinnabarHighlighting } from "@/lib/cinnabar-codemirror";
 import type { PlaygroundReport } from "@/lib/cinnabar-diagnostics";
 import { checkSource, preloadChecker } from "@/lib/cinnabar-wasm-client";
@@ -34,7 +34,7 @@ const BASIC_SETUP = {
 };
 
 export default function PlaygroundEditor() {
-  const [source, setSource] = useState(SAMPLES[0].code);
+  const [source, setSource] = useState(PLAYGROUND_SAMPLES[0].code);
   const [report, setReport] = useState<PlaygroundReport | null>(null);
   const latestRequest = useRef(0);
   // `@uiw/react-codemirror`'s `value` prop only seeds the initial document;
@@ -81,7 +81,7 @@ export default function PlaygroundEditor() {
         aria-label="Load a sample"
         className="border-hairline flex flex-wrap border-b"
       >
-        {SAMPLES.map((sample) => (
+        {PLAYGROUND_SAMPLES.map((sample) => (
           <button
             key={sample.id}
             type="button"
