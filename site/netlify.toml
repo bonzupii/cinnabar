@@ -1,0 +1,41 @@
+[build]
+  # The Netlify site is linked to this subdirectory, so the build runs here and
+  # publishes the static export beside it.
+  command = "npm run build"
+  publish = "out"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# Deploys are run by hand from this directory (`npm run deploy`), not on push.
+# This file only describes how a build would run if one were triggered.
+
+# Next's `opengraph-image` file convention writes an extension-less file
+# (out/opengraph-image), and a static host has nothing to infer a type from —
+# it would be served as a generic download, which every social scraper
+# rejects. These rules restore the real type. tests/e2e/metadata.spec.ts
+# asserts the images are valid PNGs, and scripts/verify-png.mjs re-checks the
+# built files, so a regression here fails the build rather than the preview
+# card.
+[[headers]]
+  for = "/opengraph-image"
+  [headers.values]
+    Content-Type = "image/png"
+
+[[headers]]
+  for = "/*/opengraph-image"
+  [headers.values]
+    Content-Type = "image/png"
+
+[[headers]]
+  for = "/_next/static/*"
+  [headers.values]
+    # Fingerprinted assets — safe to cache indefinitely.
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    X-Frame-Options = "DENY"

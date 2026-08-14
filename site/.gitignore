@@ -1,0 +1,53 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# netlify — local link state and build cache, written by `netlify link`/`deploy`
+.netlify/
+
+# test output. The visual baselines under tests/e2e/*-snapshots ARE committed:
+# they are the expected result, not a build product.
+/playwright-report/
+/test-results/
+/.lighthouseci/
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# Ad-hoc capture output from tests/e2e (not committed)
+/capture/
