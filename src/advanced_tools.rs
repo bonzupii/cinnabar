@@ -283,7 +283,11 @@ fn read_request(stream: &mut TcpStream) -> Result<(String, Vec<u8>), String> {
     while bytes.len() < header_end + length {
         let count = stream.read(&mut buffer).map_err(|read_error| format!("cannot read request body: {}", read_error))?;
         if count == 0 {
-            break;
+            return Err(format!(
+                "playground request body ended prematurely: declared {} bytes, received {}",
+                length,
+                bytes.len() - header_end
+            ));
         }
         bytes.extend_from_slice(&buffer[..count]);
     }
