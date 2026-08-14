@@ -143,7 +143,17 @@ pub const EXPR_STRUCT_LIT: i64 = 5; // b: path segments name-id list, c: field n
 pub const EXPR_ARRAY: i64 = 6; // b: element expr-id list
 pub const EXPR_MATCH: i64 = 7; // b: scrutinee expr id, c: arm ids list
 pub const EXPR_TRY: i64 = 8; // b: inner expr id
-pub const EXPR_INDEX: i64 = 9; // b: base expr id, c: index expr id
+pub const EXPR_INDEX: i64 = 9; // b: base expr id, c: index expr id, d: fallibility flag (INDEX_*)
+
+// Slot-d flag on EXPR_INDEX rows.  The typechecker attaches this fact once,
+// and codegen reads it rather than re-deriving fallibility from the shape of
+// the result type: an array whose element is itself a `Result` is infallible
+// when indexed by a compile-time-proven constant, even though its result type
+// is a `Result`.  `INDEX_FALLIBLE` marks a runtime or slice index typed as
+// `Result(T, IndexError)`; `INDEX_INFALLIBLE` marks a constant array index
+// typed as the bare element type.
+pub const INDEX_INFALLIBLE: i64 = 0;
+pub const INDEX_FALLIBLE: i64 = 1;
 pub const EXPR_FIELD_ACCESS: i64 = 10; // b: base expr id, c: field name id; `expr.field` on a non-path base
 
 pub const LIT_INT: i64 = 0;
@@ -1041,6 +1051,70 @@ pub fn alloc_localfact(nodes: &mut Vec<i64>, source: i64, name: i64, key: i64, i
             NONE,
         ],
     )
+}
+
+// Tail-safety-fact rows.  (tag=NODE_CALLFACT, a=call expr id, b=tail-safe
+// flag, c=frame-local root name id or NONE).  The typechecker computes, for
+// every call, whether any argument carries a reference rooted in the
+// current function's frame — which is what would make LLVM's `tail` marker
+// a false promise that the callee never touches the caller's frame — and
+// attaches the result so codegen marks a call `tail` only when it is safe
+// (Single-Fact Rule).  Slot `c` names the offending frame-local binding for
+// the self-recursion rejection diagnostic; it is NONE when the call is
+// tail-safe.
+
+pub const NODE_CALLFACT: i64 = 21;
+
+pub fn alloc_callfact(nodes: &mut Vec<i64>, call: i64, tail_safe: i64, root_name: i64) -> i64 {
+    alloc_node(
+        nodes,
+        &[NODE_CALLFACT, NO_FILE, NO_FILE, NO_FILE, call, tail_safe, root_name, NONE, NONE, NONE],
+    )
+}
+
+pub fn callfact_tail_safe_of(nodes: &[i64], call: i64) -> i64 {
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_CALLFACT && node_a(nodes, idx) == call {
+            return node_b(nodes, idx);
+        }
+        idx += 1;
+    }
+    0
+}
+
+pub fn callfact_root_name_of(nodes: &[i64], call: i64) -> i64 {
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_CALLFACT && node_a(nodes, idx) == call {
+            return node_c(nodes, idx);
+        }
+        idx += 1;
+    }
+    NONE
+}
+
+// Pattern-binding-fact rows.  (tag=NODE_PATFACT, a=pattern node, b=match
+// scrutinee expr id).  The typechecker attaches one per binding pattern
+// (PAT_BIND and the rest binder of PAT_ARRAY) so the tail-safety trace can
+// resolve a match-arm binding's origin to the scrutinee it destructures
+// without re-walking the arm list (Single-Fact Rule).
+
+pub const NODE_PATFACT: i64 = 22;
+
+pub fn alloc_patfact(nodes: &mut Vec<i64>, pat: i64, scrutinee: i64) -> i64 {
+    alloc_node(nodes, &[NODE_PATFACT, NO_FILE, NO_FILE, NO_FILE, pat, scrutinee, NONE, NONE, NONE, NONE])
+}
+
+pub fn patfact_scrutinee_of(nodes: &[i64], pat: i64) -> i64 {
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_PATFACT && node_a(nodes, idx) == pat {
+            return node_b(nodes, idx);
+        }
+        idx += 1;
+    }
+    NONE
 }
 
 pub fn alloc_fieldkey(nodes: &mut Vec<i64>, key: i64, name: i64, fkey: i64, idx: i64) -> i64 {

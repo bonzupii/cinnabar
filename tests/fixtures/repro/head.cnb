@@ -55,28 +55,8 @@
 |#
 
 pub const ZERO_INT: I64 = 0
-
-
-
-
 pub const LOOP_LIMIT: I64 = 5
-
-
-
-
-
-
-
-
 pub const CHECKSUM_SALT: U32 = 0x0F
-
-
-
-
-
-
-
-
 
 pub type Header
   pub kind: U32
@@ -92,9 +72,6 @@ pub type MagicHeader
   pub bytes: [U8; 4]
   pub expected: U32
 end
-
-
-
 
 #! Runtime is a public mod.
 pub mod Runtime
@@ -292,18 +269,6 @@ pub impl Checksum for Tag
     return value.value ^ CHECKSUM_SALT
   end
 end
-
-
-
-
-
-
-
-
-
-
-
-
 
 #! Demonstrates var for mutable local state.
 #! Compiler error if total or i is val: assignment requires var.

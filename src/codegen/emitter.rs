@@ -20,7 +20,11 @@
 //! arm — never through an argument subexpression or a match scrutinee — and
 //! that marking is what lets LLVM's `-O2` deliver the language's
 //! O(1)-call-stack recursion guarantee with no runtime stack check anywhere
-//! in the emitted binary.
+//! in the emitted binary. A call is marked `tail` only when the typechecker's
+//! attached tail-safety fact (`NODE_CALLFACT`) says no argument carries a
+//! reference into the current frame; a reference into the caller's own frame
+//! would make the `tail` marker a false promise and the IR undefined at
+//! `-O2`.
 //!
 //! **Invariants:**
 //! - Nothing is re-derived here. Types come from the typechecker's
@@ -1811,13 +1815,15 @@ fn emit_index<'ctx, 'a>(
         len_val = slice_len_of(sess, base_ptr)?;
     }
 
-    // The typechecker attaches the element type directly to constant array
-    // indices (proven in range at compile time) and Result(T, IndexError)
-    // only to dynamic array and slice indices.  An element type that is
-    // itself an enum is not a fallible Result; the seeded Result primitive
-    // kind is the single source of truth for the fallible path.
-    let key_sym = em_key_sym(sess, key);
-    if key_sym == NONE || sym_prim_kind(sess.5, key_sym) != PRIM_RESULT {
+    // The typechecker attaches an explicit fallibility fact to the index
+    // node: INDEX_FALLIBLE for runtime and slice indices (whose result it
+    // types as Result(T, IndexError)), INDEX_INFALLIBLE for a constant array
+    // index proven in range (whose result is the bare element type).  The
+    // element type itself cannot be the signal: an array of Result elements
+    // indexed by a constant has a Result-typed result that is still
+    // infallible.  Reading the attached fact keeps codegen from re-deriving
+    // a decision the typechecker already made.
+    if node_d(sess.5, expr) != INDEX_FALLIBLE {
         let eptr = offset_elem_ptr(sess, elem_key, data_ptr, idx_val, span)?;
         return Ok(eptr);
     }
@@ -1903,7 +1909,7 @@ fn emit_call<'ctx, 'a>(
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(fn_val, &arg_vals, "").map_err(builder_fail)?;
-    if is_tail {
+    if is_tail && callfact_tail_safe_of(sess.5, expr) == 1 {
         call.set_tail_call(true);
     }
     let out = declare_local(sess, ret_key, "call", span)?;
@@ -1997,7 +2003,7 @@ fn emit_deferred_trait_call<'ctx, 'a>(
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(fn_val, &arg_vals, "").map_err(builder_fail)?;
-    if is_tail {
+    if is_tail && callfact_tail_safe_of(sess.5, expr) == 1 {
         call.set_tail_call(true);
     }
     let out = declare_local(sess, result, "call", span)?;
@@ -2319,7 +2325,7 @@ fn emit_native_call<'ctx, 'a>(
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(native_val, &arg_vals, "").map_err(builder_fail)?;
-    if is_tail {
+    if is_tail && callfact_tail_safe_of(sess.5, expr) == 1 {
         call.set_tail_call(true);
     }
     let out = declare_local(sess, ret_key, "call", span)?;

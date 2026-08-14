@@ -23,6 +23,7 @@ pub(crate) const EXPECT_OK: &[(&str, i32)] = &[
     ("array_test", 0),
     ("borrow_index", 0),
     ("enum_array_index", 0),
+    ("result_array_index", 0),
     ("idx10d_mut_disjoint", 30),
     ("idx10e_same_expr_disjoint", 30),
     ("rec_test", 120),
