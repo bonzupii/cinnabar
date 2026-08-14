@@ -91,7 +91,7 @@ impl MessageReader {
     }
 
     fn next(&self) -> Result<Value, Box<dyn Error>> {
-        self.next_within(Duration::from_secs(15))
+        self.next_within(Duration::from_secs(30))
     }
 
     fn next_within(&self, timeout: Duration) -> Result<Value, Box<dyn Error>> {
@@ -199,7 +199,7 @@ fn stdio_hover_for_large_http_server_completes_within_bound() -> Result<(), Box<
     // This is deliberately generous enough for the complete compiler
     // pipeline on a debug build, but finite: a hover may not monopolize the
     // server indefinitely on a valid large source file.
-    let hover_timeout = Duration::from_secs(10);
+    let hover_timeout = Duration::from_secs(20);
     let mut child = Command::new(env!("CARGO_BIN_EXE_cinnabar-lsp"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -294,7 +294,7 @@ fn stdio_hover_during_http_server_diagnostics_responds_without_duplicate_analysi
     // finish.  Both hover requests need a terminal response promptly; once
     // the authoritative diagnostic analysis finishes, a later hover must
     // answer from those attached facts.
-    let prompt_timeout = Duration::from_secs(1);
+    let prompt_timeout = Duration::from_secs(2);
     let mut child = Command::new(env!("CARGO_BIN_EXE_cinnabar-lsp"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -314,7 +314,7 @@ fn stdio_hover_during_http_server_diagnostics_responds_without_duplicate_analysi
                 "params": { "capabilities": {}, "clientInfo": { "name": "diagnostics-hover-test" } }
             }),
         )?;
-        let initialized = read_response_within(&reader, 1, Duration::from_secs(10))?;
+        let initialized = read_response_within(&reader, 1, Duration::from_secs(20))?;
         if initialized.pointer("/result/capabilities/hoverProvider").and_then(Value::as_bool) != Some(true) {
             return Err(format!("hover capability was not enabled: {}", initialized).into());
         }

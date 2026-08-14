@@ -1899,7 +1899,7 @@ fn emit_call<'ctx, 'a>(
     }
     let saved_tail = ctx.6;
     ctx.6 = false;
-    let arg_vals = emit_call_args(sess, ctx, expr);
+    let arg_vals = emit_call_args(sess, ctx, expr, params_list, false);
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(fn_val, &arg_vals, "").map_err(builder_fail)?;
@@ -1993,7 +1993,7 @@ fn emit_deferred_trait_call<'ctx, 'a>(
     }
     let saved_tail = ctx.6;
     ctx.6 = false;
-    let arg_vals = emit_call_args(sess, ctx, expr);
+    let arg_vals = emit_call_args(sess, ctx, expr, param_keys, false);
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(fn_val, &arg_vals, "").map_err(builder_fail)?;
@@ -2020,6 +2020,8 @@ fn emit_call_args<'ctx, 'a>(
     sess: &mut Session<'ctx, '_, '_>,
     ctx: &mut FnCtx<'ctx, 'a>,
     expr: i64,
+    params_list: i64,
+    use_instance_params: bool,
 ) -> Result<Vec<BasicMetadataValueEnum<'ctx>>, CodegenError> {
     let span = (node_file(sess.5, expr), node_start(sess.5, expr), node_end(sess.5, expr));
     let arg_exprs = node_d(sess.5, expr);
@@ -2028,7 +2030,12 @@ fn emit_call_args<'ctx, 'a>(
     let mut idx = 0i64;
     while idx < count {
         let arg = list_get(sess.6, arg_exprs, idx);
-        let akey = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, arg));
+        let declared_key = list_get(sess.6, params_list, idx);
+        let akey = if use_instance_params {
+            sub_key(sess, ctx.3, ctx.4, declared_key)
+        } else {
+            sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, arg))
+        };
         let ptr = emit_expr(sess, ctx, arg)?;
         let value = load_key(sess, akey, ptr, span)?;
         vals.push(into_meta(value));
@@ -2308,7 +2315,7 @@ fn emit_native_call<'ctx, 'a>(
     };
     let saved_tail = ctx.6;
     ctx.6 = false;
-    let arg_vals = emit_call_args(sess, ctx, expr);
+    let arg_vals = emit_call_args(sess, ctx, expr, params_list, false);
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(native_val, &arg_vals, "").map_err(builder_fail)?;
@@ -2453,8 +2460,8 @@ fn dispatch_native<'ctx>(
     if op == NAT_VEC_PUSH {
         return native_vec_push(sess, f, locals, params_list, ret_key, out, span);
     }
-    if op == NAT_VEC_VIEW {
-        native_vec_view(sess, locals, out, span)?;
+    if op == NAT_SLICE_VIEW {
+        native_slice_view(sess, locals, out, span)?;
         return Ok(out);
     }
     if op == NAT_VEC_FREE {
@@ -2549,34 +2556,12 @@ fn dispatch_native<'ctx>(
         native_net_close(sess, locals, ret_key, out, span)?;
         return Ok(out);
     }
-    let name = em_name(sess, node_b(sess.5, sym));
-    let llvm_name = name.replace('.', "_");
-    let sig = build_fn_sig(sess, params_list, ret_key, span)?;
-    let fn_val = extern_fn(sess, &llvm_name, sig);
-    let pcount = list_len(sess.6, params_list);
-    let mut arg_vals: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
-    let mut idx = 0i64;
-    while idx < pcount {
-        let p = get_local(locals, idx, span)?;
-        let k = get_local_key(locals, idx, span)?;
-        let v = load_key(sess, k, p, span)?;
-        arg_vals.push(v.into());
-        idx += 1;
-    }
-    let call = sess.2.build_call(fn_val, &arg_vals, "").map_err(builder_fail)?;
-    let ret_val = match call.try_as_basic_value() {
-        ValueKind::Basic(bv) => bv,
-        ValueKind::Instruction(inst) => {
-            return Err(builder_error(
-                span.0,
-                span.1,
-                span.2,
-                &format!("internal: void return from a native call ({:?})", inst.get_opcode()),
-            ));
-        }
-    };
-    store_key(sess, out, ret_val)?;
-    Ok(out)
+    Err(builder_error(
+        span.0,
+        span.1,
+        span.2,
+        &format!("internal: native opcode {} has no codegen implementation", op),
+    ))
 }
 
 fn native_int_from<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
@@ -2863,18 +2848,18 @@ fn native_vec_push<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     Ok(out)
 }
 
-fn native_vec_view<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
+fn native_slice_view<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let p0 = get_local(locals, 0, span)?;
-    let vec_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
-    let vec_ref = load_ptr(sess, p0)?;
-    let d = struct_gep(sess, vec_key, vec_ref, 0, "", span)?;
-    let data = load_ptr(sess, d)?;
-    let l = struct_gep(sess, vec_key, vec_ref, 1, "", span)?;
-    let len = load_i64(sess, l)?;
-    let od = slice_gep(sess, out, 0, "")?;
-    store_key(sess, od, data.into())?;
-    let ol = slice_gep(sess, out, 1, "")?;
-    store_key(sess, ol, len.into())?;
+    let handle_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
+    let handle_ref = load_ptr(sess, p0)?;
+    let data_slot = struct_gep(sess, handle_key, handle_ref, 0, "", span)?;
+    let data_ptr = load_ptr(sess, data_slot)?;
+    let len_slot = struct_gep(sess, handle_key, handle_ref, 1, "", span)?;
+    let len = load_i64(sess, len_slot)?;
+    let out_data = slice_gep(sess, out, 0, "")?;
+    store_key(sess, out_data, data_ptr.into())?;
+    let out_len = slice_gep(sess, out, 1, "")?;
+    store_key(sess, out_len, len.into())?;
     Ok(())
 }
 

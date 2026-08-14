@@ -3382,7 +3382,11 @@ fn check_call(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64
 // NONE: the parser's type-argument list is dead once the call is checked,
 // and borrow treats a non-NONE slot as an attached binding.
 fn attach_extraction_binding(state: &mut State, expr: i64, sym: i64) {
-    let op = sym_native_op(state.1, sym);
+    let op = if sym != NONE && node_tag(state.1, sym) == NODE_SYM && sym_kind(state.1, sym) == SYM_NATIVE_FUN {
+        sym_native_op(state.1, sym)
+    } else {
+        NAT_NONE
+    };
     if op == NAT_VEC_POP || op == NAT_HASH_MAP_REMOVE {
         let first = list_first(state.2, node_d(state.1, expr));
         let mut container_name = NONE;
@@ -3506,9 +3510,13 @@ fn check_direct_call(state: &mut State, expr: i64, expected: i64, sym: i64, ret:
     }
     let declared_ret = ty_key_of(state.1, node_d(state.1, fn_node));
     let result = subst_key(state.1, state.2, declared_ret, &from, &to);
-    let mono = canon_tyinfo(state.1, state.2, TYD_MONO, fn_node, args_list, NONE, NONE);
-    let slot = if kind == SYM_NATIVE_FUN { sym } else { fn_node };
-    let inst = instance_of(state.1, mono, slot, args_list, result, param_keys, kind);
+    let mono_slot = if kind == SYM_NATIVE_FUN { sym } else { fn_node };
+    let mono = canon_tyinfo(state.1, state.2, TYD_MONO, mono_slot, args_list, NONE, NONE);
+    let inst = instance_of(
+        state.1,
+        (node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr)),
+        (mono, mono_slot, args_list, result, param_keys, kind),
+    );
     expr_set_sym(state.1, expr, inst);
     result
 }
@@ -3532,8 +3540,9 @@ fn check_container_resolvability(state: &mut State, expr: i64, param_keys: i64) 
                 let acount = list_len(state.2, args);
                 let mut ai = 0i64;
                 let mut has_linear = 0;
+                let mut seen: Vec<i64> = Vec::new();
                 while ai < acount {
-                    if linear_of(state.1, state.2, list_get(state.2, args, ai), &mut Vec::new()) == 1 {
+                    if linear_of(state.1, state.2, list_get(state.2, args, ai), &mut seen) == 1 {
                         has_linear = 1;
                     }
                     ai += 1;
@@ -3541,13 +3550,9 @@ fn check_container_resolvability(state: &mut State, expr: i64, param_keys: i64) 
                 if has_linear == 1 {
                     let cty_sym = key_sym_of(state.1, key);
                     if cty_sym == NONE || node_f(state.1, cty_sym) == NONE {
-                        let container = render_type_key(state.0, state.1, state.2, key);
                         push_error(
                             state.3,
-                            &format!(
-                                "cannot store linear element in container '{}': its native API provides no by-value extraction operation",
-                                container
-                            ),
+                            "cannot store linear element in container: its native API provides no by-value extraction operation",
                             node_file(state.1, expr),
                             node_start(state.1, expr),
                             node_end(state.1, expr),
@@ -3570,12 +3575,21 @@ fn key_sym_of(nodes: &[i64], key: i64) -> i64 {
     }
 }
 
-fn instance_of(nodes: &mut Vec<i64>, mono: i64, fn_slot: i64, args_list: i64, result: i64, param_keys: i64, kind: i64) -> i64 {
+fn instance_of(
+    nodes: &mut Vec<i64>,
+    span: (i64, i64, i64),
+    data: (i64, i64, i64, i64, i64, i64),
+) -> i64 {
+    let mono = data.0;
     let existing = find_instance(nodes, mono);
     if existing != NONE {
         return existing;
     }
-    alloc_node(nodes, &[NODE_INST, NO_FILE, NO_FILE, NO_FILE, fn_slot, args_list, result, param_keys, mono, kind])
+    alloc_instance(
+        nodes,
+        span,
+        (data.1, data.2, data.3, data.4, data.0, data.5),
+    )
 }
 
 fn fn_node_of(nodes: &[i64], decl: i64) -> i64 {
@@ -3682,7 +3696,11 @@ fn check_int_from(state: &mut State, expr: i64, expected: i64, sym: i64, ret: i6
     let mono = canon_tyinfo(state.1, state.2, TYD_MONO, sym, args_list, NONE, NONE);
     let param_keys = alloc_list(state.2);
     list_push(state.2, param_keys, akey);
-    let inst = instance_of(state.1, mono, sym, args_list, receiver_key, param_keys, SYM_NATIVE_FUN);
+    let inst = instance_of(
+        state.1,
+        (file, start, end),
+        (mono, sym, args_list, receiver_key, param_keys, SYM_NATIVE_FUN),
+    );
     expr_set_sym(state.1, expr, inst);
     receiver_key
 }
@@ -3770,7 +3788,11 @@ fn trait_call_concrete(state: &mut State, expr: i64, trait_sym: i64, trait_metho
     }
     let result = ty_key_of(state.1, node_d(state.1, fn_node));
     let mono = canon_tyinfo(state.1, state.2, TYD_MONO, fn_node, NONE, NONE, NONE);
-    let inst = instance_of(state.1, mono, fn_node, NONE, result, param_keys, SYM_IMPL_METHOD);
+    let inst = instance_of(
+        state.1,
+        (file, start, end),
+        (mono, fn_node, NONE, result, param_keys, SYM_IMPL_METHOD),
+    );
     alloc_trait_call(state.1, expr, inst, trait_sym, method_name, trait_method);
     expr_set_sym(state.1, expr, inst);
     result

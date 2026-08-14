@@ -632,7 +632,7 @@ pub const NAT_MEM_WRITE_U8: i64 = 5;
 pub const NAT_MEM_READ_U8: i64 = 6;
 pub const NAT_VEC_NEW: i64 = 7;
 pub const NAT_VEC_PUSH: i64 = 8;
-pub const NAT_VEC_VIEW: i64 = 9;
+pub const NAT_SLICE_VIEW: i64 = 36;
 pub const NAT_VEC_FREE: i64 = 10;
 pub const NAT_STRING_FROM_SLICE: i64 = 11;
 pub const NAT_STRING_LEN: i64 = 12;
@@ -752,7 +752,34 @@ pub fn tyinfo_builtin_kind(nodes: &[i64], key: i64) -> i64 {
     }
 }
 
-// Instance rows.  (tag=NODE_INST, a=fn node, b=type-arg key list, c=return key, d=param key list, e=mono key, f=sym kind).
+// Instance rows.  (tag=NODE_INST, a=fn slot, b=type-arg key list, c=return key,
+// d=parameter key list, e=canonical mono key, f=symbol kind).  The source
+// span belongs to the call that caused this instantiation; it is not a
+// synthesized declaration, so it must never use NO_FILE.
+
+pub fn alloc_instance(
+    nodes: &mut Vec<i64>,
+    span: (i64, i64, i64),
+    data: (i64, i64, i64, i64, i64, i64),
+) -> i64 {
+    let (file, start, end) = span;
+    let (fn_slot, args_list, result_key, param_keys_list, mono_key, sym_kind) = data;
+    alloc_node(
+        nodes,
+        &[
+            NODE_INST,
+            file,
+            start,
+            end,
+            fn_slot,
+            args_list,
+            result_key,
+            param_keys_list,
+            mono_key,
+            sym_kind,
+        ],
+    )
+}
 
 pub fn inst_fn_of(nodes: &[i64], id: i64) -> i64 {
     node_a(nodes, id)
@@ -1282,6 +1309,26 @@ mod tests {
             Some(items) => assert_eq!(items.len(), 2),
             None => assert!(false),
         }
+    }
+
+    #[test]
+    fn instance_row_preserves_call_fact_layout() {
+        let mut nodes: Vec<i64> = Vec::new();
+        let instance = alloc_instance(
+            &mut nodes,
+            (7, 11, 19),
+            (23, 29, 31, 37, 41, SYM_NATIVE_FUN),
+        );
+        assert_eq!(node_tag(&nodes, instance), NODE_INST);
+        assert_eq!(node_file(&nodes, instance), 7);
+        assert_eq!(node_start(&nodes, instance), 11);
+        assert_eq!(node_end(&nodes, instance), 19);
+        assert_eq!(inst_fn_of(&nodes, instance), 23);
+        assert_eq!(inst_args_of(&nodes, instance), 29);
+        assert_eq!(inst_ret_of(&nodes, instance), 31);
+        assert_eq!(inst_params_of(&nodes, instance), 37);
+        assert_eq!(inst_mono_of(&nodes, instance), 41);
+        assert_eq!(node_f(&nodes, instance), SYM_NATIVE_FUN);
     }
 
     #[test]

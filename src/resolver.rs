@@ -170,6 +170,7 @@ pub fn resolve(
         idx += 1;
     }
 
+    classify_native_views(&mut state);
     link_extraction_surfaces(&mut state);
 
     check_unused_imports(state.0, state.1, state.2, state.3, state.9, root);
@@ -938,9 +939,6 @@ fn native_opcode_of(names: &[String], full: i64) -> i64 {
     if name_is(names, full, "Collections.vec_push") {
         return NAT_VEC_PUSH;
     }
-    if name_is(names, full, "Collections.vec_view") {
-        return NAT_VEC_VIEW;
-    }
     if name_is(names, full, "Collections.vec_free") {
         return NAT_VEC_FREE;
     }
@@ -1020,6 +1018,60 @@ fn native_opcode_of(names: &[String], full: i64) -> i64 {
         return NAT_NET_CLOSE;
     }
     NAT_NONE
+}
+
+// Classifies native view functions from their resolved signature rather than
+// their spelling.  A view is any native function whose first parameter is a
+// reference to a native handle and whose return type is a slice (written as
+// either `[T]` internally or `&[T]` in source).  The opcode is the only fact
+// later stages need to select the uniform handle-to-slice lowering.
+fn classify_native_views(state: &mut State) {
+    let count = state.1.len() as i64 / NODE_STRIDE;
+    let mut idx = 0i64;
+    while idx < count {
+        if node_tag(state.1, idx) == NODE_SYM
+            && sym_kind_of(state.1, idx) == SYM_NATIVE_FUN
+            && native_view_signature(state.1, state.2, idx)
+        {
+            sym_set_native_op(state.1, idx, NAT_SLICE_VIEW);
+        }
+        idx += 1;
+    }
+}
+
+fn native_view_signature(nodes: &[i64], lists: &[Vec<i64>], sym: i64) -> bool {
+    let decl = sym_decl_of(nodes, sym);
+    if decl == NONE || node_tag(nodes, decl) != NODE_ITEM || node_a(nodes, decl) != ITEM_NATIVE_FUN {
+        return false;
+    }
+    let fn_node = node_d(nodes, decl);
+    let params = node_c(nodes, fn_node);
+    if list_len(lists, params) == 0 {
+        return false;
+    }
+    let first = list_first(lists, params);
+    if first == NONE {
+        return false;
+    }
+    let param_ty = node_b(nodes, first);
+    let param_kind = node_a(nodes, param_ty);
+    if param_kind != TY_REF && param_kind != TY_REF_MUT {
+        return false;
+    }
+    let handle_ty = node_b(nodes, param_ty);
+    let handle_sym = ty_sym_of(nodes, handle_ty);
+    if handle_sym == NONE || node_tag(nodes, handle_sym) != NODE_SYM || sym_kind_of(nodes, handle_sym) != SYM_TYPE {
+        return false;
+    }
+    let handle_decl = sym_decl_of(nodes, handle_sym);
+    if handle_decl == NONE || node_tag(nodes, handle_decl) != NODE_ITEM || node_a(nodes, handle_decl) != ITEM_NATIVE_TYPE {
+        return false;
+    }
+    let mut return_ty = node_d(nodes, fn_node);
+    if node_a(nodes, return_ty) == TY_REF || node_a(nodes, return_ty) == TY_REF_MUT {
+        return_ty = node_b(nodes, return_ty);
+    }
+    node_a(nodes, return_ty) == TY_SLICE
 }
 
 // Every native function with an extraction opcode (vec_pop, hash_map_remove)

@@ -297,17 +297,20 @@ fn container_has_linear_elem(ctx: &mut Ctx, key: i64) -> bool {
     is_container_key(ctx.1, key) && tyinfo_has_linear_elems(ctx.1, key) == 1
 }
 
-// The native opcode of the callee of `expr`, or NONE for non-native calls.
+// The native opcode attached to `expr`'s monomorphic call instance, or
+// NONE for non-native calls.  The callee path is deliberately ignored here:
+// resolution and typechecking already attached the symbol and instance, so
+// borrow checking consumes that fact instead of resolving the path again.
 fn native_op_of(ctx: &mut Ctx, expr: i64) -> i64 {
-    let callee = node_b(ctx.1, expr);
-    if node_tag(ctx.1, callee) != NODE_EXPR || node_a(ctx.1, callee) != EXPR_PATH {
+    let inst = expr_sym_of(ctx.1, expr);
+    if node_tag(ctx.1, inst) != NODE_INST {
         return NONE;
     }
-    let sym = expr_sym_of(ctx.1, callee);
-    if sym == NONE || node_a(ctx.1, sym) != SYM_NATIVE_FUN {
+    let fn_slot = inst_fn_of(ctx.1, inst);
+    if node_tag(ctx.1, fn_slot) != NODE_SYM || node_a(ctx.1, fn_slot) != SYM_NATIVE_FUN {
         return NONE;
     }
-    sym_native_op(ctx.1, sym)
+    sym_native_op(ctx.1, fn_slot)
 }
 
 fn call_is_create(ctx: &mut Ctx, expr: i64) -> bool {
@@ -1702,7 +1705,7 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
             let mode = param_mode_of(ctx.1, pty);
             let mut arg_prod: Vec<i64> = Vec::new();
             expr_effects(f, b, ctx, arg, mode, ret, &mut arg_prod);
-            if mode == MODE_MUT {
+            if mode == MODE_MUT && op != NAT_VEC_POP && op != NAT_HASH_MAP_REMOVE {
                 fill_container_if_mut_arg(f, b, ctx, arg);
             }
             arg_prods.push(arg_prod);
@@ -1731,7 +1734,7 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
         };
         let mut arg_prod: Vec<i64> = Vec::new();
         expr_effects(f, b, ctx, arg, mode, ret, &mut arg_prod);
-        if mode == MODE_MUT {
+        if mode == MODE_MUT && op != NAT_VEC_POP && op != NAT_HASH_MAP_REMOVE {
             fill_container_if_mut_arg(f, b, ctx, arg);
         }
         arg_prods.push(arg_prod);
@@ -1739,7 +1742,14 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
     }
     let ret_key = inst_ret_of(ctx.1, inst);
     if is_ref_key(ctx.1, ret_key) {
-        call_origin_of(ctx, Some(inst_fn_of(ctx.1, inst)), &arg_prods, prod);
+        if op == NAT_SLICE_VIEW {
+            prod.clear();
+            if let Some(first_prod) = arg_prods.first() {
+                append_prod_unique(prod, first_prod);
+            }
+        } else {
+            call_origin_of(ctx, Some(inst_fn_of(ctx.1, inst)), &arg_prods, prod);
+        }
     } else {
         prod.clear();
     }
