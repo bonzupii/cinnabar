@@ -70,7 +70,7 @@ export type NavItem = {
  * Icons are named rather than imported here, because this module is read by
  * the sitemap and the metadata — neither of which should pull in components.
  */
-export type IconName = "doc" | "build" | "reference" | "architecture" | "check";
+export type IconName = "doc" | "build" | "reference" | "architecture" | "check" | "playground";
 
 /**
  * Plate 12's docs header sets the order: the normative spec first, then the
@@ -88,6 +88,12 @@ export const NAV: readonly NavItem[] = [
     label: "Install",
     blurb: "Build the compiler and set up an editor.",
     icon: "build",
+  },
+  {
+    href: "/playground/",
+    label: "Playground",
+    blurb: "Type Cinnabar, checked in your browser.",
+    icon: "playground",
   },
   {
     href: "/reference/",

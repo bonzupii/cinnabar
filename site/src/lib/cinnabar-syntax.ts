@@ -41,6 +41,28 @@ export type Token = {
 };
 
 /**
+ * The "Cinnabar Dark" theme — plate 09 — as a token kind to class mapping.
+ *
+ * The single definition every renderer of tokenized source shares: the
+ * static samples in `CodeBlock`, and the live editor in `PlaygroundEditor`,
+ * so typing a program never looks like a different language from reading
+ * one.
+ */
+export const TOKEN_STYLE: Record<TokenKind, string> = {
+  keyword: "text-syn-keyword",
+  type: "text-syn-type font-medium",
+  constant: "text-syn-type",
+  function: "text-syn-type font-semibold",
+  identifier: "text-syn-identifier",
+  literal: "text-syn-literal",
+  string: "text-syn-literal",
+  punctuation: "text-syn-punctuation",
+  comment: "text-syn-comment italic",
+  "doc-comment": "text-syn-comment italic",
+  text: "",
+};
+
+/**
  * Every keyword in the language surface, from MANIFESTO.md. Keeping this list
  * exhaustive matters: an unknown keyword falls through to the identifier rules
  * and would be mis-coloured as a binding.

@@ -240,4 +240,5 @@ export const NAV_ICONS = {
   // and two sections marked alike is worse than no marks at all.
   architecture: StaticLinkIcon,
   check: CheckIcon,
+  playground: DiagnosticIcon,
 } as const;
