@@ -35,8 +35,12 @@
             # wasm32-unknown-unknown target support for crates/cinnabar-wasm:
             # rustc already carries that target's std, but linking a cdylib
             # for it needs a wasm-aware linker, which clang/llvm above don't
-            # provide on their own.
+            # provide on their own. wasm-bindgen-cli must stay in lockstep
+            # with the `wasm-bindgen` crate version pinned in
+            # crates/cinnabar-wasm/Cargo.toml -- the CLI post-processes the
+            # exact .wasm the matching crate version produced.
             lld
+            wasm-bindgen-cli
           ];
 
           shellHook = ''
