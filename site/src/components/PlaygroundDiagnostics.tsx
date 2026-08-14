@@ -1,4 +1,4 @@
-import { AnimatePresence, motion } from "motion/react";
+import { motion } from "motion/react";
 import Window, { WindowBody } from "@/components/Window";
 import { CheckIcon } from "@/components/brand/icons";
 import { isClean, locateSpan, type PlaygroundDiagnostic, type PlaygroundReport } from "@/lib/cinnabar-diagnostics";
@@ -14,6 +14,14 @@ import { isClean, locateSpan, type PlaygroundDiagnostic, type PlaygroundReport }
  * arbitrary, changing span on every keystroke, so it settles for the same
  * palette and a `^^^^` caret run under the span instead of replicating
  * ariadne's box-joining geometry live.
+ *
+ * Content here can flip on every keystroke, sometimes several times before a
+ * debounce settles. `AnimatePresence mode="wait"` was tried for the clean/
+ * errors swap and dropped: a key change arriving mid-exit restarts the exit
+ * of an element that's already animating out, and a fast enough typist could
+ * leave the previous state's element exit-animating forever while the DOM
+ * never mounts the current one. `animate`'s key change alone still gives the
+ * swap a beat of motion, with no unmount/remount sequencing to race.
  */
 
 function SourceExcerpt({ source, diagnostic }: { source: string; diagnostic: PlaygroundDiagnostic }) {
@@ -97,24 +105,21 @@ export default function PlaygroundDiagnostics({
     <Window path={path} title="Diagnostics" className={className}>
       <WindowBody scale="diagnostic">
         <code>
-          <AnimatePresence mode="wait" initial={false}>
-            <motion.span
-              key={clean ? "clean" : "errors"}
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.12 }}
-              className="block"
-            >
-              {clean ? (
-                <CleanState />
-              ) : (
-                report?.diagnostics.map((diagnostic, index) => (
-                  <DiagnosticBlock key={index} diagnostic={diagnostic} source={source} />
-                ))
-              )}
-            </motion.span>
-          </AnimatePresence>
+          <motion.span
+            key={clean ? "clean" : "errors"}
+            initial={{ opacity: 0.4 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.12 }}
+            className="block"
+          >
+            {clean ? (
+              <CleanState />
+            ) : (
+              report?.diagnostics.map((diagnostic, index) => (
+                <DiagnosticBlock key={index} diagnostic={diagnostic} source={source} />
+              ))
+            )}
+          </motion.span>
         </code>
       </WindowBody>
     </Window>

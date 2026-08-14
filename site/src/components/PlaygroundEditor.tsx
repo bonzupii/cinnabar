@@ -21,10 +21,35 @@ const ENTRY_PATH = "playground.cnb";
 
 const EXTENSIONS = [cinnabarHighlighting, EditorView.lineWrapping];
 
+// A stable reference, so CodeMirror never mistakes a new render for a
+// reconfiguration request the way it would with an inline object literal.
+const BASIC_SETUP = {
+  lineNumbers: true,
+  foldGutter: false,
+  highlightActiveLine: false,
+  highlightActiveLineGutter: false,
+  autocompletion: false,
+  closeBrackets: true,
+  bracketMatching: true,
+};
+
 export default function PlaygroundEditor() {
   const [source, setSource] = useState(SAMPLES[0].code);
   const [report, setReport] = useState<PlaygroundReport | null>(null);
   const latestRequest = useRef(0);
+  // `@uiw/react-codemirror`'s `value` prop only seeds the initial document;
+  // once the view exists, further changes to `value` from outside the
+  // editor's own `onChange` (loading a different sample) don't get pushed
+  // back in. Remounting on a key change is the reliable way to actually
+  // replace the document, and it's the right behaviour anyway -- loading a
+  // different starter program is a reset, undo history included, not an
+  // edit.
+  const [loadKey, setLoadKey] = useState(0);
+
+  function loadSample(code: string) {
+    setSource(code);
+    setLoadKey((key) => key + 1);
+  }
 
   // Warms the wasm module on mount rather than on the first edit, so typing
   // never pays its load latency.
@@ -62,7 +87,7 @@ export default function PlaygroundEditor() {
             type="button"
             role="tab"
             aria-selected={source === sample.code}
-            onClick={() => setSource(sample.code)}
+            onClick={() => loadSample(sample.code)}
             className="panel-hover text-secondary hover:text-text hover:border-hairline-strong -mb-px border-b-2 border-transparent px-4 py-2.5 text-[12px] font-bold tracking-widest uppercase"
           >
             {sample.label}
@@ -72,20 +97,13 @@ export default function PlaygroundEditor() {
 
       <Window path={ENTRY_PATH} title="Cinnabar source">
         <CodeMirror
+          key={loadKey}
           value={source}
           onChange={setSource}
           theme={cinnabarEditorTheme}
           extensions={EXTENSIONS}
           height="24rem"
-          basicSetup={{
-            lineNumbers: true,
-            foldGutter: false,
-            highlightActiveLine: false,
-            highlightActiveLineGutter: false,
-            autocompletion: false,
-            closeBrackets: true,
-            bracketMatching: true,
-          }}
+          basicSetup={BASIC_SETUP}
         />
       </Window>
 

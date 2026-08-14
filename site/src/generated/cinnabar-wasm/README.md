@@ -1,4 +1,4 @@
-# Generated — do not hand-edit
+# Generated, plus one required patch
 
 `cinnabar_wasm.js` and `cinnabar_wasm.d.ts` are `wasm-bindgen`'s JS glue for
 `crates/cinnabar-wasm`, built for the `web` target. The `.wasm` binary itself
@@ -24,3 +24,26 @@ Netlify's build does not regenerate this — there's no Rust toolchain in that
 build image — so a change to `crates/cinnabar-wasm` (or to any pipeline stage
 it calls into) needs the commands above run and the diff committed alongside
 it.
+
+## The required patch
+
+`wasm-bindgen`'s `web` target always emits a fallback in its `init()` that
+resolves the `.wasm` relative to the JS file when no path is given:
+
+```js
+if (module_or_path === undefined) {
+    module_or_path = new URL('cinnabar_wasm_bg.wasm', import.meta.url);
+}
+```
+
+Next's bundler statically resolves that `new URL(..., import.meta.url)`
+expression at build time — regardless of whether the branch ever runs — and
+fails the build with `Module not found` once the `.wasm` no longer sits next
+to this file. Every caller here always passes an explicit path, so that
+branch is genuinely unreachable; after each regeneration, replace it with:
+
+```js
+if (module_or_path === undefined) {
+    throw new Error('cinnabar_wasm: call default(url) with an explicit path to the .wasm binary');
+}
+```

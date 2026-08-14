@@ -193,7 +193,13 @@ async function __wbg_init(module_or_path) {
     }
 
     if (module_or_path === undefined) {
-        module_or_path = new URL('cinnabar_wasm_bg.wasm', import.meta.url);
+        // Patched: the generated `import.meta.url`-relative fallback is
+        // removed. Next's bundler statically resolves that `new URL(...)`
+        // expression at build time regardless of whether this branch runs,
+        // and the .wasm this crate ships lives at public/wasm/ instead of
+        // beside this file (see ../README.md) precisely so callers pass an
+        // explicit path instead of relying on this fallback.
+        throw new Error('cinnabar_wasm: call default(url) with an explicit path to the .wasm binary');
     }
     const imports = __wbg_get_imports();
 
