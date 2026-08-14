@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { IBM_Plex_Mono, Schibsted_Grotesk } from "next/font/google";
 import SiteHeader from "@/components/SiteHeader";
 import SiteFooter from "@/components/SiteFooter";
+import MushroomEasterEgg from "@/components/MushroomEasterEgg";
 import { og } from "./(home)/page";
 import { ogImage } from "@/lib/og-image";
 import { THEME_INIT_SCRIPT } from "@/lib/theme";
@@ -100,6 +101,8 @@ export default function RootLayout({
           {children}
         </main>
         <SiteFooter />
+        {/* Renders nothing until the Konami code is typed. */}
+        <MushroomEasterEgg />
       </body>
     </html>
   );

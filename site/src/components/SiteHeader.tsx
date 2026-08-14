@@ -1,9 +1,7 @@
-import Link from "next/link";
-import Wordmark from "@/components/brand/Wordmark";
-import CinnabarMark from "@/components/brand/CinnabarMark";
 import { GitHubIcon } from "@/components/brand/icons";
 import NavLinks from "@/components/NavLinks";
 import MobileMenu from "@/components/MobileMenu";
+import SiteHeaderLogo from "@/components/SiteHeaderLogo";
 import ThemeToggle from "@/components/ThemeToggle";
 import { REPO_URL } from "@/lib/site";
 
@@ -25,17 +23,13 @@ export default function SiteHeader() {
 
       <div className="mx-auto flex h-16 max-w-[1400px] items-center gap-8 px-6 sm:px-10">
         {/*
-          Below 400px only the mark shows, and the mark is decorative, so the
-          link would otherwise have no accessible name at all on a small phone.
+          The wordmark already carries the mark as the inline C at its head
+          (`InlineMark`, in Wordmark.tsx) -- rendering the standalone mark
+          beside it duplicated the same glyph twice. Below 400px there's no
+          room for the full lockup, so the mark alone stands in; the mark is
+          decorative there too, but the link's own aria-label still names it.
         */}
-        <Link
-          href="/"
-          aria-label="Cinnabar — home"
-          className="flex items-center gap-3 focus-visible:outline-offset-4"
-        >
-          <CinnabarMark size={26} letter="var(--text)" />
-          <Wordmark size={18} letter="var(--text)" className="hidden min-[400px]:block" />
-        </Link>
+        <SiteHeaderLogo />
 
         <nav aria-label="Primary" className="hidden items-center gap-8 lg:flex">
           <NavLinks />
