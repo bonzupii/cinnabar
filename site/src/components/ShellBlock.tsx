@@ -1,4 +1,4 @@
-import TerminalFrame, { TerminalBody } from "@/components/TerminalFrame";
+import Window, { WindowBody } from "@/components/Window";
 import {
   tokenizeShellLine,
   tokenizeUsageLine,
@@ -41,18 +41,20 @@ export type ShellLine = string | { out: string };
 
 export default function ShellBlock({
   lines,
-  cwd,
-  label,
+  cwd = "~/src/cinnabar",
+  title = "Terminal session",
   className,
 }: {
   lines: readonly ShellLine[];
+  /** Shown beside the mark — the directory the session is running in. */
   cwd?: string;
-  label?: string;
+  /** Centred: what the session demonstrates. */
+  title?: string;
   className?: string;
 }) {
   return (
-    <TerminalFrame cwd={cwd} label={label} className={className}>
-      <TerminalBody>
+    <Window path={cwd} title={title} className={className}>
+      <WindowBody>
         <code>
           {lines.map((line, index) => {
             const isCommand = typeof line === "string";
@@ -66,17 +68,12 @@ export default function ShellBlock({
             );
           })}
         </code>
-      </TerminalBody>
-    </TerminalFrame>
+      </WindowBody>
+    </Window>
   );
 }
 
-/**
- * The synopsis shape `cinnabar --help` prints.
- *
- * No terminal chrome: this is a reference figure rather than a session, and
- * dressing it as one would imply it had been run.
- */
+/** The synopsis shape `cinnabar --help` prints. */
 export function UsageBlock({
   lines,
   className,
@@ -85,11 +82,8 @@ export function UsageBlock({
   className?: string;
 }) {
   return (
-    <div className={`rule-grid flex min-w-0 ${className ?? ""}`}>
-      <pre
-        tabIndex={0}
-        className="bg-code-terminal w-full overflow-x-auto px-6 py-6 font-mono text-[13px] leading-[1.75]"
-      >
+    <Window path="cinnabar --help" title="Usage" className={className}>
+      <WindowBody className="leading-[1.75]">
         <code>
           {lines.map((line, index) => (
             <span key={index}>
@@ -98,7 +92,33 @@ export function UsageBlock({
             </span>
           ))}
         </code>
-      </pre>
-    </div>
+      </WindowBody>
+    </Window>
+  );
+}
+
+/**
+ * A block of plain text in a window — a config file, or a fenced block in a
+ * repository document whose language the site has no theme for.
+ */
+export function PlainWindow({
+  text,
+  path,
+  title = "Output",
+  className,
+}: {
+  text: string;
+  /** Shown beside the mark — a file name, or the language of the block. */
+  path: string;
+  /** Centred: what the block is showing. */
+  title?: string;
+  className?: string;
+}) {
+  return (
+    <Window path={path} title={title} className={className}>
+      <WindowBody className="text-term-output text-[12.5px] leading-[1.7]">
+        <code>{text}</code>
+      </WindowBody>
+    </Window>
   );
 }

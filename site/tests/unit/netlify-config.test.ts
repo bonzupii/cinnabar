@@ -40,14 +40,14 @@ describe("netlify.toml", () => {
   });
 
   it("serves the root social image as a PNG", () => {
-    const rule = headerValues("/opengraph-image");
-    expect(rule, "no [[headers]] rule for /opengraph-image").toBeDefined();
+    const rule = headerValues("/og-image");
+    expect(rule, "no [[headers]] rule for /og-image").toBeDefined();
     expect(rule).toMatch(/Content-Type\s*=\s*"image\/png"/);
   });
 
   it("serves every route's social image as a PNG", () => {
-    const rule = headerValues("/*/opengraph-image");
-    expect(rule, "no [[headers]] rule for /*/opengraph-image").toBeDefined();
+    const rule = headerValues("/*/og-image");
+    expect(rule, "no [[headers]] rule for /*/og-image").toBeDefined();
     expect(rule).toMatch(/Content-Type\s*=\s*"image\/png"/);
   });
 

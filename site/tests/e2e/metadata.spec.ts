@@ -5,10 +5,10 @@ import { ROUTES } from "./routes";
  * Deployment-shape checks.
  *
  * The site ships as a static export, so whatever the build wrote is exactly
- * what gets served. The social images in particular are route handlers under
- * /og/<name>.png rather than Next's `opengraph-image` convention, because that
- * convention emits an extension-less file, which a static host serves without
- * an image content-type and every social scraper then rejects.
+ * what gets served. The social images are route handlers at /og-image rather
+ * than Next's `opengraph-image` convention: the handler is written once and
+ * reused, and the URL is one this code chooses, so the header rule that gives
+ * it an image content type points at a path that will not move.
  */
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -19,8 +19,8 @@ for (const route of ROUTES) {
     expect(response.status()).toBe(200);
 
     // The content type is asserted in tests/unit/netlify-config.test.ts, not
-    // here: Next's file convention writes an extension-less file and the local
-    // `serve` has no netlify.toml to read, so only the deployed host sets it.
+    // here: a route handler emits an extension-less file and the local `serve`
+    // has no netlify.toml to read, so only the deployed host sets it.
     const body = await response.body();
     expect(body.subarray(0, 8)).toEqual(PNG_SIGNATURE);
     expect(body.readUInt32BE(16)).toBe(1200);
@@ -35,7 +35,7 @@ test("every page declares a social image with its dimensions", async ({ page }) 
     const ogImage = await page
       .locator('meta[property="og:image"]')
       .getAttribute("content");
-    expect(ogImage, `${route.name} has no og:image`).toContain(`${route.og}?`);
+    expect(ogImage, `${route.name} has no og:image`).toContain(route.og);
 
     await expect(page.locator('meta[property="og:image:width"]')).toHaveAttribute(
       "content",

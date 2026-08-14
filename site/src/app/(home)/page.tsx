@@ -24,7 +24,7 @@ import { MANIFEST_SAMPLE } from "@/content/samples";
 import { readPageContent } from "@/lib/page-content";
 import { BADGES, QUIP, REPO_URL, STATUS_BADGE } from "@/lib/site";
 
-/** Social image copy, consumed by ./opengraph-image.tsx. */
+/** Social image copy, rendered by /og-image. The root layout points at it. */
 export const og = {
   eyebrow: "Systems language",
   title: "Consumed exactly once.",
@@ -96,7 +96,6 @@ export default async function Home() {
         <ShellBlock
           lines={INSTALL_SHELL}
           cwd="~/src"
-          label="Getting started"
           className="mt-7 max-w-[760px]"
         />
 
@@ -237,7 +236,7 @@ export default async function Home() {
             </div>
             <ArrowLink href="/reference/#manifest">Manifest reference</ArrowLink>
           </div>
-          <CodeBlock code={MANIFEST_SAMPLE} caption="build.cnb" />
+          <CodeBlock code={MANIFEST_SAMPLE} path="build.cnb" title="The manifest" />
         </Reveal>
       </section>
 

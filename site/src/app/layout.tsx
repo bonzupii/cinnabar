@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import { IBM_Plex_Mono, Schibsted_Grotesk } from "next/font/google";
 import SiteHeader from "@/components/SiteHeader";
 import SiteFooter from "@/components/SiteFooter";
+import { og } from "./(home)/page";
+import { ogImage } from "@/lib/og-image";
 import { THEME_INIT_SCRIPT } from "@/lib/theme";
 import { DESCRIPTION, SITE_URL, TAGLINE } from "@/lib/site";
 import "./globals.css";
@@ -53,11 +55,13 @@ export const metadata: Metadata = {
     type: "website",
     locale: "en_US",
     url: "/",
+    images: [ogImage("/", og)],
   },
   twitter: {
     card: "summary_large_image",
     title: "Cinnabar — consumed exactly once",
     description: DESCRIPTION,
+    images: [ogImage("/", og)],
   },
 };
 

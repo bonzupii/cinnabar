@@ -1,59 +1,69 @@
 import type { Metadata } from "next";
 import DocBody from "@/components/DocBody";
-import PageHeader from "@/components/PageHeader";
+import PageHeader, { Eyebrow } from "@/components/PageHeader";
 import SectionHeading from "@/components/SectionHeading";
 import Reveal from "@/components/Reveal";
-import { Panel, SourceNote, Stat } from "@/components/ui";
-import { CheckIcon, DiagnosticIcon, RunIcon } from "@/components/brand/icons";
-import { MILESTONES, STATUS_LABEL, type MilestoneStatus } from "@/content/roadmap";
+import { ArrowLink, Callout, Panel, SourceNote, Stat } from "@/components/ui";
+import { CheckIcon, LinearIcon, RunIcon } from "@/components/brand/icons";
+import {
+  HORIZON,
+  IN_PROGRESS,
+  MILESTONE_TALLY,
+  SHIPPED,
+  type Capability,
+} from "@/content/roadmap";
+import { CONTAINER, ICON } from "@/lib/constants";
+import { ogImageMetadata } from "@/lib/og-image";
 import { readPageContent } from "@/lib/page-content";
 import { linkRepoFile, readRepoDoc } from "@/lib/repo-docs";
+
+/** Social image copy, rendered by ./og-image/route.tsx. */
+export const og = {
+  eyebrow: "Project status",
+  title: "Eight milestones down.",
+  description:
+    "What the language and its toolchain do today, what is still being widened, and why self-hosting is a completeness test rather than a gate.",
+  alt: "Cinnabar social card — the project status.",
+};
 
 export const metadata: Metadata = {
   title: "Roadmap",
   description:
-    "What is resolved and what is planned in Cinnabar: eight milestones, their status, and why self-hosting is a goal rather than a gate.",
+    "What Cinnabar does today: linear types checked on every path, direct system calls, freestanding static binaries — and self-hosting on the horizon.",
   alternates: { canonical: "/roadmap/" },
+  ...ogImageMetadata("/roadmap/", og),
 };
 
-/** Social image copy, consumed by ./opengraph-image.tsx. */
-export const og = {
-  eyebrow: "Project status",
-  title: "Resolved, and planned.",
-  description:
-    "Eight milestones and their status, and why self-hosting is a completeness test rather than a gate.",
-  alt: "Cinnabar social card — the project status.",
-};
 
-/*
- * Status is carried by a shape as well as a colour. The board allows one
- * accent, so "partial" cannot simply be a second hue — and colour alone would
- * not carry the distinction for a reader who cannot see it, which is why each
- * state also has its own icon and fill treatment.
- */
-const STATUS_STYLE: Record<MilestoneStatus, { chip: string; node: string }> = {
-  complete: { chip: "bg-cinnabar text-on-cinnabar", node: "bg-cinnabar border-cinnabar" },
-  partial: {
-    chip: "border border-cinnabar text-cinnabar-text",
-    node: "border-cinnabar bg-ground",
-  },
-  goal: {
-    chip: "border border-hairline-strong text-label",
-    node: "border-hairline-strong bg-ground",
-  },
-};
-
-const STATUS_ICON = {
-  complete: CheckIcon,
-  partial: RunIcon,
-  goal: DiagnosticIcon,
-} as const;
-
-const SUMMARY_STATES = [
-  ["complete", "Complete"],
-  ["partial", "Partial"],
-  ["goal", "Long-term goal"],
-] as const;
+/** One capability, as a cell in the hairline grid. */
+function CapabilityCard({
+  capability,
+  delay,
+}: {
+  capability: Capability;
+  delay: number;
+}) {
+  const Icon = capability.icon;
+  return (
+    <Reveal
+      delay={delay}
+      className="bg-panel hover:bg-panel-raised panel-hover flex flex-col gap-5 p-8"
+    >
+      <Icon size={ICON.card} className="text-text" />
+      <h3 className="text-[17px] leading-snug font-bold tracking-[-0.015em]">
+        <a
+          href={capability.anchor}
+          className="text-text hover:text-cinnabar-text panel-hover"
+        >
+          {capability.title}
+        </a>
+      </h3>
+      <p className="text-secondary text-[14.5px] leading-[1.65] text-pretty">
+        {capability.detail}
+      </p>
+    </Reveal>
+  );
+}
 
 export default async function RoadmapPage() {
   const [document, content] = await Promise.all([
@@ -61,111 +71,100 @@ export default async function RoadmapPage() {
     readPageContent("roadmap"),
   ]);
 
-  const counts = MILESTONES.reduce<Record<string, number>>((totals, milestone) => {
-    totals[milestone.status] = (totals[milestone.status] ?? 0) + 1;
-    return totals;
-  }, {});
-
   return (
     <article className="pb-28">
       <PageHeader
         section="Roadmap"
         note="A milestone is done only when fixtures, gate and spec agree"
         icon={CheckIcon}
-        title="Resolved, and planned."
+        title="Eight milestones down."
         lede={content.block("lede")}
       />
 
-      {/* A count per state, so the shape of the project is legible at a glance. */}
-      <section className="mx-auto max-w-[1400px] px-6 pt-14 sm:px-10">
+      {/* The shape of the project in three numbers. */}
+      <section className={`${CONTAINER} pt-14`}>
         <div className="rule-grid grid grid-cols-2 sm:grid-cols-4">
-          {SUMMARY_STATES.map(([status, label]) => (
-            <Stat key={status} value={counts[status] ?? 0} label={label} />
-          ))}
-          <Panel className="justify-center gap-2 bg-ground p-6">
+          <Stat value={SHIPPED.length} label="Capabilities shipped" />
+          <Stat
+            value={`${MILESTONE_TALLY.complete} / ${MILESTONE_TALLY.total}`}
+            label="Milestones complete"
+          />
+          <Stat value={IN_PROGRESS.length} label="Still widening" />
+          <Panel className="bg-ground justify-center gap-2 p-6">
             <span className="text-secondary text-[13px] leading-[1.55] text-pretty">
-              Self-hosting is a completeness test, not a gate.
+              Self-hosting is the next horizon, and a completeness test rather than a
+              gate.
             </span>
           </Panel>
         </div>
       </section>
 
-      {/* A rail rather than a grid: the milestones are ordered, and the order
-          is information. */}
-      <section className="mx-auto max-w-[1400px] px-6 pt-20 sm:px-10">
+      {/* What the language does today. */}
+      <section className={`${CONTAINER} pt-20`}>
         <SectionHeading
-          title="Milestones"
-          note={content.block("milestones-note")}
+          title="What Cinnabar does today"
+          note={content.block("shipped-note")}
           icon={CheckIcon}
         />
-
-        <ol className="mt-12 flex list-none flex-col">
-          {MILESTONES.map((milestone, index) => {
-            const style = STATUS_STYLE[milestone.status];
-            const Icon = STATUS_ICON[milestone.status];
-            const last = index === MILESTONES.length - 1;
-
-            return (
-              <Reveal
-                key={milestone.number}
-                as="li"
-                delay={Math.min(index * 0.03, 0.18)}
-                className="grid grid-cols-[28px_minmax(0,1fr)] gap-x-6 sm:grid-cols-[64px_minmax(0,1fr)]"
-              >
-                <div className="flex flex-col items-center">
-                  <span
-                    aria-hidden="true"
-                    className={`mt-1.5 h-3.5 w-3.5 flex-none border-2 ${style.node}`}
-                  />
-                  {!last ? (
-                    <span
-                      aria-hidden="true"
-                      className="bg-hairline w-px flex-1"
-                      style={{ minHeight: 24 }}
-                    />
-                  ) : null}
-                </div>
-
-                <div className={`min-w-0 ${last ? "pb-0" : "pb-12"}`}>
-                  <div className="flex flex-wrap items-center gap-3">
-                    <span className="text-label font-mono text-[11px] tracking-[0.16em]">
-                      {milestone.number === "—" ? "GOAL" : `MILESTONE ${milestone.number}`}
-                    </span>
-                    <span
-                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 font-mono text-[10px] tracking-[0.14em] uppercase ${style.chip}`}
-                    >
-                      <Icon size={12} />
-                      {STATUS_LABEL[milestone.status]}
-                    </span>
-                  </div>
-
-                  <h3 className="mt-3 text-[20px] leading-tight font-bold tracking-[-0.02em] sm:text-[24px]">
-                    <a
-                      href={milestone.anchor}
-                      className="text-text hover:text-cinnabar-text panel-hover"
-                    >
-                      {milestone.title}
-                    </a>
-                  </h3>
-
-                  <p className="text-secondary mt-3 max-w-[86ch] text-[15.5px] leading-[1.7] text-pretty">
-                    {milestone.summary}
-                  </p>
-                </div>
-              </Reveal>
-            );
-          })}
-        </ol>
+        <div className="rule-grid mt-11 grid sm:grid-cols-2 lg:grid-cols-3">
+          {SHIPPED.map((capability, index) => (
+            <CapabilityCard
+              key={capability.title}
+              capability={capability}
+              delay={Math.min(index * 0.03, 0.18)}
+            />
+          ))}
+        </div>
       </section>
 
-      <section className="mx-auto max-w-[1400px] px-6 pt-24 pb-12 sm:px-10">
-        <SectionHeading title="Full roadmap" note="ROADMAP.md" />
+      {/* The two partials, stated plainly rather than as open tickets. */}
+      <section className={`${CONTAINER} pt-24`}>
+        <SectionHeading title="Still widening" note="Marked partial" icon={RunIcon} />
+        <Reveal className="mt-9">
+          <p className="text-secondary max-w-[86ch] text-[16.5px] leading-[1.75] text-pretty">
+            {content.block("progress")}
+          </p>
+        </Reveal>
+        <div className="rule-grid mt-9 grid sm:grid-cols-2">
+          {IN_PROGRESS.map((capability, index) => (
+            <CapabilityCard
+              key={capability.title}
+              capability={capability}
+              delay={index * 0.04}
+            />
+          ))}
+        </div>
+      </section>
+
+      {/* The horizon. */}
+      <section className={`${CONTAINER} pt-24`}>
+        <SectionHeading
+          title="On the horizon"
+          note={content.block("horizon-note")}
+          icon={LinearIcon}
+        />
+        <Reveal className="mt-11">
+          <Callout>
+            <Eyebrow>Next</Eyebrow>
+            <h3 className="text-text text-[28px] leading-tight font-bold tracking-[-0.025em] sm:text-[36px]">
+              {HORIZON.title}
+            </h3>
+            <p className="text-bright max-w-[80ch] text-[17px] leading-[1.7] text-pretty">
+              {HORIZON.detail}
+            </p>
+            <ArrowLink href={HORIZON.anchor}>Read the reasoning</ArrowLink>
+          </Callout>
+        </Reveal>
+      </section>
+
+      <section className={`${CONTAINER} pt-24 pb-12`}>
+        <SectionHeading title="The full record" note="ROADMAP.md" />
         <SourceNote className="mt-10">
           {linkRepoFile(content.block("source"), "ROADMAP.md")}
         </SourceNote>
       </section>
 
-      <DocBody markdown={document} tocLabel="Sections" />
+      <DocBody markdown={document} tocLabel="Milestones" />
     </article>
   );
 }

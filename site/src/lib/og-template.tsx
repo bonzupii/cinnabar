@@ -1,4 +1,5 @@
 import { ImageResponse } from "next/og";
+import { BRAND, OG_SIZE, WORDMARK_METRICS } from "@/lib/constants";
 import { loadOgFonts } from "@/lib/og-fonts";
 import {
   MARK_BLOCK,
@@ -15,15 +16,9 @@ import {
  * they are not vendored here.
  */
 
-const GROUND = "#100E0D";
-const TEXT = "#EDE9E6";
-const SECONDARY = "#A29B96";
-const MUTE = "#6E6763";
-const HAIRLINE = "#302C2A";
-const CINNABAR = "#E0442A";
+const { ground: GROUND, text: TEXT, secondary: SECONDARY, mute: MUTE, hairline: HAIRLINE, cinnabar: CINNABAR } = BRAND;
 
-export const ogSize = { width: 1200, height: 630 };
-export const ogContentType = "image/png";
+export const ogSize = OG_SIZE;
 
 
 /**
@@ -34,8 +29,8 @@ export const ogContentType = "image/png";
  * the letter on the same baseline the type sits on.
  */
 function Wordmark({ cap }: { cap: number }) {
-  const height = cap * 0.705;
-  const width = cap * 0.6698;
+  const height = cap * WORDMARK_METRICS.capHeight;
+  const width = cap * WORDMARK_METRICS.width;
   return (
     <div style={{ display: "flex", alignItems: "center" }}>
       <svg width={width} height={height} viewBox={MARK_VIEWBOX_INLINE}>
@@ -50,7 +45,7 @@ function Wordmark({ cap }: { cap: number }) {
           lineHeight: 1,
           letterSpacing: cap * -0.035,
           color: TEXT,
-          marginLeft: cap * 0.031,
+          marginLeft: cap * WORDMARK_METRICS.sidebearing,
         }}
       >
         INNABAR

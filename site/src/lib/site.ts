@@ -38,9 +38,17 @@ export const STATUS_BADGE = "early development";
 export type NavItem = {
   href: string;
   label: string;
-  /** Shown in the dropdown/mobile menu under the label. */
+  /** Shown in the mobile menu under the label. */
   blurb: string;
+  /** The plate 07 icon that stands for this section, used wherever it appears. */
+  icon: IconName;
 };
+
+/**
+ * Icons are named rather than imported here, because this module is read by
+ * the sitemap and the metadata — neither of which should pull in components.
+ */
+export type IconName = "doc" | "build" | "reference" | "architecture" | "check";
 
 /**
  * Plate 12's docs header sets the order: the normative spec first, then the
@@ -51,26 +59,31 @@ export const NAV: readonly NavItem[] = [
     href: "/manifesto/",
     label: "Manifesto",
     blurb: "The normative language specification.",
+    icon: "doc",
   },
   {
     href: "/install/",
     label: "Install",
     blurb: "Build the compiler and set up an editor.",
+    icon: "build",
   },
   {
     href: "/reference/",
     label: "Reference",
     blurb: "Every CLI flag, command and manifest field.",
+    icon: "reference",
   },
   {
     href: "/architecture/",
     label: "Architecture",
     blurb: "The seven pipeline stages, end to end.",
+    icon: "architecture",
   },
   {
     href: "/roadmap/",
     label: "Roadmap",
     blurb: "What is resolved and what is planned.",
+    icon: "check",
   },
 ] as const;
 

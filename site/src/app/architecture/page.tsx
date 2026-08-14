@@ -7,17 +7,12 @@ import Reveal from "@/components/Reveal";
 import { Callout, MarkedList, Panel, SourceNote } from "@/components/ui";
 import { BuildIcon, LinearIcon, StaticLinkIcon } from "@/components/brand/icons";
 import { ARENA_PROPERTIES, ARENAS, SINGLE_FACT_RULE, STAGES } from "@/content/pipeline";
+import { CONTAINER } from "@/lib/constants";
+import { ogImageMetadata } from "@/lib/og-image";
 import { readPageContent } from "@/lib/page-content";
 import { linkRepoFile, readRepoDoc } from "@/lib/repo-docs";
 
-export const metadata: Metadata = {
-  title: "Architecture",
-  description:
-    "How the Cinnabar compiler is built: one fixed pipeline of seven stages over a flat node arena, with every fact computed exactly once.",
-  alternates: { canonical: "/architecture/" },
-};
-
-/** Social image copy, consumed by ./opengraph-image.tsx. */
+/** Social image copy, rendered by ./og-image/route.tsx. */
 export const og = {
   eyebrow: "Compiler internals",
   title: "One fixed pipeline.",
@@ -25,6 +20,15 @@ export const og = {
     "Seven stages over a flat node arena, where every fact is computed exactly once and attached for later stages to read.",
   alt: "Cinnabar social card — the compiler internals.",
 };
+
+export const metadata: Metadata = {
+  title: "Architecture",
+  description:
+    "How the Cinnabar compiler is built: one fixed pipeline of seven stages over a flat node arena, with every fact computed exactly once.",
+  alternates: { canonical: "/architecture/" },
+  ...ogImageMetadata("/architecture/", og),
+};
+
 
 /** Inline code inside a stage summary, which quotes identifiers in backticks. */
 const STAGE_PROSE =
@@ -50,7 +54,7 @@ export default async function ArchitecturePage() {
         The pipeline as a figure before the prose. ARCHITECTURE.md draws it as
         an ASCII column; at this width it reads better as a run of stages.
       */}
-      <section className="mx-auto max-w-[1400px] px-6 pt-16 sm:px-10">
+      <section className={`${CONTAINER} pt-16`}>
         <SectionHeading
           title="The pipeline"
           note={content.block("stages-note")}
@@ -65,14 +69,9 @@ export default async function ArchitecturePage() {
               delay={Math.min(index * 0.04, 0.2)}
               className="bg-panel hover:bg-panel-raised panel-hover flex flex-col gap-4 p-7"
             >
-              <div className="flex items-baseline justify-between gap-3">
-                <span className="text-cinnabar-text font-mono text-[10px] tracking-[0.16em]">
-                  {stage.index}
-                </span>
-                {stage.size ? (
-                  <span className="text-label font-mono text-[10px]">{stage.size}</span>
-                ) : null}
-              </div>
+              <span className="text-cinnabar-text font-mono text-[10px] tracking-[0.16em]">
+                {stage.index}
+              </span>
               <h3 className="text-text text-[17px] font-bold tracking-[-0.015em]">
                 {stage.name}
               </h3>
@@ -97,7 +96,7 @@ export default async function ArchitecturePage() {
       </section>
 
       {/* The representation, which is the genuinely unusual part. */}
-      <section className="mx-auto max-w-[1400px] px-6 pt-24 sm:px-10">
+      <section className={`${CONTAINER} pt-24`}>
         <SectionHeading
           title="The core representation"
           note="Struct of arrays, not a tree"
@@ -134,7 +133,7 @@ export default async function ArchitecturePage() {
       </section>
 
       {/* The governing rule, given the weight the document gives it. */}
-      <section className="mx-auto max-w-[1400px] px-6 pt-24 sm:px-10">
+      <section className={`${CONTAINER} pt-24`}>
         <Reveal>
           <Callout>
             <Eyebrow>The Single-Fact Rule</Eyebrow>
@@ -145,7 +144,7 @@ export default async function ArchitecturePage() {
         </Reveal>
       </section>
 
-      <section className="mx-auto max-w-[1400px] px-6 pt-24 pb-12 sm:px-10">
+      <section className={`${CONTAINER} pt-24 pb-12`}>
         <SectionHeading title="Full walkthrough" note="ARCHITECTURE.md" />
         <SourceNote className="mt-10">
           {linkRepoFile(content.block("source"), "ARCHITECTURE.md")}

@@ -2,8 +2,7 @@ import type { Metadata } from "next";
 import type { ComponentType, ReactNode } from "react";
 import PageHeader from "@/components/PageHeader";
 import SectionHeading from "@/components/SectionHeading";
-import ShellBlock from "@/components/ShellBlock";
-import TerminalFrame, { TerminalBody } from "@/components/TerminalFrame";
+import ShellBlock, { PlainWindow } from "@/components/ShellBlock";
 import Reveal from "@/components/Reveal";
 import { ArrowLink, Callout, Code, Prose } from "@/components/ui";
 import {
@@ -14,17 +13,11 @@ import {
   StaticLinkIcon,
   TestIcon,
 } from "@/components/brand/icons";
+import { ogImageMetadata } from "@/lib/og-image";
 import { readPageContent } from "@/lib/page-content";
 import { REPO_URL } from "@/lib/site";
 
-export const metadata: Metadata = {
-  title: "Install",
-  description:
-    "Build the Cinnabar compiler with the project's Nix flake, run it from Docker on Windows, set up the language server, and verify a change against the repository's gate.",
-  alternates: { canonical: "/install/" },
-};
-
-/** Social image copy, consumed by ./opengraph-image.tsx. */
+/** Social image copy, rendered by ./og-image/route.tsx. */
 export const og = {
   eyebrow: "Getting started",
   title: "Build the compiler.",
@@ -32,6 +25,15 @@ export const og = {
     "LLVM 21 via a Nix flake, a static musl libc, the language server, and the repository's verification gate.",
   alt: "Cinnabar social card — the getting-started guide.",
 };
+
+export const metadata: Metadata = {
+  title: "Install",
+  description:
+    "Build the Cinnabar compiler with the project's Nix flake, run it from Docker on Windows, set up the language server, and verify a change against the repository's gate.",
+  alternates: { canonical: "/install/" },
+  ...ogImageMetadata("/install/", og),
+};
+
 
 /** One step of the guide, with its own section rule. */
 function Step({
@@ -159,11 +161,7 @@ export default async function InstallPage() {
                 lines={["cargo build --release --bin cinnabar-lsp"]}
                 cwd="~/src/cinnabar"
               />
-              <TerminalFrame cwd="~/.config/nvim" label="init.lua" className="mt-7">
-                <TerminalBody className="text-term-output text-[12.5px] leading-[1.7]">
-                  <code>{NEOVIM_SETUP}</code>
-                </TerminalBody>
-              </TerminalFrame>
+              <PlainWindow text={NEOVIM_SETUP} path="init.lua" title="Neovim" className="mt-7" />
               <Prose className="mt-6 [&_p]:text-[15px]">
                 {content.block("lsp-vscode")}
               </Prose>

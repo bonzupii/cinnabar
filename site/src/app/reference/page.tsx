@@ -15,17 +15,11 @@ import {
   USAGE,
 } from "@/content/cli";
 import { MANIFEST_SAMPLE } from "@/content/samples";
+import { ogImageMetadata } from "@/lib/og-image";
 import { readPageContent } from "@/lib/page-content";
 import { REPO_URL } from "@/lib/site";
 
-export const metadata: Metadata = {
-  title: "Reference",
-  description:
-    "The Cinnabar CLI: every flag for compiling a single file, every project subcommand, the build.cnb manifest, the test layout, and the local test profiles.",
-  alternates: { canonical: "/reference/" },
-};
-
-/** Social image copy, consumed by ./opengraph-image.tsx. */
+/** Social image copy, rendered by ./og-image/route.tsx. */
 export const og = {
   eyebrow: "CLI reference",
   title: "Two ways to invoke it.",
@@ -33,6 +27,15 @@ export const og = {
     "Every flag for compiling a file, every project subcommand, the build.cnb manifest, and the test layout.",
   alt: "Cinnabar social card — the CLI reference.",
 };
+
+export const metadata: Metadata = {
+  title: "Reference",
+  description:
+    "The Cinnabar CLI: every flag for compiling a single file, every project subcommand, the build.cnb manifest, the test layout, and the local test profiles.",
+  alternates: { canonical: "/reference/" },
+  ...ogImageMetadata("/reference/", og),
+};
+
 
 const SECTION_ICONS = {
   "single-file": BuildIcon,
@@ -93,7 +96,7 @@ export default async function ReferencePage() {
               <Prose>{content.block("manifest")}</Prose>
             </Reveal>
             <Reveal delay={0.06}>
-              <CodeBlock code={MANIFEST_SAMPLE} caption="build.cnb" />
+              <CodeBlock code={MANIFEST_SAMPLE} path="build.cnb" title="The manifest" />
             </Reveal>
           </div>
         </section>

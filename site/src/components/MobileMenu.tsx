@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { GitHubIcon } from "@/components/brand/icons";
+import { GitHubIcon, NAV_ICONS } from "@/components/brand/icons";
 import { isActiveRoute, NAV, REPO_URL } from "@/lib/site";
 
 /*
@@ -123,6 +123,7 @@ export default function MobileMenu() {
                 <nav aria-label="Primary mobile" className="flex flex-col">
                   {NAV.map((item) => {
                     const active = isActiveRoute(pathname, item.href);
+                    const Icon = NAV_ICONS[item.icon];
                     return (
                       <Link
                         key={item.href}
@@ -132,13 +133,14 @@ export default function MobileMenu() {
                         className="border-hairline hover:bg-panel-raised panel-hover border-b px-6 py-4"
                       >
                         <span
-                          className={`block text-sm font-bold tracking-[0.1em] uppercase ${
+                          className={`flex items-center gap-2.5 text-sm font-bold tracking-[0.1em] uppercase ${
                             active ? "text-cinnabar-text" : "text-text"
                           }`}
                         >
+                          <Icon size={16} />
                           {item.label}
                         </span>
-                        <span className="text-label mt-1 block font-mono text-xs">
+                        <span className="text-label mt-1 block pl-[26px] font-mono text-xs">
                           {item.blurb}
                         </span>
                       </Link>

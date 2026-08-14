@@ -3,6 +3,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSlug from "rehype-slug";
 import CodeBlock from "@/components/CodeBlock";
+import { PlainWindow } from "@/components/ShellBlock";
 
 /*
  * Renders markdown in the brand's type scale (plate 06).
@@ -21,18 +22,28 @@ import CodeBlock from "@/components/CodeBlock";
  * (`MANIFESTO.md#7-linear-types`) depend on.
  */
 
-/** A fenced block that is not Cinnabar source: mono, uncoloured, scrollable. */
-function PlainBlock({ text }: { text: string }) {
-  return (
-    <div className="rule-grid my-8 flex min-w-0">
-      <pre
-        tabIndex={0}
-        className="bg-code-terminal text-term-output w-full overflow-x-auto px-6 py-6 font-mono text-[13px] leading-[1.7]"
-      >
-        <code>{text}</code>
-      </pre>
-    </div>
-  );
+/**
+ * Titles a fenced block that is not Cinnabar source.
+ *
+ * The documents tag blocks as `bash`, `lua`, `rust` and so on, and some not at
+ * all. Whatever the fence says becomes the window title, so a reader can tell
+ * a shell session from a diagram without the site inventing a theme for each
+ * language — which plate 14's last misuse rule forbids anyway.
+ */
+function plainTitle(language: string | undefined): { path: string; title: string } {
+  if (!language || language === "text") {
+    return { path: "output", title: "Output" };
+  }
+  const titles: Record<string, string> = {
+    bash: "Shell",
+    sh: "Shell",
+    console: "Shell",
+    lua: "Editor config",
+    rust: "Rust",
+    toml: "Configuration",
+    json: "Configuration",
+  };
+  return { path: language, title: titles[language] ?? language.toUpperCase() };
 }
 
 const INLINE_CODE =
@@ -134,8 +145,18 @@ function components(inline: boolean): Components {
       const isBlock = language !== undefined || text.includes("\n");
 
       if (!isBlock) return <code className={INLINE_CODE}>{children}</code>;
-      if (language === "cinnabar") return <CodeBlock code={text} className="my-8" />;
-      return <PlainBlock text={text} />;
+      if (language === "cinnabar") {
+        return <CodeBlock code={text} path="fixture.cnb" className="my-8" />;
+      }
+      const plain = plainTitle(language);
+      return (
+        <PlainWindow
+          text={text}
+          path={plain.path}
+          title={plain.title}
+          className="my-8"
+        />
+      );
     },
     // `code` above renders the whole block, so the wrapper is redundant.
     pre: ({ children }) => <>{children}</>,

@@ -1,3 +1,4 @@
+import Window, { WindowBody } from "@/components/Window";
 import { tokenizeCinnabar, type TokenKind } from "@/lib/cinnabar-syntax";
 
 /*
@@ -6,6 +7,10 @@ import { tokenizeCinnabar, type TokenKind } from "@/lib/cinnabar-syntax";
  * "Only keywords take the accent, so the eye reads control flow first. Linear
  * handles get a dotted underline instead of a colour: the one thing the
  * language cares about is marked structurally, not chromatically."
+ *
+ * The code surface keeps its own dark ground in both site themes. The theme is
+ * specified against that ground, and plate 14's last misuse rule forbids
+ * adding colours to it, so there is no light variant to invent.
  */
 
 const TOKEN_STYLE: Record<TokenKind, string> = {
@@ -22,34 +27,30 @@ const TOKEN_STYLE: Record<TokenKind, string> = {
   text: "",
 };
 
-type CodeBlockProps = {
+export default function CodeBlock({
+  code,
+  linearHandles,
+  path = "source.cnb",
+  title = "Cinnabar source",
+  className,
+}: {
   code: string;
   /**
    * Bindings the typechecker would mark linear. Plate 09 gives these a dotted
    * rule; the highlighter cannot infer linearity, so callers state it.
    */
   linearHandles?: readonly string[];
-  /** Shown as a mono caption above the block — conventionally the file path. */
-  caption?: string;
+  /** Shown beside the mark — the file this source came from. */
+  path?: string;
+  /** Centred: what the sample demonstrates. */
+  title?: string;
   className?: string;
-};
-
-export default function CodeBlock({
-  code,
-  linearHandles,
-  caption,
-  className,
-}: CodeBlockProps) {
+}) {
   const tokens = tokenizeCinnabar(code.replace(/\n+$/, ""), linearHandles);
 
   return (
-    <figure className={`rule-grid flex min-w-0 flex-col ${className ?? ""}`}>
-      {caption ? (
-        <figcaption className="bg-panel px-5 py-3 font-mono text-[11px] tracking-[0.14em] text-label uppercase">
-          {caption}
-        </figcaption>
-      ) : null}
-      <pre tabIndex={0} className="bg-code-ground overflow-x-auto px-6 py-6 font-mono text-[13.5px] leading-[1.75] sm:text-[15px]">
+    <Window path={path} title={title} className={className}>
+      <WindowBody tone="code" className="text-[13.5px] leading-[1.75] sm:text-[15px]">
         <code>
           {tokens.map((token, position) => {
             if (token.kind === "text") {
@@ -65,29 +66,7 @@ export default function CodeBlock({
             );
           })}
         </code>
-      </pre>
-    </figure>
-  );
-}
-
-/**
- * A terminal transcript in the diagnostic palette from plate 10. Diagnostics
- * are pre-styled text rather than tokenized source: vermilion is reserved for
- * the error and its primary span, and everything else stays grey. There is no
- * warning colour, because the language has no warnings.
- */
-export function TerminalBlock({
-  children,
-  className,
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <div className={`rule-grid flex min-w-0 ${className ?? ""}`}>
-      <pre tabIndex={0} className="bg-code-terminal text-term-output w-full overflow-x-auto px-6 py-7 font-mono text-[12.5px] leading-[1.7] sm:text-[14px]">
-        {children}
-      </pre>
-    </div>
+      </WindowBody>
+    </Window>
   );
 }

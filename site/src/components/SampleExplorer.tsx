@@ -97,7 +97,8 @@ export default function SampleExplorer() {
         <CodeBlock
           code={sample.code}
           linearHandles={sample.linearHandles}
-          caption={sample.source}
+          path={sample.source}
+          title={sample.label}
         />
       </div>
     </div>

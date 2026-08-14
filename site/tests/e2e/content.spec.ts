@@ -52,12 +52,30 @@ test("no rendered link points at a bare .md path", async ({ page }) => {
   }
 });
 
-test("the roadmap summary cards link into the rendered document", async ({ page }) => {
+test("the roadmap capability cards link into the rendered document", async ({ page }) => {
   await page.goto("/roadmap/");
-  const card = page.getByRole("link", { name: "Fixed-width integer suite", exact: true });
+  const card = page.getByRole("link", {
+    name: "The full fixed-width integer grid",
+    exact: true,
+  });
   await expect(card).toBeVisible();
   await card.click();
-  await expect(page.locator("#milestone-1--fixed-width-integer-suite-complete")).toBeInViewport();
+  await expect(
+    page.locator("#milestone-1--fixed-width-integer-suite-complete"),
+  ).toBeInViewport();
+});
+
+test("the roadmap leads with what the language does, not with milestone numbers", async ({
+  page,
+}) => {
+  await page.goto("/roadmap/");
+  await expect(
+    page.getByRole("heading", { name: "What Cinnabar does today" }),
+  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "On the horizon" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Self-hosting", exact: true }),
+  ).toBeVisible();
 });
 
 test("code samples are highlighted in the Cinnabar Dark theme", async ({ page }) => {

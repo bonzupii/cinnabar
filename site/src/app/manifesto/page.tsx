@@ -3,17 +3,11 @@ import DocBody from "@/components/DocBody";
 import PageHeader from "@/components/PageHeader";
 import { SourceNote } from "@/components/ui";
 import { DocIcon } from "@/components/brand/icons";
+import { ogImageMetadata } from "@/lib/og-image";
 import { readPageContent } from "@/lib/page-content";
 import { linkRepoFile, readRepoDoc } from "@/lib/repo-docs";
 
-export const metadata: Metadata = {
-  title: "Manifesto",
-  description:
-    "The normative Cinnabar language specification: twelve core principles, the authoritative language surface, and the anti-principles.",
-  alternates: { canonical: "/manifesto/" },
-};
-
-/** Social image copy, consumed by ./opengraph-image.tsx. */
+/** Social image copy, rendered by ./og-image/route.tsx. */
 export const og = {
   eyebrow: "Normative specification",
   title: "The Cinnabar Manifesto",
@@ -21,6 +15,15 @@ export const og = {
     "Twelve core principles, the authoritative language surface, and the anti-principles the language will never have.",
   alt: "Cinnabar social card — the normative language specification.",
 };
+
+export const metadata: Metadata = {
+  title: "Manifesto",
+  description:
+    "The normative Cinnabar language specification: twelve core principles, the authoritative language surface, and the anti-principles.",
+  alternates: { canonical: "/manifesto/" },
+  ...ogImageMetadata("/manifesto/", og),
+};
+
 
 export default async function ManifestoPage() {
   const [document, content] = await Promise.all([

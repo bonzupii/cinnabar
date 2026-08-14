@@ -81,8 +81,15 @@ npm run test:links   # linkinator over the built export
 npm run test:lighthouse
 ```
 
-`npm run test:e2e` serves `out/`, so run `npm run build` first. Refresh visual
-baselines with `npm run test:e2e:update` and read the diff before committing it.
+`npm run test:e2e` serves `out/`, so run `npm run build` first.
+
+**The visual baselines are not committed.** They are ~21 MB in total, which is
+more than this repository should carry for a site, so `**/*-snapshots/` is
+ignored. The consequence is real and worth knowing: on a machine with no
+baselines the visual specs write fresh ones and assert "this rendered" rather
+than "this did not change". Everything a screenshot would otherwise pin —
+contrast in both themes, window chrome, layout overflow, focus behaviour — is
+asserted explicitly by the other specs, which do run everywhere.
 
 ## Deploying
 
@@ -99,20 +106,22 @@ gives a draft URL without touching production.
 
 ## Notes on four non-obvious choices
 
-**Social images need a content-type header.** Next's `opengraph-image`
-convention emits an extension-less file (`out/opengraph-image`), which a static
-host serves as a generic download — and every social scraper then rejects it.
-`netlify.toml` restores `image/png` for those paths; `tests/unit/netlify-config.test.ts`
-asserts the rules exist, since the local test server has no `netlify.toml` to
-read, and `scripts/verify-png.mjs` checks the built files are real PNGs.
+**Social images are route handlers, not the metadata convention.** Next has an
+`opengraph-image.tsx` file convention, but it requires that exact filename in
+every segment, emits it at a path with no extension, and appends a content hash
+to it inside a route group. `src/app/<route>/og-image/route.tsx` serves the
+image instead: the handler is written once in `src/lib/og-image.tsx` and reused,
+and the URL is one this code chooses.
 
 The copy each image renders is exported as `og` from that route's `page.tsx`,
-beside the page's other metadata, and imported by `opengraph-image.tsx` — Next
-requires the image to be its own file, but a route's title and description
-should not live in two places. The home page's image is at the root segment
-rather than inside `(home)`: Next appends a content hash to a metadata image
-declared inside a route group, which would break the stable path the header
-rule targets.
+beside the page's other metadata, and the page points at the image with
+`ogImageMetadata`. A route's title and description live in one place.
+
+The emitted files still have no extension, so `netlify.toml` sets
+`Content-Type: image/png` on `/og-image` and `/*/og-image` —
+`tests/unit/netlify-config.test.ts` asserts those rules exist, since the local
+test server has no `netlify.toml` to read, and `scripts/verify-png.mjs` checks
+the built files are real PNGs.
 
 **Fonts for those images come from npm.** `src/lib/og-fonts.ts` reads the
 static `.woff` faces out of `@fontsource`. It locates them by walking up

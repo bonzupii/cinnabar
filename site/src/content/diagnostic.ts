@@ -1,31 +1,40 @@
 /*
  * A borrow-checker diagnostic, as data.
  *
- * Plate 10 names five roles and the exact weight each takes. Holding the
- * transcript as role-tagged segments rather than as markup means the roles are
- * stated once, in one table, instead of being re-spelled as class names on
- * every span — and the styling study on the home page can then be checked
- * against the plate by reading a list rather than by reading JSX.
+ * The layout follows what the compiler actually prints through ariadne: a
+ * capitalised `Error:` line, a bracketed source header, then a gutter of line
+ * numbers and rails, with each span underlined directly beneath the code it
+ * refers to and a connector dropping to its label.
  *
- * The board labels this "styling study · illustrative output".
+ * Column alignment is load-bearing and easy to break by hand, so it is stated
+ * once here rather than being re-derived per line:
+ *
+ *   - the gutter is ` NN │` — five columns wide;
+ *   - source text begins at column 8;
+ *   - an underline sits under the span it marks, and its `┬` is the column its
+ *     `╰──` label hangs from.
+ *
+ * Plate 10 fixes the palette: vermilion for the error and its primary span,
+ * grey for everything else. There is no warning role, because the language has
+ * no warnings.
  */
 
 export type DiagnosticRole =
-  /** The word `error` and its primary span. The only vermilion on the plate. */
+  /** The word `Error` and its primary span. The only vermilion on the plate. */
   | "error"
-  /** The message beside `error`, and `help`. */
+  /** The message beside `Error`, and `help`. */
   | "message"
   /** Quoted source lines. */
   | "source"
   /** Secondary spans, notes and help text. */
   | "secondary"
-  /** Line numbers and box drawing. */
+  /** Line numbers, rails and box drawing. */
   | "gutter"
   /** The shell prompt. */
   | "prompt"
   /** A command name. */
   | "command"
-  /** A flag. */
+  /** A flag or a path. */
   | "flag";
 
 export type Segment = { role: DiagnosticRole; text: string };
@@ -40,55 +49,57 @@ export const BORROW_DIAGNOSTIC: readonly Segment[][] = [
   ],
   [],
   [
-    { role: "error", text: "error" },
-    { role: "message", text: ": linear value `vec` is not consumed on every path" },
+    { role: "error", text: "Error" },
+    { role: "message", text: ": linear value 'vec' is consumed on some paths but not on all paths" },
   ],
   [
-    { role: "gutter", text: "    ╭─[" },
-    { role: "source", text: "src/main.cnb:14:5" },
-    { role: "gutter", text: "]" },
+    { role: "gutter", text: "   ─[ " },
+    { role: "flag", text: "src/main.cnb:14:5" },
+    { role: "gutter", text: " ]" },
   ],
   [{ role: "gutter", text: "    │" }],
   [
-    { role: "gutter", text: " 11 │  " },
+    { role: "gutter", text: " 11 │   " },
     { role: "source", text: "val vec = vec_new[I64]()?" },
   ],
   [
-    { role: "gutter", text: "    │      " },
+    { role: "gutter", text: "    │       " },
     { role: "secondary", text: "─┬─" },
   ],
   [
-    { role: "gutter", text: "    │       " },
-    { role: "secondary", text: "╰── bound here as `Collections.Vec(I64)`, linear" },
+    { role: "gutter", text: "    │        " },
+    { role: "secondary", text: "╰── bound here as 'Collections.Vec(I64)', linear" },
   ],
+  [{ role: "gutter", text: "    │" }],
   [
-    { role: "gutter", text: " 15 │    " },
+    { role: "gutter", text: " 15 │     " },
     { role: "source", text: "return 0" },
   ],
   [
-    { role: "gutter", text: "    │    " },
+    { role: "gutter", text: "    │     " },
     { role: "error", text: "────┬───" },
   ],
   [
-    { role: "gutter", text: "    │        " },
-    { role: "error", text: "╰─── this path returns without consuming `vec`" },
+    { role: "gutter", text: "    │         " },
+    { role: "error", text: "╰── this path returns without consuming 'vec'" },
   ],
+  [{ role: "gutter", text: "    │" }],
   [
-    { role: "gutter", text: " 18 │  " },
+    { role: "gutter", text: " 18 │   " },
     { role: "source", text: "vec_free(vec)" },
   ],
   [
-    { role: "gutter", text: "    │  " },
+    { role: "gutter", text: "    │   " },
     { role: "secondary", text: "──────┬──────" },
   ],
   [
-    { role: "gutter", text: "    │        " },
+    { role: "gutter", text: "    │         " },
     { role: "secondary", text: "╰── consumed on the other path" },
   ],
-  [{ role: "gutter", text: "────╯" }],
+  [{ role: "gutter", text: "   ─╯" }],
   [
     { role: "message", text: "help" },
-    { role: "secondary", text: ": consume `vec` before returning, or restructure so both" },
+    { role: "secondary", text: ": consume 'vec' before returning, or restructure so both" },
   ],
   [{ role: "secondary", text: "      paths leave through one exit." }],
 ];

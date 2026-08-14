@@ -10,44 +10,49 @@
 !.yarn/releases
 !.yarn/versions
 
-# testing
-/coverage
-
 # next.js
 /.next/
 /out/
+next-env.d.ts
 
-# production
-/build
-
-# misc
-.DS_Store
-*.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
+# typescript
+*.tsbuildinfo
 
 # env files (can opt-in for committing if needed)
 .env*
 
-# vercel
+# hosts
 .vercel
-
-# netlify — local link state and build cache, written by `netlify link`/`deploy`
+# netlify: local link state and build cache, written by `netlify link`/`deploy`
 .netlify/
 
-# test output. The visual baselines under tests/e2e/*-snapshots ARE committed:
-# they are the expected result, not a build product.
+# test output
 /playwright-report/
 /test-results/
 /.lighthouseci/
+/coverage/
+/blob-report/
+/playwright/.cache/
 
-# typescript
-*.tsbuildinfo
-next-env.d.ts
+# Playwright visual baselines.
+#
+# These are the expected result rather than a build product, so committing them
+# is the usual practice — but they are ~1.5 MB each and 21 MB in total, which
+# is more than this repository should carry for a site. The consequence is that
+# `npm run test:e2e` writes fresh baselines on a machine that has none, so the
+# visual specs assert "this rendered" rather than "this did not change".
+# Everything that a screenshot would otherwise pin — contrast in both themes,
+# window chrome, layout overflow, focus behaviour — is asserted explicitly by
+# the other specs, which do run everywhere.
+**/*-snapshots/
 
-# Ad-hoc capture output from tests/e2e (not committed)
+# Ad-hoc capture output from tests/e2e
 /capture/
+
+# macOS / editors
+.DS_Store
+*.pem
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*

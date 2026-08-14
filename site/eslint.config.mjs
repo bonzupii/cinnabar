@@ -5,19 +5,25 @@ import nextTs from "eslint-config-next/typescript";
 const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
-  // Override default ignores of eslint-config-next.
+  // Overrides the default ignores of eslint-config-next, which is why the
+  // defaults have to be repeated here rather than added to.
   globalIgnores([
-    // Default ignores of eslint-config-next:
+    // Defaults of eslint-config-next:
     ".next/**",
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Local Netlify state and build cache, written by `netlify link` and
+    // `netlify deploy`. It contains a copy of the minified build output.
+    ".netlify/**",
     // Brand design boards — hand-authored HTML, not part of the app.
     ".planning/**",
-    // Playwright/Lighthouse output.
+    // Tooling output.
     "playwright-report/**",
     "test-results/**",
+    "blob-report/**",
     ".lighthouseci/**",
+    "capture/**",
   ]),
 ]);
 

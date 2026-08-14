@@ -12,8 +12,6 @@ export type Stage = {
   index: string;
   name: string;
   file: string;
-  /** Approximate size, as ARCHITECTURE.md reports it. */
-  size?: string;
   summary: string;
 };
 
@@ -22,56 +20,50 @@ export const STAGES: readonly Stage[] = [
     index: "01",
     name: "Lexer",
     file: "src/lexer.rs",
-    size: "~622 lines",
     summary:
-      "A hand-written byte-level scanner writing token rows straight into the shared arena — there is no separate token type. Handles the four comment forms, five string escapes, and decimal and hex literals, with checked arithmetic so overflow is caught rather than wrapped.",
+      "A hand-written byte scanner writing token rows straight into the shared arena. There is no separate token type.",
   },
   {
     index: "02",
     name: "Parser",
     file: "src/parser.rs",
-    size: "~1448 lines",
     summary:
-      "Hand-rolled recursive descent, no generator. Indentation is not significant: blocks close with `end` and newlines separate statements. Line-based recovery means one malformed statement does not abort the rest of the file.",
+      "Recursive descent, no generator. Blocks close with `end`, so indentation carries no meaning, and one bad statement does not abort the file.",
   },
   {
     index: "03",
     name: "Module loader",
     file: "src/module_loader.rs",
-    size: "~226 lines",
     summary:
-      "There is no package manager. A `use X.y` whose first segment is not a local `mod` resolves to the sibling file `X.cnb` and is parsed recursively, producing the root item list plus one entry per externally loaded file.",
+      "No package manager: `use X.y` resolves to the sibling file `X.cnb` and is parsed recursively.",
   },
   {
     index: "04",
     name: "Resolver",
     file: "src/resolver.rs",
-    size: "~1498 lines",
     summary:
-      "Builds a scope tree over two namespaces, seeds the builtins, hoists declarations, and enforces the casing rules here — a mis-cased identifier is a resolver error and never reaches the typechecker. Tags the entry point so later stages read the tag instead of comparing names.",
+      "Scopes, imports, and the casing rules. A mis-cased identifier is an error here and never reaches the typechecker.",
   },
   {
     index: "05",
     name: "Typechecker",
     file: "src/typecheck.rs",
-    size: "~3900 lines",
     summary:
-      "Structural and unification-free, keyed by canonical interned type keys. Evaluates constants, records monomorphization instances, and infers linearity once — a generic parameter is conservatively linear, since its instantiation is unknown at definition time.",
+      "Structural and unification-free, over canonical interned type keys. Linearity is inferred once, here.",
   },
   {
     index: "06",
     name: "Borrow checker",
     file: "src/borrow.rs",
-    size: "~3274 lines",
     summary:
-      "Flow-sensitive dataflow over a per-function control-flow graph. Enforces exactly-once consumption on every path out of scope, aliasing exclusivity, field-level partial moves, and rejection of ambiguous returned borrows — all from facts earlier stages attached, never by matching type names.",
+      "Flow-sensitive dataflow over a per-function CFG, enforcing exactly-once consumption on every path out of scope.",
   },
   {
     index: "07",
     name: "Codegen",
     file: "src/codegen/",
     summary:
-      "Lowers canonical type keys to LLVM types, marks self-tail-recursive calls `tail`, then shells out to `opt`, `llc` and `clang -static -nostdlib -no-pie`. Links against a musl libc staged into the compiler binary at build time.",
+      "Lowers type keys to LLVM, marks tail calls, then optimizes, assembles and links statically against a staged musl.",
   },
 ] as const;
 

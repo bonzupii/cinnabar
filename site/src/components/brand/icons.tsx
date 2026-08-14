@@ -202,3 +202,19 @@ export const PIPELINE_ICONS = {
   diagnostic: DiagnosticIcon,
   staticLink: StaticLinkIcon,
 } as const;
+
+/**
+ * The icon that stands for each navigable section.
+ *
+ * Named in lib/site.ts and resolved here, so the footer, the mobile menu and a
+ * page's own header all mark a section with the same figure.
+ */
+export const NAV_ICONS = {
+  doc: DocIcon,
+  build: BuildIcon,
+  reference: FmtIcon,
+  // The arena figure, not the build diamond — Install already uses that one,
+  // and two sections marked alike is worse than no marks at all.
+  architecture: StaticLinkIcon,
+  check: CheckIcon,
+} as const;

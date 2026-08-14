@@ -1,4 +1,4 @@
-import TerminalFrame, { TerminalBody } from "@/components/TerminalFrame";
+import Window, { WindowBody } from "@/components/Window";
 import {
   BORROW_DIAGNOSTIC,
   DIAGNOSTIC_LEGEND,
@@ -32,8 +32,8 @@ export default function DiagnosticTranscript({
   className?: string;
 }) {
   return (
-    <TerminalFrame label="Illustrative output" className={className}>
-      <TerminalBody className="text-[12.5px] leading-[1.7] sm:text-[13.5px]">
+    <Window path="~/src/kernel" title="Borrow diagnostic" className={className}>
+      <WindowBody className="text-[12.5px] leading-[1.7] sm:text-[13.5px]">
         <code>
           {lines.map((segments, index) => (
             <span key={index}>
@@ -46,8 +46,8 @@ export default function DiagnosticTranscript({
             </span>
           ))}
         </code>
-      </TerminalBody>
-    </TerminalFrame>
+      </WindowBody>
+    </Window>
   );
 }
 
