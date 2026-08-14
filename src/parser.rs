@@ -147,8 +147,14 @@ fn tok_text_is(nodes: &[i64], names: &[String], pos: i64, text: &str) -> bool {
     // punctuation (TOK_SYM), so the token kind expected is determined by the
     // text itself.
     let expected_kind = match text.chars().next() {
-        Some(c) if c.is_ascii_alphabetic() => TOK_IDENT,
-        _ => TOK_SYM,
+        Some(c) => {
+            if c.is_ascii_alphabetic() {
+                TOK_IDENT
+            } else {
+                TOK_SYM
+            }
+        }
+        None => TOK_SYM,
     };
     node_tag(nodes, pos) == NODE_TOKEN
         && node_a(nodes, pos) == expected_kind

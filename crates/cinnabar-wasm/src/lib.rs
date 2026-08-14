@@ -64,10 +64,10 @@ pub fn hover(source: &str, offset: i32) -> String {
         }),
         None => Value::Null,
     };
-    match serde_json::to_string(&value) {
-        Ok(rendered) => rendered,
-        Err(_) => "null".to_string(),
-    }
+    // `Value`'s Display impl serializes to the same compact JSON as
+    // `serde_json::to_string`, but infallibly: the value can never contain
+    // a non-finite float, so there is no error to discard here.
+    value.to_string()
 }
 
 fn source_json(files: &[(String, String)], file: i64, start: i64, end: i64) -> Value {
@@ -102,13 +102,15 @@ fn diagnostics_json(result: &analysis::Analysis) -> Vec<Value> {
         let mut note_idx = 0usize;
         while note_idx < result.notes.len() {
             match result.notes.get(note_idx) {
-                Some(note) if note.0 == error_idx as i64 => {
-                    explanations.push(json!({
-                        "message": note.1,
-                        "source": source_json(&result.files, note.2, note.3, note.4),
-                    }));
+                Some(note) => {
+                    if note.0 == error_idx as i64 {
+                        explanations.push(json!({
+                            "message": note.1,
+                            "source": source_json(&result.files, note.2, note.3, note.4),
+                        }));
+                    }
                 }
-                _ => {}
+                None => {}
             }
             note_idx += 1;
         }

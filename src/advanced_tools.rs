@@ -353,7 +353,11 @@ fn execute_with_timeout(binary: &Path, limit: Duration) -> Result<Output, String
     }
 }
 
-pub fn serve_playground(address: &str, executable: &Path) -> Result<(), String> {
+pub fn serve_playground(
+    address: &str,
+    executable: &Path,
+    mut report_error: impl FnMut(&str),
+) -> Result<(), String> {
     let parsed: SocketAddr = address.parse().map_err(|parse_error| format!("invalid playground address: {}", parse_error))?;
     if !parsed.ip().is_loopback() {
         return Err("the local playground may bind only to a loopback address".to_string());
@@ -362,13 +366,14 @@ pub fn serve_playground(address: &str, executable: &Path) -> Result<(), String> 
     // Only the bind is fatal: once the socket is listening, a connection
     // that fails to accept, read, or write is that one visitor's problem —
     // a browser closing mid-response must not take the server down for
-    // every future visitor. Per-connection failures are logged and the
-    // loop moves on.
+    // every future visitor. Per-connection failures are reported to the
+    // caller, which renders them, and the loop moves on.
     for incoming in listener.incoming() {
         let mut stream = match incoming {
             Ok(stream) => stream,
             Err(accept_error) => {
-                eprintln!("cannot accept playground connection: {}", accept_error);
+                let message = format!("cannot accept playground connection: {}", accept_error);
+                report_error(&message);
                 continue;
             }
         };
@@ -382,7 +387,8 @@ pub fn serve_playground(address: &str, executable: &Path) -> Result<(), String> 
                     request_error.as_bytes(),
                 );
                 if let Err(write_error) = written {
-                    eprintln!("cannot write playground error response: {}", write_error);
+                    let message = format!("cannot write playground error response: {}", write_error);
+                    report_error(&message);
                 }
             }
         }
