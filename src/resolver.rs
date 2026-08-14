@@ -1190,7 +1190,21 @@ fn resolve_imports(state: &mut State, scope: i64, list: i64) {
     let count = list_len(state.2, list);
     let mut idx = 0i64;
     while idx < count {
-        resolve_import(state, scope, list_get(state.2, list, idx));
+        let item = list_get(state.2, list, idx);
+        resolve_import(state, scope, item);
+        // A `use` inside `mod ... end` never reached here: this walk only
+        // ever looked at the list it started with, never a module's own
+        // child item list, even though `collect_item` already hoisted the
+        // module's placeholder into its own scope (`item_scope_of`, the
+        // same lookup `walk_item` uses for the identical shape). A
+        // module-local import resolves against that module's own scope,
+        // not the scope its `mod` block sits in — the same reasoning
+        // `walk_item`'s `ITEM_MODULE` arm already applies to everything
+        // else inside it.
+        if node_tag(state.1, item) == NODE_ITEM && node_a(state.1, item) == ITEM_MODULE {
+            let children = node_e(state.1, item);
+            resolve_imports(state, item_scope_of(state.8, item), children);
+        }
         idx += 1;
     }
 }
@@ -2437,6 +2451,57 @@ end
             let errors: Vec<String> = result.errors.iter().map(|d| d.0.clone()).collect();
             assert!(errors.is_empty(), "{}: {:?}", path, errors);
         }
+    }
+
+    // Pins the fix to resolve_imports never recursing into a module's own
+    // child item list: a `use` written inside `mod ... end` used to never
+    // resolve at all, no matter how valid the path, because the walk that
+    // resolves imports only ever looked at the list it started with.
+    #[test]
+    fn a_use_inside_a_mod_block_resolves() {
+        let source = r#"
+pub mod Tools
+  pub fun helper() I64
+    return 1
+  end
+end
+
+pub mod Wrapper
+  use Tools.helper
+
+  pub fun call_helper() I64
+    return helper()
+  end
+end
+
+pub fun main() I64
+  return Wrapper.call_helper()
+end
+"#;
+        let errors = errors_for(source);
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    // Negative control: an unresolvable module-local import still reports
+    // the resolution failure, not a silent pass -- the recursion above must
+    // not accidentally short-circuit resolve_import's own error path.
+    #[test]
+    fn an_unresolvable_use_inside_a_mod_block_is_rejected() {
+        let source = r#"
+pub mod Wrapper
+  use Tools.nonexistent
+
+  pub fun call_helper() I64
+    return 1
+  end
+end
+
+pub fun main() I64
+  return Wrapper.call_helper()
+end
+"#;
+        let errors = errors_for(source);
+        assert!(errors.iter().any(|m| m.contains("cannot resolve import")), "{:?}", errors);
     }
 }
 
