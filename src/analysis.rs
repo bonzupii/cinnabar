@@ -1081,3 +1081,752 @@ fn active_arg(analysis: &Analysis, args: i64, offset: i64) -> i64 {
     }
     if active >= count && count > 0 { count - 1 } else { active }
 }
+
+// ---------------------------------------------------------------------------
+// Name spans
+// ---------------------------------------------------------------------------
+
+fn is_ident_byte(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphanumeric()
+}
+
+/// The span of `name`'s first whole-word occurrence within `[start, end)` of
+/// `file`'s text, or `None` when the exact text can't be pinpointed there.
+///
+/// Several node kinds' own `(start, end)` cover more than just the name --
+/// an item's span runs from its keyword through `end`, a variant's span
+/// grows to include a payload -- and there is no separate name-only span
+/// stored anywhere for those (see the parser's node-layout comments). This
+/// recovers one by search rather than by modeling every kind's slot layout,
+/// and callers that cannot tolerate an imprecise fallback (rename) treat
+/// `None` as "refuse" rather than as "use the wider span".
+fn locate_name(analysis: &Analysis, file: i64, start: i64, end: i64, name: &str) -> Option<(i64, i64)> {
+    if name.is_empty() || start < 0 || end < start {
+        return None;
+    }
+    let text = file_text_of(analysis, file);
+    let haystack = text.get(start as usize..end as usize)?;
+    let hay = haystack.as_bytes();
+    let needle = name.as_bytes();
+    if needle.len() > hay.len() {
+        return None;
+    }
+    let mut idx = 0usize;
+    while idx + needle.len() <= hay.len() {
+        if &hay[idx..idx + needle.len()] == needle {
+            let before_ok = idx == 0 || !is_ident_byte(hay[idx - 1]);
+            let after = idx + needle.len();
+            let after_ok = after >= hay.len() || !is_ident_byte(hay[after]);
+            if before_ok && after_ok {
+                return Some((start + idx as i64, start + after as i64));
+            }
+        }
+        idx += 1;
+    }
+    None
+}
+
+// The short (undotted) declared name of a symbol, read from its own
+// declaration row rather than the symbol's possibly-qualified display name
+// (the `hover`/`sym_kind_label` name can read `Memory.allocate`; the source
+// token at every use site is always just `allocate`).
+fn short_name_of_sym(analysis: &Analysis, sym: i64) -> Option<String> {
+    let decl = node_c(&analysis.nodes, sym);
+    if decl == NONE {
+        return None;
+    }
+    let tag = node_tag(&analysis.nodes, decl);
+    if tag == NODE_FN {
+        return Some(name_text(&analysis.names, node_a(&analysis.nodes, decl)));
+    }
+    if tag == NODE_ITEM {
+        let kind = node_a(&analysis.nodes, decl);
+        if kind == ITEM_FUN || kind == ITEM_NATIVE_FUN {
+            let fn_node = node_d(&analysis.nodes, decl);
+            return Some(name_text(&analysis.names, node_a(&analysis.nodes, fn_node)));
+        }
+        return Some(name_text(&analysis.names, node_d(&analysis.nodes, decl)));
+    }
+    if tag == NODE_VARIANT {
+        return Some(name_text(&analysis.names, node_a(&analysis.nodes, decl)));
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Folding ranges
+// ---------------------------------------------------------------------------
+
+/// Byte spans of every foldable block in `file`: item bodies (module,
+/// struct, enum, trait, impl), function bodies (top-level and, since a
+/// method carries no wrapping item, `NODE_FN` directly), `while`/`if`
+/// bodies, `match` expressions, and -- via a source scan, since a plain
+/// comment keeps no parse-tree span at all -- `#|...|#`/`#!|...|#` comment
+/// blocks. A bodyless declaration (a native fn/type, or a trait method
+/// signature) has no interior lines and folds nothing.
+pub fn folding_ranges(analysis: &Analysis, file: i64) -> Vec<(i64, i64)> {
+    let count = node_count(analysis);
+    let mut out: Vec<(i64, i64)> = Vec::new();
+    let mut id = 0i64;
+    while id < count {
+        if node_file(&analysis.nodes, id) == file {
+            let tag = node_tag(&analysis.nodes, id);
+            let foldable = if tag == NODE_ITEM {
+                let kind = node_a(&analysis.nodes, id);
+                kind == ITEM_MODULE
+                    || kind == ITEM_STRUCT
+                    || kind == ITEM_ENUM
+                    || kind == ITEM_TRAIT
+                    || kind == ITEM_IMPL
+            } else if tag == NODE_FN {
+                true
+            } else if tag == NODE_STMT {
+                let kind = node_a(&analysis.nodes, id);
+                kind == STMT_WHILE || kind == STMT_IF
+            } else if tag == NODE_EXPR {
+                node_a(&analysis.nodes, id) == EXPR_MATCH
+            } else {
+                false
+            };
+            if foldable {
+                let start = node_start(&analysis.nodes, id);
+                let end = node_end(&analysis.nodes, id);
+                if end > start {
+                    out.push((start, end));
+                }
+            }
+        }
+        id += 1;
+    }
+    out.extend(comment_block_spans(&file_text_of(analysis, file)));
+    out
+}
+
+// Plain `#|...|#`/`#!|...|#` block comments produce no token and no parse
+// span: the lexer scans past their text and discards it. Comments do not
+// nest in Cinnabar, so a plain byte scan for the next `|#` after an opener
+// is exact -- no stack, no ambiguity, unlike trying to fold the surrounding
+// keyword structure from source text (which cannot tell a bodyless
+// declaration from one with a body; that is why the block above reads real
+// parse-tree spans instead).
+fn comment_block_spans(text: &str) -> Vec<(i64, i64)> {
+    let bytes = text.as_bytes();
+    let mut out: Vec<(i64, i64)> = Vec::new();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let is_doc = bytes[idx] == b'#' && bytes.get(idx + 1) == Some(&b'!') && bytes.get(idx + 2) == Some(&b'|');
+        let is_plain = !is_doc && bytes[idx] == b'#' && bytes.get(idx + 1) == Some(&b'|');
+        if is_doc || is_plain {
+            let opener_len = if is_doc { 3 } else { 2 };
+            let mut cursor = idx + opener_len;
+            let mut closed: Option<usize> = None;
+            while cursor + 1 < bytes.len() {
+                if bytes[cursor] == b'|' && bytes[cursor + 1] == b'#' {
+                    closed = Some(cursor + 2);
+                    break;
+                }
+                cursor += 1;
+            }
+            match closed {
+                Some(close) => {
+                    out.push((idx as i64, close as i64));
+                    idx = close;
+                    continue;
+                }
+                None => break,
+            }
+        }
+        idx += 1;
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Document / workspace symbols
+// ---------------------------------------------------------------------------
+
+/// One entry in a document's or workspace's symbol outline. `span` is the
+/// whole declaration; `selection_span` is just the name where `locate_name`
+/// can pinpoint it, falling back to `span` otherwise -- an outline entry
+/// that highlights slightly more than the name is a cosmetic gap, not a
+/// wrong answer the way the same imprecision would be for `rename`.
+pub struct SymbolInfo {
+    pub name: String,
+    pub detail: String,
+    pub kind: i64,
+    pub span: (i64, i64, i64),
+    pub selection_span: (i64, i64, i64),
+    pub children: Vec<SymbolInfo>,
+}
+
+// LSP SymbolKind numbers -- a third numbering distinct from this compiler's
+// own SYM_* table and from CompletionItemKind (cinnabar_lsp.rs).
+pub const SYMBOL_KIND_MODULE: i64 = 2;
+pub const SYMBOL_KIND_NAMESPACE: i64 = 3;
+pub const SYMBOL_KIND_CLASS: i64 = 5;
+pub const SYMBOL_KIND_METHOD: i64 = 6;
+pub const SYMBOL_KIND_FIELD: i64 = 8;
+pub const SYMBOL_KIND_ENUM: i64 = 10;
+pub const SYMBOL_KIND_INTERFACE: i64 = 11;
+pub const SYMBOL_KIND_FUNCTION: i64 = 12;
+pub const SYMBOL_KIND_CONSTANT: i64 = 14;
+pub const SYMBOL_KIND_ENUM_MEMBER: i64 = 22;
+pub const SYMBOL_KIND_STRUCT: i64 = 23;
+
+fn symbol_kind_for_item(kind: i64) -> i64 {
+    if kind == ITEM_MODULE {
+        SYMBOL_KIND_MODULE
+    } else if kind == ITEM_STRUCT {
+        SYMBOL_KIND_STRUCT
+    } else if kind == ITEM_ENUM {
+        SYMBOL_KIND_ENUM
+    } else if kind == ITEM_TRAIT {
+        SYMBOL_KIND_INTERFACE
+    } else if kind == ITEM_FUN || kind == ITEM_NATIVE_FUN {
+        SYMBOL_KIND_FUNCTION
+    } else if kind == ITEM_CONST {
+        SYMBOL_KIND_CONSTANT
+    } else if kind == ITEM_NATIVE_TYPE {
+        SYMBOL_KIND_CLASS
+    } else {
+        SYMBOL_KIND_MODULE
+    }
+}
+
+fn ids_of_list(analysis: &Analysis, list: i64) -> Vec<i64> {
+    let count = list_len(&analysis.lists, list);
+    let mut out: Vec<i64> = Vec::new();
+    let mut idx = 0i64;
+    while idx < count {
+        out.push(list_get(&analysis.lists, list, idx));
+        idx += 1;
+    }
+    out
+}
+
+fn selection_span(analysis: &Analysis, file: i64, start: i64, end: i64, name: &str) -> (i64, i64, i64) {
+    match locate_name(analysis, file, start, end, name) {
+        Some((s, e)) => (file, s, e),
+        None => (file, start, end),
+    }
+}
+
+fn symbol_for_fn(analysis: &Analysis, fn_node: i64, kind: i64) -> SymbolInfo {
+    let file = node_file(&analysis.nodes, fn_node);
+    let start = node_start(&analysis.nodes, fn_node);
+    let end = node_end(&analysis.nodes, fn_node);
+    let name = name_text(&analysis.names, node_a(&analysis.nodes, fn_node));
+    SymbolInfo {
+        selection_span: selection_span(analysis, file, start, end, &name),
+        detail: render_fn_signature(analysis, fn_node),
+        name,
+        kind,
+        span: (file, start, end),
+        children: Vec::new(),
+    }
+}
+
+// `None` only for `ITEM_USE`: an import is not a declaration, so it has no
+// outline entry.
+fn symbol_for_item(analysis: &Analysis, item: i64) -> Option<SymbolInfo> {
+    let kind = node_a(&analysis.nodes, item);
+    if kind == ITEM_USE {
+        return None;
+    }
+    let file = node_file(&analysis.nodes, item);
+    let start = node_start(&analysis.nodes, item);
+    let end = node_end(&analysis.nodes, item);
+    let span = (file, start, end);
+
+    if kind == ITEM_FUN || kind == ITEM_NATIVE_FUN {
+        let fn_node = node_d(&analysis.nodes, item);
+        return Some(symbol_for_fn(analysis, fn_node, symbol_kind_for_item(kind)));
+    }
+    if kind == ITEM_IMPL {
+        let trait_name = path_join(analysis, node_d(&analysis.nodes, item));
+        let target = render_ty_node(analysis, node_e(&analysis.nodes, item));
+        let name = if trait_name.is_empty() {
+            format!("impl {}", target)
+        } else {
+            format!("impl {} for {}", trait_name, target)
+        };
+        let children: Vec<SymbolInfo> = ids_of_list(analysis, node_f(&analysis.nodes, item))
+            .into_iter()
+            .map(|fn_node| symbol_for_fn(analysis, fn_node, SYMBOL_KIND_METHOD))
+            .collect();
+        return Some(SymbolInfo {
+            name,
+            detail: String::new(),
+            kind: SYMBOL_KIND_NAMESPACE,
+            span,
+            selection_span: span,
+            children,
+        });
+    }
+
+    let name = name_text(&analysis.names, node_d(&analysis.nodes, item));
+    let selection = selection_span(analysis, file, start, end, &name);
+    let mut children: Vec<SymbolInfo> = Vec::new();
+
+    if kind == ITEM_MODULE {
+        for child in ids_of_list(analysis, node_e(&analysis.nodes, item)) {
+            if let Some(info) = symbol_for_item(analysis, child) {
+                children.push(info);
+            }
+        }
+    } else if kind == ITEM_STRUCT {
+        for field in ids_of_list(analysis, node_e(&analysis.nodes, item)) {
+            let fname = name_text(&analysis.names, node_a(&analysis.nodes, field));
+            let ffile = node_file(&analysis.nodes, field);
+            let fstart = node_start(&analysis.nodes, field);
+            let fend = node_end(&analysis.nodes, field);
+            children.push(SymbolInfo {
+                selection_span: selection_span(analysis, ffile, fstart, fend, &fname),
+                name: fname,
+                detail: render_ty_node(analysis, node_b(&analysis.nodes, field)),
+                kind: SYMBOL_KIND_FIELD,
+                span: (ffile, fstart, fend),
+                children: Vec::new(),
+            });
+        }
+    } else if kind == ITEM_ENUM {
+        for variant in ids_of_list(analysis, node_e(&analysis.nodes, item)) {
+            let vname = name_text(&analysis.names, node_a(&analysis.nodes, variant));
+            let vfile = node_file(&analysis.nodes, variant);
+            let vstart = node_start(&analysis.nodes, variant);
+            let vend = node_end(&analysis.nodes, variant);
+            children.push(SymbolInfo {
+                selection_span: selection_span(analysis, vfile, vstart, vend, &vname),
+                name: vname,
+                detail: String::new(),
+                kind: SYMBOL_KIND_ENUM_MEMBER,
+                span: (vfile, vstart, vend),
+                children: Vec::new(),
+            });
+        }
+    } else if kind == ITEM_TRAIT {
+        for fn_node in ids_of_list(analysis, node_e(&analysis.nodes, item)) {
+            children.push(symbol_for_fn(analysis, fn_node, SYMBOL_KIND_METHOD));
+        }
+    }
+
+    Some(SymbolInfo {
+        name,
+        detail: String::new(),
+        kind: symbol_kind_for_item(kind),
+        span,
+        selection_span: selection,
+        children,
+    })
+}
+
+/// Every top-level declaration in `file`, nested hierarchically (a module's
+/// children, a struct's fields, an enum's variants, a trait's or impl's
+/// methods). Imports are not declarations and are excluded.
+pub fn document_symbols(analysis: &Analysis, file: i64) -> Vec<SymbolInfo> {
+    let count = node_count(analysis);
+    let mut nested: Vec<i64> = Vec::new();
+    let mut id = 0i64;
+    while id < count {
+        if node_tag(&analysis.nodes, id) == NODE_ITEM
+            && node_file(&analysis.nodes, id) == file
+            && node_a(&analysis.nodes, id) == ITEM_MODULE
+        {
+            nested.extend(ids_of_list(analysis, node_e(&analysis.nodes, id)));
+        }
+        id += 1;
+    }
+    let mut out: Vec<SymbolInfo> = Vec::new();
+    id = 0i64;
+    while id < count {
+        if node_tag(&analysis.nodes, id) == NODE_ITEM
+            && node_file(&analysis.nodes, id) == file
+            && !nested.contains(&id)
+            && let Some(info) = symbol_for_item(analysis, id)
+        {
+            out.push(info);
+        }
+        id += 1;
+    }
+    out
+}
+
+fn push_if_matches(out: &mut Vec<SymbolInfo>, info: SymbolInfo, needle: &str) {
+    if needle.is_empty() || info.name.to_lowercase().contains(needle) {
+        out.push(info);
+    }
+}
+
+/// Every declaration across every loaded file whose name contains `query`
+/// (case-insensitive; an empty query matches everything), flattened -- a
+/// workspace outline has no per-file nesting the way a document outline
+/// does. Struct fields and enum variants are reached only through a
+/// document outline's tree, not listed here on their own.
+pub fn workspace_symbols(analysis: &Analysis, query: &str) -> Vec<SymbolInfo> {
+    let needle = query.to_lowercase();
+    let count = node_count(analysis);
+    let mut wrapped_fns: Vec<i64> = Vec::new();
+    let mut id = 0i64;
+    while id < count {
+        if node_tag(&analysis.nodes, id) == NODE_ITEM {
+            let kind = node_a(&analysis.nodes, id);
+            if kind == ITEM_FUN || kind == ITEM_NATIVE_FUN {
+                wrapped_fns.push(node_d(&analysis.nodes, id));
+            }
+        }
+        id += 1;
+    }
+    let mut out: Vec<SymbolInfo> = Vec::new();
+    id = 0i64;
+    while id < count {
+        let tag = node_tag(&analysis.nodes, id);
+        if tag == NODE_ITEM && node_file(&analysis.nodes, id) != NO_FILE {
+            if let Some(info) = symbol_for_item(analysis, id) {
+                push_if_matches(&mut out, info, &needle);
+            }
+        } else if tag == NODE_FN && node_file(&analysis.nodes, id) != NO_FILE && !wrapped_fns.contains(&id) {
+            // Bare method rows: top-level functions are already covered
+            // above through their wrapping `ITEM_FUN`/`ITEM_NATIVE_FUN`.
+            let info = symbol_for_fn(analysis, id, SYMBOL_KIND_METHOD);
+            push_if_matches(&mut out, info, &needle);
+        }
+        id += 1;
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Rename
+// ---------------------------------------------------------------------------
+
+/// The identifier-only span of the symbol under the cursor, or `None` when
+/// there is nothing there `rename_edits` could safely act on.
+pub fn prepare_rename(analysis: &Analysis, file: i64, offset: i64) -> Option<(i64, i64, i64)> {
+    let sym = sym_at(analysis, file, offset);
+    if sym == NONE {
+        return None;
+    }
+    let name = short_name_of_sym(analysis, sym)?;
+    let id = node_at(analysis, file, offset);
+    if id == NONE {
+        return None;
+    }
+    let start = node_start(&analysis.nodes, id);
+    let end = node_end(&analysis.nodes, id);
+    locate_name(analysis, file, start, end, &name).map(|(s, e)| (file, s, e))
+}
+
+/// Every occurrence of the symbol under the cursor, each narrowed from its
+/// enclosing node span down to the identifier's own span by a whole-word
+/// text search, paired with `new_name`. Returns `None` -- rather than a
+/// partial edit -- if the symbol's short name can't be read, if it has no
+/// occurrences, or if any occurrence's exact name text can't be pinpointed.
+/// Struct fields are never covered: `references` never resolves them, since
+/// a field carries no `SYM_*` symbol (see the module doc).
+pub fn rename_edits(
+    analysis: &Analysis,
+    file: i64,
+    offset: i64,
+    new_name: &str,
+) -> Option<Vec<(i64, i64, i64, String)>> {
+    let sym = sym_at(analysis, file, offset);
+    if sym == NONE {
+        return None;
+    }
+    let short = short_name_of_sym(analysis, sym)?;
+    if short.is_empty() {
+        return None;
+    }
+    let occurrences = references(analysis, file, offset);
+    if occurrences.is_empty() {
+        return None;
+    }
+    let mut out: Vec<(i64, i64, i64, String)> = Vec::new();
+    for (occ_file, start, end) in occurrences {
+        let (name_start, name_end) = locate_name(analysis, occ_file, start, end, &short)?;
+        out.push((occ_file, name_start, name_end, new_name.to_string()));
+    }
+    Some(out)
+}
+
+// ---------------------------------------------------------------------------
+// Semantic tokens
+// ---------------------------------------------------------------------------
+
+/// Standard LSP semantic token type names, in legend order -- the index
+/// into this array is what `semantic_tokens` encodes per token.
+pub const SEMANTIC_TOKEN_TYPES: &[&str] =
+    &["namespace", "type", "enumMember", "function", "method", "variable"];
+
+fn semantic_token_type(kind: i64) -> Option<i64> {
+    if kind == SYM_MODULE {
+        Some(0)
+    } else if kind == SYM_STRUCT || kind == SYM_ENUM || kind == SYM_TRAIT || kind == SYM_TYPE {
+        Some(1)
+    } else if kind == SYM_VARIANT {
+        Some(2)
+    } else if kind == SYM_FUN || kind == SYM_NATIVE_FUN {
+        Some(3)
+    } else if kind == SYM_IMPL_METHOD || kind == SYM_TRAIT_METHOD {
+        Some(4)
+    } else if kind == SYM_CONST {
+        Some(5)
+    } else {
+        None
+    }
+}
+
+/// Every symbol-resolved occurrence in `file` as `(start, end, token_type)`
+/// triples in source order, ready for delta-encoding. Locals, parameters,
+/// and struct fields carry no `SYM_*` symbol (see the module doc on
+/// `references`) and so are not classified here -- they keep whatever the
+/// grammar already highlights them as, rather than this layer guessing.
+pub fn semantic_tokens(analysis: &Analysis, file: i64) -> Vec<(i64, i64, i64)> {
+    let count = node_count(analysis);
+    let mut out: Vec<(i64, i64, i64)> = Vec::new();
+    let mut id = 0i64;
+    while id < count {
+        if node_file(&analysis.nodes, id) == file {
+            let tag = node_tag(&analysis.nodes, id);
+            let sym = sym_of_node(analysis, id);
+            if sym != NONE {
+                let kind = node_a(&analysis.nodes, sym);
+                if let Some(token_type) = semantic_token_type(kind) {
+                    let raw_start = node_start(&analysis.nodes, id);
+                    let raw_end = node_end(&analysis.nodes, id);
+                    // Item and variant spans run wider than their name (see
+                    // `locate_name`'s doc); expression, pattern, and type
+                    // spans already are the name.
+                    let span = if tag == NODE_ITEM || tag == NODE_VARIANT {
+                        short_name_of_sym(analysis, sym)
+                            .and_then(|name| locate_name(analysis, file, raw_start, raw_end, &name))
+                    } else {
+                        Some((raw_start, raw_end))
+                    };
+                    if let Some((start, end)) = span
+                        && end > start
+                    {
+                        out.push((start, end, token_type));
+                    }
+                }
+            }
+        }
+        id += 1;
+    }
+    out.sort_by_key(|entry| entry.0);
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Inlay hints
+// ---------------------------------------------------------------------------
+
+/// `: Type` hints for every `val`/`var` binding in `file` with no explicit
+/// type annotation, read from the typechecker's own attached inference --
+/// never re-inferred here (see the module doc). A binding the typechecker
+/// never reached (its canonical type key does not resolve) is skipped
+/// rather than shown with a guessed or garbled type. Each hint pairs the
+/// byte offset it anchors to (immediately after the bound name) with the
+/// label text to insert there.
+pub fn inlay_hints(analysis: &Analysis, file: i64) -> Vec<(i64, String)> {
+    if !analysis.typechecked {
+        return Vec::new();
+    }
+    let count = node_count(analysis);
+    let mut out: Vec<(i64, String)> = Vec::new();
+    let mut id = 0i64;
+    while id < count {
+        if node_file(&analysis.nodes, id) == file
+            && node_tag(&analysis.nodes, id) == NODE_STMT
+            && node_a(&analysis.nodes, id) == STMT_LET
+            && node_d(&analysis.nodes, id) == NONE
+        {
+            let key = stmt_ty_of(&analysis.nodes, id);
+            if key != NONE && find_tyinfo(&analysis.nodes, key) != NONE {
+                let name = name_text(&analysis.names, node_c(&analysis.nodes, id));
+                let start = node_start(&analysis.nodes, id);
+                let end = node_end(&analysis.nodes, id);
+                if let Some(name_span) = locate_name(analysis, file, start, end, &name) {
+                    let rendered = render_type_key(&analysis.names, &analysis.nodes, &analysis.lists, key);
+                    out.push((name_span.1, format!(": {}", rendered)));
+                }
+            }
+        }
+        id += 1;
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Code actions
+// ---------------------------------------------------------------------------
+
+/// One mechanically-generated fix: a title and the `(file, start, end,
+/// replacement)` edits it applies. Every fix here is derived from a
+/// diagnostic's own message *text* and span -- there is no `DiagKind` to
+/// switch on (see the module doc on `Analysis.errors`), only the message
+/// the compiler already chose to write. A diagnostic whose text this layer
+/// does not recognize produces no fix; that is a real answer ("no
+/// mechanical fix exists"), not a gap to paper over with a guess.
+pub struct CodeFix {
+    pub title: String,
+    pub edits: Vec<(i64, i64, i64, String)>,
+}
+
+fn strip_prefix_quoted<'a>(message: &'a str, prefix: &str) -> Option<&'a str> {
+    message.strip_prefix(prefix)?.strip_suffix('\'')
+}
+
+fn parse_casing_message(message: &str) -> Option<(String, String)> {
+    let rest = message.strip_prefix('\'')?;
+    let (name, tail) = rest.split_once("' violates casing rule: expected ")?;
+    Some((name.to_string(), tail.to_string()))
+}
+
+fn strip_access_message(message: &str) -> Option<String> {
+    const PREFIXES: [&str; 4] =
+        ["cannot access trait '", "cannot access type '", "cannot access '", "cannot call '"];
+    for prefix in PREFIXES {
+        if let Some(rest) = message.strip_prefix(prefix)
+            && let Some(name) = rest.strip_suffix("' here")
+        {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+fn capitalize(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
+        None => String::new(),
+    }
+}
+
+// Splits an identifier into words at underscores and camel/Pascal humps, so
+// any of the three casings can be rebuilt from any other.
+fn split_words(name: &str) -> Vec<String> {
+    let chars: Vec<char> = name.chars().collect();
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut idx = 0usize;
+    while idx < chars.len() {
+        let ch = chars[idx];
+        if ch == '_' {
+            if !current.is_empty() {
+                words.push(current.clone());
+                current.clear();
+            }
+        } else if ch.is_uppercase() && !current.is_empty() {
+            let prev = chars[idx - 1];
+            let next_lower = chars.get(idx + 1).map(|c| c.is_lowercase()).unwrap_or(false);
+            if prev.is_lowercase() || prev.is_ascii_digit() || (prev.is_uppercase() && next_lower) {
+                words.push(current.clone());
+                current.clear();
+            }
+            current.push(ch);
+        } else {
+            current.push(ch);
+        }
+        idx += 1;
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn casing_fix_name(current: &str, rule: &str) -> Option<String> {
+    let words = split_words(current);
+    if words.is_empty() {
+        return None;
+    }
+    if rule == "snake_case" {
+        Some(words.iter().map(|w| w.to_lowercase()).collect::<Vec<_>>().join("_"))
+    } else if rule == "PascalCase" {
+        Some(words.iter().map(|w| capitalize(w)).collect::<Vec<_>>().join(""))
+    } else if rule == "SCREAMING_SNAKE_CASE" {
+        Some(words.iter().map(|w| w.to_uppercase()).collect::<Vec<_>>().join("_"))
+    } else {
+        None
+    }
+}
+
+fn delete_span_with_newline(analysis: &Analysis, file: i64, start: i64, end: i64) -> (i64, i64, i64, String) {
+    let text = file_text_of(analysis, file);
+    let bytes = text.as_bytes();
+    let mut extended_end = end;
+    if bytes.get(extended_end as usize) == Some(&b'\n') {
+        extended_end += 1;
+    } else if bytes.get(extended_end as usize) == Some(&b'\r')
+        && bytes.get((extended_end + 1) as usize) == Some(&b'\n')
+    {
+        extended_end += 2;
+    }
+    (file, start, extended_end, String::new())
+}
+
+// The declaring `NODE_ITEM` a use site's symbol resolves to, if any -- only
+// item-kind declarations carry an `is_pub` flag (a bare method's `NODE_FN`
+// row does not), so a private *method* offers no "make public" fix here.
+fn add_pub_fix(analysis: &Analysis, file: i64, offset: i64) -> Option<(i64, i64, i64, String)> {
+    let sym = sym_at(analysis, file, offset);
+    if sym == NONE {
+        return None;
+    }
+    let decl = node_c(&analysis.nodes, sym);
+    if decl == NONE || node_tag(&analysis.nodes, decl) != NODE_ITEM {
+        return None;
+    }
+    if item_is_pub(&analysis.nodes, decl) != 0 {
+        return None;
+    }
+    let decl_file = node_file(&analysis.nodes, decl);
+    let start = node_start(&analysis.nodes, decl);
+    Some((decl_file, start, start, "pub ".to_string()))
+}
+
+/// Fixes for diagnostics in `file` overlapping `[range_start, range_end)`,
+/// recognized purely by message text: "remove unused import", "remove
+/// unused declaration", "fix casing" (built on `rename_edits`, so it shares
+/// its all-or-nothing guarantee), and "make public" (declarations only, not
+/// methods).
+pub fn code_actions(analysis: &Analysis, file: i64, range_start: i64, range_end: i64) -> Vec<CodeFix> {
+    let mut out: Vec<CodeFix> = Vec::new();
+    for (message, diag_file, start, end) in &analysis.errors {
+        if *diag_file != file || *end < range_start || *start > range_end {
+            continue;
+        }
+        if let Some(name) = strip_prefix_quoted(message, "unused import '") {
+            out.push(CodeFix {
+                title: format!("Remove unused import '{}'", name),
+                edits: vec![delete_span_with_newline(analysis, file, *start, *end)],
+            });
+            continue;
+        }
+        if message.starts_with("unused ")
+            && let Some(name) = message.split("'").nth(1)
+        {
+            out.push(CodeFix {
+                title: format!("Remove unused declaration '{}'", name),
+                edits: vec![delete_span_with_newline(analysis, file, *start, *end)],
+            });
+            continue;
+        }
+        if let Some((name, rule)) = parse_casing_message(message) {
+            if let Some(fixed) = casing_fix_name(&name, &rule)
+                && let Some(edits) = rename_edits(analysis, file, *start, &fixed)
+            {
+                out.push(CodeFix { title: format!("Rename '{}' to '{}'", name, fixed), edits });
+            }
+            continue;
+        }
+        if let Some(name) = strip_access_message(message)
+            && let Some(edit) = add_pub_fix(analysis, file, *start)
+        {
+            out.push(CodeFix { title: format!("Make '{}' public", name), edits: vec![edit] });
+        }
+    }
+    out
+}

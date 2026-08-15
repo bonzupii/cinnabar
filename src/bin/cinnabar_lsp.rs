@@ -25,9 +25,10 @@
 //!   errors from a previous keystroke is worse than one showing none.
 
 use cinnabar::analysis::{
-    analyze, completions, definition, file_id_of, file_text_of, hover, offset_to_position,
-    position_to_offset, references, signature_help, Analysis, COMPLETE_FIELD, COMPLETE_KEYWORD,
-    COMPLETE_LOCAL,
+    analyze, code_actions, completions, definition, document_symbols, file_id_of, file_text_of,
+    folding_ranges, hover, inlay_hints, offset_to_position, position_to_offset, prepare_rename,
+    references, rename_edits, semantic_tokens, signature_help, workspace_symbols, Analysis,
+    SymbolInfo, COMPLETE_FIELD, COMPLETE_KEYWORD, COMPLETE_LOCAL, SEMANTIC_TOKEN_TYPES,
 };
 use cinnabar::ast::{
     NO_FILE, SYM_CONST, SYM_ENUM, SYM_FUN, SYM_IMPL_METHOD, SYM_MODULE, SYM_NATIVE_FUN,
@@ -84,6 +85,10 @@ struct ServerState {
 // gone.
 fn main() -> Result<(), String> {
     let (connection, io_threads) = Connection::stdio();
+    // Built from the same array `semantic_tokens`' indices are defined
+    // against, rather than a second copy of the type names here: the legend
+    // and the encoder can never drift out of sync.
+    let token_types: Vec<Value> = SEMANTIC_TOKEN_TYPES.iter().map(|name| json!(*name)).collect();
     let capabilities = json!({
         "textDocumentSync": 1,
         "hoverProvider": true,
@@ -92,7 +97,17 @@ fn main() -> Result<(), String> {
         "completionProvider": { "triggerCharacters": ["."] },
         "signatureHelpProvider": { "triggerCharacters": ["(", ","] },
         "codeLensProvider": { "resolveProvider": false },
-        "documentFormattingProvider": true
+        "documentFormattingProvider": true,
+        "foldingRangeProvider": true,
+        "documentSymbolProvider": true,
+        "workspaceSymbolProvider": true,
+        "renameProvider": { "prepareProvider": true },
+        "semanticTokensProvider": {
+            "legend": { "tokenTypes": token_types, "tokenModifiers": [] },
+            "full": true
+        },
+        "inlayHintProvider": true,
+        "codeActionProvider": true
     });
     // lsp-server wraps this value in the InitializeResult's `capabilities`
     // field itself.
@@ -220,6 +235,38 @@ fn dispatch_request(connection: &Connection, state: &ServerState, req: Request) 
     }
     if method == "textDocument/formatting" {
         let result = on_formatting(state, &req.params);
+        return send_ok(connection, req.id, result);
+    }
+    if method == "textDocument/foldingRange" {
+        let result = on_folding_range(state, &req.params);
+        return send_ok(connection, req.id, result);
+    }
+    if method == "textDocument/documentSymbol" {
+        let result = on_document_symbol(state, &req.params);
+        return send_ok(connection, req.id, result);
+    }
+    if method == "workspace/symbol" {
+        let result = on_workspace_symbol(state, &req.params);
+        return send_ok(connection, req.id, result);
+    }
+    if method == "textDocument/prepareRename" {
+        let result = on_prepare_rename(state, &req.params);
+        return send_ok(connection, req.id, result);
+    }
+    if method == "textDocument/rename" {
+        let result = on_rename(state, &req.params);
+        return send_ok(connection, req.id, result);
+    }
+    if method == "textDocument/semanticTokens/full" {
+        let result = on_semantic_tokens_full(state, &req.params);
+        return send_ok(connection, req.id, result);
+    }
+    if method == "textDocument/inlayHint" {
+        let result = on_inlay_hint(state, &req.params);
+        return send_ok(connection, req.id, result);
+    }
+    if method == "textDocument/codeAction" {
+        let result = on_code_action(state, &req.params);
         return send_ok(connection, req.id, result);
     }
     let resp = Response::new_err(
@@ -577,6 +624,286 @@ fn on_code_lens(state: &ServerState, params: &Value) -> Value {
         idx += 1;
     }
     Value::Array(lenses)
+}
+
+// The (path, analysis, file id) behind a file-scoped (non-positional)
+// request, or None when the params don't name a file this server has an
+// up-to-date analysis for. Mirrors `positional` minus the offset.
+fn file_scoped<'state>(state: &'state ServerState, params: &Value) -> Option<(&'state Analysis, i64)> {
+    let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+    let path = uri_to_path(uri)?;
+    let entry = entry_of_doc(state, &path);
+    let analysis = completed_analysis(state, &entry)?;
+    let file = file_id_of(analysis, &path);
+    if file == NONE_ID {
+        return None;
+    }
+    Some((analysis, file))
+}
+
+fn on_folding_range(state: &ServerState, params: &Value) -> Value {
+    let (analysis, file) = match file_scoped(state, params) {
+        Some(found) => found,
+        None => return Value::Array(Vec::new()),
+    };
+    let text = file_text_of(analysis, file);
+    let mut out: Vec<Value> = Vec::new();
+    let mut idx = 0usize;
+    let ranges = folding_ranges(analysis, file);
+    while idx < ranges.len() {
+        match ranges.get(idx) {
+            Some((start, end)) => {
+                let start_pos = offset_to_position(&text, *start);
+                let end_pos = offset_to_position(&text, *end);
+                if end_pos.0 > start_pos.0 {
+                    out.push(json!({ "startLine": start_pos.0, "endLine": end_pos.0 }));
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    Value::Array(out)
+}
+
+fn document_symbol_json(analysis: &Analysis, info: &SymbolInfo) -> Value {
+    let mut node = json!({
+        "name": info.name,
+        "kind": info.kind,
+        "range": range_json(analysis, info.span.0, info.span.1, info.span.2),
+        "selectionRange": range_json(
+            analysis,
+            info.selection_span.0,
+            info.selection_span.1,
+            info.selection_span.2
+        )
+    });
+    if !info.detail.is_empty() {
+        node["detail"] = json!(info.detail);
+    }
+    if !info.children.is_empty() {
+        let mut children: Vec<Value> = Vec::new();
+        let mut idx = 0usize;
+        while idx < info.children.len() {
+            match info.children.get(idx) {
+                Some(child) => children.push(document_symbol_json(analysis, child)),
+                None => break,
+            }
+            idx += 1;
+        }
+        node["children"] = Value::Array(children);
+    }
+    node
+}
+
+fn on_document_symbol(state: &ServerState, params: &Value) -> Value {
+    let (analysis, file) = match file_scoped(state, params) {
+        Some(found) => found,
+        None => return Value::Array(Vec::new()),
+    };
+    let symbols = document_symbols(analysis, file);
+    let mut out: Vec<Value> = Vec::new();
+    let mut idx = 0usize;
+    while idx < symbols.len() {
+        match symbols.get(idx) {
+            Some(info) => out.push(document_symbol_json(analysis, info)),
+            None => break,
+        }
+        idx += 1;
+    }
+    Value::Array(out)
+}
+
+// Every currently open root's analysis carries the full module graph it
+// reached, so a workspace search asks each one and concatenates -- there is
+// no single `Analysis` that already spans every open root at once.
+fn on_workspace_symbol(state: &ServerState, params: &Value) -> Value {
+    let query = params.get("query").and_then(Value::as_str).unwrap_or("");
+    let mut out: Vec<Value> = Vec::new();
+    let mut idx = 0usize;
+    while idx < state.completed.len() {
+        match state.completed.get(idx) {
+            Some(result) => {
+                let analysis = &result.analysis;
+                let symbols = workspace_symbols(analysis, query);
+                let mut s_idx = 0usize;
+                while s_idx < symbols.len() {
+                    match symbols.get(s_idx) {
+                        Some(info) => {
+                            if let Some(location) =
+                                location_json(analysis, info.span.0, info.span.1, info.span.2)
+                            {
+                                out.push(json!({
+                                    "name": info.name,
+                                    "kind": info.kind,
+                                    "location": location
+                                }));
+                            }
+                        }
+                        None => break,
+                    }
+                    s_idx += 1;
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    Value::Array(out)
+}
+
+fn workspace_edit_json(analysis: &Analysis, edits: &[(i64, i64, i64, String)]) -> Value {
+    let mut by_uri: Vec<(String, Vec<Value>)> = Vec::new();
+    let mut idx = 0usize;
+    while idx < edits.len() {
+        match edits.get(idx) {
+            Some((edit_file, start, end, new_text)) => {
+                if let Some(entry) = analysis.files.get(*edit_file as usize) {
+                    let uri = path_to_uri(&entry.0);
+                    let text_edit = json!({
+                        "range": range_json(analysis, *edit_file, *start, *end),
+                        "newText": new_text
+                    });
+                    match by_uri.iter_mut().find(|pair| pair.0 == uri) {
+                        Some(pair) => pair.1.push(text_edit),
+                        None => by_uri.push((uri, vec![text_edit])),
+                    }
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    let mut changes = serde_json::Map::new();
+    let mut u_idx = 0usize;
+    while u_idx < by_uri.len() {
+        match by_uri.get(u_idx) {
+            Some((uri, items)) => {
+                changes.insert(uri.clone(), Value::Array(items.clone()));
+            }
+            None => break,
+        }
+        u_idx += 1;
+    }
+    json!({ "changes": changes })
+}
+
+fn on_prepare_rename(state: &ServerState, params: &Value) -> Value {
+    let (analysis, file, offset) = match positional(state, params) {
+        Some(found) => found,
+        None => return Value::Null,
+    };
+    match prepare_rename(analysis, file, offset) {
+        Some(span) => range_json(analysis, span.0, span.1, span.2),
+        None => Value::Null,
+    }
+}
+
+fn on_rename(state: &ServerState, params: &Value) -> Value {
+    let (analysis, file, offset) = match positional(state, params) {
+        Some(found) => found,
+        None => return Value::Null,
+    };
+    let new_name = match params.get("newName").and_then(Value::as_str) {
+        Some(value) => value,
+        None => return Value::Null,
+    };
+    match rename_edits(analysis, file, offset, new_name) {
+        Some(edits) => workspace_edit_json(analysis, &edits),
+        None => Value::Null,
+    }
+}
+
+fn on_semantic_tokens_full(state: &ServerState, params: &Value) -> Value {
+    let (analysis, file) = match file_scoped(state, params) {
+        Some(found) => found,
+        None => return json!({ "data": [] }),
+    };
+    let text = file_text_of(analysis, file);
+    let tokens = semantic_tokens(analysis, file);
+    let mut data: Vec<i64> = Vec::new();
+    let mut prev_line = 0i64;
+    let mut prev_char = 0i64;
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+        match tokens.get(idx) {
+            Some((start, end, token_type)) => {
+                let (line, character) = offset_to_position(&text, *start);
+                let delta_line = line - prev_line;
+                let delta_char = if delta_line == 0 { character - prev_char } else { character };
+                data.push(delta_line);
+                data.push(delta_char);
+                data.push(*end - *start);
+                data.push(*token_type);
+                data.push(0);
+                prev_line = line;
+                prev_char = character;
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    json!({ "data": data })
+}
+
+fn on_inlay_hint(state: &ServerState, params: &Value) -> Value {
+    let (analysis, file) = match file_scoped(state, params) {
+        Some(found) => found,
+        None => return Value::Array(Vec::new()),
+    };
+    let text = file_text_of(analysis, file);
+    let hints = inlay_hints(analysis, file);
+    let mut out: Vec<Value> = Vec::new();
+    let mut idx = 0usize;
+    while idx < hints.len() {
+        match hints.get(idx) {
+            Some((offset, label)) => {
+                let (line, character) = offset_to_position(&text, *offset);
+                out.push(json!({
+                    "position": { "line": line, "character": character },
+                    "label": label,
+                    "kind": 1
+                }));
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    Value::Array(out)
+}
+
+fn on_code_action(state: &ServerState, params: &Value) -> Value {
+    let (analysis, file) = match file_scoped(state, params) {
+        Some(found) => found,
+        None => return Value::Array(Vec::new()),
+    };
+    let text = file_text_of(analysis, file);
+    let range = match params.get("range") {
+        Some(value) => value,
+        None => return Value::Array(Vec::new()),
+    };
+    let start_line = range.get("start").and_then(|p| p.get("line")).and_then(Value::as_i64).unwrap_or(0);
+    let start_char =
+        range.get("start").and_then(|p| p.get("character")).and_then(Value::as_i64).unwrap_or(0);
+    let end_line = range.get("end").and_then(|p| p.get("line")).and_then(Value::as_i64).unwrap_or(0);
+    let end_char = range.get("end").and_then(|p| p.get("character")).and_then(Value::as_i64).unwrap_or(0);
+    let range_start = position_to_offset(&text, start_line, start_char);
+    let range_end = position_to_offset(&text, end_line, end_char);
+    let fixes = code_actions(analysis, file, range_start, range_end);
+    let mut out: Vec<Value> = Vec::new();
+    let mut idx = 0usize;
+    while idx < fixes.len() {
+        match fixes.get(idx) {
+            Some(fix) => out.push(json!({
+                "title": fix.title,
+                "kind": "quickfix",
+                "edit": workspace_edit_json(analysis, &fix.edits)
+            })),
+            None => break,
+        }
+        idx += 1;
+    }
+    Value::Array(out)
 }
 
 // ---------------------------------------------------------------------------
