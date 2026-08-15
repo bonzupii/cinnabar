@@ -699,11 +699,24 @@ pub fn snapshot_report(executable: &Path, manifest: &ProjectManifest) -> Result<
 
 /// Write one snapshot, as `--update-snapshots` would.
 ///
-/// It goes through the same confinement check every other sidecar write
-/// does, so accepting a snapshot cannot write outside the project even if
-/// a caller asks it to.
+/// The target must be the sidecar of a discovered test. Confinement is not
+/// sufficient on its own: `write_confined` establishes that a path lies
+/// inside the project, which the sources, the manifest, and every other
+/// regular file in the tree also satisfy, so a caller passing an arbitrary
+/// project-relative path would rewrite one of those with snapshot text.
+/// Discovery already names the complete set of files acceptance may touch,
+/// so membership in that set is the check, and a path that does not name
+/// one — including one spelled with `..` segments that would resolve to
+/// one — is refused rather than normalized into range.
 pub fn accept_snapshot(manifest: &ProjectManifest, snapshot_relative: &str, text: &str) -> Result<(), ManifestError> {
     let snapshot = manifest.root.join(snapshot_relative);
+    let discovered = discover_tests(manifest)?;
+    if !discovered.iter().any(|test| snapshot_path(test) == snapshot) {
+        return Err(ManifestError::source_less(format!(
+            "'{}' is not the diagnostic snapshot of a discovered test",
+            snapshot_relative
+        )));
+    }
     write_confined(&manifest.root, &snapshot, "diagnostic snapshot", text)
 }
 
