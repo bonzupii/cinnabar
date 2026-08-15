@@ -45,7 +45,7 @@ echo "Packaging extension..."
 
 # The server directory is named for the VS Code commit, which changes whenever
 # the editor updates, so discover it rather than pinning it.
-SERVER_CLI="$(ls -dt "${HOME}"/.vscode-server/bin/*/bin/code-server 2>/dev/null | head -1 || true)"
+SERVER_CLI="$(find "${HOME}/.vscode-server/bin" -mindepth 3 -maxdepth 3 -type f -name code-server -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n1 | cut -d' ' -f2- || true)"
 if [ -z "${SERVER_CLI}" ]; then
   echo "No VS Code Server in this container.  Attach the editor once so it" >&2
   echo "installs itself, then re-run this script." >&2

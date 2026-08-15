@@ -73,13 +73,13 @@
       "beforeText": "^\\s*#!?\\|\\s*$",
       "afterText": "^\\s*\\|#\\s*$",
       "action": {
-        "indentAction": "IndentOutdent"
+        "indent": "indentOutdent"
       }
     },
     {
       "beforeText": "^\\s*#!?\\|.*$",
       "action": {
-        "indentAction": "Indent"
+        "indent": "indent"
       }
     }
   ]
