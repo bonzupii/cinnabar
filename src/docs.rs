@@ -18,7 +18,7 @@
 
 use crate::ast::*;
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 
 pub fn render_api_docs(names: &[String], nodes: &[i64], lists: &[Vec<i64>], root: i64) -> String {
     let mut body = String::new();
@@ -47,33 +47,37 @@ pub fn render_cinnabook(api_html: &str) -> String {
     page("Cinnabook", &body)
 }
 
-pub fn serve_cinnabook(address: &str, page_text: &str, mut on_connection_error: impl FnMut(&str)) -> Result<(), String> {
+pub fn serve_cinnabook(
+    address: &str,
+    page_text: &str,
+    mut report_error: impl FnMut(&str),
+) -> Result<(), String> {
     let listener = TcpListener::bind(address)
         .map_err(|bind_error| format!("cannot bind Cinnabook server to '{}': {}", address, bind_error))?;
     // Only the bind is fatal: once the socket is listening, a connection
     // that fails to accept, read, or write is that one visitor's problem —
     // a browser closing mid-response must not take the server down for
     // every future visitor. Per-connection failures are reported to the
-    // caller through `on_connection_error` (never printed directly here —
-    // this is library code, and only the CLI entry point in `main.rs`
-    // decides how a message reaches the user) and the loop moves on.
+    // caller through `report_error` (never printed directly here — this is
+    // library code, and only the CLI entry point in `main.rs` decides how a
+    // message reaches the user), which renders them, and the loop moves on.
     for incoming in listener.incoming() {
         let mut stream = match incoming {
             Ok(stream) => stream,
             Err(accept_error) => {
-                on_connection_error(&format!("cannot accept Cinnabook connection: {}", accept_error));
+                let message = format!("cannot accept Cinnabook connection: {}", accept_error);
+                report_error(&message);
                 continue;
             }
         };
-        let mut request = [0u8; 2048];
-        let bytes_read = match stream.read(&mut request) {
-            Ok(count) => count,
+        let request_len = match read_headers(&mut stream) {
+            Ok(len) => len,
             Err(read_error) => {
-                on_connection_error(&format!("cannot read Cinnabook request: {}", read_error));
+                report_error(&read_error);
                 continue;
             }
         };
-        if bytes_read == 0 {
+        if request_len == 0 {
             continue;
         }
         let response = format!(
@@ -82,10 +86,40 @@ pub fn serve_cinnabook(address: &str, page_text: &str, mut on_connection_error: 
             page_text
         );
         if let Err(write_error) = stream.write_all(response.as_bytes()) {
-            on_connection_error(&format!("cannot write Cinnabook response: {}", write_error));
+            let message = format!("cannot write Cinnabook response: {}", write_error);
+            report_error(&message);
         }
     }
     Ok(())
+}
+
+/// Read a request through its header terminator, so the connection can be
+/// closed without leaving unread bytes behind.
+///
+/// A single `read` can return a partial request. Closing a socket that still
+/// holds unread bytes resets the connection (RST) instead of finishing it
+/// (FIN), which a client observes as "connection reset by peer". Reading
+/// until the header terminator consumes everything a header-only request
+/// sent, so the close that follows is a clean FIN. An empty request is also
+/// read cleanly (zero bytes) so the caller can skip it without reporting it.
+fn read_headers(stream: &mut TcpStream) -> Result<usize, String> {
+    let mut buffer = [0u8; 2048];
+    let mut request = Vec::new();
+    loop {
+        let count = stream
+            .read(&mut buffer)
+            .map_err(|read_error| format!("cannot read Cinnabook request: {}", read_error))?;
+        if count == 0 {
+            return Ok(request.len());
+        }
+        request.extend_from_slice(&buffer[..count]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(request.len());
+        }
+        if request.len() > 1_048_576 {
+            return Err("Cinnabook request headers exceed one MiB".to_string());
+        }
+    }
 }
 
 fn render_item_list(

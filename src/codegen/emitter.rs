@@ -20,15 +20,15 @@
 //! arm — never through an argument subexpression or a match scrutinee — and
 //! that marking is what lets LLVM's `-O2` deliver the language's
 //! O(1)-call-stack recursion guarantee with no runtime stack check anywhere
-//! in the emitted binary. Tail position alone does not earn the marker,
-//! though: `tail` promises the callee never reaches into the caller's
-//! frame, so a call handed an argument whose type can carry a reference
-//! into that frame is emitted as an ordinary call instead.
+//! in the emitted binary. A call is marked `tail` only when the typechecker's
+//! attached tail-safety fact (`NODE_CALLFACT`) says no argument carries a
+//! reference into the current frame; a reference into the caller's own frame
+//! would make the `tail` marker a false promise and the IR undefined at
+//! `-O2`.
 //!
 //! **Invariants:**
-//! - `tail` is asserted only where codegen can prove it. Every argument's
-//!   canonical type must be free of references, exclusive references, and
-//!   slice views, transitively through struct, enum, and array members.
+//! - `tail` is asserted only where the typechecker's attached tail-safety
+//!   fact says it is safe -- never re-derived here from an argument's type.
 //! - Nothing is re-derived here. Types come from the typechecker's
 //!   canonical keys, symbols from the resolver, variant tags from
 //!   `NODE_VARFACT`, field offsets from `NODE_FIELDKEY`. Codegen never
@@ -45,15 +45,13 @@ use crate::ast::*;
 use crate::codegen::error::*;
 use crate::codegen::syscall;
 use crate::codegen::types::*;
-use crate::typecheck::{index_access_of, type_contains_ref, IDX_ACCESS_FALLIBLE};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::targets::TargetData;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, CallSiteValue, FunctionValue, IntValue, PointerValue,
-    ValueKind,
+    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue, ValueKind,
 };
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
@@ -1162,7 +1160,7 @@ fn emit_unary<'ctx, 'a>(
         // left to borrow.  Which of the two it is comes from the access
         // fact on the index node, not from the shape of the key here, so
         // the fallible path is decided in exactly one place for indexing.
-        if index_access_of(sess.5, inner) == IDX_ACCESS_FALLIBLE {
+        if node_d(sess.5, inner) == INDEX_FALLIBLE {
             return Ok(inner_ptr);
         }
         let out = declare_local(sess, key, "ref", span)?;
@@ -1826,24 +1824,15 @@ fn emit_index<'ctx, 'a>(
         len_val = slice_len_of(sess, base_ptr)?;
     }
 
-    // Whether this access is fallible was decided by the typechecker, which
-    // is the stage that either proved the index in range against a fixed
-    // array length or could not, and attached the answer to this node.
-    // Codegen reads that fact; it must not re-derive it from the shape of
-    // the attached type, because the shape does not carry the answer -- an
-    // in-range constant index into `[Result(T, E); N]` attaches the bare
-    // element key, which is itself a `Result`, and a shape test would send
-    // it down the fallible path and copy the wrong byte range.
-    let access = index_access_of(sess.5, expr);
-    if access == NONE {
-        return Err(builder_error(
-            node_file(sess.5, expr),
-            node_start(sess.5, expr),
-            node_end(sess.5, expr),
-            "internal: index expression with no attached access fact",
-        ));
-    }
-    if access != IDX_ACCESS_FALLIBLE {
+    // The typechecker attaches an explicit fallibility fact to the index
+    // node: INDEX_FALLIBLE for runtime and slice indices (whose result it
+    // types as Result(T, IndexError)), INDEX_INFALLIBLE for a constant array
+    // index proven in range (whose result is the bare element type).  The
+    // element type itself cannot be the signal: an array of Result elements
+    // indexed by a constant has a Result-typed result that is still
+    // infallible.  Reading the attached fact keeps codegen from re-deriving
+    // a decision the typechecker already made.
+    if node_d(sess.5, expr) != INDEX_FALLIBLE {
         let eptr = offset_elem_ptr(sess, elem_key, data_ptr, idx_val, span)?;
         return Ok(eptr);
     }
@@ -1889,75 +1878,6 @@ fn into_meta<'ctx>(value: BasicValueEnum<'ctx>) -> BasicMetadataValueEnum<'ctx> 
     value.into()
 }
 
-// Whether a value of `key` could hand a callee a pointer into the caller's
-// stack frame.  A reference, an exclusive reference, and a slice view all
-// can directly; a struct, enum, or array can by containing one, which is
-// the walk `typecheck::type_contains_ref` already performs for the borrow
-// checker's returned-borrow obligation -- the same question about the same
-// canonical keys, so it is read here rather than implemented a second time.
-//
-// A key whose shape codegen cannot see through -- an unresolved key, or a
-// type parameter that some instantiation may bind to a reference -- answers
-// "could".  The marker this feeds is a promise, so anything short of proof
-// has to withhold it.
-fn arg_may_carry_frame_ref(sess: &mut Session, key: i64) -> bool {
-    let kind = key_kind_of(sess.5, key);
-    if kind == TYD_UNKNOWN || kind == TYD_PARAM || kind == TYD_MONO {
-        return true;
-    }
-    let mut seen: Vec<i64> = Vec::new();
-    type_contains_ref(&mut *sess.5, &mut *sess.6, key, &mut seen)
-}
-
-// The single place a call is marked `tail`.
-//
-// Being in tail position is necessary but not sufficient.  LLVM's `tail`
-// marker is a promise that the callee never accesses the caller's stack
-// frame, and `return f(&local)` is in tail position while breaking exactly
-// that promise: the argument is a pointer into a frame the marker permits
-// the backend to release before `f` runs.  That is undefined behaviour at
-// -O2 rather than a missed optimization, so the marker is withheld unless
-// every argument's canonical type is provably frame-free.
-//
-// This is not a semantic change and not a lost guarantee.  Withholding
-// `tail` only stops codegen asserting something it cannot justify; LLVM's
-// own tail-call elimination re-derives the marker from a real escape
-// analysis of the emitted function, so a call that genuinely does not leak
-// the frame still gets the O(1)-stack treatment, and one that does never
-// could have had it.
-//
-// Self-tail-recursion needs no separate rule.  A function tail-calling
-// itself while passing a borrow of one of its own locals cannot both reuse
-// the frame and keep that borrow pointing at live storage -- the frame it
-// points into is the one about to be overwritten.  The borrow's type is
-// still `&T`, `&mut T`, or `&[T]`, so the argument check above declines
-// that call for the same reason it declines any other, and the language's
-// O(1)-stack guarantee holds for exactly the recursions that can honour it.
-fn mark_tail_call<'ctx>(
-    sess: &mut Session<'ctx, '_, '_>,
-    from: &[i64],
-    to: &[i64],
-    expr: i64,
-    call: CallSiteValue<'ctx>,
-    is_tail: bool,
-) {
-    if !is_tail {
-        return;
-    }
-    let arg_exprs = node_d(sess.5, expr);
-    let count = list_len(sess.6, arg_exprs);
-    let mut idx = 0i64;
-    while idx < count {
-        let arg = list_get(sess.6, arg_exprs, idx);
-        let akey = sub_key(sess, from, to, em_expr_ty(sess, arg));
-        if arg_may_carry_frame_ref(sess, akey) {
-            return;
-        }
-        idx += 1;
-    }
-    call.set_tail_call(true);
-}
-
 fn emit_call<'ctx, 'a>(
     sess: &mut Session<'ctx, '_, '_>,
     ctx: &mut FnCtx<'ctx, 'a>,
@@ -1998,7 +1918,9 @@ fn emit_call<'ctx, 'a>(
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(fn_val, &arg_vals, "").map_err(builder_fail)?;
-    mark_tail_call(sess, ctx.3, ctx.4, expr, call, is_tail);
+    if is_tail && callfact_tail_safe_of(sess.5, expr) == 1 {
+        call.set_tail_call(true);
+    }
     let out = declare_local(sess, ret_key, "call", span)?;
     let ret_val = match call.try_as_basic_value() {
         ValueKind::Basic(bv) => bv,
@@ -2090,7 +2012,9 @@ fn emit_deferred_trait_call<'ctx, 'a>(
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(fn_val, &arg_vals, "").map_err(builder_fail)?;
-    mark_tail_call(sess, ctx.3, ctx.4, expr, call, is_tail);
+    if is_tail && callfact_tail_safe_of(sess.5, expr) == 1 {
+        call.set_tail_call(true);
+    }
     let out = declare_local(sess, result, "call", span)?;
     let ret_val = match call.try_as_basic_value() {
         ValueKind::Basic(bv) => bv,
@@ -2410,7 +2334,9 @@ fn emit_native_call<'ctx, 'a>(
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(native_val, &arg_vals, "").map_err(builder_fail)?;
-    mark_tail_call(sess, ctx.3, ctx.4, expr, call, is_tail);
+    if is_tail && callfact_tail_safe_of(sess.5, expr) == 1 {
+        call.set_tail_call(true);
+    }
     let out = declare_local(sess, ret_key, "call", span)?;
     let ret_val = match call.try_as_basic_value() {
         ValueKind::Basic(bv) => bv,

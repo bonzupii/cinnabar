@@ -1,0 +1,27 @@
+# A constant index into an array whose element type is the seeded Result
+# primitive.  The index is proven in range at compile time, so its result is
+# the bare Result element — not Result(Result(_, DivError), IndexError).
+# Codegen must read the typechecker's attached fallibility fact rather than
+# infer fallibility from the element type's Result shape, or it enters the
+# fallible-index path and looks for IndexOutOfBounds inside DivError.
+# (EXPECT_OK 0.)
+
+pub fun main() I64
+  val results: [Result(I64, DivError); 2] = [Ok(1), Err(DivByZero)]
+
+  val first = match results[0]
+    Ok(value) => value
+    Err(DivByZero) => 9
+  end
+
+  val second = match results[1]
+    Ok(value) => value
+    Err(DivByZero) => 7
+  end
+
+  if first == 1 && second == 7
+    return 0
+  end
+
+  return 1
+end

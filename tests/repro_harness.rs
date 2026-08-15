@@ -70,6 +70,7 @@ const EXPECT_REJECTED: &[&str] = &[
     "borrow_after_move",
     "int_unsigned_neg",
     "non_tail_recursion",
+    "tail_local_borrow",
     "vec_no_extraction",
     "vec_undrained_free",
     "vec_pop_unconsumed",
