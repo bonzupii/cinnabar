@@ -28,6 +28,7 @@ default = ["codegen"]
 # `default-features = false` to keep `inkwell`/LLVM out of a wasm32 build
 # entirely — the front end through borrow-checking has no such dependency.
 codegen = ["dep:inkwell"]
+static-musl = []
 test-profile-balanced = []
 test-profile-smoke = []
 

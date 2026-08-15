@@ -328,11 +328,11 @@ pass under the real gate with this change.
 
 ## 1e. A first slice of `Process` (§3.2.1)
 
-`Process.spawn`/`Process.wait` now exist: `clone`/`execve`/`wait4` issued directly as inline
-assembly, following the exact `Memory`/`Terminal`/`File` convention `syscall.rs` already documents
-(one kernel entry point per native, nothing between the Cinnabar declaration and the instruction that
-leaves user space) — `clone` rather than `fork`, because AArch64's Linux ABI has no `fork` syscall at
-all, the same "one code path for both architectures" reasoning `File` already applies to `openat`.
+`Process.spawn`/`Process.wait` now exist: `fork`/`execve`/`waitpid` issued as external C/POSIX
+calls, the same convention the `Memory`/`Terminal`/`File` runtime layer now uses everywhere (one libc
+entry point per native, nothing between the Cinnabar declaration and the C call). `fork` rather than
+any platform-specific syscall, so one code path serves every POSIX platform; `spawn`/`wait` are
+scoped to POSIX for now, because Windows has no `fork`/`execve`/`waitpid` C-runtime equivalent.
 Verified against real LLVM 21: a new fixture (`tests/fixtures/repro/process_spawn_wait.cnb`) spawns
 `/bin/true` and `/bin/false`, waits on each, and confirms the decoded exit code matches (0 and 1) —
 proving argv marshaling, the fork/exec/wait sequence, and status decoding all actually work, not just
@@ -340,13 +340,13 @@ compile. Three real bugs surfaced and were fixed before this shipped clean:
 
 - **A memory leak**, caught by `sanitizer_gate`'s Valgrind pass exactly as it's meant to: the argv
   array, each argument's NUL-terminated copy, and the empty `envp` array were all heap-allocated
-  before `clone` but never freed in the parent afterward (the child either replaces its own image via
+  before `fork` but never freed in the parent afterward (the child either replaces its own image via
   a successful `execve` or exits immediately on a failed one, so only the parent's copy of that memory
-  outlives the call). Fixed by freeing all of it once, right after `clone` returns, in the parent's
+  outlives the call). Fixed by freeing all of it once, right after `fork` returns, in the parent's
   path only.
 - **An unjustified `unreachable`**, caught by `undefined_behaviour.rs`'s IR scan exactly as it's meant
-  to: the child's fallback path (`execve` returning at all means it failed; call `exit_group` and stop)
-  ended in `build_unreachable()`, but "the kernel never returns from `exit_group`" is a fact about the
+  to: the child's fallback path (`execve` returning at all means it failed; call `_exit` and stop)
+  ended in `build_unreachable()`, but "`_exit` never returns" is a fact about the
   kernel, not something this compiler's type checker proved the way it proves a `match` exhaustive —
   precisely the "cannot happen with nothing proving it" class that check exists to catch. Fixed by
   ending that path in a self-loop trap instead of a terminator that claims provably unreachable.
@@ -368,11 +368,11 @@ asked for, not a completeness gain. `wait` blocks until the child exits and deco
 code; it does not yet distinguish a signal-terminated child (the encoded status word's low byte is a
 termination signal in that case, which a caller that cares can already read off the same `I64` `wait`
 returns — just not decoded automatically). No stdout/stderr capture yet: the child inherits the
-parent's own file descriptors as `clone`/`execve` naturally do, so a spawned program's output goes
+parent's own file descriptors as `fork`/`execve` naturally do, so a spawned program's output goes
 wherever the caller's own already goes, which is enough for `cinnabar test`-style "run it and check the
 exit code" but not for `mushlings verify`-style "run it and check what it printed." Piped stdout/stderr
-is the natural next slice, needs nothing new architecturally (`pipe2`/`dup2` join `clone`/`execve` in
-the same syscall table, and the plumbing is the same shape as everything already built here), and was
+is the natural next slice, needs nothing new architecturally (`pipe2`/`dup2` join `fork`/`execve` in
+the same runtime layer, and the plumbing is the same shape as everything already built here), and was
 left for a follow-up rather than folded in blind.
 
 ---
@@ -425,14 +425,14 @@ self-hosted compiler is attempted.
 What the current `Memory`/`Terminal`/`File`/`Net` surface doesn't cover, needed by different parts of
 today's Rust implementation, roughly ordered by how many things depend on it:
 
-1. **Process spawning — started (§1e).** `Process.spawn`/`Process.wait` exist now: `clone` (not
-   `fork` — AArch64 has no `fork` syscall) plus `execve` and `wait4`, verified against real LLVM 21.
-   `cinnabar test`, `mushlings verify`, `fuzz replay`/`minimize`, and codegen's own final step (shelling
-   out to `opt`/`llc`/`clang`) can all be built on this today. What's still missing: piped
-   stdout/stderr capture (needs `pipe2`/`dup2`, same syscall-table pattern, not yet added), and
-   environment variables to pass through (§3.2.5, tracked separately — `spawn` today always passes an
-   explicit empty environment). Neither blocks the common "run it, check the exit code" case; both
-   block "run it and read what it printed."
+1. **Process spawning — started (§1e).** `Process.spawn`/`Process.wait` exist now, lowered to the
+   external C/POSIX functions (`fork`/`execve`/`waitpid`) the runtime layer uses everywhere, verified
+   against real LLVM 21. `cinnabar test`, `mushlings verify`, `fuzz replay`/`minimize`, and codegen's
+   own final step (shelling out to `opt`/`llc`/`clang`) can all be built on this today. What's still
+   missing: piped stdout/stderr capture (needs `pipe2`/`dup2`, same runtime-layer pattern, not yet
+   added), and environment variables to pass through (§3.2.5, tracked separately — `spawn` today
+   always passes an explicit empty environment). Neither blocks the common "run it, check the exit
+   code" case; both block "run it and read what it printed."
 2. **Directory enumeration, `stat`, and `realpath`.** `cinnabar test`'s recursive test-file walk, and
    — load-bearing — the Milestone 5 path-confinement checks that make `build.cnb`'s
    `ENTRY`/`TESTS`/sidecar paths safe all depend on `fs::canonicalize`. `File` today is
@@ -446,7 +446,7 @@ today's Rust implementation, roughly ordered by how many things depend on it:
    the compiler-in-Cinnabar effort will have to answer (native threads vs. a deliberately
    single-threaded LSP redesign), not just a missing native.
 5. **Environment variables and temp-file/asset staging.** `build.rs`'s musl-libc discovery
-   (`MUSL_LIBC_A`, `/nix/store` search) and the embedded `include_bytes!` of `libc.a`/crt objects have
+   (self-provisioned from upstream, with `MUSL_LIBC_A` as an override) and the embedded `include_bytes!` of `libc.a`/crt objects have
    no Cinnabar-side equivalent yet; the pragmatic answer is shipping those archives beside the binary
    and opening them via `File` plus a way to locate the running executable (`/proc/self/exe`, i.e. one
    more `readlinkat`-shaped native), not a compile-time embedding story.

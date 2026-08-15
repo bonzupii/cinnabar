@@ -6,16 +6,16 @@ ships a Nix flake that provisions all of it.
 
 <!-- @nix -->
 
-The flake provides LLVM, clang, the Rust toolchain, and the static musl libc
-that `build.rs` stages into the compiler binary. Add `--bin cinnabar-lsp` to
-build the language server as well.
+The flake provides LLVM, clang, and the Rust toolchain. Static `--static`
+builds on Linux self-provision musl from upstream at build time. Add
+`--bin cinnabar-lsp` to build the language server as well.
 
 <!-- @nix-outside -->
 
 Outside `nix develop`, `cargo build` and `cargo clippy` will fail unless you have
-a matching LLVM 21 toolchain and `MUSL_LIBC_A` — pointing at a static `libc.a` —
-configured yourself. See `build.rs` and `flake.nix` for the exact discovery logic
-and paths.
+a matching LLVM 21 toolchain and `clang` on `PATH`. `build.rs` self-provisions
+musl for static builds (via `curl`/`wget`, `tar`, `make`, and `sha256sum`), so no
+host musl package is required; `MUSL_LIBC_A` remains a manual override.
 
 <!-- @first-program -->
 

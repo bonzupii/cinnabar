@@ -2,16 +2,14 @@
 //!
 //! Takes the module's IR text and shells out to `opt` (running the
 //! `default<O2>`-class module pipeline), `llc -filetype=obj`, and
-//! `clang -static -nostdlib -no-pie`, working in a per-process temp
+//! `clang`, working in a per-process temp
 //! directory that is cleaned up afterward. `--emit-llvm` and `--emit-obj`
 //! stop the sequence early, so what a developer inspects is exactly what a
 //! real build feeds forward rather than a separate debug path.
 //!
-//! The static link is against a musl `libc.a` staged into this binary at
-//! crate build time by `build.rs` and pulled in here with `include_bytes!`.
-//! That is what makes a compiled Cinnabar program independent of the host's
-//! libc with no dynamic-linker dependency — and it is why no archive is
-//! ever committed to the source tree.
+//! Dynamic C/POSIX linking is the normal path. Linux builds made with the
+//! optional `static-musl` feature may instead embed the musl archive staged
+//! by `build.rs`; no archive is committed to the source tree.
 //!
 //! **Invariants:**
 //! - A failing external tool becomes a typed `CodegenError` naming the tool
@@ -23,7 +21,6 @@
 pub mod emitter;
 pub mod error;
 pub mod layout;
-pub mod syscall;
 pub mod types;
 
 use crate::codegen::emitter::{emit_program, protocol_of, InstFns, Session};
@@ -43,9 +40,13 @@ use std::process::Command;
 // compile time (never committed to the source tree).  Every emitted binary
 // is a standalone static executable with no host libc or dynamic linker
 // dependency.
+#[cfg(all(feature = "static-musl", target_os = "linux"))]
 const MUSL_LIBC_A: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libc.a"));
+#[cfg(all(feature = "static-musl", target_os = "linux"))]
 const MUSL_CRT1_O: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crt1.o"));
+#[cfg(all(feature = "static-musl", target_os = "linux"))]
 const MUSL_CRTI_O: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crti.o"));
+#[cfg(all(feature = "static-musl", target_os = "linux"))]
 const MUSL_CRTN_O: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crtn.o"));
 
 /// How a program is linked.
@@ -66,7 +67,9 @@ const MUSL_CRTN_O: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crtn.o"));
 /// binaries a user receives are unchanged by the existence of the checks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LinkMode {
-    Shipped,
+    Dynamic,
+    StaticMusl,
+    WindowsMinGW,
     Instrumented,
 }
 
@@ -80,6 +83,7 @@ pub struct BuildTarget<'a> {
     pub out: &'a Path,
     pub opt_level: &'a str,
     pub mode: LinkMode,
+    pub platform: &'a str,
 }
 
 pub fn compile_and_link(
@@ -90,13 +94,13 @@ pub fn compile_and_link(
     target: &BuildTarget,
     entry_span: (i64, i64, i64),
 ) -> Result<(), CodegenError> {
-    let ir_text = emit_to_ir(names, nodes, lists, impls_list, entry_span)?;
+    let ir_text = emit_to_ir(names, nodes, lists, impls_list, entry_span, target.platform)?;
     let temp_root = make_temp_root()?;
     let ir_path = temp_path(target.out, "ll");
     let obj_path = temp_path(target.out, "o");
     let compiled = write_text(&ir_path, &ir_text)
         .and_then(|()| assemble(&ir_path, &obj_path, target.opt_level))
-        .and_then(|()| link(&obj_path, target.out, target.mode));
+        .and_then(|()| link(&obj_path, target.out, target.mode, target.platform));
     finish_temp(&temp_root, compiled)
 }
 
@@ -109,29 +113,29 @@ pub fn compile_to_ir(
     lists: &mut Vec<Vec<i64>>,
     impls_list: i64,
     entry_span: (i64, i64, i64),
+    platform: &str,
 ) -> Result<String, CodegenError> {
-    emit_to_ir(names, nodes, lists, impls_list, entry_span)
+    emit_to_ir(names, nodes, lists, impls_list, entry_span, platform)
 }
 
 /// Emit, optimize, and assemble the program to a relocatable object file at
-/// `out`, skipping the final static link.  Runs the same `opt`/`llc` steps as
-/// `compile_and_link` at the same optimization level.
+/// `target.out`, skipping the final static link.  Runs the same `opt`/`llc`
+/// steps as `compile_and_link` at the same optimization level.
 pub fn compile_to_object(
     names: &[String],
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
     impls_list: i64,
-    out: &Path,
-    opt_level: &str,
+    target: &BuildTarget,
     entry_span: (i64, i64, i64),
 ) -> Result<(), CodegenError> {
-    let ir_text = emit_to_ir(names, nodes, lists, impls_list, entry_span)?;
+    let ir_text = emit_to_ir(names, nodes, lists, impls_list, entry_span, target.platform)?;
     let temp_root = make_temp_root()?;
-    let ir_path = temp_path(out, "ll");
-    let obj_path = temp_path(out, "o");
+    let ir_path = temp_path(target.out, "ll");
+    let obj_path = temp_path(target.out, "o");
     let compiled = write_text(&ir_path, &ir_text)
-        .and_then(|()| assemble(&ir_path, &obj_path, opt_level))
-        .and_then(|()| copy_file(&obj_path, out));
+        .and_then(|()| assemble(&ir_path, &obj_path, target.opt_level))
+        .and_then(|()| copy_file(&obj_path, target.out));
     finish_temp(&temp_root, compiled)
 }
 
@@ -192,11 +196,12 @@ fn emit_to_ir(
     lists: &mut Vec<Vec<i64>>,
     impls_list: i64,
     entry_span: (i64, i64, i64),
+    platform: &str,
 ) -> Result<String, CodegenError> {
     let context = Context::create();
     let module = context.create_module("cinnabar");
     let builder = context.create_builder();
-    let (target_data, triple) = host_target()?;
+    let (target_data, triple) = target_for(platform)?;
     module.set_triple(&triple);
     let layout = target_data.get_data_layout();
     module.set_data_layout(&layout);
@@ -269,6 +274,42 @@ pub(crate) fn host_target() -> Result<(TargetData, TargetTriple), CodegenError> 
     Ok((target_data, triple))
 }
 
+fn target_for(platform: &str) -> Result<(TargetData, TargetTriple), CodegenError> {
+    if platform == "host" {
+        return host_target();
+    }
+    let triple_text = match platform {
+        "linux" => "x86_64-unknown-linux-gnu",
+        "darwin" => darwin_triple(),
+        "bsd" => "x86_64-unknown-freebsd",
+        "windows" => "x86_64-w64-windows-gnu",
+        value => return Err(tool_error("llvm", None, &format!("unknown target platform '{}'", value))),
+    };
+    Target::initialize_all(&InitializationConfig::default());
+    let triple = TargetTriple::create(triple_text);
+    let target = Target::from_triple(&triple)
+        .map_err(|message| tool_error("llvm", None, &message.to_string()))?;
+    let machine = target
+        .create_target_machine(
+            &triple,
+            "generic",
+            "",
+            OptimizationLevel::Default,
+            RelocMode::Default,
+            CodeModel::Default,
+        )
+        .ok_or_else(|| tool_error("llvm", None, "failed to create the requested target machine"))?;
+    Ok((machine.get_target_data(), triple))
+}
+
+fn darwin_triple() -> &'static str {
+    if cfg!(target_arch = "aarch64") {
+        "aarch64-apple-darwin"
+    } else {
+        "x86_64-apple-darwin"
+    }
+}
+
 fn verify_module(module: &Module) -> Result<(), CodegenError> {
     match module.verify() {
         Ok(()) => Ok(()),
@@ -332,9 +373,11 @@ fn opt_flags(level: &str) -> (String, String) {
     }
 }
 
-fn link(obj_path: &Path, out: &Path, mode: LinkMode) -> Result<(), CodegenError> {
+fn link(obj_path: &Path, out: &Path, mode: LinkMode, platform: &str) -> Result<(), CodegenError> {
     match mode {
-        LinkMode::Shipped => link_shipped(obj_path, out),
+        LinkMode::Dynamic => link_dynamic(obj_path, out, platform),
+        LinkMode::StaticMusl => link_static_musl(obj_path, out),
+        LinkMode::WindowsMinGW => link_windows_mingw(obj_path, out),
         LinkMode::Instrumented => link_instrumented(obj_path, out),
     }
 }
@@ -354,7 +397,43 @@ fn link_instrumented(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
     run_tool("clang", &["-no-pie", "-o", &out.to_string_lossy(), &obj_path.to_string_lossy()])
 }
 
-fn link_shipped(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
+fn link_dynamic(obj_path: &Path, out: &Path, platform: &str) -> Result<(), CodegenError> {
+    let triple = match platform {
+        "host" => None,
+        "linux" => Some("x86_64-unknown-linux-gnu"),
+        "darwin" => Some(darwin_triple()),
+        "bsd" => Some("x86_64-unknown-freebsd"),
+        "windows" => Some("x86_64-w64-windows-gnu"),
+        value => return Err(tool_error("clang", None, &format!("unknown target platform '{}'", value))),
+    };
+    let out_text = out.to_string_lossy();
+    let obj_text = obj_path.to_string_lossy();
+    let mut args: Vec<&str> = Vec::new();
+    if let Some(value) = triple { args.push("-target"); args.push(value); }
+    let is_darwin = platform == "darwin" || (platform == "host" && cfg!(target_os = "macos"));
+    if !is_darwin { args.push("-no-pie"); }
+    args.push("-o");
+    args.push(&out_text);
+    args.push(&obj_text);
+    run_tool("clang", &args)
+}
+
+fn link_windows_mingw(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
+    run_tool(
+        "clang",
+        &[
+            "-target",
+            "x86_64-w64-windows-gnu",
+            "-o",
+            &out.to_string_lossy(),
+            &obj_path.to_string_lossy(),
+            "-lws2_32",
+        ],
+    )
+}
+
+#[cfg(all(feature = "static-musl", target_os = "linux"))]
+fn link_static_musl(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
     let libc_path = temp_path(out, "libc.a");
     let crt1_path = temp_path(out, "crt1.o");
     let crti_path = temp_path(out, "crti.o");
@@ -380,6 +459,17 @@ fn link_shipped(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
     )
 }
 
+#[cfg(not(all(feature = "static-musl", target_os = "linux")))]
+fn link_static_musl(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
+    let details = format!(
+        "cannot statically link '{}' to '{}': this compiler was built without the static-musl feature",
+        obj_path.display(),
+        out.display()
+    );
+    Err(tool_error("clang", None, &details))
+}
+
+#[cfg(all(feature = "static-musl", target_os = "linux"))]
 fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), CodegenError> {
     fs::write(path, bytes).map_err(|err| io_error(&format!("cannot write '{}': {}", path.display(), err)))
 }

@@ -191,14 +191,14 @@ More real examples live in [`tests/fixtures/`](tests/fixtures/), especially [`te
 
 ## Building the compiler
 
-Cinnabar targets **LLVM 21** (via the `inkwell` crate) and requires `clang`/`llc`/`opt` on `PATH`, plus a static musl libc to link Cinnabar binaries against. The project ships a Nix flake that provisions all of this:
+Cinnabar targets **LLVM 21** (via the `inkwell` crate) and requires `clang`/`llc`/`opt` on `PATH`. Static `--static` builds on Linux self-provision musl from upstream at build time (see `build.rs`). The project ships a Nix flake that provisions the LLVM toolchain:
 
 ```bash
 nix develop
 cargo build --release
 ```
 
-Outside of `nix develop`, `cargo build`/`cargo clippy` will fail unless you have a matching LLVM 21 toolchain and `MUSL_LIBC_A` (pointing at a static `libc.a`) configured yourself — see [`build.rs`](build.rs) and [`flake.nix`](flake.nix) for the exact discovery logic and paths.
+Outside of `nix develop`, `cargo build`/`cargo clippy` will fail unless you have a matching LLVM 21 toolchain and `clang` on `PATH`. `build.rs` self-provisions musl from upstream for static builds (via `curl`/`wget`, `tar`, `make`, and `sha256sum`), so no host musl package is required; `MUSL_LIBC_A` remains available as a manual override. See [`build.rs`](build.rs) and [`flake.nix`](flake.nix) for the exact discovery logic and paths.
 
 ### Docker Desktop and Windows worktrees
 

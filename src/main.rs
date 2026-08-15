@@ -48,6 +48,8 @@ struct CliArgs {
     format_check: Option<bool>,
     check_only: bool,
     instrumented: bool,
+    static_link: bool,
+    target: String,
     tool_command: Option<ToolCommand>,
 }
 
@@ -85,7 +87,7 @@ fn parse_args() -> Option<CliArgs> {
             "Cinnabar compiler.\n\n\
              There are two ways to invoke it. Given a source FILE, it runs the whole \
              pipeline — lex, parse, load modules, resolve, typecheck, borrow-check, \
-             generate code, link — and writes a static binary. Given a subcommand, it \
+             generate code, link — and writes a dynamically linked binary by default. Given a subcommand, it \
              acts on the project whose 'build.cnb' manifest is discovered by walking \
              upward from the supplied path.\n\n\
              Diagnostics are errors only. There is no warning severity, no suppression \
@@ -94,7 +96,7 @@ fn parse_args() -> Option<CliArgs> {
         )
         .after_help(
             "Examples:\n  \
-             cinnabar main.cnb -o main        Compile one file to a static binary\n  \
+             cinnabar main.cnb -o main        Compile one file to a native binary\n  \
              cinnabar main.cnb --run          Compile it and execute the result\n  \
              cinnabar build                   Build the project containing the current directory\n  \
              cinnabar test                    Run the project's test suite\n\n\
@@ -181,6 +183,14 @@ fn parse_args() -> Option<CliArgs> {
                 .conflicts_with_all(["dump_ast", "dump_typed_ast", "print_layout", "emit_llvm", "emit_obj", "check_only"])
                 .help("Link dynamically against the host libc so a memory checker can interpose; test infrastructure, never a release artifact"),
         )
+        .arg(
+            Arg::new("static")
+                .long("static")
+                .action(ArgAction::SetTrue)
+                .conflicts_with_all(["instrumented", "emit_llvm", "emit_obj", "check_only"])
+                .help("Link with the embedded musl runtime (Linux builds with the static-musl feature only)"),
+        )
+        .arg(target_arg())
         .arg(
             Arg::new("check_only")
                 .long("check-only")
@@ -548,6 +558,8 @@ fn parse_args() -> Option<CliArgs> {
             format_check: Some(format_matches.get_flag("check")),
             check_only: false,
             instrumented: false,
+            static_link: false,
+            target: "host".to_string(),
             tool_command: None,
         });
     }
@@ -596,6 +608,8 @@ fn parse_args() -> Option<CliArgs> {
                 format_check: None,
                 check_only: false,
                 instrumented: false,
+                static_link: false,
+                target: "host".to_string(),
                 tool_command: Some(tool_command),
             });
         }
@@ -645,16 +659,18 @@ fn parse_args() -> Option<CliArgs> {
         format_check: None,
         check_only: matches.get_flag("check_only"),
         instrumented: matches.get_flag("instrumented"),
+        static_link: matches.get_flag("static"),
+        target: matches.get_one::<String>("target").cloned().unwrap_or_else(|| "host".to_string()),
         tool_command: None,
     })
 }
 
 fn target_arg() -> Arg {
-    Arg::new("target").long("target").default_value("host").help("Compilation target; only host is available until the AArch64 runtime/backend lands")
+    Arg::new("target").long("target").default_value("host").help("Compilation target: host, linux, darwin, bsd, or windows")
 }
 
 fn tool_args(input: PathBuf, tool_command: ToolCommand, output: Option<PathBuf>) -> CliArgs {
-    CliArgs { input, output, dump_ast: false, dump_typed_ast: false, print_layout: false, explain_borrow: None, run: false, opt_level: "2".to_string(), emit_llvm: false, emit_obj: false, format_check: None, check_only: false, instrumented: false, tool_command: Some(tool_command) }
+    CliArgs { input, output, dump_ast: false, dump_typed_ast: false, print_layout: false, explain_borrow: None, run: false, opt_level: "2".to_string(), emit_llvm: false, emit_obj: false, format_check: None, check_only: false, instrumented: false, static_link: false, target: "host".to_string(), tool_command: Some(tool_command) }
 }
 
 fn main() -> ExitCode {
@@ -734,7 +750,7 @@ fn main() -> ExitCode {
     let entry_span = entry_span_of(&files);
     if args.emit_llvm {
         let out = emit_out_path(&args, "ll");
-        let written = compile_to_ir(&names, &mut nodes, &mut lists, impls_list, entry_span)
+        let written = compile_to_ir(&names, &mut nodes, &mut lists, impls_list, entry_span, &args.target)
             .and_then(|ir_text| write_output_text(&out, &ir_text));
         if let Err(codegen_err) = written {
             return finish_with_codegen_error(&codegen_err, &files);
@@ -744,8 +760,17 @@ fn main() -> ExitCode {
     }
     if args.emit_obj {
         let out = emit_out_path(&args, "o");
+        // Object emission stops before linking, so the link mode is never
+        // consulted; it is carried only to share BuildTarget with the link
+        // path.
+        let target = codegen::BuildTarget {
+            out: &out,
+            opt_level: &args.opt_level,
+            mode: codegen::LinkMode::Dynamic,
+            platform: &args.target,
+        };
         if let Err(codegen_err) =
-            compile_to_object(&names, &mut nodes, &mut lists, impls_list, &out, &args.opt_level, entry_span)
+            compile_to_object(&names, &mut nodes, &mut lists, impls_list, &target, entry_span)
         {
             return finish_with_codegen_error(&codegen_err, &files);
         }
@@ -756,14 +781,22 @@ fn main() -> ExitCode {
         Some(path) => path.clone(),
         None => default_out_path(&args.input),
     };
+    if args.static_link && (args.target != "host" && args.target != "linux" || !cfg!(all(feature = "static-musl", target_os = "linux"))) {
+        return source_less_failure("--static requires a Linux compiler built with the static-musl feature");
+    }
     let target = codegen::BuildTarget {
         out: &out,
         opt_level: &args.opt_level,
         mode: if args.instrumented {
             codegen::LinkMode::Instrumented
+        } else if args.static_link {
+            codegen::LinkMode::StaticMusl
+        } else if args.target == "windows" || (args.target == "host" && cfg!(target_os = "windows")) {
+            codegen::LinkMode::WindowsMinGW
         } else {
-            codegen::LinkMode::Shipped
+            codegen::LinkMode::Dynamic
         },
+        platform: &args.target,
     };
     if let Err(codegen_err) = compile_and_link(&names, &mut nodes, &mut lists, impls_list, &target, entry_span) {
         return finish_with_codegen_error(&codegen_err, &files);
@@ -826,7 +859,10 @@ fn run_tool_command(path: &Path, output: Option<&Path>, command: ToolCommand) ->
         ToolCommand::Inspect => inspect_binary(path, output),
         ToolCommand::Targets => {
             println!("host\tavailable\t{}", advanced_tools::host_target());
-            println!("aarch64\tplanned\trequires the Milestone 6 AArch64 backend and runtime");
+            println!("linux\tavailable\tPOSIX C runtime");
+            println!("darwin\tavailable\tPOSIX C runtime");
+            println!("bsd\tavailable\tPOSIX C runtime");
+            println!("windows\tavailable\tMinGW C runtime");
             ExitCode::SUCCESS
         }
         ToolCommand::MushlingsInit => initialize_mushlings(path),
@@ -1098,6 +1134,7 @@ fn run_project_compiler(path: &Path, run: bool, check: bool, target: &str) -> Ex
     };
     let mut invocation = Command::new(executable);
     invocation.arg(&manifest.entry);
+    invocation.arg("--target").arg(target);
     if check {
         invocation.arg("--check-only");
     } else {

@@ -102,9 +102,9 @@ fn tier_five_and_six_commands_work_end_to_end() -> Result<(), Box<dyn Error>> {
     let targets = run(compiler, &["targets"])?;
     assert!(targets.status.success());
     assert!(text(&targets).contains("host\tavailable"));
-    let unavailable = run(compiler, &["build", &path_text(&directory), "--target", "aarch64"])?;
-    assert!(!unavailable.status.success());
-    assert!(text(&unavailable).contains("unavailable"));
+    let unknown_target = run(compiler, &["build", &path_text(&directory), "--target", "aarch64"])?;
+    assert!(!unknown_target.status.success());
+    assert!(text(&unknown_target).contains("unknown target"));
 
     let report = directory.join("inspection.txt");
     let inspected = run(compiler, &["inspect", &path_text(&source), "-o", &path_text(&report)])?;

@@ -41,11 +41,11 @@ pub fn host_target() -> String {
 
 pub fn validate_target(requested: &str) -> Result<(), String> {
     let host = host_target();
-    if requested == "host" || requested == host {
+    if requested == "host" || requested == host || requested == "linux" || requested == "darwin" || requested == "bsd" || requested == "windows" {
         Ok(())
     } else {
         Err(format!(
-            "target '{}' is unavailable; this compiler embeds a host-specific runtime and currently supports only 'host' ({})",
+            "unknown target '{}'; choose host, linux, darwin, bsd, or windows (host is {})",
             requested, host
         ))
     }

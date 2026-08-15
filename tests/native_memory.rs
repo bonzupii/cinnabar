@@ -324,10 +324,10 @@ fn deallocate_unmaps_the_handles_address_and_length() {
     // the handle would unmap memory the program still owns — which is the
     // second reason a handle must be fully initialized.
     //
-    // The assertion is on the data flow, not on a syscall number, so it
-    // holds on every architecture. The numbers themselves are checked
-    // independently by the unit tests in `src/codegen/syscall.rs`, against
-    // hand-written Linux ABI values.
+    // The assertion is on the data flow, not on a syscall number: `munmap`
+    // is a C/POSIX call whose `(address, length)` signature is the same on
+    // every platform, so the architecture-specific numbering lives in the C
+    // runtime and the data flow is what a regression would break.
     let body = function_body(&ir, "@Memory_deallocate");
     assert!(!body.is_empty(), "no Memory.deallocate in the emitted IR");
 
@@ -346,29 +346,24 @@ fn deallocate_unmaps_the_handles_address_and_length() {
     let length_ssa = ssa_defined_by(&body, &format!("load i64, ptr {},", length_field));
     assert!(!length_ssa.is_empty(), "Memory.deallocate does not load the handle's length");
 
-    // The address reaches the kernel as an integer, so it passes through a
-    // `ptrtoint` of exactly the pointer loaded from the data field.
-    let address_word = ssa_defined_by(&body, &format!("ptrtoint ptr {} to i64", address_ssa));
-    assert!(
-        !address_word.is_empty(),
-        "Memory.deallocate does not pass the handle's data pointer to the system call"
-    );
-
-    let unmap = match body.lines().find(|line| line.contains("asm sideeffect")) {
+    // `munmap` is an external C call that takes the pointer and length
+    // directly, so the loaded pointer reaches it without the `ptrtoint` a
+    // raw syscall would have needed.
+    let unmap = match body.lines().find(|line| line.contains("@munmap")) {
         Some(line) => line.to_string(),
         None => {
-            assert!(false, "Memory.deallocate issues no system call: {}", body);
+            assert!(false, "Memory.deallocate issues no munmap call: {}", body);
             String::new()
         }
     };
     assert!(
-        unmap.contains(&format!("i64 {}", address_word)),
-        "Memory.deallocate's system call does not receive the handle's address: {}",
+        unmap.contains(&format!("ptr {}", address_ssa)),
+        "Memory.deallocate's munmap does not receive the handle's address: {}",
         unmap
     );
     assert!(
         unmap.contains(&format!("i64 {}", length_ssa)),
-        "Memory.deallocate's system call does not receive the handle's length: {}",
+        "Memory.deallocate's munmap does not receive the handle's length: {}",
         unmap
     );
 

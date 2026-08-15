@@ -1,9 +1,9 @@
-#! `Process.spawn`/`Process.wait`: `clone`, `execve`, and `wait4` issued
-#! directly, matching the `Memory`/`Terminal`/`File` convention of one
-#! kernel entry point per native with nothing between the Cinnabar
-#! declaration and the syscall -- `clone` rather than `fork` because
-#! AArch64's Linux ABI has no `fork` at all, so one code path serves both
-#! architectures, the same reasoning `File` already applies to `openat`.
+#! `Process.spawn`/`Process.wait`: `fork`, `execve`, and `waitpid` issued
+#! as external C/POSIX calls, matching the `Memory`/`Terminal`/`File`
+#! runtime convention of one libc entry point per native. `fork` rather
+#! than any platform-specific syscall, so one code path serves every
+#! POSIX platform; `spawn`/`wait` are scoped to POSIX for now (Windows
+#! has no fork/execve/waitpid C-runtime equivalent).
 #!
 #! `argv` is a `Vec(String)` the caller builds and still owns afterward --
 #! `spawn` only borrows it -- so every `String` pushed into it is drained
