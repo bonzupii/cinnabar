@@ -52,25 +52,53 @@
 - Preserve typed errors end-to-end. Only the final diagnostic may stringify an error; every intermediate stage carries a typed error with a real span.
 - `Span` fields must always reflect the real source origin of the fact they describe. Never fabricate a placeholder location such as `Span::new(0, 0, 1, 1)`, including for compiler-generated runtime bodies, builtin declarations, synthesized module wrappers, inferred types, or tool/infrastructure failures. If a fact has no Cinnabar source origin, represent that source-less origin explicitly in the diagnostic/error model; do not assign it a fake source location. Source-derived facts must carry their actual span from lexing through codegen without substitution.
 
-### File header comments
-Every `.rs` file in `src/`, `tests/`, and `build.rs` opens with an inner doc comment (`//!`) in this shape, before any `use` or item:
+### Comment standards and file headers
+
+Every `.rs` file in `src/`, `tests/`, and `build.rs` opens with an inner doc comment (`//!`) before any `use` or item:
 
 ```rust
 //! <One sentence naming what this file is. A noun phrase, ends with a period.>
 //!
-//! <Free prose. What this file owns, which earlier stage's facts it reads,
-//! why it exists in the shape it does, and what it deliberately does not
-//! do. Wrap at roughly 76 columns.>
+//! <Mechanistic prose. What data structures this file owns, which arena facts
+//! it reads from prior stages, what transformations it performs, and what it
+//! emits. Wrap at roughly 76 columns.>
 //!
 //! **Invariants:**
-//! - <A rule a reviewer can check a diff against.>
+//! - <A verifiable, machine-level rule a reviewer can check against a diff.>
 ```
 
-- **First line is mandatory and fixed in form**: one sentence, a noun phrase, ending in a period. `grep -rn '^//! [A-Z].*\.$' src tests build.rs` must yield a one-line index of the tree, so no other line may take that shape at the top of a file.
-- **The body is free prose**, in the voice of the surrounding code — explain the design and its reasons, not a restatement of the file's own name or path. "Purpose: the typed error type" is not worth a line.
-- **No stage numbers, milestone numbers, or other project-tracking labels**, in the first line or the body. `Stage 4:` and `Milestone 8 —` are positions in a plan, not descriptions of code: they go stale when the plan is reorganized, they mean nothing to a reader who has not read the plan, and they take the place of the sentence that would have said what the file does. Describe the work — "Name resolution, scope construction, and casing enforcement." A pointer to `ROADMAP.md` for a genuine open follow-up is fine; a number worn as a label is not.
-- **The `**Invariants:**` block is included only where the file carries a hard rule** worth pinning — a Single-Fact Rule boundary, a no-fabricated-span rule, a "derived, never hand-maintained" table. Omit it entirely rather than filling it with restated obviousness.
-- Doc comments on individual items (`///`) are unaffected by this and stay where they are.
+#### Rules for all comments (headers, doc comments, and inline code):
+
+- **First line is mandatory and fixed in form**: Exactly one sentence, a noun phrase, ending in a period. `grep -rn '^//! [A-Z].*\.$' src tests build.rs` must yield an index of the entire codebase with zero formatting anomalies.
+- **Describe the machine, not the philosophy**: Explain memory layouts, input/output data, and non-obvious algorithms. State what data is read, what arena rows are written, and what invariants the control flow guarantees.
+- **No apologetics or rationalization**: Never write prose defending why a hack, shortcut, or exception was added. If an implementation requires an essay explaining why it deviates from the spec, the code is defective—fix the architecture, do not defend the workaround.
+- **No bug retrospectives or fixture storytelling**: Never narrate past debugging sessions, previous broken states, or how a fixture used to fail (e.g., *"We used to do X on fixture Y, but..."*). Historical context belongs in git commit messages, not inline source. Describe the code strictly as it operates today.
+- **No milestone tags or document slogans**: Phrases like `Milestone 4`, `Stage 2`, `(Single-Fact Rule)`, or citations to `MANIFESTO principle X` are strictly prohibited. State the physical structural invariant directly without appealing to external authority or project management milestones.
+- **Spec is authoritative over inline lore**: `MANIFESTO.md` defines the language laws. Inline comments have zero authority to grant exemptions, relax safety rules, or declare dead code "deliberately conservative."
+- **The `**Invariants:**` block**: Restrict this block to hard, verifiable constraints (e.g., arena immutability boundaries, single-index allocation rules, or layout guarantees). Omit the block entirely rather than restating generic or obvious statements.
+
+### Commit message standards
+
+Every commit must document **why** the change was necessary and **what** was mechanically altered. Commit messages must be factual, concise, and written in the imperative mood.
+
+```
+<subsystem>: <Imperative summary, capitalized, 50–72 chars, no period>
+
+<Why the change was necessary. State the broken invariant, spec violation,
+or concrete failure mode being fixed. Wrap at roughly 72 columns.>
+
+<What changed structurally. Name the data structures modified, parallel
+logic deleted, and invariants restored. Do not list raw diff lines.>
+```
+
+#### Rules for commit messages:
+
+- **Imperative subject line**: Use the imperative mood (e.g., `codegen: Use two-index GEP for fixed-size array allocations`, not `Fixed GEP` or `Fixes array bug`). Prefix with the primary subsystem (`lexer`, `parser`, `resolver`, `typecheck`, `borrow`, `codegen`, `target`, `lsp`, `tools`).
+- **State the root cause, not the test symptom**: Explain the underlying structural defect, not merely the failing fixture (e.g., write *"Resolver omitted dependency edge between enum variants and parent enum"*, not *"Make enum test pass"*).
+- **Document structural deletions**: When removing parallel logic, string heuristics, or ad-hoc tables, explicitly state what was deleted and what canonical fact replaced it.
+- **No vague summaries**: Messages like `WIP`, `Fix bug`, `Update emitter.rs`, or `Refactoring` are strictly prohibited.
+- **No marketing or self-congratulatory prose**: Words like `elegant`, `clean up`, `robust`, `seamless`, or `improved` have no place in commit logs. Describe what the machine instructions or data structures do, not how impressive the author feels the change is.
+- **No milestone tags or prompt lore**: Never include tracking labels like `Milestone 4`, `Phase 2`, `Task 3`, or references to AI prompts or conversation turns. The git history must read as a permanent, standalone engineering log.
 
 ## Generalization Over Special-Casing (STRICT)
 - **Zero String-Name Semantics**: No pass in `typecheck`, `borrow`, or `codegen` may ever check a string name (e.g. `name == "Block"` or `name == "Memory.allocate"`) to decide how a type lowers, how linearity is tracked, or how code is generated. All semantics MUST derive strictly from node tags, canonical type descriptors (`TYD_*`), or symbol metadata (`sym_kind`, `is_linear`, `sym_native_op`).
