@@ -1,0 +1,109 @@
+#! HashMap's key scan compares whole keys with memcmp over the key type's
+#! full ABI size, not field by field. A struct key like Rec below has a
+#! 7-byte alignment gap between `tag` (U8, offset 0) and `id` (I64, offset
+#! 8 on a standard LP64 layout) that no field write ever touches -- so the
+#! comparison is only well-defined if every Rec value's padding bytes are
+#! deterministic from the moment the value is constructed, not just at the
+#! point a key gets copied into the map's own storage. This exercises
+#! insert/get across several struct keys, plus a lookup for a key that was
+#! never inserted, so a regression here shows up as either the wrong value
+#! coming back or a real key going unrecognized -- not just a crash.
+
+pub const KEY_A_TAG: U8 = 1
+pub const KEY_A_ID: I64 = 100
+pub const KEY_A_VALUE: I64 = 1100
+
+pub const KEY_B_TAG: U8 = 2
+pub const KEY_B_ID: I64 = 200
+pub const KEY_B_VALUE: I64 = 1200
+
+pub const KEY_C_TAG: U8 = 3
+pub const KEY_C_ID: I64 = 300
+pub const KEY_C_VALUE: I64 = 1300
+
+pub const MISSING_TAG: U8 = 9
+pub const MISSING_ID: I64 = 900
+
+pub mod Collections
+  pub nat type HashMap(K, V)
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub KeyNotFound
+  end
+
+  pub nat fun hash_map_new<K, V>() impure Result(HashMap(K, V), Error)
+  pub nat fun hash_map_insert<K, V>(map: &mut HashMap(K, V), key: K, value: V) impure Result(Unit, Error)
+  pub nat fun hash_map_get<K, V>(map: &HashMap(K, V), key: K) impure Result(V, Error)
+  pub nat fun hash_map_free<K, V>(map: HashMap(K, V)) impure Unit
+end
+
+use Collections.hash_map_new
+use Collections.hash_map_insert
+use Collections.hash_map_get
+use Collections.hash_map_free
+
+pub type Rec
+  pub tag: U8
+  pub id: I64
+end
+
+fun fail_free_map(map: Collections.HashMap(Rec, I64), code: I64) impure I64
+  hash_map_free(map)
+  return code
+end
+
+pub fun main() impure I64
+  val map = match hash_map_new[Rec, I64]()
+    Ok(m) => m
+    Err(error) => return 1
+  end
+
+  match hash_map_insert(&mut map, Rec(tag: KEY_A_TAG, id: KEY_A_ID), KEY_A_VALUE)
+    Ok(Unit) => Unit
+    Err(error) => return fail_free_map(map, 2)
+  end
+
+  match hash_map_insert(&mut map, Rec(tag: KEY_B_TAG, id: KEY_B_ID), KEY_B_VALUE)
+    Ok(Unit) => Unit
+    Err(error) => return fail_free_map(map, 2)
+  end
+
+  match hash_map_insert(&mut map, Rec(tag: KEY_C_TAG, id: KEY_C_ID), KEY_C_VALUE)
+    Ok(Unit) => Unit
+    Err(error) => return fail_free_map(map, 2)
+  end
+
+  val got_a = match hash_map_get(&map, Rec(tag: KEY_A_TAG, id: KEY_A_ID))
+    Ok(value) => value
+    Err(error) => return fail_free_map(map, 20)
+  end
+  if got_a != KEY_A_VALUE
+    return fail_free_map(map, 21)
+  end
+
+  val got_b = match hash_map_get(&map, Rec(tag: KEY_B_TAG, id: KEY_B_ID))
+    Ok(value) => value
+    Err(error) => return fail_free_map(map, 22)
+  end
+  if got_b != KEY_B_VALUE
+    return fail_free_map(map, 23)
+  end
+
+  val got_c = match hash_map_get(&map, Rec(tag: KEY_C_TAG, id: KEY_C_ID))
+    Ok(value) => value
+    Err(error) => return fail_free_map(map, 24)
+  end
+  if got_c != KEY_C_VALUE
+    return fail_free_map(map, 25)
+  end
+
+  match hash_map_get(&map, Rec(tag: MISSING_TAG, id: MISSING_ID))
+    Ok(value) => return fail_free_map(map, 4)
+    Err(Collections.KeyNotFound) => Unit
+    Err(error) => return fail_free_map(map, 4)
+  end
+
+  hash_map_free(map)
+  return 0
+end

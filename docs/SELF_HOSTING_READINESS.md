@@ -10,19 +10,23 @@ flagged but left open; a third pass closing the handful of items that round two'
 explicitly rather than guessed); and a fourth pass that reconciled an independently-diverged
 `origin/main` merge (nine commits, not started by this effort, including two other fixes for the
 same codegen bugs round two had already fixed) and closed out the last of the site/tooling items.
-This document is the result: what got fixed, what's still broken, and — the thing actually asked for
-— what stands between here and ROADMAP.md's "Self-Hosting" goal (Cinnabar compiling itself).
+A fifth pass (§1d) then ran the real toolchain — `nix develop --command ./pre_commit_check.sh`, via
+the project's Docker/Nix dev container — against everything above, including the two codegen
+findings §2 had deferred pending exactly that. Both were real bugs; both are fixed and verified
+against actual LLVM 21, not reasoned about blind. This document is the result: what got fixed, what
+was checked and found clean, and — the thing actually asked for — what stands between here and
+ROADMAP.md's "Self-Hosting" goal (Cinnabar compiling itself).
 
-Scope note on verification: this machine has `cargo`/`rustc` but no LLVM 21 and no Nix devshell, so
-`cargo build`/`cargo check` with the default `codegen` feature fails immediately (`llvm-sys` can't
-find LLVM) and `pre_commit_check.sh` cannot run at all here. Everything below that touches
-`src/codegen/*` or `src/main.rs` is **read-only analysis**, not a compiled-and-tested fix. Everything
-that touches the front end (`lexer.rs` through `borrow.rs`, `resolver.rs`, `analysis.rs`,
-`cinnabar-lsp`) *was* compiled and tested here, via `cargo check --no-default-features` / `cargo
-test --no-default-features --lib` / `cargo clippy --no-default-features -- -D warnings` — the
+Scope note on verification, historical for §1/§1b/§1c: at the time those rounds ran, this machine had
+`cargo`/`rustc` but no LLVM 21 and no Nix devshell, so `cargo build`/`cargo check` with the default
+`codegen` feature failed immediately (`llvm-sys` can't find LLVM) and `pre_commit_check.sh` could not
+run at all. Everything in §1/§1b/§1c that touched `src/codegen/*` or `src/main.rs` was **read-only
+analysis** at the time it was written, not a compiled-and-tested fix — §1d is what changed that.
+Everything touching the front end (`lexer.rs` through `borrow.rs`, `resolver.rs`, `analysis.rs`,
+`cinnabar-lsp`) *was* compiled and tested from the start, via `cargo check --no-default-features` /
+`cargo test --no-default-features --lib` / `cargo clippy --no-default-features -- -D warnings` — the
 `codegen` feature (and its LLVM dependency) is off in that mode, exactly the way
-`crates/cinnabar-wasm` already builds it. **Run the real gate before merging anything below**:
-`nix develop --command ./pre_commit_check.sh`.
+`crates/cinnabar-wasm` already builds it.
 
 ---
 
@@ -255,19 +259,79 @@ without a technical blocker:
 
 ---
 
+## 1d. Round five — the real gate, and the two remaining codegen findings
+
+The real toolchain (`nix develop --command ./pre_commit_check.sh`, via the project's Docker/Nix dev
+container — see `CONTAINER_DEVELOPMENT.md`) has now actually been run, repeatedly, against `main`.
+Every check passes cleanly: `cargo check`, `cargo clippy -D warnings`, Semgrep, the full unit test
+suite, every CLI smoke check, and the whole `EXPECT_OK`/`EXPECT_REJECTED` fixture corpus — including
+`spec.cnb` compiling to a real binary and passing every self-check it runs, against real LLVM 21.
+This is what §2's old first bullet asked for; it's done, not just believed.
+
+That also meant the two codegen findings §2 had deferred could finally be investigated for real
+instead of reasoned about blind. Both turned out to be genuine bugs, and one of them was bigger than
+originally scoped:
+
+**The `HashMap` correctness question was real, and the actual bug was one level deeper than
+padding.** The original flag was about non-deterministic padding bytes in struct/enum keys breaking
+`memcmp`-based key comparison. That *is* a real hole — `emit_struct_lit` and `build_enum_value_into`
+both allocated via a plain `alloca` and wrote only their declared fields, leaving inter-field padding
+(and, for enums, a smaller variant's unused payload tail) as whatever bits were already on that stack
+slot — and it's fixed: both now zero the destination before writing fields (`zero_fill`, next to
+`copy_value`), so every aggregate value has deterministic padding from the moment it exists. A
+pre-existing "fix" in `hash_map_insert` that zeroed the destination *slot* before copying a key into
+it turned out to have never worked — the very next line was a full-size `copy_value` memcpy from the
+source, which unconditionally overwrote those zeros with the source's own undetermined padding. That
+dead code is removed; the real fix has to be upstream, at construction, not at the comparison site.
+
+But writing an actual regression fixture (`tests/fixtures/repro/hash_map_struct_key.cnb` — insert
+three struct keys, get each back, confirm a never-inserted key is reported missing) surfaced a second,
+more serious bug that padding determinism alone doesn't fix: **struct/enum arguments to native
+functions were passed across the LLVM call boundary as first-class aggregate values, not by
+pointer.** Every other struct/enum manipulation in this codegen stays in the pointer/memory domain
+(`copy_value` is a byte-level `memcpy`), but native call argument marshaling
+(`emit_call_args`/`build_fn_sig`) and native function entry (`emit_native_body`) round-tripped
+aggregate arguments through memory→value→memory — an aggregate `load`/`store` in LLVM is not
+guaranteed to preserve padding bytes the way a byte-level `memcpy` is. The result, confirmed against
+real LLVM 21: `hash_map_get` on a struct key that had just been inserted, unconditionally, 100% of the
+time, came back `KeyNotFound` — not an occasional flake, an always-broken path, because the System V
+ABI's own register classification for a padded struct silently drops what's in the padding bits when
+passing it by value. Confirmed pre-existing (reproduced identically with the padding fix alone,
+before the call-boundary fix) rather than something introduced by the padding fix itself. Fixed by
+giving native functions (only native functions — see below) a `ptr`-typed LLVM parameter for any
+aggregate-typed argument instead of the value type itself, so the argument never leaves the pointer
+domain crossing into a native body. With both fixes in place, the new fixture passes end to end
+(exit 0) against real LLVM 21, and the full fixture corpus (`repro_harness`, 6/6 groups) stays green.
+
+*Scoped deliberately to native calls.* Regular Cinnabar-to-Cinnabar function calls have the exact
+same theoretical padding-loss risk in their own by-value aggregate calling convention
+(`get_or_emit_fn`/`build_fn_sig` with `for_native: false`) — but nothing in an ordinary function body
+ever reads a struct/enum's whole raw byte range; every access goes through `struct_gep` to a specific,
+padding-agnostic field. `HashMap`'s `memcmp` scan is the only place in the entire compiler that reads
+a whole aggregate's bytes today, so it's the only place this class of bug can currently manifest.
+Widening the by-pointer fix to every function call was deliberately *not* done — it's a much larger,
+harder-to-verify-in-one-pass change to a currently-unobserved risk, exactly the kind of blind,
+ABI-sensitive change §2 previously warned against. If a future native or language feature ever needs
+whole-value struct/enum comparison outside HashMap, the same fix pattern applies there too.
+
+**The under-aligned `sockaddr_in` store was also real.** `build_sockaddr_in` allocated its 16-byte
+buffer as `[16 x i8]` — 1-byte natural alignment — then stored 16-bit and 32-bit fields into it at
+byte offsets 2 and 4 with LLVM's default (unrequested) alignment for those value types, 2 and 4 bytes.
+That's a real mismatch per LLVM's semantics: the store instructions' alignment annotations claimed
+more than the underlying allocation was ever declared to provide, which the optimizer is entitled to
+assume is honored. Fixed by allocating the same 16 bytes as `[4 x i32]` instead, giving the buffer
+real 4-byte alignment matching every store into it (and matching `sockaddr_in`'s actual C ABI
+alignment, driven by its widest member). `net_primitives.cnb` (`Net.bind` and friends) continues to
+pass under the real gate with this change.
+
+---
+
 ## 2. Confirmed, not fixed — genuinely still open
 
-- **`emitter.rs`'s codegen fixes are unverified** — this machine cannot compile, type-check, or run
-  anything under `src/codegen/`. Run the real gate before trusting them, per 1b/1c above — this is
-  the single most important remaining step; everything else with a mechanical, verifiable-here fix
-  across four rounds is done.
-- **A `HashMap` padding/`memcmp` correctness question and an under-aligned `sockaddr_in` store** in
-  codegen — both flagged in the original seven-agent audit as lower-confidence even then, and, like
-  everything else under `src/codegen/`, unverifiable on this machine. Deliberately not attempted
-  blind: this session's one earlier codegen fix needed correcting by an independent, better-informed
-  implementation found during the round-four merge, which is exactly the outcome to avoid repeating
-  on ABI-sensitive, memory-layout code with no compiler here to catch a mistake. Worth a dedicated,
-  carefully-verified pass once the real toolchain is available, not a guess.
+Nothing. Every item the seven-agent audit flagged, across five rounds, either had a mechanical fix
+applied and verified, or — for the two codegen findings — was investigated for real against actual
+LLVM 21 once the toolchain was available, rather than guessed at. The audit itself is closed. What
+remains is self-hosting proper (§3 below), which was never a bug list to begin with.
 
 ---
 
@@ -373,9 +437,8 @@ stay permanently native regardless (this matches the "marked-native boundary for
 Roughly cheapest-and-most-widely-useful first, each step independently valuable regardless of
 whether the ones after it ever happen:
 
-1. Run the real `nix develop` gate to confirm the codegen fixes from 1b/1c — everything else that had
-   a mechanical fix is already done, so this is the one thing standing between "believed correct" and
-   "proven correct" for the whole four-round effort. Worth doing regardless of anything below.
+1. ~~Run the real `nix develop` gate to confirm the codegen fixes~~ — done in §1d: the whole five-round
+   effort is now proven correct against real LLVM 21, not just believed correct.
 2. Add the `Process` native surface (§3.2.1) plus the `File` extensions (§3.2.2) — both are useful to
    ordinary Cinnabar programs immediately, not just to a future self-hosted compiler.
 3. Add a string-formatting surface (§3.2.3) — same argument, broadly useful on its own.

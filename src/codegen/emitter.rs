@@ -313,6 +313,27 @@ fn copy_value<'ctx>(
     Ok(())
 }
 
+// Every field write at a struct/enum literal's construction site only
+// defines the bytes its layout assigns meaning to; inter-field padding
+// (and, for an enum, a smaller variant's unused payload tail) is otherwise
+// whatever bits were already on that stack slot. `copy_value` then carries
+// those bytes -- padding included -- through every later memcpy of the
+// value (a parameter, a struct field, a HashMap entry), so anything that
+// structurally compares a whole value by its raw bytes needs the padding
+// to be deterministic from the moment the value first exists. HashMap's
+// key scan (`extern_memcmp` below) is that site today. Zeroing at
+// construction, once, here, covers it and everywhere else a memcmp'd value
+// could flow from -- zeroing again at a comparison's destination would not:
+// the very next full-size `copy_value` memcpy would overwrite the zeros
+// with the source's own undetermined padding anyway.
+fn zero_fill<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, ptr: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
+    let ty = llvm_of(sess, key, span)?;
+    let size = sess.3.get_abi_size(&ty);
+    let zero8 = sess.0.i8_type().const_zero();
+    sess.2.build_memset(ptr, 1, zero8, sess.0.i64_type().const_int(size, false)).map_err(builder_fail)?;
+    Ok(())
+}
+
 fn key_elem_of(nodes: &[i64], key: i64) -> i64 {
     let row = find_tyinfo(nodes, key);
     if row == NONE {
@@ -659,6 +680,7 @@ fn build_enum_value<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, variant_id
 }
 
 fn build_enum_value_into<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, variant_idx: i64, payloads: &[(i64, PointerValue<'ctx>)], out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
+    zero_fill(sess, key, out, span)?;
     let tag_ptr = struct_gep(sess, key, out, 0, "", span)?;
     let tag = sess.0.i64_type().const_int(variant_idx as u64, false);
     store_key(sess, tag_ptr, tag.into())?;
@@ -1500,6 +1522,7 @@ fn emit_struct_lit<'ctx, 'a>(
     let kind = node_a(sess.5, sym);
     if kind == SYM_STRUCT {
         let ptr = declare_local(sess, key, "struct", span)?;
+        zero_fill(sess, key, ptr, span)?;
         let names = node_c(sess.5, expr);
         let values = node_d(sess.5, expr);
         let count = list_len(sess.6, names);
@@ -1914,7 +1937,7 @@ fn emit_call<'ctx, 'a>(
     }
     let saved_tail = ctx.6;
     ctx.6 = false;
-    let arg_vals = emit_call_args(sess, ctx, expr, params_list, false);
+    let arg_vals = emit_call_args(sess, ctx, expr, params_list, false, false);
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(fn_val, &arg_vals, "").map_err(builder_fail)?;
@@ -2008,7 +2031,7 @@ fn emit_deferred_trait_call<'ctx, 'a>(
     }
     let saved_tail = ctx.6;
     ctx.6 = false;
-    let arg_vals = emit_call_args(sess, ctx, expr, param_keys, false);
+    let arg_vals = emit_call_args(sess, ctx, expr, param_keys, false, false);
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(fn_val, &arg_vals, "").map_err(builder_fail)?;
@@ -2031,12 +2054,17 @@ fn emit_deferred_trait_call<'ctx, 'a>(
     Ok(out)
 }
 
+// `for_native`: see `build_fn_sig`'s doc comment -- an aggregate-typed
+// argument to a native call is passed as the pointer `emit_expr` already
+// produced, matching that native's `ptr`-typed parameter, instead of being
+// loaded into a first-class value first.
 fn emit_call_args<'ctx, 'a>(
     sess: &mut Session<'ctx, '_, '_>,
     ctx: &mut FnCtx<'ctx, 'a>,
     expr: i64,
     params_list: i64,
     use_instance_params: bool,
+    for_native: bool,
 ) -> Result<Vec<BasicMetadataValueEnum<'ctx>>, CodegenError> {
     let span = (node_file(sess.5, expr), node_start(sess.5, expr), node_end(sess.5, expr));
     let arg_exprs = node_d(sess.5, expr);
@@ -2052,8 +2080,12 @@ fn emit_call_args<'ctx, 'a>(
             sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, arg))
         };
         let ptr = emit_expr(sess, ctx, arg)?;
-        let value = load_key(sess, akey, ptr, span)?;
-        vals.push(into_meta(value));
+        if for_native && is_aggregate_kind(key_kind_of(sess.5, akey)) {
+            vals.push(into_meta(ptr.into()));
+        } else {
+            let value = load_key(sess, akey, ptr, span)?;
+            vals.push(into_meta(value));
+        }
         idx += 1;
     }
     Ok(vals)
@@ -2071,14 +2103,30 @@ fn find_inst_fn<'ctx>(sess: &Session<'ctx, '_, '_>, mono: i64) -> Option<Functio
     None
 }
 
-fn build_fn_sig<'ctx>(sess: &mut Session<'ctx, '_, '_>, params_list: i64, ret_key: i64, span: (i64, i64, i64)) -> Result<FunctionType<'ctx>, CodegenError> {
+// `for_native` matters only for aggregate-typed (struct/enum) parameters.
+// A regular Cinnabar-to-Cinnabar call passes an aggregate as a first-class
+// LLVM value -- fine, because a callee only ever reaches its fields by GEP,
+// never by reading the whole value's raw bytes. A native call can: HashMap's
+// key scan (`extern_memcmp`) compares a whole key's ABI-size byte range,
+// padding included, and LLVM does not guarantee an aggregate value's
+// load/store round-trip preserves padding bytes the way a byte-level memcpy
+// does (see `zero_fill`'s doc comment for where that determinism has to
+// start). So a native's aggregate-typed parameters are declared as `ptr`
+// here instead -- the argument stays in the pointer/memory domain the whole
+// way from the caller's own storage into the native body, the same way
+// every other aggregate in this codegen is already handled.
+fn build_fn_sig<'ctx>(sess: &mut Session<'ctx, '_, '_>, params_list: i64, ret_key: i64, for_native: bool, span: (i64, i64, i64)) -> Result<FunctionType<'ctx>, CodegenError> {
     let count = list_len(sess.6, params_list);
     let mut param_tys: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
     let mut idx = 0i64;
     while idx < count {
         let pkey = list_get(sess.6, params_list, idx);
-        let ty = llvm_of(sess, pkey, span)?;
-        param_tys.push(ty.into());
+        let ty: BasicMetadataTypeEnum = if for_native && is_aggregate_kind(key_kind_of(sess.5, pkey)) {
+            ptr_ty(sess).into()
+        } else {
+            llvm_of(sess, pkey, span)?.into()
+        };
+        param_tys.push(ty);
         idx += 1;
     }
     let ret_ty = llvm_of(sess, ret_key, span)?;
@@ -2099,7 +2147,7 @@ fn get_or_emit_fn<'ctx>(
     }
     let fn_name = em_name(sess, node_a(sess.5, fn_slot));
     let llvm_name = format!("{}_{}", fn_name, mono);
-    let sig = build_fn_sig(sess, params_list, ret_key, span)?;
+    let sig = build_fn_sig(sess, params_list, ret_key, false, span)?;
     let fn_val = sess.1.add_function(&llvm_name, sig, None);
     sess.10.push((mono, fn_val));
     let from = fn_declared_param_keys(sess, fn_slot);
@@ -2319,7 +2367,7 @@ fn emit_native_call<'ctx, 'a>(
                 Some(block) => block,
                 None => return Err(builder_error(span.0, span.1, span.2, "internal: no insertion block")),
             };
-            let sig = build_fn_sig(sess, params_list, ret_key, span)?;
+            let sig = build_fn_sig(sess, params_list, ret_key, true, span)?;
             let llvm_name = format!("{}_{}", name.replace('.', "_"), mono);
             let fn_val = sess.1.add_function(&llvm_name, sig, None);
             sess.10.push((mono, fn_val));
@@ -2330,7 +2378,7 @@ fn emit_native_call<'ctx, 'a>(
     };
     let saved_tail = ctx.6;
     ctx.6 = false;
-    let arg_vals = emit_call_args(sess, ctx, expr, params_list, false);
+    let arg_vals = emit_call_args(sess, ctx, expr, params_list, false, true);
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(native_val, &arg_vals, "").map_err(builder_fail)?;
@@ -2370,12 +2418,22 @@ fn emit_native_body<'ctx>(
     let mut idx = 0i64;
     while idx < pcount {
         let pkey = list_get(sess.6, params_list, idx);
-        let ptr = declare_local(sess, pkey, "p", span)?;
         let pval = match param_values.get(idx as usize) {
             Some(value) => *value,
             None => break,
         };
-        store_key(sess, ptr, pval)?;
+        // Aggregate-typed params arrive as `ptr` (see `build_fn_sig`) --
+        // already pointing at the caller's own storage, so no local copy is
+        // made or needed. Everything else still arrives by value and is
+        // spilled to a fresh alloca the rest of this function's body can
+        // take the address of, same as before.
+        let ptr = if is_aggregate_kind(key_kind_of(sess.5, pkey)) {
+            pval.into_pointer_value()
+        } else {
+            let local = declare_local(sess, pkey, "p", span)?;
+            store_key(sess, local, pval)?;
+            local
+        };
         bind_local(&mut body_locals, idx, pkey, ptr);
         idx += 1;
     }
@@ -3075,7 +3133,6 @@ fn native_hash_map_insert<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
     let vsize = sess.3.get_abi_size(&llvm_of(sess, v_key, span)?);
     let stride_const = sess.0.i64_type().const_int(ksize + vsize, false);
     let ksize_const = sess.0.i64_type().const_int(ksize, false);
-    let vsize_const = sess.0.i64_type().const_int(vsize, false);
     let map_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let map_ref = load_ptr(sess, p0)?;
     let dptr = struct_gep(sess, map_key, map_ref, 0, "", span)?;
@@ -3164,17 +3221,16 @@ fn native_hash_map_insert<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
     let len2 = load_i64(sess, lptr)?;
     let entry_off = sess.2.build_int_mul(len2, stride_const, "").map_err(builder_fail)?;
     let keyptr2 = byte_offset(sess, data2, entry_off)?;
-    // Zero-fill the new key and value slots before copying: struct and
-    // enum keys lowered with ABI layout carry padding bytes, and the scan
-    // compares whole keys with memcmp over ksize bytes.  Deterministic
-    // padding keeps that comparison well-defined (interim measure; the
-    // long-term fix is structural key equality).
-    let zero8 = sess.0.i8_type().const_zero();
-    sess.2.build_memset(keyptr2, 1, zero8, ksize_const).map_err(builder_fail)?;
+    // No zero-fill needed here: `zero_fill` at every struct/enum literal's
+    // construction site (`emit_struct_lit`, `build_enum_value_into`) is
+    // what actually makes `k_key`'s padding deterministic for the memcmp
+    // scan above -- `copy_value`'s full-ABI-size memcpy carries that
+    // determinism through every copy, this one included. Zeroing the
+    // destination here instead (as this used to) would not: the memcpy
+    // immediately below fully overwrites it with the source's own bytes.
     copy_value(sess, k_key, keyptr2, p1, span)?;
     let voff2 = sess.2.build_int_add(entry_off, ksize_const, "").map_err(builder_fail)?;
     let valueptr2 = byte_offset(sess, data2, voff2)?;
-    sess.2.build_memset(valueptr2, 1, zero8, vsize_const).map_err(builder_fail)?;
     copy_value(sess, v_key, valueptr2, p2, span)?;
     let len3 = sess.2.build_int_add(len2, one, "").map_err(builder_fail)?;
     store_key(sess, lptr, len3.into())?;
@@ -4027,7 +4083,18 @@ fn net_rc_branch<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>,
 }
 
 fn build_sockaddr_in<'ctx>(sess: &mut Session<'ctx, '_, '_>, port: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
-    let sa_ty = sess.0.i8_type().array_type(16);
+    // `struct sockaddr_in` is 16 bytes with 4-byte natural alignment (driven
+    // by its widest member, the u32 `sin_addr`) -- but the stores below, at
+    // byte offsets 2 and 4, get LLVM's default alignment for their value
+    // type (2, 4) regardless of what this alloca is actually declared to
+    // provide. Allocating as `[16 x i8]` (1-byte natural alignment) made
+    // those stores' align annotations claim more than the underlying memory
+    // was ever guaranteed to have -- undefined per LLVM's semantics, not
+    // just untidy: the optimizer is entitled to assume align metadata is
+    // honored. Allocating as four i32 words instead keeps the same 16 bytes
+    // but gives the buffer real 4-byte alignment, matching every store into
+    // it and the C struct this is standing in for.
+    let sa_ty = sess.0.i32_type().array_type(4);
     let sa = alloca_raw(sess, sa_ty.into(), "sa", span)?;
     let zero = sess.0.i64_type().const_zero();
     let fam_off = byte_offset(sess, sa, zero)?;
