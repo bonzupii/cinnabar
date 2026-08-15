@@ -2,7 +2,7 @@
 
 import CodeMirror from "@uiw/react-codemirror";
 import type { EditorView } from "@codemirror/view";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import PlaygroundDiagnostics from "@/components/PlaygroundDiagnostics";
 import Window from "@/components/Window";
 import { PLAYGROUND_SAMPLES } from "@/content/playground-samples";
@@ -109,11 +109,30 @@ export default function PlaygroundEditor() {
   const [selectedSampleId, setSelectedSampleId] = useState(PLAYGROUND_SAMPLES[0].id);
   const selectedSample =
     PLAYGROUND_SAMPLES.find((sample) => sample.id === selectedSampleId) ?? PLAYGROUND_SAMPLES[0];
+  const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   function loadSample(sample: (typeof PLAYGROUND_SAMPLES)[number]) {
     setSource(sample.code);
     setSelectedSampleId(sample.id);
     setLoadKey((key) => key + 1);
+  }
+
+  // Roving tabindex, the WAI-ARIA tabs pattern's keyboard contract: only the
+  // active tab sits in the page's tab order (tabIndex 0 below), and arrow
+  // keys move focus *and* activate the newly focused tab -- automatic
+  // activation, appropriate here since switching samples has no separate
+  // "confirm" step to wait for.
+  function onTabKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    let next = -1;
+    if (event.key === "ArrowRight") next = (index + 1) % PLAYGROUND_SAMPLES.length;
+    else if (event.key === "ArrowLeft") next = (index - 1 + PLAYGROUND_SAMPLES.length) % PLAYGROUND_SAMPLES.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = PLAYGROUND_SAMPLES.length - 1;
+    if (next === -1) return;
+    event.preventDefault();
+    const sample = PLAYGROUND_SAMPLES[next];
+    loadSample(sample);
+    tabRefs.current[next]?.focus();
   }
 
   function onHoverLine(line: number | null) {
@@ -160,16 +179,23 @@ export default function PlaygroundEditor() {
           aria-label="Load a sample"
           className="border-hairline flex flex-wrap border-b"
         >
-          {PLAYGROUND_SAMPLES.map((sample) => {
+          {PLAYGROUND_SAMPLES.map((sample, index) => {
             const Icon = sample.icon;
             const active = sample.id === selectedSampleId;
             return (
               <button
                 key={sample.id}
+                ref={(element) => {
+                  tabRefs.current[index] = element;
+                }}
+                id={`playground-tab-${sample.id}`}
                 type="button"
                 role="tab"
                 aria-selected={active}
+                aria-controls="playground-tabpanel"
+                tabIndex={active ? 0 : -1}
                 onClick={() => loadSample(sample)}
+                onKeyDown={(event) => onTabKeyDown(event, index)}
                 className={`panel-hover -mb-px flex items-center gap-2 border-b-2 px-4 py-2.5 text-[12px] font-bold tracking-widest uppercase ${
                   active
                     ? "border-cinnabar text-text"
@@ -182,36 +208,45 @@ export default function PlaygroundEditor() {
             );
           })}
         </div>
-        <p className="text-secondary mt-3 text-[14px] leading-[1.6] text-pretty">
-          {selectedSample.summary}
-        </p>
       </div>
 
-      {/*
-        One frame for the whole tool: diagnostics dock directly under the
-        titlebar, above the source, the way an IDE's problems panel sits in
-        the same pane as the file it reports on rather than in a second
-        window beside it.
-      */}
-      <Window path={ENTRY_PATH} title="Cinnabar source">
-        <PlaygroundDiagnostics report={report} source={source} />
-        <div className="bg-code-ground flex">
-          <PlaygroundLineNumbers lineCount={lineCount} onHoverLine={onHoverLine} />
-          <CodeMirror
-            key={loadKey}
-            className="min-w-0 flex-1"
-            value={source}
-            onChange={setSource}
-            theme={cinnabarEditorTheme}
-            extensions={EXTENSIONS}
-            minHeight="24rem"
-            basicSetup={BASIC_SETUP}
-            onCreateEditor={(view) => {
-              viewRef.current = view;
-            }}
-          />
-        </div>
-      </Window>
+      <div
+        role="tabpanel"
+        id="playground-tabpanel"
+        aria-labelledby={`playground-tab-${selectedSampleId}`}
+        tabIndex={0}
+        className="flex flex-col gap-6"
+      >
+        <p className="text-secondary text-[14px] leading-[1.6] text-pretty">
+          {selectedSample.summary}
+        </p>
+
+        {/*
+          One frame for the whole tool: diagnostics dock directly under the
+          titlebar, above the source, the way an IDE's problems panel sits in
+          the same pane as the file it reports on rather than in a second
+          window beside it.
+        */}
+        <Window path={ENTRY_PATH} title="Cinnabar source">
+          <PlaygroundDiagnostics report={report} source={source} />
+          <div className="bg-code-ground flex">
+            <PlaygroundLineNumbers lineCount={lineCount} onHoverLine={onHoverLine} />
+            <CodeMirror
+              key={loadKey}
+              className="min-w-0 flex-1"
+              value={source}
+              onChange={setSource}
+              theme={cinnabarEditorTheme}
+              extensions={EXTENSIONS}
+              minHeight="24rem"
+              basicSetup={BASIC_SETUP}
+              onCreateEditor={(view) => {
+                viewRef.current = view;
+              }}
+            />
+          </div>
+        </Window>
+      </div>
     </div>
   );
 }
