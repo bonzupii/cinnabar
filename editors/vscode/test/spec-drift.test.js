@@ -219,6 +219,41 @@ test("indentation rules mention only real keywords", () => {
   );
 });
 
+// Every reserved word a snippet body relies on structurally (not the English
+// placeholder text inside `${n:...}` tabstops, which a scan can't tell apart
+// from real syntax). Mirrors CONTEXTUAL_KEYWORDS above: a hand-kept set
+// cross-checked against the compiler's own table, rather than an attempt to
+// parse "is this token code or prose" out of the snippet bodies themselves.
+const SNIPPET_KEYWORDS = [
+  "fun", "end", "if", "elif", "else", "while", "match", "pub", "nat", "const",
+  "val", "var", "use", "type", "mod", "trait", "impl",
+];
+
+test("snippet bodies reference only real keywords", () => {
+  const keywords = compilerKeywords();
+  const missing = SNIPPET_KEYWORDS.filter((word) => !keywords.has(word)).sort();
+  assert.deepEqual(
+    missing,
+    [],
+    `snippets/cinnabar.json assumes keywords src/analysis.rs no longer has: ${missing.join(", ")}`
+  );
+});
+
+test("every snippet has a unique prefix and the manifest points at a real file", () => {
+  const manifest = readExtensionJson("package.json");
+  const declared = manifest.contributes.snippets.find((entry) => entry.language === "cinnabar");
+  assert.notEqual(declared, undefined, "no 'cinnabar' snippets contribution");
+  assert.ok(
+    fs.existsSync(path.join(extensionRoot, declared.path)),
+    `package.json points snippets at ${declared.path}, which does not exist`
+  );
+
+  const snippets = readExtensionJson(declared.path.replace(/^\.\//, ""));
+  const prefixes = Object.values(snippets).map((entry) => entry.prefix);
+  const duplicates = prefixes.filter((prefix, index) => prefixes.indexOf(prefix) !== index);
+  assert.deepEqual([...new Set(duplicates)], [], `duplicate snippet prefixes: ${duplicates.join(", ")}`);
+});
+
 test("the launcher targets a binary the workspace actually builds", () => {
   const launcher = fs.readFileSync(path.join(extensionRoot, "lsp-launcher.js"), "utf8");
   const segments = /const SERVER_SEGMENTS = \[([^\]]*)\]/.exec(launcher);

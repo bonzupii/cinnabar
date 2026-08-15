@@ -11,18 +11,22 @@
   "categories": [
     "Programming Languages"
   ],
+  "icon": "icon.png",
   "main": "./extension.js",
   "files": [
     "extension.js",
     "lsp-launcher.js",
     "language-configuration.json",
     "syntaxes",
+    "snippets",
+    "icon.png",
     "README.md",
+    "LICENSE",
     "node_modules"
   ],
   "scripts": {
     "test": "node --test",
-    "package:dry-run": "npm pack --dry-run"
+    "package:dry-run": "npx --yes @vscode/vsce ls --tree"
   },
   "contributes": {
     "languages": [
@@ -43,6 +47,22 @@
         "language": "cinnabar",
         "scopeName": "source.cinnabar",
         "path": "./syntaxes/cinnabar.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "cinnabar",
+        "path": "./snippets/cinnabar.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "cinnabar.restartServer",
+        "title": "Cinnabar: Restart Language Server"
+      },
+      {
+        "command": "cinnabar.showOutputChannel",
+        "title": "Cinnabar: Show Output Channel"
       }
     ],
     "configuration": {

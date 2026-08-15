@@ -21,9 +21,12 @@ import { DESCRIPTION } from "@/lib/site";
  * The site itself never loads these: every mark on a page is the SVG
  * component, which is sharper and themes itself. They exist for everything
  * outside the site that cannot use an SVG React component — a README, GitHub's
- * social card, a slide, someone writing about the language. That audience also
- * explains the two grounds: a README is read in whichever theme its reader
- * chose, so both are shipped rather than one with a guess.
+ * social card, a slide, someone writing about the language, the VS Code
+ * extension's Marketplace listing. That audience also explains the two
+ * grounds: a README is read in whichever theme its reader chose, so both are
+ * shipped rather than one with a guess. The extension icon is the one
+ * exception — the Marketplace has a single slot, not a pair, so it takes the
+ * favicon's dark ground instead of picking a theme blind.
  *
  * Nothing here redraws the mark. The geometry is imported from the component
  * that owns it, the wordmark lock-up is the same `OgWordmark` the social cards
@@ -59,7 +62,27 @@ const BANNER_SIZE = { width: 1280, height: 640 };
 const WORDMARK_CANVAS = { width: 1024, height: 300 };
 const WORDMARK_CAP = 148;
 
-type Asset = { name: string; render: () => Promise<ImageResponse> };
+/**
+ * The Marketplace gallery icon's canvas. VS Code has one slot for it, not a
+ * light/dark pair, so it takes the same ground the favicon already commits
+ * to: `src/app/icon.svg` is plate 05's dark table, and this matches it rather
+ * than guessing again.
+ */
+const VSCODE_ICON_SIZE = 128;
+const VSCODE_ICON_PATH = path.join(
+  process.cwd(),
+  "..",
+  "editors",
+  "vscode",
+  "icon.png",
+);
+
+type Asset = {
+  name: string;
+  render: () => Promise<ImageResponse>;
+  /** Absolute output path. Defaults to OUTPUT_DIR/name. */
+  outputPath?: string;
+};
 
 /** The mark alone, centred on its ground. */
 function markAsset(size: number, palette: BrandPalette) {
@@ -134,6 +157,11 @@ function assets(): Asset[] {
       render: bannerAsset(theme),
     });
   }
+  list.push({
+    name: "icon.png",
+    render: markAsset(VSCODE_ICON_SIZE, BRAND_THEMES.dark),
+    outputPath: VSCODE_ICON_PATH,
+  });
   return list;
 }
 
@@ -143,9 +171,10 @@ async function main() {
   for (const asset of assets()) {
     const response = await asset.render();
     const bytes = Buffer.from(await response.arrayBuffer());
-    const file = path.join(OUTPUT_DIR, asset.name);
+    const file = asset.outputPath ?? path.join(OUTPUT_DIR, asset.name);
+    await mkdir(path.dirname(file), { recursive: true });
     await writeFile(file, bytes);
-    console.log(`wrote public/brand/${asset.name} — ${bytes.length} bytes`);
+    console.log(`wrote ${path.relative(process.cwd(), file)} — ${bytes.length} bytes`);
   }
 }
 
