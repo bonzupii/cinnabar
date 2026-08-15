@@ -2,14 +2,16 @@
 
 An overnight full-repository audit (seven independent agents, one per subsystem: lexer/parser/AST,
 resolver/typecheck, borrow checker, codegen, CLI/LSP/infra, the tests/fixtures corpus, and the
-website), followed by three rounds of fixes: an initial pass on the safely-verifiable front end; a
+website), followed by four rounds of fixes: an initial pass on the safely-verifiable front end; a
 second, targeted pass (three more agents, in isolated git worktrees, on `opus` for the highest-stakes
 areas and `fable` for the more mechanical ones) that closed out nearly everything the audit had
-flagged but left open; and a third pass closing the handful of items that round two's own work
-surfaced (the remaining borrow-checker leaks, a newly-found resolver gap, and a fixture content
-decision, made explicitly rather than guessed). This document is the result: what got fixed, what's
-still broken, and — the thing actually asked for — what stands between here and ROADMAP.md's
-"Self-Hosting" goal (Cinnabar compiling itself).
+flagged but left open; a third pass closing the handful of items that round two's own work surfaced
+(the remaining borrow-checker leaks, a newly-found resolver gap, and a fixture content decision, made
+explicitly rather than guessed); and a fourth pass that reconciled an independently-diverged
+`origin/main` merge (nine commits, not started by this effort, including two other fixes for the
+same codegen bugs round two had already fixed) and closed out the last of the site/tooling items.
+This document is the result: what got fixed, what's still broken, and — the thing actually asked for
+— what stands between here and ROADMAP.md's "Self-Hosting" goal (Cinnabar compiling itself).
 
 Scope note on verification: this machine has `cargo`/`rustc` but no LLVM 21 and no Nix devshell, so
 `cargo build`/`cargo check` with the default `codegen` feature fails immediately (`llvm-sys` can't
@@ -212,21 +214,60 @@ about** (`src/resolver.rs`, `src/typecheck.rs`):
 
 ---
 
+## 1c. Round four — a parallel merge, and the last of the site/tooling items
+
+Partway through round three, `git status` turned up an in-progress, uncommitted merge from
+`origin/main` (9 commits, diverged independently, not started by this session) with real conflicts
+in 6 files — including two of the exact same codegen bugs fixed in round two, fixed independently
+and differently upstream. Resolving it surfaced one thing worth recording: **origin's tail-call-safety
+fix was substantively better than this session's own.** Round two's fix withheld LLVM's `tail` marker
+for any call passing a reference-shaped argument at all — sound, but overly conservative enough that
+it would have disabled tail-call elimination for the common, safe pattern of threading a borrowed
+parameter through a self-tail-call (exactly what `slice_test.cnb`'s own `slice_sum_acc` does).
+Origin's fix computes a precise per-argument frame-rooting trace at typecheck time
+(`NODE_CALLFACT`/`expr_frame_root`) and only withholds `tail` when an argument is provably rooted in
+the *current* frame. Origin's version was kept; round two's `mark_tail_call`/`arg_may_carry_frame_ref`
+were deleted. The constant-index-fallibility fix had a subtler problem: both sides had independently
+attached the same fact to the same `EXPR_INDEX` payload slot under different names, and git's
+textual merge — since the two additions didn't touch identical lines — merged them into two
+back-to-back writes to one slot rather than flagging a conflict. Same numeric encoding by
+coincidence, so not a wrong-value bug, but a real Single-Fact Rule violation a text diff can't
+catch; resolved by keeping origin's shared-location constants (`ast.rs`) and deleting round two's
+redundant ones. Full resolution rationale, including the non-codegen conflicts (an independent
+TOCTOU fix in `project.rs`, a `docs.rs` HTTP-connection-handling improvement, `head.cnb`), is in the
+merge commit itself. Origin also contributed two real fixtures (`tail_local_borrow.cnb`,
+`result_array_index.cnb`) giving both codegen fixes actual compile-link-run coverage once the real
+toolchain is available — this session's own coverage for them was `analysis::analyze`-only.
+
+The same pass also closed the three remaining site/tooling items that had been sitting in "not fixed"
+without a technical blocker:
+- **VS Code extension**: `client.start()`'s `Promise` is no longer pushed into `context.subscriptions`
+  (which threw on deactivate under `vscode-languageclient` ^9); its rejection is now surfaced via
+  `showErrorMessage` instead.
+- **Playground diagnostic spans**: `locateSpan` now indexes in UTF-8 byte space (re-encoding once via
+  `TextEncoder`/`TextDecoder`) instead of the JS string's native UTF-16 units, so a non-ASCII
+  character in a string or comment no longer shifts every span below it.
+- **Playground sample-switcher tabs**: now a complete WAI-ARIA tabs implementation —
+  `aria-controls`/`aria-labelledby` linking each tab to a real `tabpanel`, and roving tabindex with
+  Left/Right/Home/End keyboard navigation. Verified via direct browser-driven interaction against a
+  live dev server (arrow keys, wraparound, `aria-labelledby` sync) in addition to the existing
+  Playwright suite.
+
+---
+
 ## 2. Confirmed, not fixed — genuinely still open
 
-Everything from the original audit that had a mechanical, verifiable-here fix is now fixed — three
-rounds deep. What's left needs either the real LLVM toolchain or is genuinely low-priority:
-
-- **`emitter.rs`'s two codegen fixes are unverified** — this machine cannot compile, type-check, or
-  run anything under `src/codegen/`. Run the real gate before trusting them. See 1b above.
-- **Everything else the original seven-agent audit found that no fix pass has touched**, still
-  exactly as first reported: a `HashMap` padding/`memcmp` correctness question and an under-aligned
-  `sockaddr_in` store in codegen (both lower-confidence, unverifiable here); the VS Code extension's
-  `client.start()`-into-`context.subscriptions` `Promise` mismatch (flagged in the original audit,
-  not in either fix pass's scope — worth folding into a future tooling pass); the playground's
-  UTF-16-vs-byte-offset diagnostic-span indexing and the sample-switcher's incomplete ARIA tabs
-  pattern (both site-side, low severity); `tests/fixtures/native_surface.idl`, a confirmed-dead file
-  now removed.
+- **`emitter.rs`'s codegen fixes are unverified** — this machine cannot compile, type-check, or run
+  anything under `src/codegen/`. Run the real gate before trusting them, per 1b/1c above — this is
+  the single most important remaining step; everything else with a mechanical, verifiable-here fix
+  across four rounds is done.
+- **A `HashMap` padding/`memcmp` correctness question and an under-aligned `sockaddr_in` store** in
+  codegen — both flagged in the original seven-agent audit as lower-confidence even then, and, like
+  everything else under `src/codegen/`, unverifiable on this machine. Deliberately not attempted
+  blind: this session's one earlier codegen fix needed correcting by an independent, better-informed
+  implementation found during the round-four merge, which is exactly the outcome to avoid repeating
+  on ABI-sensitive, memory-layout code with no compiler here to catch a mistake. Worth a dedicated,
+  carefully-verified pass once the real toolchain is available, not a guess.
 
 ---
 
@@ -332,9 +373,9 @@ stay permanently native regardless (this matches the "marked-native boundary for
 Roughly cheapest-and-most-widely-useful first, each step independently valuable regardless of
 whether the ones after it ever happen:
 
-1. Run the real `nix develop` gate to confirm the codegen fixes from 1b — everything else that had a
-   mechanical fix is already done, so this is the one thing standing between "believed correct" and
-   "proven correct" for the whole three-round effort. Worth doing regardless of anything below.
+1. Run the real `nix develop` gate to confirm the codegen fixes from 1b/1c — everything else that had
+   a mechanical fix is already done, so this is the one thing standing between "believed correct" and
+   "proven correct" for the whole four-round effort. Worth doing regardless of anything below.
 2. Add the `Process` native surface (§3.2.1) plus the `File` extensions (§3.2.2) — both are useful to
    ordinary Cinnabar programs immediately, not just to a future self-hosted compiler.
 3. Add a string-formatting surface (§3.2.3) — same argument, broadly useful on its own.
