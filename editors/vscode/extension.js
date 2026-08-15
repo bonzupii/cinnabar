@@ -41,7 +41,15 @@ function activate(context) {
     serverOptions,
     clientOptions
   );
-  context.subscriptions.push(client.start());
+  // `client.start()` returns a Promise<void> under vscode-languageclient ^9,
+  // not a Disposable -- pushing it into context.subscriptions makes VS Code
+  // call .dispose() on a Promise when the extension deactivates, which
+  // throws. deactivate() below already stops the client, so start() needs
+  // nothing pushed; it only needs its rejection surfaced instead of left
+  // unhandled.
+  client.start().catch((error) => {
+    vscode.window.showErrorMessage(`Cinnabar Language Server failed to start: ${error.message}`);
+  });
 }
 
 function deactivate() {
