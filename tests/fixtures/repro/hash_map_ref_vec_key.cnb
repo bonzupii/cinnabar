@@ -1,0 +1,68 @@
+#! A HashMap key that reaches a parameterized native handle through a
+#! reference is rejected at compile time. `Rec` holds
+#! `&Collections.Vec(U8)`; the reference keeps the key itself non-linear
+#! (only the referenced Vec is a handle), so the map is freeable and the
+#! program passes the borrow checker. The rejection is codegen's "a HashMap
+#! key cannot contain a native handle", not a linearity error.
+#! (EXPECT_REJECTED.)
+
+pub mod Collections
+  pub nat type HashMap(K, V)
+  pub nat type Vec(T)
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub KeyNotFound
+  end
+
+  pub nat fun hash_map_new<K, V>() impure Result(HashMap(K, V), Error)
+  pub nat fun hash_map_insert<K, V>(map: &mut HashMap(K, V), key: K, value: V) impure Result(Unit, Error)
+  pub nat fun hash_map_free<K, V>(map: HashMap(K, V)) impure Unit
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
+end
+
+use Collections.hash_map_new
+use Collections.hash_map_insert
+use Collections.hash_map_free
+use Collections.vec_new
+use Collections.vec_free
+
+pub type Rec
+  pub id: I64
+  pub items: &Collections.Vec(U8)
+end
+
+pub fun main() impure I64
+  val map = match hash_map_new[Rec, I64]()
+    Ok(m) => m
+    Err(error) => return 1
+  end
+
+  val items = match vec_new[U8]()
+    Ok(v) => v
+    Err(error) => return fail_free_map(map)
+  end
+
+  val key = Rec(id: 1, items: &items)
+
+  match hash_map_insert(&mut map, key, 42)
+    Ok(Unit) => Unit
+    Err(error) => return fail_free_map_vec(map, items)
+  end
+
+  hash_map_free(map)
+  vec_free(items)
+  return 0
+end
+
+fun fail_free_map(map: Collections.HashMap(Rec, I64)) impure I64
+  hash_map_free(map)
+  return 1
+end
+
+fun fail_free_map_vec(map: Collections.HashMap(Rec, I64), items: Collections.Vec(U8)) impure I64
+  hash_map_free(map)
+  vec_free(items)
+  return 1
+end

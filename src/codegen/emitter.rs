@@ -312,27 +312,6 @@ fn copy_value<'ctx>(
     Ok(())
 }
 
-// Every field write at a struct/enum literal's construction site only
-// defines the bytes its layout assigns meaning to; inter-field padding
-// (and, for an enum, a smaller variant's unused payload tail) is otherwise
-// whatever bits were already on that stack slot. `copy_value` then carries
-// those bytes -- padding included -- through every later memcpy of the
-// value (a parameter, a struct field, a HashMap entry), so anything that
-// structurally compares a whole value by its raw bytes needs the padding
-// to be deterministic from the moment the value first exists. HashMap's
-// key scan (`extern_memcmp` below) is that site today. Zeroing at
-// construction, once, here, covers it and everywhere else a memcmp'd value
-// could flow from -- zeroing again at a comparison's destination would not:
-// the very next full-size `copy_value` memcpy would overwrite the zeros
-// with the source's own undetermined padding anyway.
-fn zero_fill<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, ptr: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
-    let ty = llvm_of(sess, key, span)?;
-    let size = sess.3.get_abi_size(&ty);
-    let zero8 = sess.0.i8_type().const_zero();
-    sess.2.build_memset(ptr, 1, zero8, sess.0.i64_type().const_int(size, false)).map_err(builder_fail)?;
-    Ok(())
-}
-
 fn key_elem_of(nodes: &[i64], key: i64) -> i64 {
     let row = find_tyinfo(nodes, key);
     if row == NONE {
@@ -679,7 +658,6 @@ fn build_enum_value<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, variant_id
 }
 
 fn build_enum_value_into<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, variant_idx: i64, payloads: &[(i64, PointerValue<'ctx>)], out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
-    zero_fill(sess, key, out, span)?;
     let tag_ptr = struct_gep(sess, key, out, 0, "", span)?;
     let tag = sess.0.i64_type().const_int(variant_idx as u64, false);
     store_key(sess, tag_ptr, tag.into())?;
@@ -1521,7 +1499,6 @@ fn emit_struct_lit<'ctx, 'a>(
     let kind = node_a(sess.5, sym);
     if kind == SYM_STRUCT {
         let ptr = declare_local(sess, key, "struct", span)?;
-        zero_fill(sess, key, ptr, span)?;
         let names = node_c(sess.5, expr);
         let values = node_d(sess.5, expr);
         let count = list_len(sess.6, names);
@@ -1936,7 +1913,7 @@ fn emit_call<'ctx, 'a>(
     }
     let saved_tail = ctx.6;
     ctx.6 = false;
-    let arg_vals = emit_call_args(sess, ctx, expr, params_list, false, false);
+    let arg_vals = emit_call_args(sess, ctx, expr, params_list, false);
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(fn_val, &arg_vals, "").map_err(builder_fail)?;
@@ -2030,7 +2007,7 @@ fn emit_deferred_trait_call<'ctx, 'a>(
     }
     let saved_tail = ctx.6;
     ctx.6 = false;
-    let arg_vals = emit_call_args(sess, ctx, expr, param_keys, false, false);
+    let arg_vals = emit_call_args(sess, ctx, expr, param_keys, false);
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(fn_val, &arg_vals, "").map_err(builder_fail)?;
@@ -2053,17 +2030,12 @@ fn emit_deferred_trait_call<'ctx, 'a>(
     Ok(out)
 }
 
-// `for_native`: see `build_fn_sig`'s doc comment -- an aggregate-typed
-// argument to a native call is passed as the pointer `emit_expr` already
-// produced, matching that native's `ptr`-typed parameter, instead of being
-// loaded into a first-class value first.
 fn emit_call_args<'ctx, 'a>(
     sess: &mut Session<'ctx, '_, '_>,
     ctx: &mut FnCtx<'ctx, 'a>,
     expr: i64,
     params_list: i64,
     use_instance_params: bool,
-    for_native: bool,
 ) -> Result<Vec<BasicMetadataValueEnum<'ctx>>, CodegenError> {
     let span = (node_file(sess.5, expr), node_start(sess.5, expr), node_end(sess.5, expr));
     let arg_exprs = node_d(sess.5, expr);
@@ -2079,12 +2051,8 @@ fn emit_call_args<'ctx, 'a>(
             sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, arg))
         };
         let ptr = emit_expr(sess, ctx, arg)?;
-        if for_native && is_aggregate_kind(key_kind_of(sess.5, akey)) {
-            vals.push(into_meta(ptr.into()));
-        } else {
-            let value = load_key(sess, akey, ptr, span)?;
-            vals.push(into_meta(value));
-        }
+        let value = load_key(sess, akey, ptr, span)?;
+        vals.push(into_meta(value));
         idx += 1;
     }
     Ok(vals)
@@ -2102,30 +2070,13 @@ fn find_inst_fn<'ctx>(sess: &Session<'ctx, '_, '_>, mono: i64) -> Option<Functio
     None
 }
 
-// `for_native` matters only for aggregate-typed (struct/enum) parameters.
-// A regular Cinnabar-to-Cinnabar call passes an aggregate as a first-class
-// LLVM value -- fine, because a callee only ever reaches its fields by GEP,
-// never by reading the whole value's raw bytes. A native call can: HashMap's
-// key scan (`extern_memcmp`) compares a whole key's ABI-size byte range,
-// padding included, and LLVM does not guarantee an aggregate value's
-// load/store round-trip preserves padding bytes the way a byte-level memcpy
-// does (see `zero_fill`'s doc comment for where that determinism has to
-// start). So a native's aggregate-typed parameters are declared as `ptr`
-// here instead -- the argument stays in the pointer/memory domain the whole
-// way from the caller's own storage into the native body, the same way
-// every other aggregate in this codegen is already handled.
-fn build_fn_sig<'ctx>(sess: &mut Session<'ctx, '_, '_>, params_list: i64, ret_key: i64, for_native: bool, span: (i64, i64, i64)) -> Result<FunctionType<'ctx>, CodegenError> {
+fn build_fn_sig<'ctx>(sess: &mut Session<'ctx, '_, '_>, params_list: i64, ret_key: i64, span: (i64, i64, i64)) -> Result<FunctionType<'ctx>, CodegenError> {
     let count = list_len(sess.6, params_list);
     let mut param_tys: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
     let mut idx = 0i64;
     while idx < count {
         let pkey = list_get(sess.6, params_list, idx);
-        let ty: BasicMetadataTypeEnum = if for_native && is_aggregate_kind(key_kind_of(sess.5, pkey)) {
-            ptr_ty(sess).into()
-        } else {
-            llvm_of(sess, pkey, span)?.into()
-        };
-        param_tys.push(ty);
+        param_tys.push(llvm_of(sess, pkey, span)?.into());
         idx += 1;
     }
     let ret_ty = llvm_of(sess, ret_key, span)?;
@@ -2146,7 +2097,7 @@ fn get_or_emit_fn<'ctx>(
     }
     let fn_name = em_name(sess, node_a(sess.5, fn_slot));
     let llvm_name = format!("{}_{}", fn_name, mono);
-    let sig = build_fn_sig(sess, params_list, ret_key, false, span)?;
+    let sig = build_fn_sig(sess, params_list, ret_key, span)?;
     let fn_val = sess.1.add_function(&llvm_name, sig, None);
     sess.10.push((mono, fn_val));
     let from = fn_declared_param_keys(sess, fn_slot);
@@ -2214,15 +2165,6 @@ fn extern_realloc<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx>
         sess,
         "realloc",
         i8p.fn_type(&[i8p.into(), sess.0.i64_type().into()], false),
-    )
-}
-
-fn extern_memcmp<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
-    let i8p = ptr_ty(sess);
-    extern_fn(
-        sess,
-        "memcmp",
-        sess.0.i32_type().fn_type(&[i8p.into(), i8p.into(), sess.0.i64_type().into()], false),
     )
 }
 
@@ -2388,7 +2330,7 @@ fn emit_native_call<'ctx, 'a>(
                 Some(block) => block,
                 None => return Err(builder_error(span.0, span.1, span.2, "internal: no insertion block")),
             };
-            let sig = build_fn_sig(sess, params_list, ret_key, true, span)?;
+            let sig = build_fn_sig(sess, params_list, ret_key, span)?;
             let llvm_name = format!("{}_{}", name.replace('.', "_"), mono);
             let fn_val = sess.1.add_function(&llvm_name, sig, None);
             sess.10.push((mono, fn_val));
@@ -2399,7 +2341,7 @@ fn emit_native_call<'ctx, 'a>(
     };
     let saved_tail = ctx.6;
     ctx.6 = false;
-    let arg_vals = emit_call_args(sess, ctx, expr, params_list, false, true);
+    let arg_vals = emit_call_args(sess, ctx, expr, params_list, false);
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(native_val, &arg_vals, "").map_err(builder_fail)?;
@@ -2443,18 +2385,8 @@ fn emit_native_body<'ctx>(
             Some(value) => *value,
             None => break,
         };
-        // Aggregate-typed params arrive as `ptr` (see `build_fn_sig`) --
-        // already pointing at the caller's own storage, so no local copy is
-        // made or needed. Everything else still arrives by value and is
-        // spilled to a fresh alloca the rest of this function's body can
-        // take the address of, same as before.
-        let ptr = if is_aggregate_kind(key_kind_of(sess.5, pkey)) {
-            pval.into_pointer_value()
-        } else {
-            let local = declare_local(sess, pkey, "p", span)?;
-            store_key(sess, local, pval)?;
-            local
-        };
+        let ptr = declare_local(sess, pkey, "p", span)?;
+        store_key(sess, ptr, pval)?;
         bind_local(&mut body_locals, idx, pkey, ptr);
         idx += 1;
     }
@@ -3169,6 +3101,461 @@ fn native_string_free<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'c
     Ok(())
 }
 
+// === HashMap: structural keys over an open-addressed table ===
+//
+// A map is an open-addressed table of slots, each slot a `{ flag, key,
+// value }` triple whose stride and field offsets derive from the slot's own
+// LLVM struct type (declared K and V, never a hand-counted byte size). The
+// flag marks a slot empty, occupied, or tombstoned (left by `remove` so a
+// probe past a removed key still reaches later keys that collided behind
+// it). Capacity is a power of two, so `(hash + step) & (capacity - 1)` maps
+// a hash to a probe sequence, and the table grows by rehashing before the
+// load factor reaches half.
+//
+// A key is hashed and compared *structurally*, field by field, not by its
+// raw ABI bytes: two keys are equal exactly when their declared fields are,
+// read recursively through nested structs, enums, arrays, and slice
+// contents. Padding bytes are never read, so no construction-time zeroing
+// is needed for correctness. The hash folds the same field values the
+// comparison reads -- the property a probe relies on -- and both are
+// emitted inline into the monomorphized native body, one implementation per
+// concrete K. Bucketing appears only as the final `& (capacity - 1)` after
+// hashing, never as a substitute for it.
+
+const HASH_SEED: u64 = 14695981039346656037;
+const HASH_PRIME: u64 = 1099511628211;
+const SLOT_EMPTY: u64 = 0;
+const SLOT_OCCUPIED: u64 = 1;
+const SLOT_TOMBSTONE: u64 = 2;
+const INITIAL_CAPACITY: u64 = 8;
+
+// The LLVM type of one slot: a flag word, the key, and the value.
+fn hash_map_slot_ty<'ctx>(sess: &mut Session<'ctx, '_, '_>, k_key: i64, v_key: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+    let flag = sess.0.i64_type().into();
+    let kty = llvm_of(sess, k_key, span)?;
+    let vty = llvm_of(sess, v_key, span)?;
+    Ok(sess.0.struct_type(&[flag, kty, vty], false).into())
+}
+
+// GEP to one field of a slot.
+fn slot_gep<'ctx>(sess: &mut Session<'ctx, '_, '_>, slot_ty: BasicTypeEnum<'ctx>, slot_ptr: PointerValue<'ctx>, index: u32) -> Result<PointerValue<'ctx>, CodegenError> {
+    sess.2.build_struct_gep(slot_ty, slot_ptr, index, "").map_err(builder_fail)
+}
+
+// The slot a probe step lands on: `(hash + step) & (capacity - 1)` strides
+// past the data pointer.
+fn probe_slot<'ctx>(sess: &mut Session<'ctx, '_, '_>, data: PointerValue<'ctx>, hash: IntValue<'ctx>, step: IntValue<'ctx>, cap: IntValue<'ctx>, slot_size: u64) -> Result<PointerValue<'ctx>, CodegenError> {
+    let sum = sess.2.build_int_add(hash, step, "").map_err(builder_fail)?;
+    let mask = sess.2.build_int_sub(cap, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    let index = sess.2.build_and(sum, mask, "").map_err(builder_fail)?;
+    let offset = sess.2.build_int_mul(index, sess.0.i64_type().const_int(slot_size, false), "").map_err(builder_fail)?;
+    byte_offset(sess, data, offset)
+}
+
+// One FNV-1a fold: `state = (state ^ word) * prime`. A real bit mixer, not
+// a raw field value or a byte-range checksum.
+fn fold_hash_word<'ctx>(sess: &mut Session<'ctx, '_, '_>, hash_slot: PointerValue<'ctx>, word: IntValue<'ctx>) -> Result<(), CodegenError> {
+    let current = load_i64(sess, hash_slot)?;
+    let xored = sess.2.build_xor(current, word, "").map_err(builder_fail)?;
+    let mixed = sess.2.build_int_mul(xored, sess.0.i64_type().const_int(HASH_PRIME, false), "").map_err(builder_fail)?;
+    store_key(sess, hash_slot, mixed.into())?;
+    Ok(())
+}
+
+// A scalar's bits as a full machine word. Zero-extension (never
+// sign-extension) so two equal values of any width or signedness fold the
+// same word.
+fn scalar_word<'ctx>(sess: &mut Session<'ctx, '_, '_>, value: IntValue<'ctx>) -> Result<IntValue<'ctx>, CodegenError> {
+    if value.get_type().get_bit_width() >= 64 {
+        Ok(value)
+    } else {
+        sess.2.build_int_z_extend(value, sess.0.i64_type(), "").map_err(builder_fail)
+    }
+}
+
+// A GEP to element `idx` of an `[N; T]` array, indexing the array type
+// itself (deref the array, then index the element) rather than casting the
+// array pointer to its element type and GEP-ing through that coincidence.
+fn array_elem_ptr<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, ptr: PointerValue<'ctx>, idx: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
+    let ty = llvm_of(sess, key, span)?;
+    let zero = sess.0.i64_type().const_zero();
+    let gep = unsafe { sess.2.build_gep(ty, ptr, &[zero, idx], "") }.map_err(builder_fail)?;
+    Ok(gep)
+}
+
+fn key_kind_label(kind: i64) -> &'static str {
+    if kind == TYD_REF || kind == TYD_REF_MUT {
+        "a reference"
+    } else if kind == TYD_SLICE {
+        "a slice"
+    } else {
+        "a native handle"
+    }
+}
+
+fn no_structural_equality<'ctx>(sess: &Session<'ctx, '_, '_>, key: i64, span: (i64, i64, i64)) -> CodegenError {
+    builder_error(
+        span.0,
+        span.1,
+        span.2,
+        &format!(
+            "a HashMap key cannot contain {}: only scalar, struct, enum, array, and slice-of-value keys have structural equality",
+            key_kind_label(key_kind_of(sess.5, key))
+        ),
+    )
+}
+
+// Structural key equality, emitted inline into the monomorphized native
+// body: two keys are equal exactly when their declared fields are, read
+// recursively through nested structs, enums, arrays, and slice contents.
+// Padding bytes are never read, and a reference-typed field compares what
+// it points to, not the address it holds.
+fn emit_key_eq<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, key: i64, a: PointerValue<'ctx>, b: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
+    let kind = key_kind_of(sess.5, key);
+    if kind == TYD_BUILTIN {
+        let va = load_key(sess, key, a, span)?.into_int_value();
+        let vb = load_key(sess, key, b, span)?.into_int_value();
+        return sess.2.build_int_compare(IntPredicate::EQ, va, vb, "").map_err(builder_fail);
+    }
+    if kind == TYD_STRUCT {
+        let item = em_sym_decl(sess, em_key_sym(sess, key));
+        let args = key_args_of(sess, key);
+        let fields = {
+            let nodes = &mut sess.5;
+            let lists = &mut sess.6;
+            struct_field_keys(nodes, lists, item, args)
+        };
+        let mut acc = sess.0.bool_type().const_all_ones();
+        let mut idx = 0usize;
+        while idx < fields.len() {
+            let fkey = match fields.get(idx) {
+                Some(pair) => pair.1,
+                None => break,
+            };
+            let fa = struct_gep(sess, key, a, idx as u32, "", span)?;
+            let fb = struct_gep(sess, key, b, idx as u32, "", span)?;
+            let feq = emit_key_eq(sess, f, fkey, fa, fb, span)?;
+            acc = sess.2.build_and(acc, feq, "").map_err(builder_fail)?;
+            idx += 1;
+        }
+        return Ok(acc);
+    }
+    if kind == TYD_ENUM {
+        let ta_ptr = struct_gep(sess, key, a, 0, "", span)?;
+        let ta = load_i64(sess, ta_ptr)?;
+        let tb_ptr = struct_gep(sess, key, b, 0, "", span)?;
+        let tb = load_i64(sess, tb_ptr)?;
+        let tag_eq = sess.2.build_int_compare(IntPredicate::EQ, ta, tb, "").map_err(builder_fail)?;
+        let result_slot = alloca_raw(sess, sess.0.bool_type().into(), "enum_eq", span)?;
+        store_key(sess, result_slot, sess.0.bool_type().const_zero().into())?;
+        let compare = new_block(sess, f, "enum_eq_compare");
+        let done = new_block(sess, f, "enum_eq_done");
+        sess.2.build_conditional_branch(tag_eq, compare, done).map_err(builder_fail)?;
+        sess.2.position_at_end(compare);
+        let item = em_sym_decl(sess, em_key_sym(sess, key));
+        let variants = node_e(sess.5, item);
+        let vcount = list_len(sess.6, variants);
+        let mut vi = 0i64;
+        while vi < vcount {
+            let arm = new_block(sess, f, "enum_eq_arm");
+            let next = if vi + 1 < vcount {
+                new_block(sess, f, "enum_eq_next")
+            } else {
+                done
+            };
+            let is_vi = sess.2.build_int_compare(IntPredicate::EQ, ta, sess.0.i64_type().const_int(vi as u64, false), "").map_err(builder_fail)?;
+            sess.2.build_conditional_branch(is_vi, arm, next).map_err(builder_fail)?;
+            sess.2.position_at_end(arm);
+            let mut variant_eq = sess.0.bool_type().const_all_ones();
+            let pcount = variant_payload_count(sess, key, vi);
+            if pcount > 0 {
+                let (pa, pty) = enum_payload_ptr(sess, a, key, vi, span)?;
+                let pb = enum_payload_ptr(sess, b, key, vi, span)?.0;
+                let mut fi = 0i64;
+                while fi < pcount {
+                    let fkey = variant_payload_key(sess, key, vi, fi, span)?;
+                    let fa = sess.2.build_struct_gep(pty, pa, fi as u32, "").map_err(builder_fail)?;
+                    let fb = sess.2.build_struct_gep(pty, pb, fi as u32, "").map_err(builder_fail)?;
+                    let feq = emit_key_eq(sess, f, fkey, fa, fb, span)?;
+                    variant_eq = sess.2.build_and(variant_eq, feq, "").map_err(builder_fail)?;
+                    fi += 1;
+                }
+            }
+            store_key(sess, result_slot, variant_eq.into())?;
+            sess.2.build_unconditional_branch(done).map_err(builder_fail)?;
+            sess.2.position_at_end(next);
+            vi += 1;
+        }
+        sess.2.position_at_end(done);
+        let result = sess.2.build_load(sess.0.bool_type(), result_slot, "").map_err(builder_fail)?.into_int_value();
+        return Ok(result);
+    }
+    if kind == TYD_ARRAY {
+        let elem = key_elem_of(sess.5, key);
+        let len = key_len_of(sess, key);
+        let mut acc = sess.0.bool_type().const_all_ones();
+        let mut idx = 0i64;
+        while idx < len {
+            let ival = sess.0.i64_type().const_int(idx as u64, false);
+            let ea = array_elem_ptr(sess, key, a, ival, span)?;
+            let eb = array_elem_ptr(sess, key, b, ival, span)?;
+            let feq = emit_key_eq(sess, f, elem, ea, eb, span)?;
+            acc = sess.2.build_and(acc, feq, "").map_err(builder_fail)?;
+            idx += 1;
+        }
+        return Ok(acc);
+    }
+    if kind == TYD_REF || kind == TYD_REF_MUT {
+        let elem = key_elem_of(sess.5, key);
+        if key_kind_of(sess.5, elem) == TYD_SLICE {
+            return emit_slice_eq(sess, f, elem, a, b, span);
+        }
+        let aref = load_ptr(sess, a)?;
+        let bref = load_ptr(sess, b)?;
+        return emit_key_eq(sess, f, elem, aref, bref, span);
+    }
+    Err(no_structural_equality(sess, key, span))
+}
+
+// Content equality of two `&[T]` slice views: equal length, then every
+// element equal, as a short-circuiting runtime loop. Two slices with equal
+// bytes but different backing addresses therefore compare equal.
+fn emit_slice_eq<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, slice_key: i64, a: PointerValue<'ctx>, b: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
+    let elem = key_elem_of(sess.5, slice_key);
+    let a_data = slice_data(sess, a)?;
+    let b_data = slice_data(sess, b)?;
+    let a_len = slice_len_of(sess, a)?;
+    let b_len = slice_len_of(sess, b)?;
+    let len_eq = sess.2.build_int_compare(IntPredicate::EQ, a_len, b_len, "").map_err(builder_fail)?;
+    let result_slot = alloca_raw(sess, sess.0.bool_type().into(), "slice_eq", span)?;
+    store_key(sess, result_slot, len_eq.into())?;
+    let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "slice_i", span)?;
+    store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
+    let cond = new_block(sess, f, "slice_eq_cond");
+    let body = new_block(sess, f, "slice_eq_body");
+    let mismatch = new_block(sess, f, "slice_eq_mismatch");
+    let done = new_block(sess, f, "slice_eq_done");
+    sess.2.build_conditional_branch(len_eq, cond, done).map_err(builder_fail)?;
+    sess.2.position_at_end(cond);
+    let i = load_i64(sess, i_slot)?;
+    let more = sess.2.build_int_compare(IntPredicate::ULT, i, a_len, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(more, body, done).map_err(builder_fail)?;
+    sess.2.position_at_end(body);
+    let ea = offset_elem_ptr(sess, elem, a_data, i, span)?;
+    let eb = offset_elem_ptr(sess, elem, b_data, i, span)?;
+    let elem_eq = emit_key_eq(sess, f, elem, ea, eb, span)?;
+    let next = new_block(sess, f, "slice_eq_next");
+    sess.2.build_conditional_branch(elem_eq, next, mismatch).map_err(builder_fail)?;
+    sess.2.position_at_end(mismatch);
+    store_key(sess, result_slot, sess.0.bool_type().const_zero().into())?;
+    sess.2.build_unconditional_branch(done).map_err(builder_fail)?;
+    sess.2.position_at_end(next);
+    let i2 = sess.2.build_int_add(i, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, i_slot, i2.into())?;
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(done);
+    let result = sess.2.build_load(sess.0.bool_type(), result_slot, "").map_err(builder_fail)?.into_int_value();
+    Ok(result)
+}
+
+// Folds a key's structural fields into `hash_slot`, so hash and equality
+// read the same values and cannot disagree. An enum's tag is folded, then
+// control dispatches on the tag so only the active variant's payload is
+// hashed -- an inactive variant's bytes are uninitialized, and reading them
+// as this variant's fields (a reference in particular) would dereference a
+// garbage pointer.
+fn emit_key_hash_into<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, key: i64, ptr: PointerValue<'ctx>, hash_slot: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
+    let kind = key_kind_of(sess.5, key);
+    if kind == TYD_BUILTIN {
+        let value = load_key(sess, key, ptr, span)?.into_int_value();
+        let word = scalar_word(sess, value)?;
+        fold_hash_word(sess, hash_slot, word)?;
+        return Ok(());
+    }
+    if kind == TYD_STRUCT {
+        let item = em_sym_decl(sess, em_key_sym(sess, key));
+        let args = key_args_of(sess, key);
+        let fields = {
+            let nodes = &mut sess.5;
+            let lists = &mut sess.6;
+            struct_field_keys(nodes, lists, item, args)
+        };
+        let mut idx = 0usize;
+        while idx < fields.len() {
+            let fkey = match fields.get(idx) {
+                Some(pair) => pair.1,
+                None => break,
+            };
+            let fptr = struct_gep(sess, key, ptr, idx as u32, "", span)?;
+            emit_key_hash_into(sess, f, fkey, fptr, hash_slot, span)?;
+            idx += 1;
+        }
+        return Ok(());
+    }
+    if kind == TYD_ENUM {
+        let tag_ptr = struct_gep(sess, key, ptr, 0, "", span)?;
+        let tag = load_i64(sess, tag_ptr)?;
+        fold_hash_word(sess, hash_slot, tag)?;
+        let item = em_sym_decl(sess, em_key_sym(sess, key));
+        let variants = node_e(sess.5, item);
+        let vcount = list_len(sess.6, variants);
+        let done = new_block(sess, f, "enum_hash_done");
+        let mut vi = 0i64;
+        while vi < vcount {
+            let arm = new_block(sess, f, "enum_hash_arm");
+            let next = if vi + 1 < vcount {
+                new_block(sess, f, "enum_hash_next")
+            } else {
+                done
+            };
+            let is_vi = sess.2.build_int_compare(IntPredicate::EQ, tag, sess.0.i64_type().const_int(vi as u64, false), "").map_err(builder_fail)?;
+            sess.2.build_conditional_branch(is_vi, arm, next).map_err(builder_fail)?;
+            sess.2.position_at_end(arm);
+            let pcount = variant_payload_count(sess, key, vi);
+            if pcount > 0 {
+                let (region, pty) = enum_payload_ptr(sess, ptr, key, vi, span)?;
+                let mut fi = 0i64;
+                while fi < pcount {
+                    let fkey = variant_payload_key(sess, key, vi, fi, span)?;
+                    let fptr = sess.2.build_struct_gep(pty, region, fi as u32, "").map_err(builder_fail)?;
+                    emit_key_hash_into(sess, f, fkey, fptr, hash_slot, span)?;
+                    fi += 1;
+                }
+            }
+            sess.2.build_unconditional_branch(done).map_err(builder_fail)?;
+            sess.2.position_at_end(next);
+            vi += 1;
+        }
+        sess.2.position_at_end(done);
+        return Ok(());
+    }
+    if kind == TYD_ARRAY {
+        let elem = key_elem_of(sess.5, key);
+        let len = key_len_of(sess, key);
+        let mut idx = 0i64;
+        while idx < len {
+            let eptr = array_elem_ptr(sess, key, ptr, sess.0.i64_type().const_int(idx as u64, false), span)?;
+            emit_key_hash_into(sess, f, elem, eptr, hash_slot, span)?;
+            idx += 1;
+        }
+        return Ok(());
+    }
+    if kind == TYD_REF || kind == TYD_REF_MUT {
+        let elem = key_elem_of(sess.5, key);
+        if key_kind_of(sess.5, elem) == TYD_SLICE {
+            emit_slice_hash_into(sess, f, elem, ptr, hash_slot, span)?;
+            return Ok(());
+        }
+        let referent = load_ptr(sess, ptr)?;
+        emit_key_hash_into(sess, f, elem, referent, hash_slot, span)?;
+        return Ok(());
+    }
+    Err(no_structural_equality(sess, key, span))
+}
+
+// Folds a `&[T]` slice's *contents* into the hash: the length, then every
+// element, so two equal-content slices hash equal wherever their bytes live.
+fn emit_slice_hash_into<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, slice_key: i64, view: PointerValue<'ctx>, hash_slot: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
+    let elem = key_elem_of(sess.5, slice_key);
+    let data = slice_data(sess, view)?;
+    let len = slice_len_of(sess, view)?;
+    fold_hash_word(sess, hash_slot, len)?;
+    let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "slice_i", span)?;
+    store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
+    let cond = new_block(sess, f, "slice_hash_cond");
+    let body = new_block(sess, f, "slice_hash_body");
+    let done = new_block(sess, f, "slice_hash_done");
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(cond);
+    let i = load_i64(sess, i_slot)?;
+    let more = sess.2.build_int_compare(IntPredicate::ULT, i, len, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(more, body, done).map_err(builder_fail)?;
+    sess.2.position_at_end(body);
+    let eptr = offset_elem_ptr(sess, elem, data, i, span)?;
+    emit_key_hash_into(sess, f, elem, eptr, hash_slot, span)?;
+    let i2 = sess.2.build_int_add(i, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, i_slot, i2.into())?;
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(done);
+    Ok(())
+}
+
+// Moves every occupied slot of a table into a fresh, zeroed one, probing
+// the new table for an empty slot per key. Called only on grow, so the new
+// table always has room; this drops tombstones, keeping a grown table at
+// most half occupied and free of stale markers.
+fn rehash_into<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    f: FunctionValue<'ctx>,
+    old: (PointerValue<'ctx>, IntValue<'ctx>),
+    new: (PointerValue<'ctx>, IntValue<'ctx>),
+    k_key: i64,
+    v_key: i64,
+    span: (i64, i64, i64),
+) -> Result<(), CodegenError> {
+    let (old_data, old_cap) = old;
+    let (new_data, new_cap) = new;
+    let slot_ty = hash_map_slot_ty(sess, k_key, v_key, span)?;
+    let slot_size = sess.3.get_abi_size(&slot_ty);
+    let slot_size_const = sess.0.i64_type().const_int(slot_size, false);
+    let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "old", span)?;
+    store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
+    let cond = new_block(sess, f, "rehash_cond");
+    let body = new_block(sess, f, "rehash_body");
+    let done = new_block(sess, f, "rehash_done");
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(cond);
+    let i = load_i64(sess, i_slot)?;
+    let more = sess.2.build_int_compare(IntPredicate::ULT, i, old_cap, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(more, body, done).map_err(builder_fail)?;
+    sess.2.position_at_end(body);
+    let offset = sess.2.build_int_mul(i, slot_size_const, "").map_err(builder_fail)?;
+    let old_slot = byte_offset(sess, old_data, offset)?;
+    let flag_ptr = slot_gep(sess, slot_ty, old_slot, 0)?;
+    let flag = load_i64(sess, flag_ptr)?;
+    let occupied = sess.2.build_int_compare(IntPredicate::EQ, flag, sess.0.i64_type().const_int(SLOT_OCCUPIED, false), "").map_err(builder_fail)?;
+    let move_it = new_block(sess, f, "rehash_move");
+    let skip = new_block(sess, f, "rehash_skip");
+    sess.2.build_conditional_branch(occupied, move_it, skip).map_err(builder_fail)?;
+    sess.2.position_at_end(move_it);
+    let old_key = slot_gep(sess, slot_ty, old_slot, 1)?;
+    let old_val = slot_gep(sess, slot_ty, old_slot, 2)?;
+    let hash_slot = alloca_raw(sess, sess.0.i64_type().into(), "rehash_key", span)?;
+    store_key(sess, hash_slot, sess.0.i64_type().const_int(HASH_SEED, false).into())?;
+    emit_key_hash_into(sess, f, k_key, old_key, hash_slot, span)?;
+    let hash = load_i64(sess, hash_slot)?;
+    let step_slot = alloca_raw(sess, sess.0.i64_type().into(), "rehash_step", span)?;
+    store_key(sess, step_slot, sess.0.i64_type().const_zero().into())?;
+    let probe_body = new_block(sess, f, "rehash_probe");
+    let place = new_block(sess, f, "rehash_place");
+    sess.2.build_unconditional_branch(probe_body).map_err(builder_fail)?;
+    sess.2.position_at_end(probe_body);
+    let step = load_i64(sess, step_slot)?;
+    let new_slot = probe_slot(sess, new_data, hash, step, new_cap, slot_size)?;
+    let new_flag_ptr = slot_gep(sess, slot_ty, new_slot, 0)?;
+    let new_flag = load_i64(sess, new_flag_ptr)?;
+    let empty = sess.2.build_int_compare(IntPredicate::EQ, new_flag, sess.0.i64_type().const_int(SLOT_EMPTY, false), "").map_err(builder_fail)?;
+    let next_probe = new_block(sess, f, "rehash_next");
+    sess.2.build_conditional_branch(empty, place, next_probe).map_err(builder_fail)?;
+    sess.2.position_at_end(next_probe);
+    let next_step = sess.2.build_int_add(step, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, step_slot, next_step.into())?;
+    sess.2.build_unconditional_branch(probe_body).map_err(builder_fail)?;
+    sess.2.position_at_end(place);
+    let new_key_ptr = slot_gep(sess, slot_ty, new_slot, 1)?;
+    let new_val_ptr = slot_gep(sess, slot_ty, new_slot, 2)?;
+    copy_value(sess, k_key, new_key_ptr, old_key, span)?;
+    copy_value(sess, v_key, new_val_ptr, old_val, span)?;
+    store_key(sess, new_flag_ptr, sess.0.i64_type().const_int(SLOT_OCCUPIED, false).into())?;
+    sess.2.build_unconditional_branch(skip).map_err(builder_fail)?;
+    sess.2.position_at_end(skip);
+    let next_i = sess.2.build_int_add(i, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, i_slot, next_i.into())?;
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(done);
+    Ok(())
+}
+
 fn native_hash_map_new<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let map_key = result_arg_key(sess, ret_key, 0);
     let map_val = declare_local(sess, map_key, "map", span)?;
@@ -3184,116 +3571,159 @@ fn native_hash_map_insert<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
     let p2 = get_local(locals, 2, span)?;
     let k_key = native_arg_key(sess, params_list, 1);
     let v_key = native_arg_key(sess, params_list, 2);
-    let ksize = sess.3.get_abi_size(&llvm_of(sess, k_key, span)?);
-    let vsize = sess.3.get_abi_size(&llvm_of(sess, v_key, span)?);
-    let stride_const = sess.0.i64_type().const_int(ksize + vsize, false);
-    let ksize_const = sess.0.i64_type().const_int(ksize, false);
+    let slot_ty = hash_map_slot_ty(sess, k_key, v_key, span)?;
+    let slot_size = sess.3.get_abi_size(&slot_ty);
+    let slot_size_const = sess.0.i64_type().const_int(slot_size, false);
     let map_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let map_ref = load_ptr(sess, p0)?;
     let dptr = struct_gep(sess, map_key, map_ref, 0, "", span)?;
     let lptr = struct_gep(sess, map_key, map_ref, 1, "", span)?;
     let cptr = struct_gep(sess, map_key, map_ref, 2, "", span)?;
-    let data = load_ptr(sess, dptr)?;
-    let len = load_i64(sess, lptr)?;
-    let key_base = sess.2.build_pointer_cast(p1, ptr_ty(sess), "").map_err(builder_fail)?;
-    let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "i", span)?;
-    store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
-    let scan_cond = new_block(sess, f, "map_cond");
-    let scan_body = new_block(sess, f, "map_body");
-    let found_block = new_block(sess, f, "map_found");
-    let append_block = new_block(sess, f, "map_append");
-    let after = new_block(sess, f, "map_after");
-    sess.2.build_unconditional_branch(scan_cond).map_err(builder_fail)?;
-    sess.2.position_at_end(scan_cond);
-    let i = load_i64(sess, i_slot)?;
-    let done = sess.2.build_int_compare(IntPredicate::ULT, i, len, "").map_err(builder_fail)?;
-    let next_i = new_block(sess, f, "map_next");
-    sess.2.build_conditional_branch(done, scan_body, append_block).map_err(builder_fail)?;
-    sess.2.position_at_end(scan_body);
-    let off = sess.2.build_int_mul(i, stride_const, "").map_err(builder_fail)?;
-    let keyptr = byte_offset(sess, data, off)?;
-    let memcmp = extern_memcmp(sess);
-    let cmp_call = sess.2.build_call(
-        memcmp,
-        &[into_meta(keyptr.into()), into_meta(key_base.into()), into_meta(ksize_const.into())],
-        "",
-    ).map_err(builder_fail)?;
-    let cmpv = match cmp_call.try_as_basic_value() {
-        ValueKind::Basic(bv) => bv.into_int_value(),
-        ValueKind::Instruction(inst) => {
-            return Err(builder_error(span.0, span.1, span.2, &format!("internal: memcmp returned void ({:?})", inst.get_opcode())));
-        }
-    };
-    let eq = sess.2.build_int_compare(IntPredicate::EQ, cmpv, sess.0.i32_type().const_zero(), "").map_err(builder_fail)?;
-    sess.2.build_conditional_branch(eq, found_block, next_i).map_err(builder_fail)?;
-    sess.2.position_at_end(next_i);
-    let one = sess.0.i64_type().const_int(1, false);
-    let i2 = sess.2.build_int_add(i, one, "").map_err(builder_fail)?;
-    store_key(sess, i_slot, i2.into())?;
-    sess.2.build_unconditional_branch(scan_cond).map_err(builder_fail)?;
-    sess.2.position_at_end(found_block);
-    let voff = sess.2.build_int_add(off, ksize_const, "").map_err(builder_fail)?;
-    let valueptr = byte_offset(sess, data, voff)?;
-    copy_value(sess, v_key, valueptr, p2, span)?;
-    let unit_key = result_arg_key(sess, ret_key, 0);
-    let unit_val = build_unit_value(sess, unit_key, span)?;
-    let ok_result = build_result_ok(sess, ret_key, unit_key, unit_val, span)?;
-    copy_to_out(sess, ret_key, out, ok_result, span)?;
-    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
-    sess.2.position_at_end(append_block);
-    let cap = load_i64(sess, cptr)?;
-    let need_grow = sess.2.build_int_compare(IntPredicate::EQ, len, cap, "").map_err(builder_fail)?;
+
+    // Grow (rehash) up front when the table is empty or already half full,
+    // so the probe below always has an empty or tombstoned slot to land in.
+    let zero = sess.0.i64_type().const_zero();
+    let len0 = load_i64(sess, lptr)?;
+    let cap0 = load_i64(sess, cptr)?;
+    let cap0_empty = sess.2.build_int_compare(IntPredicate::EQ, cap0, zero, "").map_err(builder_fail)?;
+    let len_doubled = sess.2.build_int_mul(len0, sess.0.i64_type().const_int(2, false), "").map_err(builder_fail)?;
+    let half_full = sess.2.build_int_compare(IntPredicate::SGE, len_doubled, cap0, "").map_err(builder_fail)?;
+    let need_grow = sess.2.build_or(cap0_empty, half_full, "").map_err(builder_fail)?;
     let grow_block = new_block(sess, f, "map_grow");
-    let do_append = new_block(sess, f, "map_do_append");
+    let probe_prep = new_block(sess, f, "map_probe_prep");
     let fail_block = new_block(sess, f, "map_fail");
-    sess.2.build_conditional_branch(need_grow, grow_block, do_append).map_err(builder_fail)?;
+    let after = new_block(sess, f, "map_after");
+    sess.2.build_conditional_branch(need_grow, grow_block, probe_prep).map_err(builder_fail)?;
+
     sess.2.position_at_end(grow_block);
     let old_data = load_ptr(sess, dptr)?;
-    let zero = sess.0.i64_type().const_zero();
-    let is_empty = sess.2.build_int_compare(IntPredicate::EQ, cap, zero, "").map_err(builder_fail)?;
-    let four = sess.0.i64_type().const_int(4, false);
-    let two = sess.0.i64_type().const_int(2, false);
-    let doubled = sess.2.build_int_mul(cap, two, "").map_err(builder_fail)?;
-    let newcap = sess.2.build_select(is_empty, four, doubled, "").map_err(builder_fail)?;
-    let needed = sess.2.build_int_mul(newcap.into_int_value(), stride_const, "").map_err(builder_fail)?;
-    let realloc = extern_realloc(sess);
-    let call = sess.2.build_call(realloc, &[into_meta(old_data.into()), into_meta(needed.into())], "").map_err(builder_fail)?;
+    let old_cap = load_i64(sess, cptr)?;
+    let old_cap_empty = sess.2.build_int_compare(IntPredicate::EQ, old_cap, zero, "").map_err(builder_fail)?;
+    let doubled_cap = sess.2.build_int_mul(old_cap, sess.0.i64_type().const_int(2, false), "").map_err(builder_fail)?;
+    let initial = sess.0.i64_type().const_int(INITIAL_CAPACITY, false);
+    let new_cap = sess.2.build_select(old_cap_empty, initial, doubled_cap, "").map_err(builder_fail)?.into_int_value();
+    let needed = sess.2.build_int_mul(new_cap, slot_size_const, "").map_err(builder_fail)?;
+    let malloc = extern_malloc(sess);
+    let call = sess.2.build_call(malloc, &[into_meta(needed.into())], "").map_err(builder_fail)?;
     let new_data = match call.try_as_basic_value() {
-        ValueKind::Basic(bv) => bv.into_pointer_value(),
-        ValueKind::Instruction(inst) => {
-            return Err(builder_error(span.0, span.1, span.2, &format!("internal: realloc returned void ({:?})", inst.get_opcode())));
-        }
+        ValueKind::Basic(value) => value.into_pointer_value(),
+        ValueKind::Instruction(inst) => return Err(builder_error(span.0, span.1, span.2, &format!("internal: malloc returned void ({:?})", inst.get_opcode()))),
     };
     let null_cmp = is_null_ptr(sess, new_data)?;
     let grow_ok = new_block(sess, f, "map_grow_ok");
     sess.2.build_conditional_branch(null_cmp, fail_block, grow_ok).map_err(builder_fail)?;
     sess.2.position_at_end(grow_ok);
+    let zero8 = sess.0.i8_type().const_zero();
+    sess.2.build_memset(new_data, 1, zero8, needed).map_err(builder_fail)?;
+    rehash_into(sess, f, (old_data, old_cap), (new_data, new_cap), k_key, v_key, span)?;
+    let old_null = is_null_ptr(sess, old_data)?;
+    let free_old = new_block(sess, f, "map_free_old");
+    let grow_done = new_block(sess, f, "map_grow_done");
+    sess.2.build_conditional_branch(old_null, grow_done, free_old).map_err(builder_fail)?;
+    sess.2.position_at_end(free_old);
+    sess.2.build_call(extern_free(sess), &[into_meta(old_data.into())], "").map_err(builder_fail)?;
+    sess.2.build_unconditional_branch(grow_done).map_err(builder_fail)?;
+    sess.2.position_at_end(grow_done);
     store_key(sess, dptr, new_data.into())?;
-    store_key(sess, cptr, newcap)?;
-    sess.2.build_unconditional_branch(do_append).map_err(builder_fail)?;
-    sess.2.position_at_end(do_append);
-    let data2 = load_ptr(sess, dptr)?;
-    let len2 = load_i64(sess, lptr)?;
-    let entry_off = sess.2.build_int_mul(len2, stride_const, "").map_err(builder_fail)?;
-    let keyptr2 = byte_offset(sess, data2, entry_off)?;
-    // No zero-fill needed here: `zero_fill` at every struct/enum literal's
-    // construction site (`emit_struct_lit`, `build_enum_value_into`) is
-    // what actually makes `k_key`'s padding deterministic for the memcmp
-    // scan above -- `copy_value`'s full-ABI-size memcpy carries that
-    // determinism through every copy, this one included. Zeroing the
-    // destination here instead (as this used to) would not: the memcpy
-    // immediately below fully overwrites it with the source's own bytes.
-    copy_value(sess, k_key, keyptr2, p1, span)?;
-    let voff2 = sess.2.build_int_add(entry_off, ksize_const, "").map_err(builder_fail)?;
-    let valueptr2 = byte_offset(sess, data2, voff2)?;
-    copy_value(sess, v_key, valueptr2, p2, span)?;
-    let len3 = sess.2.build_int_add(len2, one, "").map_err(builder_fail)?;
-    store_key(sess, lptr, len3.into())?;
+    store_key(sess, cptr, new_cap.into())?;
+    sess.2.build_unconditional_branch(probe_prep).map_err(builder_fail)?;
+
+    sess.2.position_at_end(probe_prep);
+    let data = load_ptr(sess, dptr)?;
+    let cap = load_i64(sess, cptr)?;
+    let hash_slot = alloca_raw(sess, sess.0.i64_type().into(), "key_hash", span)?;
+    store_key(sess, hash_slot, sess.0.i64_type().const_int(HASH_SEED, false).into())?;
+    emit_key_hash_into(sess, f, k_key, p1, hash_slot, span)?;
+    let hash = load_i64(sess, hash_slot)?;
+    let step_slot = alloca_raw(sess, sess.0.i64_type().into(), "step", span)?;
+    store_key(sess, step_slot, zero.into())?;
+    let insert_slot = alloca_raw(sess, sess.0.i64_type().into(), "insert_at", span)?;
+    let minus_one = sess.0.i64_type().const_int(u64::MAX, false);
+    store_key(sess, insert_slot, minus_one.into())?;
+    let probe_cond = new_block(sess, f, "map_probe_cond");
+    let probe_body = new_block(sess, f, "map_probe_body");
+    let exhausted = new_block(sess, f, "map_probe_exhausted");
+    sess.2.build_unconditional_branch(probe_cond).map_err(builder_fail)?;
+    sess.2.position_at_end(probe_cond);
+    let step = load_i64(sess, step_slot)?;
+    let more = sess.2.build_int_compare(IntPredicate::ULT, step, cap, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(more, probe_body, exhausted).map_err(builder_fail)?;
+    sess.2.position_at_end(probe_body);
+    let slot = probe_slot(sess, data, hash, step, cap, slot_size)?;
+    let flag_ptr = slot_gep(sess, slot_ty, slot, 0)?;
+    let flag = load_i64(sess, flag_ptr)?;
+    let empty_const = sess.0.i64_type().const_int(SLOT_EMPTY, false);
+    let occupied_const = sess.0.i64_type().const_int(SLOT_OCCUPIED, false);
+    let is_empty = sess.2.build_int_compare(IntPredicate::EQ, flag, empty_const, "").map_err(builder_fail)?;
+    let is_occupied = sess.2.build_int_compare(IntPredicate::EQ, flag, occupied_const, "").map_err(builder_fail)?;
+    let empty_case = new_block(sess, f, "map_slot_empty");
+    let occupied_case = new_block(sess, f, "map_slot_occupied");
+    let tombstone_case = new_block(sess, f, "map_slot_tombstone");
+    sess.2.build_conditional_branch(is_empty, empty_case, occupied_case).map_err(builder_fail)?;
+    let compare_block = new_block(sess, f, "map_compare");
+    let replace = new_block(sess, f, "map_replace");
+    let remember = new_block(sess, f, "map_remember");
+    let advance = new_block(sess, f, "map_advance");
+    sess.2.position_at_end(occupied_case);
+    sess.2.build_conditional_branch(is_occupied, compare_block, tombstone_case).map_err(builder_fail)?;
+    sess.2.position_at_end(compare_block);
+    let slot_key = slot_gep(sess, slot_ty, slot, 1)?;
+    let eq = emit_key_eq(sess, f, k_key, slot_key, p1, span)?;
+    sess.2.build_conditional_branch(eq, replace, advance).map_err(builder_fail)?;
+    sess.2.position_at_end(tombstone_case);
+    let have_slot = sess.2.build_int_compare(IntPredicate::EQ, load_i64(sess, insert_slot)?, minus_one, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(have_slot, remember, advance).map_err(builder_fail)?;
+    sess.2.position_at_end(remember);
+    store_key(sess, insert_slot, step.into())?;
+    sess.2.build_unconditional_branch(advance).map_err(builder_fail)?;
+    sess.2.position_at_end(empty_case);
+    let have_slot2 = sess.2.build_int_compare(IntPredicate::EQ, load_i64(sess, insert_slot)?, minus_one, "").map_err(builder_fail)?;
+    let remember2 = new_block(sess, f, "map_remember2");
+    let do_insert = new_block(sess, f, "map_insert");
+    sess.2.build_conditional_branch(have_slot2, remember2, do_insert).map_err(builder_fail)?;
+    sess.2.position_at_end(remember2);
+    store_key(sess, insert_slot, step.into())?;
+    sess.2.build_unconditional_branch(do_insert).map_err(builder_fail)?;
+    sess.2.position_at_end(advance);
+    let next_step = sess.2.build_int_add(step, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, step_slot, next_step.into())?;
+    sess.2.build_unconditional_branch(probe_cond).map_err(builder_fail)?;
+
+    sess.2.position_at_end(replace);
+    let slot_val = slot_gep(sess, slot_ty, slot, 2)?;
+    copy_value(sess, v_key, slot_val, p2, span)?;
+    let unit_key = result_arg_key(sess, ret_key, 0);
+    let unit_val = build_unit_value(sess, unit_key, span)?;
+    let ok_result = build_result_ok(sess, ret_key, unit_key, unit_val, span)?;
+    copy_to_out(sess, ret_key, out, ok_result, span)?;
+    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+
+    sess.2.position_at_end(exhausted);
+    // Defensive: a table kept below half occupancy always has an empty or
+    // tombstoned slot, so this is unreachable in practice. If it is ever
+    // reached, rehash into a larger table (which drops tombstones and
+    // guarantees room) and retry, rather than writing a slot that does not
+    // exist.
+    sess.2.build_unconditional_branch(grow_block).map_err(builder_fail)?;
+
+    sess.2.position_at_end(do_insert);
+    let at = load_i64(sess, insert_slot)?;
+    let target = probe_slot(sess, data, hash, at, cap, slot_size)?;
+    let target_flag = slot_gep(sess, slot_ty, target, 0)?;
+    let target_key = slot_gep(sess, slot_ty, target, 1)?;
+    let target_val = slot_gep(sess, slot_ty, target, 2)?;
+    copy_value(sess, k_key, target_key, p1, span)?;
+    copy_value(sess, v_key, target_val, p2, span)?;
+    store_key(sess, target_flag, occupied_const.into())?;
+    let len_now = load_i64(sess, lptr)?;
+    let len_next = sess.2.build_int_add(len_now, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, lptr, len_next.into())?;
     let unit_key2 = result_arg_key(sess, ret_key, 0);
     let unit_val2 = build_unit_value(sess, unit_key2, span)?;
     let ok_result2 = build_result_ok(sess, ret_key, unit_key2, unit_val2, span)?;
     copy_to_out(sess, ret_key, out, ok_result2, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+
     sess.2.position_at_end(fail_block);
     let err_key = result_arg_key(sess, ret_key, 1);
     let alloc_fail_tag = variant_tag_of(sess, err_key, sess.12.alloc_failed, span)?;
@@ -3308,62 +3738,62 @@ fn native_hash_map_insert<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
     Ok(out)
 }
 
+
 fn native_hash_map_get<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, locals: &Locals<'ctx>, params_list: i64, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
     let p0 = get_local(locals, 0, span)?;
     let p1 = get_local(locals, 1, span)?;
     let k_key = native_arg_key(sess, params_list, 1);
     let v_key = result_arg_key(sess, ret_key, 0);
-    let ksize = sess.3.get_abi_size(&llvm_of(sess, k_key, span)?);
-    let vsize = sess.3.get_abi_size(&llvm_of(sess, v_key, span)?);
-    let stride_const = sess.0.i64_type().const_int(ksize + vsize, false);
-    let ksize_const = sess.0.i64_type().const_int(ksize, false);
+    let slot_ty = hash_map_slot_ty(sess, k_key, v_key, span)?;
+    let slot_size = sess.3.get_abi_size(&slot_ty);
     let map_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let map_ref = load_ptr(sess, p0)?;
     let dptr = struct_gep(sess, map_key, map_ref, 0, "", span)?;
+    let cptr = struct_gep(sess, map_key, map_ref, 2, "", span)?;
     let data = load_ptr(sess, dptr)?;
-    let lptr = struct_gep(sess, map_key, map_ref, 1, "", span)?;
-    let len = load_i64(sess, lptr)?;
-    let key_base = sess.2.build_pointer_cast(p1, ptr_ty(sess), "").map_err(builder_fail)?;
-    let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "i", span)?;
-    store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
-    let scan_cond = new_block(sess, f, "g_cond");
-    let scan_body = new_block(sess, f, "g_body");
+    let cap = load_i64(sess, cptr)?;
+    let hash_slot = alloca_raw(sess, sess.0.i64_type().into(), "key_hash", span)?;
+    store_key(sess, hash_slot, sess.0.i64_type().const_int(HASH_SEED, false).into())?;
+    emit_key_hash_into(sess, f, k_key, p1, hash_slot, span)?;
+    let hash = load_i64(sess, hash_slot)?;
+    let step_slot = alloca_raw(sess, sess.0.i64_type().into(), "step", span)?;
+    store_key(sess, step_slot, sess.0.i64_type().const_zero().into())?;
+    let probe_cond = new_block(sess, f, "g_cond");
+    let probe_body = new_block(sess, f, "g_body");
     let found_block = new_block(sess, f, "g_found");
     let missing_block = new_block(sess, f, "g_missing");
     let after = new_block(sess, f, "g_after");
-    sess.2.build_unconditional_branch(scan_cond).map_err(builder_fail)?;
-    sess.2.position_at_end(scan_cond);
-    let i = load_i64(sess, i_slot)?;
-    let done = sess.2.build_int_compare(IntPredicate::ULT, i, len, "").map_err(builder_fail)?;
-    let next_i = new_block(sess, f, "g_next");
-    sess.2.build_conditional_branch(done, scan_body, missing_block).map_err(builder_fail)?;
-    sess.2.position_at_end(scan_body);
-    let off = sess.2.build_int_mul(i, stride_const, "").map_err(builder_fail)?;
-    let keyptr = byte_offset(sess, data, off)?;
-    let memcmp = extern_memcmp(sess);
-    let cmp_call = sess.2.build_call(
-        memcmp,
-        &[into_meta(keyptr.into()), into_meta(key_base.into()), into_meta(ksize_const.into())],
-        "",
-    ).map_err(builder_fail)?;
-    let cmpv = match cmp_call.try_as_basic_value() {
-        ValueKind::Basic(bv) => bv.into_int_value(),
-        ValueKind::Instruction(inst) => {
-            return Err(builder_error(span.0, span.1, span.2, &format!("internal: memcmp returned void ({:?})", inst.get_opcode())));
-        }
-    };
-    let eq = sess.2.build_int_compare(IntPredicate::EQ, cmpv, sess.0.i32_type().const_zero(), "").map_err(builder_fail)?;
-    sess.2.build_conditional_branch(eq, found_block, next_i).map_err(builder_fail)?;
-    sess.2.position_at_end(next_i);
-    let one = sess.0.i64_type().const_int(1, false);
-    let i2 = sess.2.build_int_add(i, one, "").map_err(builder_fail)?;
-    store_key(sess, i_slot, i2.into())?;
-    sess.2.build_unconditional_branch(scan_cond).map_err(builder_fail)?;
+    sess.2.build_unconditional_branch(probe_cond).map_err(builder_fail)?;
+    sess.2.position_at_end(probe_cond);
+    let step = load_i64(sess, step_slot)?;
+    let more = sess.2.build_int_compare(IntPredicate::ULT, step, cap, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(more, probe_body, missing_block).map_err(builder_fail)?;
+    sess.2.position_at_end(probe_body);
+    let slot = probe_slot(sess, data, hash, step, cap, slot_size)?;
+    let flag_ptr = slot_gep(sess, slot_ty, slot, 0)?;
+    let flag = load_i64(sess, flag_ptr)?;
+    let empty_const = sess.0.i64_type().const_int(SLOT_EMPTY, false);
+    let occupied_const = sess.0.i64_type().const_int(SLOT_OCCUPIED, false);
+    let is_empty = sess.2.build_int_compare(IntPredicate::EQ, flag, empty_const, "").map_err(builder_fail)?;
+    let is_occupied = sess.2.build_int_compare(IntPredicate::EQ, flag, occupied_const, "").map_err(builder_fail)?;
+    let occupied_or_tombstone = new_block(sess, f, "g_occupied_or_tombstone");
+    let compare_block = new_block(sess, f, "g_compare");
+    let advance = new_block(sess, f, "g_advance");
+    sess.2.build_conditional_branch(is_empty, missing_block, occupied_or_tombstone).map_err(builder_fail)?;
+    sess.2.position_at_end(occupied_or_tombstone);
+    sess.2.build_conditional_branch(is_occupied, compare_block, advance).map_err(builder_fail)?;
+    sess.2.position_at_end(compare_block);
+    let slot_key = slot_gep(sess, slot_ty, slot, 1)?;
+    let eq = emit_key_eq(sess, f, k_key, slot_key, p1, span)?;
+    sess.2.build_conditional_branch(eq, found_block, advance).map_err(builder_fail)?;
+    sess.2.position_at_end(advance);
+    let next_step = sess.2.build_int_add(step, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, step_slot, next_step.into())?;
+    sess.2.build_unconditional_branch(probe_cond).map_err(builder_fail)?;
     sess.2.position_at_end(found_block);
-    let voff = sess.2.build_int_add(off, ksize_const, "").map_err(builder_fail)?;
-    let valueptr = byte_offset(sess, data, voff)?;
+    let slot_val = slot_gep(sess, slot_ty, slot, 2)?;
     let v_val = declare_local(sess, v_key, "got", span)?;
-    copy_value(sess, v_key, v_val, valueptr, span)?;
+    copy_value(sess, v_key, v_val, slot_val, span)?;
     let ok_result = build_result_ok(sess, ret_key, v_key, v_val, span)?;
     copy_to_out(sess, ret_key, out, ok_result, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
@@ -3394,68 +3824,61 @@ fn native_hash_map_remove<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
     let p1 = get_local(locals, 1, span)?;
     let k_key = native_arg_key(sess, params_list, 1);
     let v_key = result_arg_key(sess, ret_key, 0);
-    let ksize = sess.3.get_abi_size(&llvm_of(sess, k_key, span)?);
-    let vsize = sess.3.get_abi_size(&llvm_of(sess, v_key, span)?);
-    let stride_const = sess.0.i64_type().const_int(ksize + vsize, false);
-    let ksize_const = sess.0.i64_type().const_int(ksize, false);
+    let slot_ty = hash_map_slot_ty(sess, k_key, v_key, span)?;
+    let slot_size = sess.3.get_abi_size(&slot_ty);
     let map_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let map_ref = load_ptr(sess, p0)?;
     let dptr = struct_gep(sess, map_key, map_ref, 0, "", span)?;
-    let data = load_ptr(sess, dptr)?;
     let lptr = struct_gep(sess, map_key, map_ref, 1, "", span)?;
-    let len = load_i64(sess, lptr)?;
-    let key_base = sess.2.build_pointer_cast(p1, ptr_ty(sess), "").map_err(builder_fail)?;
-    let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "i", span)?;
-    store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
-    let scan_cond = new_block(sess, f, "rm_cond");
-    let scan_body = new_block(sess, f, "rm_body");
+    let cptr = struct_gep(sess, map_key, map_ref, 2, "", span)?;
+    let data = load_ptr(sess, dptr)?;
+    let cap = load_i64(sess, cptr)?;
+    let hash_slot = alloca_raw(sess, sess.0.i64_type().into(), "key_hash", span)?;
+    store_key(sess, hash_slot, sess.0.i64_type().const_int(HASH_SEED, false).into())?;
+    emit_key_hash_into(sess, f, k_key, p1, hash_slot, span)?;
+    let hash = load_i64(sess, hash_slot)?;
+    let step_slot = alloca_raw(sess, sess.0.i64_type().into(), "step", span)?;
+    store_key(sess, step_slot, sess.0.i64_type().const_zero().into())?;
+    let probe_cond = new_block(sess, f, "rm_cond");
+    let probe_body = new_block(sess, f, "rm_body");
     let found_block = new_block(sess, f, "rm_found");
     let missing_block = new_block(sess, f, "rm_missing");
     let after = new_block(sess, f, "rm_after");
-    sess.2.build_unconditional_branch(scan_cond).map_err(builder_fail)?;
-    sess.2.position_at_end(scan_cond);
-    let i = load_i64(sess, i_slot)?;
-    let done = sess.2.build_int_compare(IntPredicate::ULT, i, len, "").map_err(builder_fail)?;
-    let next_i = new_block(sess, f, "rm_next");
-    sess.2.build_conditional_branch(done, scan_body, missing_block).map_err(builder_fail)?;
-    sess.2.position_at_end(scan_body);
-    let off = sess.2.build_int_mul(i, stride_const, "").map_err(builder_fail)?;
-    let keyptr = byte_offset(sess, data, off)?;
-    let memcmp = extern_memcmp(sess);
-    let cmp_call = sess.2.build_call(
-        memcmp,
-        &[into_meta(keyptr.into()), into_meta(key_base.into()), into_meta(ksize_const.into())],
-        "",
-    ).map_err(builder_fail)?;
-    let cmpv = match cmp_call.try_as_basic_value() {
-        ValueKind::Basic(bv) => bv.into_int_value(),
-        ValueKind::Instruction(inst) => {
-            return Err(builder_error(span.0, span.1, span.2, &format!("internal: memcmp returned void ({:?})", inst.get_opcode())));
-        }
-    };
-    let eq = sess.2.build_int_compare(IntPredicate::EQ, cmpv, sess.0.i32_type().const_zero(), "").map_err(builder_fail)?;
-    sess.2.build_conditional_branch(eq, found_block, next_i).map_err(builder_fail)?;
-    sess.2.position_at_end(next_i);
-    let one = sess.0.i64_type().const_int(1, false);
-    let i2 = sess.2.build_int_add(i, one, "").map_err(builder_fail)?;
-    store_key(sess, i_slot, i2.into())?;
-    sess.2.build_unconditional_branch(scan_cond).map_err(builder_fail)?;
+    sess.2.build_unconditional_branch(probe_cond).map_err(builder_fail)?;
+    sess.2.position_at_end(probe_cond);
+    let step = load_i64(sess, step_slot)?;
+    let more = sess.2.build_int_compare(IntPredicate::ULT, step, cap, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(more, probe_body, missing_block).map_err(builder_fail)?;
+    sess.2.position_at_end(probe_body);
+    let slot = probe_slot(sess, data, hash, step, cap, slot_size)?;
+    let flag_ptr = slot_gep(sess, slot_ty, slot, 0)?;
+    let flag = load_i64(sess, flag_ptr)?;
+    let empty_const = sess.0.i64_type().const_int(SLOT_EMPTY, false);
+    let occupied_const = sess.0.i64_type().const_int(SLOT_OCCUPIED, false);
+    let is_empty = sess.2.build_int_compare(IntPredicate::EQ, flag, empty_const, "").map_err(builder_fail)?;
+    let is_occupied = sess.2.build_int_compare(IntPredicate::EQ, flag, occupied_const, "").map_err(builder_fail)?;
+    let occupied_or_tombstone = new_block(sess, f, "rm_occupied_or_tombstone");
+    let compare_block = new_block(sess, f, "rm_compare");
+    let advance = new_block(sess, f, "rm_advance");
+    sess.2.build_conditional_branch(is_empty, missing_block, occupied_or_tombstone).map_err(builder_fail)?;
+    sess.2.position_at_end(occupied_or_tombstone);
+    sess.2.build_conditional_branch(is_occupied, compare_block, advance).map_err(builder_fail)?;
+    sess.2.position_at_end(compare_block);
+    let slot_key = slot_gep(sess, slot_ty, slot, 1)?;
+    let eq = emit_key_eq(sess, f, k_key, slot_key, p1, span)?;
+    sess.2.build_conditional_branch(eq, found_block, advance).map_err(builder_fail)?;
+    sess.2.position_at_end(advance);
+    let next_step = sess.2.build_int_add(step, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, step_slot, next_step.into())?;
+    sess.2.build_unconditional_branch(probe_cond).map_err(builder_fail)?;
     sess.2.position_at_end(found_block);
-    let voff = sess.2.build_int_add(off, ksize_const, "").map_err(builder_fail)?;
-    let valueptr = byte_offset(sess, data, voff)?;
+    let slot_val = slot_gep(sess, slot_ty, slot, 2)?;
     let v_val = declare_local(sess, v_key, "removed", span)?;
-    copy_value(sess, v_key, v_val, valueptr, span)?;
-    let i_found = load_i64(sess, i_slot)?;
-    let one_more = sess.2.build_int_add(i_found, one, "").map_err(builder_fail)?;
-    let remain = sess.2.build_int_sub(len, one_more, "").map_err(builder_fail)?;
-    let shift_bytes = sess.2.build_int_mul(remain, stride_const, "").map_err(builder_fail)?;
-    let dst_off = sess.2.build_int_mul(i_found, stride_const, "").map_err(builder_fail)?;
-    let src_off = sess.2.build_int_mul(one_more, stride_const, "").map_err(builder_fail)?;
-    let dst = byte_offset(sess, data, dst_off)?;
-    let src = byte_offset(sess, data, src_off)?;
-    sess.2.build_memmove(dst, 1, src, 1, shift_bytes).map_err(builder_fail)?;
-    let len2 = sess.2.build_int_sub(len, one, "").map_err(builder_fail)?;
-    store_key(sess, lptr, len2.into())?;
+    copy_value(sess, v_key, v_val, slot_val, span)?;
+    store_key(sess, flag_ptr, sess.0.i64_type().const_int(SLOT_TOMBSTONE, false).into())?;
+    let len_now = load_i64(sess, lptr)?;
+    let len_next = sess.2.build_int_sub(len_now, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, lptr, len_next.into())?;
     let ok_result = build_result_ok(sess, ret_key, v_key, v_val, span)?;
     copy_to_out(sess, ret_key, out, ok_result, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;

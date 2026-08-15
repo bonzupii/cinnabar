@@ -1,0 +1,72 @@
+#! Growth and rehash: the table starts empty and doubles when it would reach
+#! half occupancy. Inserting KEY_COUNT keys forces two rehashes (capacity 8
+#! at the 5th insert and 16 at the 9th), moving every already-inserted key
+#! into the larger table by re-probing it. Every key must still come back
+#! with its own value afterward -- a rehash that drops or misplaces a key
+#! shows up here as the wrong value or a KeyNotFound for a key that was
+#! inserted. Exit code 0 means every check passed.
+
+pub const KEY_COUNT: I64 = 12
+pub const VALUE_BASE: I64 = 100
+pub const MISSING_KEY: I64 = 999
+
+pub mod Collections
+  pub nat type HashMap(K, V)
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub KeyNotFound
+  end
+
+  pub nat fun hash_map_new<K, V>() impure Result(HashMap(K, V), Error)
+  pub nat fun hash_map_insert<K, V>(map: &mut HashMap(K, V), key: K, value: V) impure Result(Unit, Error)
+  pub nat fun hash_map_get<K, V>(map: &HashMap(K, V), key: K) impure Result(V, Error)
+  pub nat fun hash_map_free<K, V>(map: HashMap(K, V)) impure Unit
+end
+
+use Collections.hash_map_new
+use Collections.hash_map_insert
+use Collections.hash_map_get
+use Collections.hash_map_free
+
+fun fail_free_map(map: Collections.HashMap(I64, I64), code: I64) impure I64
+  hash_map_free(map)
+  return code
+end
+
+pub fun main() impure I64
+  val map = match hash_map_new[I64, I64]()
+    Ok(m) => m
+    Err(error) => return 1
+  end
+
+  var i: I64 = 0
+  while i < KEY_COUNT
+    match hash_map_insert(&mut map, i, i * VALUE_BASE)
+      Ok(Unit) => Unit
+      Err(error) => return fail_free_map(map, 2)
+    end
+    i = i + 1
+  end
+
+  i = 0
+  while i < KEY_COUNT
+    val got = match hash_map_get(&map, i)
+      Ok(value) => value
+      Err(error) => return fail_free_map(map, 3)
+    end
+    if got != i * VALUE_BASE
+      return fail_free_map(map, 4)
+    end
+    i = i + 1
+  end
+
+  match hash_map_get(&map, MISSING_KEY)
+    Ok(value) => return fail_free_map(map, 5)
+    Err(Collections.KeyNotFound) => Unit
+    Err(error) => return fail_free_map(map, 5)
+  end
+
+  hash_map_free(map)
+  return 0
+end

@@ -1,0 +1,136 @@
+#! Reference-typed keys: a HashMap keyed by `&[U8]` hashes and compares the
+#! slice's *contents*, never the address its data pointer holds. Two blocks
+#! filled with the same three bytes produce two views at different heap
+#! addresses; inserting one and looking up the other must find the same key,
+#! and a view over different bytes must still report KeyNotFound. A
+#! regression that compares addresses instead of contents shows up as
+#! KeyNotFound for the equal-content lookup. Exit code 0 means every check
+#! passed; a non-zero code names the check.
+
+pub mod Collections
+  pub nat type HashMap(K, V)
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub KeyNotFound
+  end
+
+  pub nat fun hash_map_new<K, V>() impure Result(HashMap(K, V), Error)
+  pub nat fun hash_map_insert<K, V>(map: &mut HashMap(K, V), key: K, value: V) impure Result(Unit, Error)
+  pub nat fun hash_map_get<K, V>(map: &HashMap(K, V), key: K) impure Result(V, Error)
+  pub nat fun hash_map_free<K, V>(map: HashMap(K, V)) impure Unit
+end
+
+pub mod Memory
+  pub nat type Block
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub AccessOutOfBounds(Usize, Usize)
+  end
+
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
+  pub nat fun deallocate(block: Block) impure Unit
+  pub nat fun write_u8(block: &Block, offset: Usize, value: U8) impure Result(Unit, Error)
+  pub nat fun block_view(block: &Block) &[U8]
+end
+
+use Collections.hash_map_new
+use Collections.hash_map_insert
+use Collections.hash_map_get
+use Collections.hash_map_free
+use Memory.allocate
+use Memory.deallocate
+use Memory.write_u8
+use Memory.block_view
+
+pub const BYTE_A: U8 = 0x41
+pub const BYTE_B: U8 = 0x42
+pub const BYTE_C: U8 = 0x43
+pub const VALUE: I64 = 111
+
+fun fail_block(block: Memory.Block, code: I64) impure I64
+  deallocate(block)
+  return code
+end
+
+fun fail_blocks(block_a: Memory.Block, block_b: Memory.Block, code: I64) impure I64
+  deallocate(block_a)
+  deallocate(block_b)
+  return code
+end
+
+fun fail_map_free(map: Collections.HashMap(&[U8], I64), block_a: Memory.Block, block_b: Memory.Block, code: I64) impure I64
+  hash_map_free(map)
+  deallocate(block_a)
+  deallocate(block_b)
+  return code
+end
+
+pub fun main() impure I64
+  val block_a = match allocate(3)
+    Ok(b) => b
+    Err(error) => return 1
+  end
+  val block_b = match allocate(3)
+    Ok(b) => b
+    Err(error) => return fail_block(block_a, 2)
+  end
+
+  match write_u8(&block_a, 0, BYTE_A)
+    Ok(Unit) => Unit
+    Err(error) => return fail_blocks(block_a, block_b, 3)
+  end
+  match write_u8(&block_a, 1, BYTE_B)
+    Ok(Unit) => Unit
+    Err(error) => return fail_blocks(block_a, block_b, 3)
+  end
+  match write_u8(&block_a, 2, BYTE_C)
+    Ok(Unit) => Unit
+    Err(error) => return fail_blocks(block_a, block_b, 3)
+  end
+  match write_u8(&block_b, 0, BYTE_A)
+    Ok(Unit) => Unit
+    Err(error) => return fail_blocks(block_a, block_b, 4)
+  end
+  match write_u8(&block_b, 1, BYTE_B)
+    Ok(Unit) => Unit
+    Err(error) => return fail_blocks(block_a, block_b, 4)
+  end
+  match write_u8(&block_b, 2, BYTE_C)
+    Ok(Unit) => Unit
+    Err(error) => return fail_blocks(block_a, block_b, 4)
+  end
+
+  val view_a = block_view(&block_a)
+  val view_b = block_view(&block_b)
+
+  val map = match hash_map_new[&[U8], I64]()
+    Ok(m) => m
+    Err(error) => return fail_blocks(block_a, block_b, 5)
+  end
+
+  match hash_map_insert(&mut map, view_a, VALUE)
+    Ok(Unit) => Unit
+    Err(error) => return fail_map_free(map, block_a, block_b, 6)
+  end
+
+  val got = match hash_map_get(&map, view_b)
+    Ok(value) => value
+    Err(error) => return fail_map_free(map, block_a, block_b, 7)
+  end
+  if got != VALUE
+    return fail_map_free(map, block_a, block_b, 8)
+  end
+
+  match hash_map_get(&map, "XYZ")
+    Ok(value) => return fail_map_free(map, block_a, block_b, 9)
+    Err(Collections.KeyNotFound) => Unit
+    Err(error) => return fail_map_free(map, block_a, block_b, 9)
+  end
+
+  hash_map_free(map)
+  deallocate(block_a)
+  deallocate(block_b)
+  return 0
+end

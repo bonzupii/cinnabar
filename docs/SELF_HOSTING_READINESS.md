@@ -272,47 +272,26 @@ That also meant the two codegen findings §2 had deferred could finally be inves
 instead of reasoned about blind. Both turned out to be genuine bugs, and one of them was bigger than
 originally scoped:
 
-**The `HashMap` correctness question was real, and the actual bug was one level deeper than
-padding.** The original flag was about non-deterministic padding bytes in struct/enum keys breaking
-`memcmp`-based key comparison. That *is* a real hole — `emit_struct_lit` and `build_enum_value_into`
-both allocated via a plain `alloca` and wrote only their declared fields, leaving inter-field padding
-(and, for enums, a smaller variant's unused payload tail) as whatever bits were already on that stack
-slot — and it's fixed: both now zero the destination before writing fields (`zero_fill`, next to
-`copy_value`), so every aggregate value has deterministic padding from the moment it exists. A
-pre-existing "fix" in `hash_map_insert` that zeroed the destination *slot* before copying a key into
-it turned out to have never worked — the very next line was a full-size `copy_value` memcpy from the
-source, which unconditionally overwrote those zeros with the source's own undetermined padding. That
-dead code is removed; the real fix has to be upstream, at construction, not at the comparison site.
+**The `HashMap` correctness question was real, and it turned out to be a design smell rather
+than a padding bug.** Round five patched the symptom twice: `zero_fill` made padding deterministic at
+construction so `memcmp`-based key comparison was at least well-defined, and a `for_native`
+pointer-passing special case stopped the System V ABI from dropping a padded struct's padding bits
+when a key crossed the native call boundary. Both were crutches around the real defect: key equality
+was `memcmp` over a key's whole ABI byte range, which smuggles bitwise identity in as structural
+equality, is wrong for reference-typed keys (it compares addresses, not contents), and is what made
+padding observable at all. That design has since been *replaced*, not patched further: `HashMap` is
+now an open-addressed hash table with field-wise structural key equality and an FNV-1a hash over the
+same fields, so padding is never read, reference-typed keys compare by contents, and `zero_fill` /
+`for_native` are deleted outright. See the fixtures `hash_map_collision.cnb`, `hash_map_resize.cnb`,
+and `hash_map_slice_key.cnb` for the collision, rehash, and reference-key coverage.
 
-But writing an actual regression fixture (`tests/fixtures/repro/hash_map_struct_key.cnb` — insert
-three struct keys, get each back, confirm a never-inserted key is reported missing) surfaced a second,
-more serious bug that padding determinism alone doesn't fix: **struct/enum arguments to native
-functions were passed across the LLVM call boundary as first-class aggregate values, not by
-pointer.** Every other struct/enum manipulation in this codegen stays in the pointer/memory domain
-(`copy_value` is a byte-level `memcpy`), but native call argument marshaling
-(`emit_call_args`/`build_fn_sig`) and native function entry (`emit_native_body`) round-tripped
-aggregate arguments through memory→value→memory — an aggregate `load`/`store` in LLVM is not
-guaranteed to preserve padding bytes the way a byte-level `memcpy` is. The result, confirmed against
-real LLVM 21: `hash_map_get` on a struct key that had just been inserted, unconditionally, 100% of the
-time, came back `KeyNotFound` — not an occasional flake, an always-broken path, because the System V
-ABI's own register classification for a padded struct silently drops what's in the padding bits when
-passing it by value. Confirmed pre-existing (reproduced identically with the padding fix alone,
-before the call-boundary fix) rather than something introduced by the padding fix itself. Fixed by
-giving native functions (only native functions — see below) a `ptr`-typed LLVM parameter for any
-aggregate-typed argument instead of the value type itself, so the argument never leaves the pointer
-domain crossing into a native body. With both fixes in place, the new fixture passes end to end
-(exit 0) against real LLVM 21, and the full fixture corpus (`repro_harness`, 6/6 groups) stays green.
-
-*Scoped deliberately to native calls.* Regular Cinnabar-to-Cinnabar function calls have the exact
-same theoretical padding-loss risk in their own by-value aggregate calling convention
-(`get_or_emit_fn`/`build_fn_sig` with `for_native: false`) — but nothing in an ordinary function body
-ever reads a struct/enum's whole raw byte range; every access goes through `struct_gep` to a specific,
-padding-agnostic field. `HashMap`'s `memcmp` scan is the only place in the entire compiler that reads
-a whole aggregate's bytes today, so it's the only place this class of bug can currently manifest.
-Widening the by-pointer fix to every function call was deliberately *not* done — it's a much larger,
-harder-to-verify-in-one-pass change to a currently-unobserved risk, exactly the kind of blind,
-ABI-sensitive change §2 previously warned against. If a future native or language feature ever needs
-whole-value struct/enum comparison outside HashMap, the same fix pattern applies there too.
+A key containing a reference to a native handle (`&String`, `&Vec(T)`, `&Memory.Block`, or any
+other `&nat type`) is rejected at compile time, and that rejection is **settled, not interim**:
+native types are opaque handles by design, and a generic hash/equality routine reaching into a
+`String`'s or `Vec`'s internal buffers would break that opacity no matter what attribute scheme is
+attached. Content-hashing for such handles, if it is ever wanted, must be an explicit hash/equality
+function that the owning module itself supplies and that callers invoke by name — never something
+generic key machinery infers by reaching past the `nat` boundary.
 
 **The under-aligned `sockaddr_in` store was also real.** `build_sockaddr_in` allocated its 16-byte
 buffer as `[16 x i8]` — 1-byte natural alignment — then stored 16-bit and 32-bit fields into it at

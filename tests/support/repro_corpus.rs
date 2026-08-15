@@ -78,6 +78,9 @@ pub(crate) const EXPECT_OK: &[(&str, i32)] = &[
     ("vec_pop_drain", 0),
     ("hash_map_remove_drain", 0),
     ("hash_map_struct_key", 0),
+    ("hash_map_collision", 0),
+    ("hash_map_resize", 0),
+    ("hash_map_slice_key", 0),
     ("native_slice_view", 0),
     ("process_spawn_wait", 0),
 ];

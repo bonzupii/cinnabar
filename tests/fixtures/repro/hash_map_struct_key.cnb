@@ -1,13 +1,13 @@
-#! HashMap's key scan compares whole keys with memcmp over the key type's
-#! full ABI size, not field by field. A struct key like Rec below has a
-#! 7-byte alignment gap between `tag` (U8, offset 0) and `id` (I64, offset
-#! 8 on a standard LP64 layout) that no field write ever touches -- so the
-#! comparison is only well-defined if every Rec value's padding bytes are
-#! deterministic from the moment the value is constructed, not just at the
-#! point a key gets copied into the map's own storage. This exercises
-#! insert/get across several struct keys, plus a lookup for a key that was
-#! never inserted, so a regression here shows up as either the wrong value
-#! coming back or a real key going unrecognized -- not just a crash.
+#! HashMap keys are compared and hashed structurally, field by field, never
+#! by their raw ABI bytes. A struct key like Rec below has a 7-byte
+#! alignment gap between `tag` (U8, offset 0) and `id` (I64, offset 8 on a
+#! standard LP64 layout) that no field write ever touches; a whole-value
+#! byte comparison would read that padding as part of the key. Field-wise
+#! comparison never reads it, so the padding bytes are irrelevant to
+#! equality. This exercises insert/get across several struct keys, plus a
+#! lookup for a key that was never inserted, so a regression here shows up
+#! as either the wrong value coming back or a real key going unrecognized
+#! -- not just a crash.
 
 pub const KEY_A_TAG: U8 = 1
 pub const KEY_A_ID: I64 = 100

@@ -76,6 +76,8 @@ const EXPECT_REJECTED: &[&str] = &[
     "vec_pop_unconsumed",
     "hash_map_undrained_free",
     "hash_map_linear_key_undrained_free",
+    "hash_map_ref_handle_key",
+    "hash_map_ref_vec_key",
     "unresolved_call_cascade",
     "non_struct_field_cascade",
     "undeclared_const_cascade",
