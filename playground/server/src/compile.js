@@ -43,22 +43,73 @@ export const MAX_DOCUMENT_BYTES = 32 * 1024 * 1024;
 /** The name a submission is compiled under, and so the name in its spans. */
 const ENTRY_NAME = "playground.cnb";
 
+/** Whether this platform has process groups a signal can address. */
+const HAS_PROCESS_GROUPS = process.platform !== "win32";
+
+/**
+ * SIGKILL `child` and every process it started.
+ *
+ * `detached` makes the child the leader of a new process group whose id is
+ * its own pid, and a negative pid signals that whole group, so a program
+ * that forked before the deadline is killed alongside its parent. Node's
+ * own `timeout` option signals the child alone, which leaves a fork holding
+ * the container's pids, cpu and memory — and holding the stdout pipe, so
+ * the callback that ends the request would not fire either.
+ *
+ * Windows has no group to signal; the direct child is all that can be
+ * reached, which is why the playground is specified to run in the Linux
+ * container rather than beside the editor.
+ */
+function killProcessTree(child) {
+  if (child.pid === undefined) {
+    return;
+  }
+  try {
+    if (HAS_PROCESS_GROUPS) {
+      process.kill(-child.pid, "SIGKILL");
+    } else {
+      child.kill("SIGKILL");
+    }
+  } catch {
+    // Nothing is rethrown. The ordinary case is `ESRCH` — the group raced
+    // the deadline and exited on its own — and this runs from a timer
+    // callback, where a throw is an uncaught exception that takes the
+    // service down. A signal that could not be delivered leaves the request
+    // to fail with its timeout, which is what the caller reports anyway.
+  }
+}
+
 /**
  * Run one command to completion, capturing both streams.
  *
  * A non-zero exit is an outcome, not a failure to run: a rejected program
  * is the most interesting thing this service reports. Only being unable to
- * start the process, or the timeout, is an error.
+ * start the process, exceeding the output cap, or the timeout is an error.
+ *
+ * The deadline is enforced here rather than by `execFile`'s `timeout`
+ * because that option kills the direct child only — see `killProcessTree`.
+ * A program that exits on its own after backgrounding something is *not*
+ * covered by this: once the child is reaped its pid may be reused, so the
+ * group is no longer safe to address, and what bounds that case is the
+ * container's `pids_limit`. As the header says, nothing in this file is a
+ * sandbox.
  */
 function run(command, args, { timeout, cwd, maxBuffer = MAX_OUTPUT_BYTES }) {
   return new Promise((resolve, reject) => {
-    execFile(
+    let timedOut = false;
+    let timer;
+    const child = execFile(
       command,
       args,
-      { timeout, cwd, maxBuffer, killSignal: "SIGKILL", encoding: "utf8" },
+      { cwd, maxBuffer, encoding: "utf8", detached: HAS_PROCESS_GROUPS },
       (error, stdout, stderr) => {
-        if (error && error.killed) {
+        clearTimeout(timer);
+        if (timedOut) {
           reject(new Error(`timed out after ${timeout} ms`));
+          return;
+        }
+        if (error && error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+          reject(new Error(`output exceeded ${maxBuffer} bytes`));
           return;
         }
         if (error && error.code === undefined && !error.killed) {
@@ -68,6 +119,10 @@ function run(command, args, { timeout, cwd, maxBuffer = MAX_OUTPUT_BYTES }) {
         resolve({ code: error ? error.code ?? 1 : 0, stdout, stderr });
       },
     );
+    timer = setTimeout(() => {
+      timedOut = true;
+      killProcessTree(child);
+    }, timeout);
   });
 }
 

@@ -50,6 +50,14 @@ outright once four are already in flight rather than queueing it. Scratch
 directories are unique per submission and removed whatever happened. Static file
 paths containing a `..` segment are refused rather than normalized.
 
+Each invocation is started in its own process group and a timed-out one is
+killed as that group, so a program that forked before the deadline does not
+leave the fork behind holding pids, memory, and the pipe the request is waiting
+on. A program that *exits on its own* after backgrounding something is not
+covered by that — once the child is reaped its pid may be reused, so the group
+is no longer safe to signal — and what bounds that case is `pids_limit` in the
+table below.
+
 **None of that constrains what a program can do once it runs.** A program that
 opens a socket, reads a file, or forks is not stopped by any of the above. What
 stops it is the runtime configuration in `compose.playground.yaml`:
