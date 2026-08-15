@@ -35,7 +35,7 @@ fi
 # carry node_modules; without them activation fails with MODULE_NOT_FOUND.
 if [ ! -d "${EXTENSION_ROOT}/node_modules" ]; then
   echo "Installing extension dependencies..."
-  (cd "${EXTENSION_ROOT}" && npm install --no-audit --no-fund)
+  (cd "${EXTENSION_ROOT}" && npm ci --no-audit --no-fund)
 fi
 
 echo "Packaging extension..."

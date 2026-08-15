@@ -1,0 +1,44 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly on Saturdays.
+    - cron: '30 3 * * 6'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (rust)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # build-mode: none analyzes the Rust source directly instead of
+      # instrumenting a real compile, so this workflow doesn't need the
+      # Nix/LLVM toolchain ci.yml uses. Trade-off (per GitHub's own docs):
+      # anything produced by build.rs codegen and only visible post-build
+      # can be missed. The pre-commit gate's Semgrep ruleset (project-
+      # specific: discard patterns, dummy spans, hardcoded registries) and
+      # CodeQL's general Rust query set are complementary, not redundant.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        with:
+          languages: rust
+          build-mode: none
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        with:
+          category: "/language:rust"
