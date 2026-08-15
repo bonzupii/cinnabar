@@ -1041,6 +1041,12 @@ fn native_opcode_of(names: &[String], full: i64) -> i64 {
     if name_is(names, full, "Net.close") {
         return NAT_NET_CLOSE;
     }
+    if name_is(names, full, "Process.spawn") {
+        return NAT_PROCESS_SPAWN;
+    }
+    if name_is(names, full, "Process.wait") {
+        return NAT_PROCESS_WAIT;
+    }
     NAT_NONE
 }
 

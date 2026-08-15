@@ -2629,6 +2629,12 @@ fn dispatch_native<'ctx>(
         native_net_close(sess, locals, ret_key, out, span)?;
         return Ok(out);
     }
+    if op == NAT_PROCESS_SPAWN {
+        return native_process_spawn(sess, f, locals, ret_key, out, span);
+    }
+    if op == NAT_PROCESS_WAIT {
+        return native_process_wait(sess, f, locals, ret_key, out, span);
+    }
     Err(builder_error(
         span.0,
         span.1,
@@ -4257,6 +4263,293 @@ fn native_net_close<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx
     let fd32 = sess.2.build_int_truncate(fd, sess.0.i32_type(), "").map_err(builder_fail)?;
     sess.2.build_call(extern_close(sess), &[into_meta(fd32.into())], "").map_err(builder_fail)?;
     build_unit_value_into(sess, ret_key, out, span)
+}
+
+/// `ENOMEM`, reported when an allocation this native needs (as opposed to
+/// the child's own memory, which the kernel is responsible for) fails.
+const ENOMEM: u64 = 12;
+
+/// Builds a fresh, NUL-terminated heap copy of a Cinnabar `String`'s bytes
+/// -- what `execve`'s `argv`/`envp` entries need and a length-prefixed
+/// `String` does not provide on its own. Unlike `nul_terminated_path`'s
+/// fixed stack buffer (fine for the one path a single `File.open` call
+/// needs), this runs once per element of a runtime-sized argv list: an
+/// `alloca` emitted inside that loop's body would be one stack slot shared
+/// by every iteration, silently aliasing every earlier argument's storage
+/// once the loop moved on. A fresh `malloc` per element is what makes each
+/// argument's buffer outlive the loop that built it.
+///
+/// Returns a null pointer if the allocation failed, exactly what
+/// `is_null_ptr` on the result reports -- the caller branches on that
+/// before ever reading the buffer, so the copy below never runs against a
+/// null destination.
+fn heap_nul_terminated<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    f: FunctionValue<'ctx>,
+    data: PointerValue<'ctx>,
+    len: IntValue<'ctx>,
+    span: (i64, i64, i64),
+) -> Result<PointerValue<'ctx>, CodegenError> {
+    let one = sess.0.i64_type().const_int(1, false);
+    let buf_size = sess.2.build_int_add(len, one, "").map_err(builder_fail)?;
+    let malloc = extern_malloc(sess);
+    let call = sess.2.build_call(malloc, &[into_meta(buf_size.into())], "").map_err(builder_fail)?;
+    let buf = match call.try_as_basic_value() {
+        ValueKind::Basic(bv) => bv.into_pointer_value(),
+        ValueKind::Instruction(inst) => {
+            return Err(builder_error(span.0, span.1, span.2, &format!("internal: malloc returned void ({:?})", inst.get_opcode())));
+        }
+    };
+    let result_slot = alloca_raw(sess, ptr_ty(sess).into(), "argbuf", span)?;
+    store_key(sess, result_slot, buf.into())?;
+    let failed = is_null_ptr(sess, buf)?;
+    let copy_block = new_block(sess, f, "argbuf_copy");
+    let after = new_block(sess, f, "argbuf_after");
+    sess.2.build_conditional_branch(failed, after, copy_block).map_err(builder_fail)?;
+    sess.2.position_at_end(copy_block);
+    sess.2.build_memcpy(buf, 1, data, 1, len).map_err(builder_fail)?;
+    let nul_off = byte_offset(sess, buf, len)?;
+    sess.2.build_store(nul_off, sess.0.i8_type().const_zero()).map_err(builder_fail)?;
+    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+    sess.2.position_at_end(after);
+    load_ptr(sess, result_slot)
+}
+
+fn native_process_spawn<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    f: FunctionValue<'ctx>,
+    locals: &Locals<'ctx>,
+    ret_key: i64,
+    out: PointerValue<'ctx>,
+    span: (i64, i64, i64),
+) -> Result<PointerValue<'ctx>, CodegenError> {
+    let p0 = get_local(locals, 0, span)?;
+    let argv_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
+    let elem_key = list_get(sess.6, key_args_of(sess, argv_key), 0);
+    let argv_ref = load_ptr(sess, p0)?;
+    let dptr = struct_gep(sess, argv_key, argv_ref, 0, "", span)?;
+    let lptr = struct_gep(sess, argv_key, argv_ref, 1, "", span)?;
+    let data = load_ptr(sess, dptr)?;
+    let len = load_i64(sess, lptr)?;
+    let esize = sess.3.get_abi_size(&llvm_of(sess, elem_key, span)?);
+    let stride_const = sess.0.i64_type().const_int(esize, false);
+
+    let merge = new_block(sess, f, "spawn_merge");
+    let enomem = sess.0.i64_type().const_int(ENOMEM, false);
+
+    // The `char*[]` execve needs: `len` entries plus one trailing NULL,
+    // eight bytes each regardless of target word size since this compiler
+    // only targets LP64 triples.
+    let one = sess.0.i64_type().const_int(1, false);
+    let eight = sess.0.i64_type().const_int(8, false);
+    let n_plus_1 = sess.2.build_int_add(len, one, "").map_err(builder_fail)?;
+    let argv_bytes = sess.2.build_int_mul(n_plus_1, eight, "").map_err(builder_fail)?;
+    let malloc = extern_malloc(sess);
+    let argv_call = sess.2.build_call(malloc, &[into_meta(argv_bytes.into())], "").map_err(builder_fail)?;
+    let argv_arr = match argv_call.try_as_basic_value() {
+        ValueKind::Basic(bv) => bv.into_pointer_value(),
+        ValueKind::Instruction(inst) => {
+            return Err(builder_error(span.0, span.1, span.2, &format!("internal: malloc returned void ({:?})", inst.get_opcode())));
+        }
+    };
+    let argv_oom = new_block(sess, f, "spawn_argv_oom");
+    let build_argv = new_block(sess, f, "spawn_build_argv");
+    let argv_null = is_null_ptr(sess, argv_arr)?;
+    sess.2.build_conditional_branch(argv_null, argv_oom, build_argv).map_err(builder_fail)?;
+    sess.2.position_at_end(argv_oom);
+    system_fault_result(sess, ret_key, out, enomem, span)?;
+    sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
+    sess.2.position_at_end(build_argv);
+
+    let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "i", span)?;
+    store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
+    let cond = new_block(sess, f, "spawn_cond");
+    let body = new_block(sess, f, "spawn_body");
+    let elem_oom = new_block(sess, f, "spawn_elem_oom");
+    let next = new_block(sess, f, "spawn_next");
+    let after_loop = new_block(sess, f, "spawn_after_loop");
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(cond);
+    let i = load_i64(sess, i_slot)?;
+    let done = sess.2.build_int_compare(IntPredicate::ULT, i, len, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(done, body, after_loop).map_err(builder_fail)?;
+    sess.2.position_at_end(body);
+    let off = sess.2.build_int_mul(i, stride_const, "").map_err(builder_fail)?;
+    let str_ptr = byte_offset(sess, data, off)?;
+    let s_data_slot = struct_gep(sess, elem_key, str_ptr, 0, "", span)?;
+    let s_data = load_ptr(sess, s_data_slot)?;
+    let s_len_slot = struct_gep(sess, elem_key, str_ptr, 1, "", span)?;
+    let s_len = load_i64(sess, s_len_slot)?;
+    let buf = heap_nul_terminated(sess, f, s_data, s_len, span)?;
+    let buf_null = is_null_ptr(sess, buf)?;
+    sess.2.build_conditional_branch(buf_null, elem_oom, next).map_err(builder_fail)?;
+    sess.2.position_at_end(elem_oom);
+    system_fault_result(sess, ret_key, out, enomem, span)?;
+    sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
+    sess.2.position_at_end(next);
+    let slot = byte_offset(sess, argv_arr, sess.2.build_int_mul(i, eight, "").map_err(builder_fail)?)?;
+    store_key(sess, slot, buf.into())?;
+    let i2 = sess.2.build_int_add(i, one, "").map_err(builder_fail)?;
+    store_key(sess, i_slot, i2.into())?;
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(after_loop);
+    let term_off = sess.2.build_int_mul(len, eight, "").map_err(builder_fail)?;
+    let term_slot = byte_offset(sess, argv_arr, term_off)?;
+    store_key(sess, term_slot, ptr_ty(sess).const_null().into())?;
+
+    // An empty environment: `Process` has no way to name a variable's
+    // value yet (`Runtime`'s environment-variable gap, tracked separately),
+    // so the honest thing is a real, explicit empty `envp` rather than
+    // silently forwarding whatever this process happened to inherit.
+    let envp_call = sess.2.build_call(malloc, &[into_meta(eight.into())], "").map_err(builder_fail)?;
+    let envp = match envp_call.try_as_basic_value() {
+        ValueKind::Basic(bv) => bv.into_pointer_value(),
+        ValueKind::Instruction(inst) => {
+            return Err(builder_error(span.0, span.1, span.2, &format!("internal: malloc returned void ({:?})", inst.get_opcode())));
+        }
+    };
+    let envp_oom = new_block(sess, f, "spawn_envp_oom");
+    let do_clone = new_block(sess, f, "spawn_do_clone");
+    let envp_null = is_null_ptr(sess, envp)?;
+    sess.2.build_conditional_branch(envp_null, envp_oom, do_clone).map_err(builder_fail)?;
+    sess.2.position_at_end(envp_oom);
+    system_fault_result(sess, ret_key, out, enomem, span)?;
+    sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
+    sess.2.position_at_end(do_clone);
+    store_key(sess, envp, ptr_ty(sess).const_null().into())?;
+
+    let sigchld = sess.0.i64_type().const_int(syscall::SIGCHLD as u64, false);
+    let zero = sess.0.i64_type().const_zero();
+    let clone_res = emit_syscall(sess, syscall::Sys::Clone, &[sigchld, zero, zero, zero, zero], span)?;
+    let is_child = sess.2.build_int_compare(IntPredicate::EQ, clone_res, zero, "").map_err(builder_fail)?;
+    let child_block = new_block(sess, f, "spawn_child");
+    let parent_check = new_block(sess, f, "spawn_parent_check");
+    sess.2.build_conditional_branch(is_child, child_block, parent_check).map_err(builder_fail)?;
+
+    sess.2.position_at_end(child_block);
+    // argv[0] is the program path: whatever the caller put first, exactly
+    // as `execve`'s own contract requires. A failed `execve` returns (it
+    // never returns on success) into a process that is still this
+    // compiler's own address space, mid-clone -- letting it fall through
+    // to the parent's own continuation would run the rest of this native,
+    // then the caller's own code, twice. `_exit` (via `exit_group`, so it
+    // cannot be caught and retried) with 127 is the shell's own convention
+    // for "the command could not be executed", not a Cinnabar-specific
+    // choice.
+    let path_ptr = load_ptr(sess, argv_arr)?;
+    let path_word = ptr_word(sess, path_ptr, span)?;
+    let argv_word = ptr_word(sess, argv_arr, span)?;
+    let envp_word = ptr_word(sess, envp, span)?;
+    // Neither call's return value is a value this block ever reads:
+    // `execve` returning at all is already the failure case, and
+    // `exit_group` never returns. `?` still propagates a genuine
+    // builder-construction error from either.
+    emit_syscall(sess, syscall::Sys::Execve, &[path_word, argv_word, envp_word], span)?;
+    let code127 = sess.0.i64_type().const_int(127, false);
+    emit_syscall(sess, syscall::Sys::ExitGroup, &[code127], span)?;
+    // Not `unreachable`: that the kernel never returns from `exit_group`
+    // is a fact about the kernel, not something this compiler's type
+    // checker proved the way it proves a `match` exhaustive -- exactly the
+    // "cannot happen with nothing proving it" `undefined_behaviour.rs`
+    // exists to catch. If it somehow did return, falling through into the
+    // parent's own continuation would run the rest of this native, then
+    // the caller's own code, a second time in what only started as the
+    // child; spinning in place is the honest terminator for a branch this
+    // compiler cannot actually rule out.
+    let trap = new_block(sess, f, "spawn_child_trap");
+    sess.2.build_unconditional_branch(trap).map_err(builder_fail)?;
+    sess.2.position_at_end(trap);
+    sess.2.build_unconditional_branch(trap).map_err(builder_fail)?;
+
+    sess.2.position_at_end(parent_check);
+    // Only the child ever needed `argv_arr`/`envp` past this point -- it
+    // either replaced its own image with them (execve succeeding) or
+    // exited before returning here (execve failing). The parent's own copy
+    // of every buffer this native built, from here on, is a leak: freed
+    // once, right after `clone`, regardless of whether `clone` itself
+    // succeeded (the buffers still exist even if spawning did not).
+    let free = extern_free(sess);
+    let free_i_slot = alloca_raw(sess, sess.0.i64_type().into(), "free_i", span)?;
+    store_key(sess, free_i_slot, sess.0.i64_type().const_zero().into())?;
+    let free_cond = new_block(sess, f, "spawn_free_cond");
+    let free_body = new_block(sess, f, "spawn_free_body");
+    let free_after = new_block(sess, f, "spawn_free_after");
+    sess.2.build_unconditional_branch(free_cond).map_err(builder_fail)?;
+    sess.2.position_at_end(free_cond);
+    let free_i = load_i64(sess, free_i_slot)?;
+    let free_more = sess.2.build_int_compare(IntPredicate::ULT, free_i, len, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(free_more, free_body, free_after).map_err(builder_fail)?;
+    sess.2.position_at_end(free_body);
+    let entry_off = sess.2.build_int_mul(free_i, eight, "").map_err(builder_fail)?;
+    let entry_slot = byte_offset(sess, argv_arr, entry_off)?;
+    let entry_ptr = load_ptr(sess, entry_slot)?;
+    sess.2.build_call(free, &[into_meta(entry_ptr.into())], "").map_err(builder_fail)?;
+    let free_i2 = sess.2.build_int_add(free_i, one, "").map_err(builder_fail)?;
+    store_key(sess, free_i_slot, free_i2.into())?;
+    sess.2.build_unconditional_branch(free_cond).map_err(builder_fail)?;
+    sess.2.position_at_end(free_after);
+    sess.2.build_call(free, &[into_meta(argv_arr.into())], "").map_err(builder_fail)?;
+    sess.2.build_call(free, &[into_meta(envp.into())], "").map_err(builder_fail)?;
+
+    let spawned = sess.2.build_int_compare(IntPredicate::SGT, clone_res, zero, "").map_err(builder_fail)?;
+    let parent_ok = new_block(sess, f, "spawn_parent_ok");
+    let clone_failed = new_block(sess, f, "spawn_clone_failed");
+    sess.2.build_conditional_branch(spawned, parent_ok, clone_failed).map_err(builder_fail)?;
+    sess.2.position_at_end(clone_failed);
+    let code = errno_of(sess, clone_res, span)?;
+    system_fault_result(sess, ret_key, out, code, span)?;
+    sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
+    sess.2.position_at_end(parent_ok);
+    let child_key = result_arg_key(sess, ret_key, 0);
+    let child_val = declare_local(sess, child_key, "child", span)?;
+    init_native_handle(sess, child_key, child_val, span)?;
+    let pid_slot = struct_gep(sess, child_key, child_val, 1, "", span)?;
+    store_key(sess, pid_slot, clone_res.into())?;
+    let ok_result = build_result_ok(sess, ret_key, child_key, child_val, span)?;
+    copy_to_out(sess, ret_key, out, ok_result, span)?;
+    sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
+
+    sess.2.position_at_end(merge);
+    Ok(out)
+}
+
+fn native_process_wait<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    f: FunctionValue<'ctx>,
+    locals: &Locals<'ctx>,
+    ret_key: i64,
+    out: PointerValue<'ctx>,
+    span: (i64, i64, i64),
+) -> Result<PointerValue<'ctx>, CodegenError> {
+    let p0 = get_local(locals, 0, span)?;
+    let child_key = get_local_key(locals, 0, span)?;
+    let pid_slot = struct_gep(sess, child_key, p0, 1, "", span)?;
+    let pid = load_i64(sess, pid_slot)?;
+    let status_slot = alloca_raw(sess, sess.0.i32_type().into(), "status", span)?;
+    let status_word = ptr_word(sess, status_slot, span)?;
+    let zero = sess.0.i64_type().const_zero();
+    let raw = emit_syscall(sess, syscall::Sys::Wait4, &[pid, status_word, zero, zero], span)?;
+    let join = syscall_result_branch(sess, f, ret_key, out, raw, span)?;
+    // The kernel packs the child's status as `((exit_code & 0xff) << 8) |
+    // termination_signal`: a clean exit has the low byte zero. Reading a
+    // signaled child's exit code as if it had one is the one case this
+    // first slice does not distinguish -- the low byte can be checked by a
+    // caller that cares, since `wait`'s own contract is "the encoded status
+    // word `wait4` returned", not a codegen-imposed simplification of it.
+    let status = sess.2.build_load(sess.0.i32_type(), status_slot, "").map_err(builder_fail)?.into_int_value();
+    let status64 = sess.2.build_int_z_extend(status, sess.0.i64_type(), "").map_err(builder_fail)?;
+    let eight = sess.0.i64_type().const_int(8, false);
+    let shifted = sess.2.build_right_shift(status64, eight, false, "").map_err(builder_fail)?;
+    let mask = sess.0.i64_type().const_int(0xff, false);
+    let exit_code = sess.2.build_and(shifted, mask, "").map_err(builder_fail)?;
+    let code_key = result_arg_key(sess, ret_key, 0);
+    let code_val = declare_local(sess, code_key, "code", span)?;
+    store_key(sess, code_val, exit_code.into())?;
+    let ok_result = build_result_ok(sess, ret_key, code_key, code_val, span)?;
+    copy_to_out(sess, ret_key, out, ok_result, span)?;
+    sess.2.build_unconditional_branch(join).map_err(builder_fail)?;
+    sess.2.position_at_end(join);
+    Ok(out)
 }
 
 fn emit_cont_step<'ctx>(

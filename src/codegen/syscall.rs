@@ -4,9 +4,9 @@
 //! a libc *is* present — `Collections` uses its allocator, and `Net` uses
 //! its socket wrappers, because an allocator and a `sockaddr` marshaller
 //! are real code rather than thin syscall shims. The `Memory`, `Terminal`,
-//! and `File` surfaces do not go through it. They issue the kernel entry
-//! point directly, which is what makes those three surfaces auditable end
-//! to end: the instruction that leaves user space is visible in the
+//! `File`, and `Process` surfaces do not go through it. They issue the
+//! kernel entry point directly, which is what makes those surfaces auditable
+//! end to end: the instruction that leaves user space is visible in the
 //! emitted IR, with nothing between the Cinnabar declaration and the
 //! kernel.
 //!
@@ -64,10 +64,21 @@ pub enum Sys {
     Close,
     Mmap,
     Munmap,
+    Clone,
+    Execve,
+    Wait4,
+    ExitGroup,
 }
 
 /// `openat`'s "relative to the current working directory" sentinel.
 pub const AT_FDCWD: i64 = -100;
+
+/// `SIGCHLD`, the flag `clone` needs to behave like `fork` -- without it the
+/// new process is still created, but the parent is never notified when it
+/// exits and `wait4` on its pid blocks forever. Every other `clone` flag is
+/// left at 0: no shared memory, no shared file-descriptor table, a genuinely
+/// separate address space, exactly what `fork` gives.
+pub const SIGCHLD: i64 = 17;
 
 /// `mmap` protection bits: readable and writable.
 pub const PROT_READ_WRITE: i64 = 0x1 | 0x2;
@@ -121,7 +132,11 @@ pub fn number(arch: Arch, call: Sys) -> u64 {
             Sys::Close => 3,
             Sys::Mmap => 9,
             Sys::Munmap => 11,
+            Sys::Clone => 56,
+            Sys::Execve => 59,
+            Sys::Wait4 => 61,
             Sys::OpenAt => 257,
+            Sys::ExitGroup => 231,
         },
         Arch::AArch64 => match call {
             Sys::OpenAt => 56,
@@ -129,7 +144,11 @@ pub fn number(arch: Arch, call: Sys) -> u64 {
             Sys::Read => 63,
             Sys::Write => 64,
             Sys::Munmap => 215,
+            Sys::Clone => 220,
+            Sys::Execve => 221,
             Sys::Mmap => 222,
+            Sys::Wait4 => 260,
+            Sys::ExitGroup => 94,
         },
     }
 }
@@ -268,7 +287,11 @@ mod tests {
         assert_eq!(number(Arch::X86_64, Sys::Close), 3);
         assert_eq!(number(Arch::X86_64, Sys::Mmap), 9);
         assert_eq!(number(Arch::X86_64, Sys::Munmap), 11);
+        assert_eq!(number(Arch::X86_64, Sys::Clone), 56);
+        assert_eq!(number(Arch::X86_64, Sys::Execve), 59);
+        assert_eq!(number(Arch::X86_64, Sys::Wait4), 61);
         assert_eq!(number(Arch::X86_64, Sys::OpenAt), 257);
+        assert_eq!(number(Arch::X86_64, Sys::ExitGroup), 231);
     }
 
     #[test]
@@ -278,7 +301,11 @@ mod tests {
         assert_eq!(number(Arch::AArch64, Sys::Read), 63);
         assert_eq!(number(Arch::AArch64, Sys::Write), 64);
         assert_eq!(number(Arch::AArch64, Sys::Munmap), 215);
+        assert_eq!(number(Arch::AArch64, Sys::Clone), 220);
+        assert_eq!(number(Arch::AArch64, Sys::Execve), 221);
         assert_eq!(number(Arch::AArch64, Sys::Mmap), 222);
+        assert_eq!(number(Arch::AArch64, Sys::Wait4), 260);
+        assert_eq!(number(Arch::AArch64, Sys::ExitGroup), 94);
     }
 
     // Every operation must have a distinct number within an architecture:
@@ -286,7 +313,18 @@ mod tests {
     // another's kernel entry point.
     #[test]
     fn numbers_are_distinct_within_an_architecture() {
-        let calls = [Sys::Read, Sys::Write, Sys::OpenAt, Sys::Close, Sys::Mmap, Sys::Munmap];
+        let calls = [
+            Sys::Read,
+            Sys::Write,
+            Sys::OpenAt,
+            Sys::Close,
+            Sys::Mmap,
+            Sys::Munmap,
+            Sys::Clone,
+            Sys::Execve,
+            Sys::Wait4,
+            Sys::ExitGroup,
+        ];
         for arch in [Arch::X86_64, Arch::AArch64] {
             let mut seen: Vec<u64> = Vec::new();
             for call in calls {

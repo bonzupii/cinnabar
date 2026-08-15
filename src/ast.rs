@@ -669,6 +669,8 @@ pub const NAT_FILE_WRITE: i64 = 32;
 pub const NAT_FILE_CLOSE: i64 = 33;
 pub const NAT_TERM_READ_LINE: i64 = 34;
 pub const NAT_RUNTIME_ARGS: i64 = 35;
+pub const NAT_PROCESS_SPAWN: i64 = 37;
+pub const NAT_PROCESS_WAIT: i64 = 38;
 
 /// The source spelling of a binary operator opcode.  Every stage that names
 /// an operator in a diagnostic reads it from here, so a message from the
