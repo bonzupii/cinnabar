@@ -2,10 +2,18 @@
 //
 // `cinnabar build`, `run`, `check`, and `test` are the whole project
 // surface, and each one already discovers its own manifest by walking
-// upward from the path it is given. So a task is nothing more than a
-// command line plus the directory to run it in, and this module builds
-// those without importing `vscode` — which is what lets the selection rules
-// be tested without an editor.
+// upward from the path it is given. So a spec is an executable, an argument
+// vector, and the directory to run it in, and this module builds those
+// without importing `vscode` — which is what lets the selection rules be
+// tested without an editor.
+//
+// A spec carries `args` as a vector and never a joined command line. Both
+// values in it come from the workspace — the root is a discovered directory
+// path and the executable is `cinnabar.compiler.path` — and a joined string
+// hands whichever shell the terminal opens a chance to read `;`, `$(...)`
+// or a backtick in either of them as syntax. `extension.js` passes the
+// vector to `ProcessExecution`, which starts the binary directly, so no
+// shell parses these strings and no quoting rule has to be right.
 
 const path = require("node:path");
 
@@ -87,29 +95,16 @@ function createTaskSpecs({ workspaceFolders, executable, pathExists }) {
         // Every project command takes the path it should act on. Passing the
         // root explicitly means the task does not depend on where the
         // terminal happened to start.
-        args: [...template.args, root],
-        commandLine: quoteCommandLine(command, [...template.args, root])
+        args: [...template.args, root]
       });
     }
   }
   return specs;
 }
 
-/**
- * A shell command line for `command` and `args`.
- *
- * Only arguments containing whitespace are quoted, so the common case reads
- * exactly as a person would have typed it into the terminal the task opens.
- */
-function quoteCommandLine(command, args) {
-  const quote = (value) => (/\s/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value);
-  return [command, ...args].map(quote).join(" ");
-}
-
 module.exports = {
   MANIFEST_FILE,
   TASK_TEMPLATES,
   findProjectRoot,
-  createTaskSpecs,
-  quoteCommandLine
+  createTaskSpecs
 };

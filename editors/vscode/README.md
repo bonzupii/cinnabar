@@ -70,6 +70,11 @@ contribute one set of tasks, not two.
 diagnostics with real spans, and a matcher scraping the same errors out of terminal text would
 double every one of them in the Problems panel.
 
+A task runs the compiler directly, as an executable and an argument vector, and never as a command
+line handed to a shell. Both the project root and `cinnabar.compiler.path` come from the workspace,
+and a `;`, `$(...)`, or backtick in either would otherwise be read as syntax by whichever shell the
+task's terminal opens.
+
 ## Snippets
 
 `snippets/cinnabar.json` covers the declaration and control-flow shapes (`fun`, `pubfun`, `natfun`,

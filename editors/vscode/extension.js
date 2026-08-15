@@ -188,7 +188,10 @@ function provideTasks() {
       vscode.TaskScope.Workspace,
       spec.name,
       "cinnabar",
-      new vscode.ShellExecution(spec.commandLine, { cwd: spec.cwd })
+      // ProcessExecution, not ShellExecution: the executable and the project
+      // root both come from the workspace, and a shell would read any
+      // metacharacter in either as syntax rather than as part of a path.
+      new vscode.ProcessExecution(spec.command, spec.args, { cwd: spec.cwd })
     );
     task.detail = spec.detail;
     return task;

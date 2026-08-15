@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const path = require("node:path");
-const { TASK_TEMPLATES, findProjectRoot, createTaskSpecs, quoteCommandLine } = require("../tasks");
+const { TASK_TEMPLATES, findProjectRoot, createTaskSpecs } = require("../tasks");
 
 // A fake filesystem: the set of paths that exist, so the selection rules can
 // be exercised without writing manifests to disk.
@@ -79,15 +79,40 @@ test("the configured executable is the one the task runs", () => {
     pathExists: existsIn(["/work/project/build.cnb"])
   });
   assert.ok(specs.every((spec) => spec.command === "/opt/cinnabar/bin/cinnabar"));
-  assert.ok(specs.every((spec) => spec.commandLine.startsWith("/opt/cinnabar/bin/cinnabar ")));
 });
 
-test("only arguments with whitespace are quoted", () => {
-  assert.strictEqual(quoteCommandLine("cinnabar", ["build", "/work/project"]), "cinnabar build /work/project");
-  assert.strictEqual(
-    quoteCommandLine("cinnabar", ["build", "/work/my project"]),
-    'cinnabar build "/work/my project"'
-  );
+test("a spec carries an argument vector and no joined command line", () => {
+  // The vector goes to ProcessExecution, which starts the binary directly.
+  // A joined string would be handed to a shell, and both the root and the
+  // executable below are workspace-controlled.
+  const specs = createTaskSpecs({
+    workspaceFolders: ["/work/project"],
+    executable: "cinnabar",
+    pathExists: existsIn(["/work/project/build.cnb"])
+  });
+  for (const spec of specs) {
+    assert.ok(Array.isArray(spec.args));
+    assert.strictEqual(spec.args.at(-1), path.resolve("/work/project"));
+    assert.ok(!Object.prototype.hasOwnProperty.call(spec, "commandLine"));
+  }
+});
+
+test("shell metacharacters in a path stay one argument", () => {
+  const root = "/work/pr;touch $(whoami)`id`";
+  const specs = createTaskSpecs({
+    workspaceFolders: [root],
+    executable: "/opt/bin/cinnabar;rm -rf /",
+    pathExists: existsIn([`${root}/build.cnb`])
+  });
+  assert.ok(specs.length > 0);
+  for (const spec of specs) {
+    // Each stays exactly one element, metacharacters intact: nothing splits
+    // them on `;` or expands `$(...)`, because nothing between here and
+    // execve is a shell.
+    assert.strictEqual(spec.command, "/opt/bin/cinnabar;rm -rf /");
+    assert.strictEqual(spec.args.at(-1), path.resolve(root));
+    assert.ok(spec.args.at(-1).includes(";touch $(whoami)`id`"));
+  }
 });
 
 test("no template declares a problem matcher", () => {
