@@ -92,7 +92,10 @@ parses.
   launches the installed `cinnabar-lsp` command from `PATH`.
 - `installed`: always launches `cinnabar-lsp` from `PATH`.
 - `path`: launches the executable configured by `cinnabar.server.path` and reports an error if it
-  is empty.
+  is empty. An absolute value is launched as given. A relative one names a path in the repository,
+  so it resolves against the nearest workspace ancestor containing `flake.nix` and `Cargo.toml`,
+  which also becomes the child process working directory — spawning it as written would resolve it
+  against whatever directory the extension host started in.
 - `docker-compose`: finds the nearest workspace ancestor containing `compose.dev.yaml` and
   `container/local/main/worktree.env`, sets that directory as the child process working directory,
   and launches:
@@ -101,10 +104,16 @@ parses.
   docker compose --env-file container/local/main/worktree.env -f compose.dev.yaml exec -T dev ./target/debug/cinnabar-lsp
   ```
 
-The repository workspace uses `docker-compose` mode in `.vscode/settings.json`, so it contains no
-machine-specific executable or temporary wrapper. Before using that mode, start the development
-container and ensure `container/local/main/worktree.env` identifies the checkout as required by
-the Compose file.
+The repository workspace uses `path` mode in `.vscode/settings.json`, with `cinnabar.server.path`
+set to `container/bin/cinnabar-lsp-nix`. Being relative, that value is machine-independent: it
+resolves against whichever checkout the window has open. The wrapper rebuilds the server and runs
+it through `nix develop`, so the mode needs no container despite the file's location — it is what
+a WSL2 or native-Linux checkout uses.
+
+`docker-compose` mode is selectable but is not the default, because it requires
+`container/local/<cache-key>/worktree.env` — a file `configure-worktree.sh` generates and
+`.gitignore` excludes, so a fresh clone does not have one. Before selecting it, start the
+development container and run that helper.
 
 For local development, run `npm install` in this directory and launch the extension through the
 VS Code Extension Development Host. Run `npm test` to exercise launch-plan selection and

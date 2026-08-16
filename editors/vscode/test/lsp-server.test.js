@@ -149,10 +149,11 @@ test("the language server the launcher names answers a real LSP session", async 
   });
   t.after(() => child.kill());
 
-  // The path can exist and still not be runnable here: the repository is
-  // developed from Windows against a Linux dev container, so target/debug can
-  // hold an ELF binary the host cannot exec.  That is a "run this in the
-  // container" signal, not a failing assertion.
+  // The path can exist and still not be runnable here: a Windows host shares a
+  // checkout with a Linux toolchain -- a WSL2 distro by default, the dev
+  // container otherwise -- so target/debug can hold an ELF binary the host
+  // cannot exec.  That is a "run this where the toolchain is" signal, not a
+  // failing assertion.
   const spawnError = await new Promise((resolve) => {
     child.once("spawn", () => resolve(null));
     child.once("error", (error) => resolve(error));
@@ -161,7 +162,7 @@ test("the language server the launcher names answers a real LSP session", async 
     if (["ENOENT", "EACCES", "ENOEXEC"].includes(spawnError.code)) {
       t.skip(
         `${server.command} is not runnable on ${process.platform} (${spawnError.code}); ` +
-          "run these tests inside the dev container"
+          "run these tests where the Linux toolchain is (a WSL2 distro or the dev container)"
       );
       return;
     }
