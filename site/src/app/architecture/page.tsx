@@ -4,7 +4,7 @@ import SectionHeading from "@/components/SectionHeading";
 import Markdown, { InlineMarkdown } from "@/components/Markdown";
 import Reveal from "@/components/Reveal";
 import { Callout, MarkedList, Panel, SourceNote } from "@/components/ui";
-import { BuildIcon, LinearIcon, StaticLinkIcon } from "@/components/brand/icons";
+import { BuildIcon, StaticLinkIcon } from "@/components/brand/icons";
 import { ARENAS, STAGES } from "@/content/pipeline";
 import { CONTAINER } from "@/lib/constants";
 import { ogImageMetadata } from "@/lib/og-image";
@@ -20,12 +20,17 @@ export default async function ArchitecturePage() {
     <PageHeader section="Architecture" note="Anchored chapters from ARCHITECTURE.md" icon={BuildIcon} title="One fixed pipeline." lede={content.block("lede")} />
     <section id="pipeline" className={`${CONTAINER} scroll-mt-24 pt-16`}>
       <SectionHeading title="The pipeline" note={content.block("stages-note")} icon={BuildIcon} />
-      <ol className="rule-grid mt-11 grid list-none sm:grid-cols-2 lg:grid-cols-4">
-        {STAGES.map((stage, index) => <Reveal key={stage.name} as="li" delay={index * 0.04} className="bg-panel hover:bg-panel-raised panel-hover flex flex-col gap-4 p-7">
-          <span className="text-cinnabar-text font-mono text-[10px] tracking-[0.16em]">{stage.index}</span><h3 className="text-text text-[17px] font-bold">{stage.name}</h3><span className="text-label font-mono text-[11px] break-all">{stage.file}</span><div className="text-secondary text-[14.5px] leading-[1.65]"><InlineMarkdown>{content.block(`stage-${stage.slug}`)}</InlineMarkdown></div>
-        </Reveal>)}
-        <Reveal as="li" className="bg-ground flex flex-col justify-center gap-4 p-7"><LinearIcon size={22} className="text-cinnabar-text" /><InlineMarkdown>{content.block("stages-halt")}</InlineMarkdown></Reveal>
-      </ol>
+      <figure className="rule-grid mt-11">
+        <figcaption className="text-label bg-panel px-7 py-4 font-mono text-[10px] tracking-[0.16em] uppercase">
+          Compiler pipeline diagram
+        </figcaption>
+        <ol className="grid list-none">
+          {STAGES.map((stage, index) => <Reveal key={stage.name} as="li" delay={index * 0.04} className="bg-panel hover:bg-panel-raised panel-hover grid gap-3 p-7 sm:grid-cols-[4rem_9rem_minmax(0,1fr)] sm:items-start sm:gap-6">
+            <span className="text-cinnabar-text font-mono text-[10px] tracking-[0.16em]">{stage.index}</span><div><h3 className="text-text text-[17px] font-bold">{stage.name}</h3><span className="text-label mt-1 block font-mono text-[11px] break-all">{stage.file}</span></div><div className="text-secondary text-[14.5px] leading-[1.65]"><InlineMarkdown>{content.block(`stage-${stage.slug}`)}</InlineMarkdown></div>
+          </Reveal>)}
+          <Reveal as="li" className="bg-ground grid gap-3 p-7 sm:grid-cols-[4rem_9rem_minmax(0,1fr)] sm:gap-6"><span className="text-cinnabar-text font-mono text-[10px] tracking-[0.16em]">HALT</span><span className="text-text font-bold">On error</span><InlineMarkdown>{content.block("stages-halt")}</InlineMarkdown></Reveal>
+        </ol>
+      </figure>
     </section>
     <section id="representation" className={`${CONTAINER} scroll-mt-24 pt-24`}>
       <SectionHeading title="The core representation" note="Struct of arrays, not a tree" icon={StaticLinkIcon} />

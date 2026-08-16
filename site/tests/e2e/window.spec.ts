@@ -152,7 +152,7 @@ test("every window's body reaches the bottom inner edge of its frame", async ({
     const gaps = await page.evaluate((selector) => {
       return Array.from(document.querySelectorAll<HTMLElement>(selector)).map(
         (frame) => {
-          const body = frame.querySelector<HTMLElement>("pre");
+          const body = frame.lastElementChild as HTMLElement | null;
           if (!body) return { gap: 0, text: "no body" };
           const border = parseFloat(getComputedStyle(frame).borderBottomWidth);
           return {

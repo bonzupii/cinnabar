@@ -13,9 +13,17 @@
 //! exercises, fuzz replay and minimization, the formatter, and the
 //! inspection flags all dispatch from this file into the library.
 //!
+//! `--emit-json` routes each exit through `emit_report` instead of the
+//! ariadne reporter: the arena document under `--dump-ast` and
+//! `--dump-typed-ast`, the layout document under `--print-layout`, and
+//! otherwise the diagnostic envelope, whose list is empty on a run that
+//! produced no diagnostics. Exactly one document reaches stdout per
+//! invocation.
+//!
 //! **Invariants:**
 //! - This is the only place a typed error may become a string. Every stage
-//!   below carries its error, with a real span, until it arrives here.
+//!   below carries its error, with a real span, until it arrives here —
+//!   including on the way into the structured envelope.
 //! - `NO_FILE` renders as a genuinely source-less error rather than as a
 //!   location. A fact about a compiler-synthesized wrapper has no line in
 //!   the user's program to point at, and inventing one would be a lie the
@@ -30,7 +38,7 @@ use clap::builder::PathBufValueParser;
 use clap::{Arg, ArgAction, Command as ClapCommand};
 use cinnabar::codegen::error::codegen_error_message;
 use cinnabar::codegen::{compile_and_link, compile_to_ir, compile_to_object};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -41,6 +49,7 @@ struct CliArgs {
     dump_typed_ast: bool,
     print_layout: bool,
     explain_borrow: Option<String>,
+    emit_json: bool,
     run: bool,
     opt_level: String,
     emit_llvm: bool,
@@ -48,11 +57,15 @@ struct CliArgs {
     format_check: Option<bool>,
     check_only: bool,
     instrumented: bool,
+    static_link: bool,
+    target: String,
     tool_command: Option<ToolCommand>,
 }
 
 enum ToolCommand {
-    Doc(Option<PathBuf>),
+    // The output directory, and whether the caller wants the document
+    // rather than the page.
+    Doc(Option<PathBuf>, bool),
     Burn(String),
     Build(String),
     Run(String),
@@ -68,6 +81,7 @@ enum ToolCommand {
     FuzzMinimize,
     Soundness,
     Playground(String),
+    Snapshots(String, bool),
 }
 
 fn project_path_arg() -> Arg {
@@ -85,7 +99,7 @@ fn parse_args() -> Option<CliArgs> {
             "Cinnabar compiler.\n\n\
              There are two ways to invoke it. Given a source FILE, it runs the whole \
              pipeline — lex, parse, load modules, resolve, typecheck, borrow-check, \
-             generate code, link — and writes a static binary. Given a subcommand, it \
+             generate code, link — and writes a dynamically linked binary by default. Given a subcommand, it \
              acts on the project whose 'build.cnb' manifest is discovered by walking \
              upward from the supplied path.\n\n\
              Diagnostics are errors only. There is no warning severity, no suppression \
@@ -94,7 +108,7 @@ fn parse_args() -> Option<CliArgs> {
         )
         .after_help(
             "Examples:\n  \
-             cinnabar main.cnb -o main        Compile one file to a static binary\n  \
+             cinnabar main.cnb -o main        Compile one file to a native binary\n  \
              cinnabar main.cnb --run          Compile it and execute the result\n  \
              cinnabar build                   Build the project containing the current directory\n  \
              cinnabar test                    Run the project's test suite\n\n\
@@ -139,6 +153,13 @@ fn parse_args() -> Option<CliArgs> {
                 .help("Explain borrow/linearity errors with secondary labels, or emit structured diagnostics with --explain-borrow=json"),
         )
         .arg(
+            Arg::new("emit_json")
+                .long("emit-json")
+                .action(ArgAction::SetTrue)
+                .conflicts_with("run")
+                .help("Write this invocation's result to standard output as one JSON document: the arena under --dump-ast/--dump-typed-ast, the layout report under --print-layout, and otherwise the diagnostics, empty when the program is accepted"),
+        )
+        .arg(
             Arg::new("print_layout")
                 .long("print-layout")
                 .action(ArgAction::SetTrue)
@@ -181,6 +202,14 @@ fn parse_args() -> Option<CliArgs> {
                 .conflicts_with_all(["dump_ast", "dump_typed_ast", "print_layout", "emit_llvm", "emit_obj", "check_only"])
                 .help("Link dynamically against the host libc so a memory checker can interpose; test infrastructure, never a release artifact"),
         )
+        .arg(
+            Arg::new("static")
+                .long("static")
+                .action(ArgAction::SetTrue)
+                .conflicts_with_all(["instrumented", "emit_llvm", "emit_obj", "check_only"])
+                .help("Link with the embedded musl runtime (Linux builds with the static-musl feature only)"),
+        )
+        .arg(target_arg())
         .arg(
             Arg::new("check_only")
                 .long("check-only")
@@ -240,6 +269,12 @@ fn parse_args() -> Option<CliArgs> {
                         .value_name("DIR")
                         .value_parser(PathBufValueParser::new())
                         .help("Documentation output directory (default: target/doc)"),
+                )
+                .arg(
+                    Arg::new("doc_emit_json")
+                        .long("emit-json")
+                        .action(ArgAction::SetTrue)
+                        .help("Write the public API as one JSON document on standard output instead of rendering a page"),
                 ),
         )
         .subcommand(
@@ -512,6 +547,39 @@ fn parse_args() -> Option<CliArgs> {
                 ),
         )
         .subcommand(
+            ClapCommand::new("snapshots")
+                .about("Review diagnostic snapshot changes one fixture at a time")
+                .long_about(
+                    "Serve a local page showing every rejection test in the project \
+                     beside the diagnostic its '.stderr' sidecar records and the one \
+                     the compiler prints now.\n\n\
+                     'cinnabar test --update-snapshots' accepts every changed snapshot \
+                     at once, which is the wrong granularity for the change that most \
+                     often produces them: improving a diagnostic rewrites many \
+                     snapshots, most of them better and one of them by accident. Here \
+                     each fixture is accepted or left alone on its own, and accepting \
+                     writes that one sidecar.\n\n\
+                     The comparison shown is the one 'cinnabar test' makes, not a \
+                     second one. It binds a loopback address only: it writes files in \
+                     your project on request.\n\n\
+                     With --emit-json the same report is written to standard output \
+                     instead of served, for a reviewer that is not a browser.",
+                )
+                .arg(project_path_arg())
+                .arg(
+                    Arg::new("address")
+                        .long("address")
+                        .default_value("127.0.0.1:7880")
+                        .help("Loopback address to bind"),
+                )
+                .arg(
+                    Arg::new("snapshots_emit_json")
+                        .long("emit-json")
+                        .action(ArgAction::SetTrue)
+                        .help("Write the report to standard output as one JSON document instead of serving it"),
+                ),
+        )
+        .subcommand(
             ClapCommand::new("playground")
                 .about("Serve a loopback-only local Cinnabar playground")
                 .long_about(
@@ -541,6 +609,7 @@ fn parse_args() -> Option<CliArgs> {
             dump_typed_ast: false,
             print_layout: false,
             explain_borrow: None,
+            emit_json: false,
             run: false,
             opt_level: "2".to_string(),
             emit_llvm: false,
@@ -548,6 +617,8 @@ fn parse_args() -> Option<CliArgs> {
             format_check: Some(format_matches.get_flag("check")),
             check_only: false,
             instrumented: false,
+            static_link: false,
+            target: "host".to_string(),
             tool_command: None,
         });
     }
@@ -556,7 +627,10 @@ fn parse_args() -> Option<CliArgs> {
         if let Some(subcommand_matches) = matches.subcommand_matches(subcommand_name) {
             let input = subcommand_matches.get_one::<PathBuf>("project_path")?.clone();
             let tool_command = if subcommand_name == "doc" {
-                ToolCommand::Doc(subcommand_matches.get_one::<PathBuf>("doc_output").cloned())
+                ToolCommand::Doc(
+                    subcommand_matches.get_one::<PathBuf>("doc_output").cloned(),
+                    subcommand_matches.get_flag("doc_emit_json"),
+                )
             } else if subcommand_name == "burn" {
                 let address = subcommand_matches.get_one::<String>("address")?.clone();
                 ToolCommand::Burn(address)
@@ -589,6 +663,7 @@ fn parse_args() -> Option<CliArgs> {
                 dump_typed_ast: false,
                 print_layout: false,
                 explain_borrow: None,
+                emit_json: false,
                 run: false,
                 opt_level: "2".to_string(),
                 emit_llvm: false,
@@ -596,6 +671,8 @@ fn parse_args() -> Option<CliArgs> {
                 format_check: None,
                 check_only: false,
                 instrumented: false,
+                static_link: false,
+                target: "host".to_string(),
                 tool_command: Some(tool_command),
             });
         }
@@ -619,6 +696,16 @@ fn parse_args() -> Option<CliArgs> {
             return Some(tool_args(minimize.get_one::<PathBuf>("project_path")?.clone(), ToolCommand::FuzzMinimize, minimize.get_one::<PathBuf>("output").cloned()));
         }
     }
+    if let Some(snapshots) = matches.subcommand_matches("snapshots") {
+        return Some(tool_args(
+            snapshots.get_one::<PathBuf>("project_path")?.clone(),
+            ToolCommand::Snapshots(
+                snapshots.get_one::<String>("address")?.clone(),
+                snapshots.get_flag("snapshots_emit_json"),
+            ),
+            None,
+        ));
+    }
     if let Some(playground) = matches.subcommand_matches("playground") {
         return Some(tool_args(PathBuf::from("."), ToolCommand::Playground(playground.get_one::<String>("address")?.clone()), None));
     }
@@ -638,6 +725,7 @@ fn parse_args() -> Option<CliArgs> {
         dump_typed_ast: matches.get_flag("dump_typed_ast"),
         print_layout: matches.get_flag("print_layout"),
         explain_borrow: matches.get_one::<String>("explain_borrow").cloned(),
+        emit_json: matches.get_flag("emit_json"),
         run: matches.get_flag("run"),
         opt_level,
         emit_llvm: matches.get_flag("emit_llvm"),
@@ -645,16 +733,18 @@ fn parse_args() -> Option<CliArgs> {
         format_check: None,
         check_only: matches.get_flag("check_only"),
         instrumented: matches.get_flag("instrumented"),
+        static_link: matches.get_flag("static"),
+        target: matches.get_one::<String>("target").cloned().unwrap_or_else(|| "host".to_string()),
         tool_command: None,
     })
 }
 
 fn target_arg() -> Arg {
-    Arg::new("target").long("target").default_value("host").help("Compilation target; only host is available until the AArch64 runtime/backend lands")
+    Arg::new("target").long("target").default_value("host").help("Compilation target: host, linux, darwin, bsd, or windows")
 }
 
 fn tool_args(input: PathBuf, tool_command: ToolCommand, output: Option<PathBuf>) -> CliArgs {
-    CliArgs { input, output, dump_ast: false, dump_typed_ast: false, print_layout: false, explain_borrow: None, run: false, opt_level: "2".to_string(), emit_llvm: false, emit_obj: false, format_check: None, check_only: false, instrumented: false, tool_command: Some(tool_command) }
+    CliArgs { input, output, dump_ast: false, dump_typed_ast: false, print_layout: false, explain_borrow: None, emit_json: false, run: false, opt_level: "2".to_string(), emit_llvm: false, emit_obj: false, format_check: None, check_only: false, instrumented: false, static_link: false, target: "host".to_string(), tool_command: Some(tool_command) }
 }
 
 fn main() -> ExitCode {
@@ -675,12 +765,23 @@ fn main() -> ExitCode {
     let mut notes: Vec<Note> = Vec::new();
     let mut deferred: Vec<Diag> = Vec::new();
     let entry = args.input.to_string_lossy().to_string();
+    let json_out = args.emit_json;
     let (loaded, files) = module_loader::load(&mut names, &mut nodes, &mut lists, &mut errors, &entry);
     let (root, ext_mods) = match loaded {
         Some(program) => program,
-        None => return finish_with_diagnostics(&errors, &[], &files),
+        None => return report_diagnostics(json_out, &errors, &[], &files),
     };
     if args.dump_ast {
+        if json_out {
+            return emit_report(&cinnabar::inspect::arena_json(
+                &names,
+                &nodes,
+                &lists,
+                root,
+                &files,
+                cinnabar::emit_json::AST_FORMAT,
+            ));
+        }
         dump_program(&names, &nodes, &lists, root);
         return ExitCode::SUCCESS;
     }
@@ -690,15 +791,19 @@ fn main() -> ExitCode {
         deferred: &mut deferred,
     };
     if !resolver::resolve(&mut names, &mut nodes, &mut lists, resolver_diagnostics, root, &ext_mods) {
-        return finish_with_diagnostics(&errors, &notes, &files);
+        return report_diagnostics(json_out, &errors, &notes, &files);
     }
     let (ok, impls_list) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods);
     if !ok {
-        return finish_with_diagnostics(&errors, &notes, &files);
+        return report_diagnostics(json_out, &errors, &notes, &files);
     }
     if !borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods) {
-        if args.explain_borrow.as_deref() == Some("json") {
-            return finish_with_diagnostics_json(&errors, &notes, &files);
+        // The structured envelope always carries the checker's notes: a
+        // consumer asked for machine-readable output, and there is no
+        // terminal to keep uncluttered. --explain-borrow=json is the older
+        // spelling of that same request.
+        if json_out || args.explain_borrow.as_deref() == Some("json") {
+            return report_diagnostics(true, &errors, &notes, &files);
         }
         let shown_notes: &[Note] = if args.explain_borrow.as_deref() == Some("human") {
             &notes
@@ -712,17 +817,32 @@ fn main() -> ExitCode {
     // reachability first would stop the pipeline and answer a broken program
     // with a list of things nothing calls.
     if !deferred.is_empty() {
-        return finish_with_diagnostics(&deferred, &[], &files);
+        return report_diagnostics(json_out, &deferred, &[], &files);
     }
     if args.dump_typed_ast {
+        if json_out {
+            return emit_report(&cinnabar::inspect::arena_json(
+                &names,
+                &nodes,
+                &lists,
+                root,
+                &files,
+                cinnabar::emit_json::TYPED_AST_FORMAT,
+            ));
+        }
         print!("{}", cinnabar::inspect::dump_typed_arena(&names, &nodes, &lists));
         return ExitCode::SUCCESS;
     }
     if args.check_only {
-        println!("{} passed all front-end checks.", entry);
-        return ExitCode::SUCCESS;
+        return report_accepted(json_out, &format!("{} passed all front-end checks.", entry));
     }
     if args.print_layout {
+        if json_out {
+            return match cinnabar::codegen::layout::layouts_json(&names, &mut nodes, &mut lists) {
+                Ok(report) => emit_report(&report),
+                Err(codegen_err) => report_codegen_error(json_out, &codegen_err, &files),
+            };
+        }
         match cinnabar::codegen::layout::render_layouts(&names, &mut nodes, &mut lists) {
             Ok(report) => {
                 print!("{}", report);
@@ -734,45 +854,121 @@ fn main() -> ExitCode {
     let entry_span = entry_span_of(&files);
     if args.emit_llvm {
         let out = emit_out_path(&args, "ll");
-        let written = compile_to_ir(&names, &mut nodes, &mut lists, impls_list, entry_span)
+        let written = compile_to_ir(&names, &mut nodes, &mut lists, impls_list, entry_span, &args.target)
             .and_then(|ir_text| write_output_text(&out, &ir_text));
         if let Err(codegen_err) = written {
-            return finish_with_codegen_error(&codegen_err, &files);
+            return report_codegen_error(json_out, &codegen_err, &files);
         }
-        println!("Emitted LLVM IR for {} to '{}'.", entry, out.display());
-        return ExitCode::SUCCESS;
+        return report_accepted(json_out, &format!("Emitted LLVM IR for {} to '{}'.", entry, out.display()));
     }
     if args.emit_obj {
         let out = emit_out_path(&args, "o");
+        // Object emission stops before linking, so the link mode is never
+        // consulted; it is carried only to share BuildTarget with the link
+        // path.
+        let target = codegen::BuildTarget {
+            out: &out,
+            opt_level: &args.opt_level,
+            mode: codegen::LinkMode::Dynamic,
+            platform: &args.target,
+        };
         if let Err(codegen_err) =
-            compile_to_object(&names, &mut nodes, &mut lists, impls_list, &out, &args.opt_level, entry_span)
+            compile_to_object(&names, &mut nodes, &mut lists, impls_list, &target, entry_span)
         {
-            return finish_with_codegen_error(&codegen_err, &files);
+            return report_codegen_error(json_out, &codegen_err, &files);
         }
-        println!("Emitted object file for {} to '{}'.", entry, out.display());
-        return ExitCode::SUCCESS;
+        return report_accepted(json_out, &format!("Emitted object file for {} to '{}'.", entry, out.display()));
     }
     let out = match &args.output {
         Some(path) => path.clone(),
         None => default_out_path(&args.input),
     };
+    if args.static_link && (args.target != "host" && args.target != "linux" || !cfg!(all(feature = "static-musl", target_os = "linux"))) {
+        // A refusal about how this binary was built has no line of the
+        // user's program to point at, so it travels as a source-less
+        // diagnostic — through the same reporter, and into the same
+        // envelope, as every other one.
+        let unsupported: Diag = (
+            "--static requires a Linux compiler built with the static-musl feature".to_string(),
+            NO_FILE,
+            0,
+            0,
+        );
+        return report_diagnostics(json_out, &[unsupported], &[], &files);
+    }
     let target = codegen::BuildTarget {
         out: &out,
         opt_level: &args.opt_level,
         mode: if args.instrumented {
             codegen::LinkMode::Instrumented
+        } else if args.static_link {
+            codegen::LinkMode::StaticMusl
+        } else if args.target == "windows" || (args.target == "host" && cfg!(target_os = "windows")) {
+            codegen::LinkMode::WindowsMinGW
         } else {
-            codegen::LinkMode::Shipped
+            codegen::LinkMode::Dynamic
         },
+        platform: &args.target,
     };
     if let Err(codegen_err) = compile_and_link(&names, &mut nodes, &mut lists, impls_list, &target, entry_span) {
-        return finish_with_codegen_error(&codegen_err, &files);
+        return report_codegen_error(json_out, &codegen_err, &files);
     }
     if args.run {
         return run_binary(&out);
     }
-    println!("Successfully compiled {} to '{}'.", entry, out.display());
+    report_accepted(json_out, &format!("Successfully compiled {} to '{}'.", entry, out.display()))
+}
+
+/// Report a run that produced no diagnostics.
+///
+/// Under `--emit-json` this writes the diagnostic envelope with an empty
+/// list, keeping one document per invocation. Otherwise it prints
+/// `message` and returns success.
+fn report_accepted(emit_json: bool, message: &str) -> ExitCode {
+    if emit_json {
+        return emit_report(&cinnabar::emit_json::diagnostics_report(&[], &[], &[]));
+    }
+    println!("{}", message);
     ExitCode::SUCCESS
+}
+
+/// End the run with diagnostics, in whichever rendering was asked for.
+fn report_diagnostics(emit_json: bool, errors: &[Diag], notes: &[Note], files: &[(String, String)]) -> ExitCode {
+    if emit_json {
+        return finish_with_diagnostics_json(errors, notes, files);
+    }
+    finish_with_diagnostics(errors, notes, files)
+}
+
+/// End the run with a codegen failure, in whichever rendering was asked
+/// for. It enters the structured envelope as the diagnostic it is, so a
+/// consumer needs no second shape for failures below the front end.
+fn report_codegen_error(emit_json: bool, codegen_err: &codegen::error::CodegenError, files: &[(String, String)]) -> ExitCode {
+    if emit_json {
+        let diag: Diag = (
+            codegen_error_message(codegen_err),
+            codegen_err.span.0,
+            codegen_err.span.1,
+            codegen_err.span.2,
+        );
+        return finish_with_diagnostics_json(&[diag], &[], files);
+    }
+    finish_with_codegen_error(codegen_err, files)
+}
+
+/// Write one JSON document to standard output.
+///
+/// A serialization failure is still a compiler failure and is reported
+/// through the same source-less reporter every other tool error uses,
+/// rather than leaving the consumer with empty output and a success status.
+fn emit_report(report: &Value) -> ExitCode {
+    match cinnabar::emit_json::render_report(report) {
+        Ok(rendered) => {
+            println!("{}", rendered);
+            ExitCode::SUCCESS
+        }
+        Err(message) => source_less_failure(&message),
+    }
 }
 
 fn format_file(path: &Path, check: bool) -> ExitCode {
@@ -815,8 +1011,8 @@ fn format_file(path: &Path, check: bool) -> ExitCode {
 
 fn run_tool_command(path: &Path, output: Option<&Path>, command: ToolCommand) -> ExitCode {
     match command {
-        ToolCommand::Doc(output) => generate_documentation(path, output.as_deref(), false, None),
-        ToolCommand::Burn(address) => generate_documentation(path, None, true, Some(&address)),
+        ToolCommand::Doc(output, emit_json) => generate_documentation(path, output.as_deref(), false, None, emit_json),
+        ToolCommand::Burn(address) => generate_documentation(path, None, true, Some(&address), false),
         ToolCommand::Build(target) => run_project_compiler(path, false, false, &target),
         ToolCommand::Run(target) => run_project_compiler(path, true, false, &target),
         ToolCommand::Check => run_project_compiler(path, false, true, "host"),
@@ -826,7 +1022,10 @@ fn run_tool_command(path: &Path, output: Option<&Path>, command: ToolCommand) ->
         ToolCommand::Inspect => inspect_binary(path, output),
         ToolCommand::Targets => {
             println!("host\tavailable\t{}", advanced_tools::host_target());
-            println!("aarch64\tplanned\trequires the Milestone 6 AArch64 backend and runtime");
+            println!("linux\tavailable\tPOSIX C runtime");
+            println!("darwin\tavailable\tPOSIX C runtime");
+            println!("bsd\tavailable\tPOSIX C runtime");
+            println!("windows\tavailable\tMinGW C runtime");
             ExitCode::SUCCESS
         }
         ToolCommand::MushlingsInit => initialize_mushlings(path),
@@ -835,6 +1034,7 @@ fn run_tool_command(path: &Path, output: Option<&Path>, command: ToolCommand) ->
         ToolCommand::FuzzMinimize => minimize_fuzz(path, output),
         ToolCommand::Soundness => emit_soundness(path, output),
         ToolCommand::Playground(address) => run_playground(&address),
+        ToolCommand::Snapshots(address, emit_json) => review_snapshots(path, &address, emit_json),
     }
 }
 
@@ -1013,7 +1213,29 @@ fn run_playground(address: &str) -> ExitCode {
         Err(message) => return source_less_failure(&message),
     };
     println!("Cinnabar playground is available at http://{}", address);
-    match advanced_tools::serve_playground(address, &executable, |message| eprintln!("{}", message)) {
+    match advanced_tools::serve_playground(address, &executable, report_source_less) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => source_less_failure(&message),
+    }
+}
+
+fn review_snapshots(path: &Path, address: &str, emit_json: bool) -> ExitCode {
+    let manifest = match project::discover(path) {
+        Ok(value) => value,
+        Err(failure) => return finish_with_manifest_error(&failure),
+    };
+    let executable = match current_executable() {
+        Ok(value) => value,
+        Err(message) => return source_less_failure(&message),
+    };
+    if emit_json {
+        return match cinnabar::snapshot_review::snapshots_json(&executable, &manifest) {
+            Ok(report) => emit_report(&report),
+            Err(failure) => finish_with_manifest_error(&failure),
+        };
+    }
+    println!("Cinnabar snapshot review is available at http://{}", address);
+    match cinnabar::snapshot_review::serve(address, &executable, &manifest, report_source_less) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => source_less_failure(&message),
     }
@@ -1034,7 +1256,7 @@ fn project_or_source(path: &Path) -> Result<(PathBuf, PathBuf), project::Manifes
     Ok((manifest.root, manifest.entry))
 }
 
-fn generate_documentation(path: &Path, output: Option<&Path>, serve: bool, address: Option<&str>) -> ExitCode {
+fn generate_documentation(path: &Path, output: Option<&Path>, serve: bool, address: Option<&str>, emit_json: bool) -> ExitCode {
     let (root, entry) = match project_or_source(path) {
         Ok(value) => value,
         Err(failure) => return finish_with_manifest_error(&failure),
@@ -1042,7 +1264,18 @@ fn generate_documentation(path: &Path, output: Option<&Path>, serve: bool, addre
     let entry_text = entry.to_string_lossy().to_string();
     let analyzed = analysis::analyze(&entry_text, &[]);
     if !analyzed.errors.is_empty() {
-        return finish_with_diagnostics(&analyzed.errors, &analyzed.notes, &analyzed.files);
+        return report_diagnostics(emit_json, &analyzed.errors, &analyzed.notes, &analyzed.files);
+    }
+    if emit_json {
+        // The document, not a page: a documentation site that wants to lay
+        // out its own pages should not have to strip the compiler's.
+        return emit_report(&docs::docs_json(
+            &analyzed.names,
+            &analyzed.nodes,
+            &analyzed.lists,
+            analyzed.root,
+            &analyzed.files,
+        ));
     }
     let api_html = docs::render_api_docs(&analyzed.names, &analyzed.nodes, &analyzed.lists, analyzed.root);
     if serve {
@@ -1052,7 +1285,7 @@ fn generate_documentation(path: &Path, output: Option<&Path>, serve: bool, addre
         };
         let page = docs::render_cinnabook(&api_html);
         println!("Cinnabook {} is available at http://{}", env!("CARGO_PKG_VERSION"), bind_address);
-        return match docs::serve_cinnabook(bind_address, &page, |message| eprintln!("{}", message)) {
+        return match docs::serve_cinnabook(bind_address, &page, report_source_less) {
             Ok(()) => ExitCode::SUCCESS,
             Err(message) => source_less_failure(&message),
         };
@@ -1098,6 +1331,7 @@ fn run_project_compiler(path: &Path, run: bool, check: bool, target: &str) -> Ex
     };
     let mut invocation = Command::new(executable);
     invocation.arg(&manifest.entry);
+    invocation.arg("--target").arg(target);
     if check {
         invocation.arg("--check-only");
     } else {
@@ -1160,10 +1394,19 @@ fn finish_with_manifest_error(failure: &project::ManifestError) -> ExitCode {
     finish_with_diagnostics(&failure.diagnostics, &[], &failure.files)
 }
 
-fn source_less_failure(message: &str) -> ExitCode {
+// Renders a source-less runtime error and continues. The server
+// subcommands report per-connection failures through this so a bad
+// connection is rendered without stopping the listener for later
+// visitors; `source_less_failure` below is the same render plus the
+// failure exit that fatal tool errors need.
+fn report_source_less(message: &str) {
     if let Err(render_error) = render_source_less(message) {
         eprintln!("{}", render_error);
     }
+}
+
+fn source_less_failure(message: &str) -> ExitCode {
+    report_source_less(message);
     ExitCode::FAILURE
 }
 
@@ -1324,66 +1567,12 @@ fn finish_with_diagnostics(errors: &[Diag], notes: &[Note], files: &[(String, St
     ExitCode::FAILURE
 }
 
-fn source_json(files: &[(String, String)], file: i64, start: i64, end: i64) -> Value {
-    if file == NO_FILE {
-        return Value::Null;
-    }
-    match files.get(file as usize) {
-        Some(entry) => json!({
-            "file_id": file,
-            "path": entry.0,
-            "start": start,
-            "end": end
-        }),
-        None => json!({
-            "file_id": file,
-            "path": Value::Null,
-            "start": start,
-            "end": end
-        }),
-    }
-}
-
 fn finish_with_diagnostics_json(errors: &[Diag], notes: &[Note], files: &[(String, String)]) -> ExitCode {
-    let mut diagnostics: Vec<Value> = Vec::new();
-    let mut error_idx = 0usize;
-    while error_idx < errors.len() {
-        let error = match errors.get(error_idx) {
-            Some(value) => value,
-            None => break,
-        };
-        let mut explanations: Vec<Value> = Vec::new();
-        let mut note_idx = 0usize;
-        while note_idx < notes.len() {
-            match notes.get(note_idx) {
-                Some(note) => {
-                    if note.0 == error_idx as i64 {
-                        explanations.push(json!({
-                            "message": note.1,
-                            "source": source_json(files, note.2, note.3, note.4)
-                        }));
-                    }
-                }
-                None => break,
-            }
-            note_idx += 1;
-        }
-        diagnostics.push(json!({
-            "severity": "error",
-            "message": error.0,
-            "source": source_json(files, error.1, error.2, error.3),
-            "explanations": explanations
-        }));
-        error_idx += 1;
-    }
-    let report = json!({
-        "format": "cinnabar.borrow-explanations.v1",
-        "diagnostics": diagnostics
-    });
-    match serde_json::to_string_pretty(&report) {
+    let report = cinnabar::emit_json::diagnostics_report(errors, notes, files);
+    match cinnabar::emit_json::render_report(&report) {
         Ok(rendered) => println!("{}", rendered),
-        Err(render_err) => {
-            if render_source_less(&format!("failed to serialize borrow explanations: {}", render_err)).is_err() {
+        Err(message) => {
+            if render_source_less(&message).is_err() {
                 return ExitCode::FAILURE;
             }
         }

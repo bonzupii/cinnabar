@@ -14,8 +14,9 @@
 //!   exists not to have.
 
 use cinnabar::analysis::{
-    analyze, completions, definition, file_id_of, hover, offset_to_position, position_to_offset,
-    references, signature_help,
+    analyze, code_actions, completions, definition, document_symbols, file_id_of, folding_ranges,
+    hover, inlay_hints, offset_to_position, position_to_offset, references, rename_edits,
+    semantic_tokens, signature_help, workspace_symbols, SEMANTIC_TOKEN_TYPES,
 };
 use cinnabar::ast::NO_FILE;
 use cinnabar::format::format_source;
@@ -211,7 +212,7 @@ fn completions_exclude_symbols_the_resolver_hides() {
 #[test]
 fn completions_exclude_locals_from_sibling_branches() {
     let entry = fixture("multi_file/main.cnb");
-    let source = "use Math.add\n\npub fun main() I64\n  if true\n    val only_then: I64 = 1\n    return only_then\n  else\n    val only_else: I64 = 2\n    return only_else\n  end\nend\n";
+    let source = "pub fun main() I64\n  if true\n    val only_then: I64 = 1\n    return only_then\n  else\n    val only_else: I64 = 2\n    return only_else\n  end\nend\n";
     let overlay = [(entry.clone(), source.to_string())];
     let analysis = analyze(&entry, &overlay);
     assert!(analysis.errors.is_empty(), "unexpected errors: {:?}", analysis.errors);
@@ -302,9 +303,12 @@ fn borrow_explanations_have_a_stable_json_surface() -> Result<(), Box<dyn Error>
         .output()?;
     assert!(!output.status.success(), "borrow-invalid input unexpectedly succeeded");
     let report: Value = serde_json::from_slice(&output.stdout)?;
+    // The envelope is the compiler's one structured diagnostic surface, not
+    // a borrow-specific one: `--explain-borrow=json` is the older spelling
+    // of the request `--emit-json` makes for every stage.
     assert_eq!(
         report.get("format").and_then(Value::as_str),
-        Some("cinnabar.borrow-explanations.v1")
+        Some("cinnabar.diagnostics.v1")
     );
     let diagnostics = report
         .get("diagnostics")
@@ -421,4 +425,163 @@ fn project_and_documentation_commands_work_end_to_end() -> Result<(), Box<dyn Er
     let tested = Command::new(compiler).arg("test").arg(&project).output()?;
     assert!(tested.status.success(), "test failed: {}", String::from_utf8_lossy(&tested.stderr));
     Ok(())
+}
+
+#[test]
+fn folding_ranges_cover_module_and_function_bodies() {
+    let entry = fixture("explain_leak.cnb");
+    let analysis = analyze(&entry, &[]);
+    assert!(analysis.resolved, "errors: {:?}", analysis.errors);
+    let entry_file = file_id_of(&analysis, &entry);
+    let text = analysis.files.first().map(|pair| pair.1.clone()).unwrap_or_default();
+    let ranges = folding_ranges(&analysis, entry_file);
+    assert!(!ranges.is_empty(), "expected at least one foldable range");
+    // The module's span starts at `mod`, not at the `pub` modifier before it
+    // (see the parser's item-span comments), so this looks for a range that
+    // *contains* the module body rather than one starting exactly at `pub`.
+    let mod_start = offset_of(&text, "mod Memory");
+    assert!(mod_start >= 0);
+    let has_module_range = ranges.iter().any(|(start, end)| {
+        let slice = text.get(*start as usize..*end as usize).unwrap_or("");
+        *start <= mod_start && slice.contains("allocate") && slice.contains("deallocate") && slice.ends_with("end")
+    });
+    assert!(has_module_range, "no fold range for the Memory module: {:?}", ranges);
+    // A bodyless native declaration (no `end`) folds nothing.
+    let nat_type_start = offset_of(&text, "pub nat type Block");
+    assert!(nat_type_start >= 0);
+    let has_native_range = ranges.iter().any(|(start, _)| *start == nat_type_start);
+    assert!(!has_native_range, "a bodyless native type should not fold");
+}
+
+#[test]
+fn document_symbols_nest_module_contents() {
+    let entry = fixture("explain_leak.cnb");
+    let analysis = analyze(&entry, &[]);
+    assert!(analysis.resolved, "errors: {:?}", analysis.errors);
+    let entry_file = file_id_of(&analysis, &entry);
+    let symbols = document_symbols(&analysis, entry_file);
+    let names: Vec<&str> = symbols.iter().map(|info| info.name.as_str()).collect();
+    assert!(names.contains(&"Memory"), "top-level symbols: {:?}", names);
+    assert!(names.contains(&"main"), "top-level symbols: {:?}", names);
+    // `leak_on_one_path` is a private top-level fun, not nested in Memory.
+    assert!(names.contains(&"leak_on_one_path"), "top-level symbols: {:?}", names);
+    let memory = symbols.iter().find(|info| info.name == "Memory").expect("Memory symbol");
+    let child_names: Vec<&str> = memory.children.iter().map(|child| child.name.as_str()).collect();
+    assert!(child_names.contains(&"Block"), "Memory children: {:?}", child_names);
+    assert!(child_names.contains(&"allocate"), "Memory children: {:?}", child_names);
+    assert!(child_names.contains(&"deallocate"), "Memory children: {:?}", child_names);
+    // `use` items are imports, not declarations, and are excluded everywhere.
+    assert!(!names.iter().any(|name| name.contains("Memory.allocate")), "imports should not appear");
+}
+
+#[test]
+fn workspace_symbols_find_declarations_across_files() {
+    let entry = fixture("multi_file/main.cnb");
+    let analysis = analyze(&entry, &[]);
+    assert!(analysis.resolved, "errors: {:?}", analysis.errors);
+    let found = workspace_symbols(&analysis, "add");
+    assert!(!found.is_empty(), "expected 'add' to be found");
+    let in_math = found.iter().any(|info| {
+        analysis
+            .files
+            .get(info.span.0 as usize)
+            .map(|pair| pair.0.ends_with("Math.cnb"))
+            .unwrap_or(false)
+    });
+    assert!(in_math, "'add' should resolve into Math.cnb: {:?}", found.iter().map(|i| &i.name).collect::<Vec<_>>());
+    // Case-insensitive, substring match.
+    assert!(!workspace_symbols(&analysis, "ADD").is_empty());
+    assert!(workspace_symbols(&analysis, "no_such_symbol_anywhere").is_empty());
+}
+
+#[test]
+fn rename_edits_cover_every_occurrence_across_files() {
+    let entry = fixture("multi_file/main.cnb");
+    let analysis = analyze(&entry, &[]);
+    assert!(analysis.resolved, "errors: {:?}", analysis.errors);
+    let entry_file = file_id_of(&analysis, &entry);
+    let main_text = analysis.files.first().map(|pair| pair.1.clone()).unwrap_or_default();
+    let call_at = offset_of(&main_text, "add(10");
+    let edits = rename_edits(&analysis, entry_file, call_at, "sum").expect("rename should succeed");
+    // `use Math.add`'s own path segment, the call site, both in main.cnb,
+    // plus the declaration in Math.cnb: an item carries one symbol for its
+    // whole span, so `use`'s import path resolves the same symbol a use
+    // site does (matching `hover`/`definition` on the same dispatch).
+    assert_eq!(edits.len(), 3, "edits: {:?}", edits);
+    let mut per_file: Vec<i64> = Vec::new();
+    for (edit_file, start, end, new_text) in &edits {
+        assert_eq!(new_text, "sum");
+        let text = analysis.files.get(*edit_file as usize).map(|pair| pair.1.clone()).unwrap_or_default();
+        let slice = text.get(*start as usize..*end as usize).unwrap_or("");
+        assert_eq!(slice, "add", "renamed span did not cover exactly the identifier: {:?}", slice);
+        per_file.push(*edit_file);
+    }
+    let main_edits = per_file.iter().filter(|file| **file == entry_file).count();
+    assert_eq!(main_edits, 2, "expected two edits in main.cnb: {:?}", edits);
+}
+
+#[test]
+fn rename_edits_refuse_a_position_with_no_symbol() {
+    let entry = fixture("dead_code.cnb");
+    let analysis = analyze(&entry, &[]);
+    let entry_file = file_id_of(&analysis, &entry);
+    let text = analysis.files.first().map(|pair| pair.1.clone()).unwrap_or_default();
+    // Well inside the file's opening doc comment: comments carry no parse
+    // node at all (see the module doc on `folding_ranges`), so nothing here
+    // resolves a symbol to rename.
+    let comment_at = offset_of(&text, "never used");
+    assert!(comment_at >= 0);
+    assert!(rename_edits(&analysis, entry_file, comment_at, "whatever").is_none());
+}
+
+#[test]
+fn semantic_tokens_classify_a_function_call() {
+    let entry = fixture("multi_file/main.cnb");
+    let analysis = analyze(&entry, &[]);
+    assert!(analysis.resolved, "errors: {:?}", analysis.errors);
+    let entry_file = file_id_of(&analysis, &entry);
+    let text = analysis.files.first().map(|pair| pair.1.clone()).unwrap_or_default();
+    let call_at = offset_of(&text, "add(10");
+    let tokens = semantic_tokens(&analysis, entry_file);
+    let function_index = SEMANTIC_TOKEN_TYPES.iter().position(|name| *name == "function").unwrap() as i64;
+    let matched = tokens
+        .iter()
+        .any(|(start, end, token_type)| *start == call_at && *end == call_at + 3 && *token_type == function_index);
+    assert!(matched, "no function-typed token at the 'add' call site: {:?}", tokens);
+}
+
+#[test]
+fn inlay_hints_report_inferred_type_for_unannotated_bindings() {
+    let entry = fixture("tooling_scope.cnb");
+    let analysis = analyze(&entry, &[]);
+    assert!(analysis.resolved && analysis.typechecked, "errors: {:?}", analysis.errors);
+    let entry_file = file_id_of(&analysis, &entry);
+    let text = analysis.files.first().map(|pair| pair.1.clone()).unwrap_or_default();
+    let hints = inlay_hints(&analysis, entry_file);
+    assert!(!hints.is_empty(), "expected at least one inlay hint");
+    let name_end = offset_of(&text, "only_then") + "only_then".len() as i64;
+    let matched = hints.iter().find(|(offset, _)| *offset == name_end);
+    let (_, label) = matched.expect("hint after 'only_then'");
+    assert_eq!(label, ": I64");
+}
+
+#[test]
+fn code_actions_remove_an_unused_import() {
+    let source = "pub mod Tools\n  pub fun visible() I64\n    return 1\n  end\nend\n\nuse Tools.visible\n\npub fun main() I64\n  return Tools.visible()\nend\n";
+    let path = fixture("synthetic_unused_import.cnb");
+    let overlay = vec![(path.clone(), source.to_string())];
+    let analysis = analyze(&path, &overlay);
+    assert!(analysis.resolved, "errors: {:?}", analysis.errors);
+    let entry_file = file_id_of(&analysis, &path);
+    let fixes = code_actions(&analysis, entry_file, 0, source.len() as i64);
+    let fix = fixes
+        .iter()
+        .find(|fix| fix.title.contains("unused import"))
+        .unwrap_or_else(|| panic!("no unused-import fix among: {:?}", fixes.iter().map(|f| &f.title).collect::<Vec<_>>()));
+    assert_eq!(fix.edits.len(), 1);
+    let (edit_file, start, end, new_text) = &fix.edits[0];
+    assert_eq!(*edit_file, entry_file);
+    assert_eq!(new_text, "");
+    let removed = source.get(*start as usize..*end as usize).unwrap_or("");
+    assert!(removed.trim() == "use Tools.visible", "removed text: {:?}", removed);
 }

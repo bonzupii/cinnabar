@@ -1,0 +1,68 @@
+#! A HashMap key that reaches a native handle through a reference is
+#! rejected at compile time. `Named` holds `&Collections.String`; the
+#! reference keeps the key itself non-linear (only the referenced String
+#! is a handle), so the map is freeable and the program passes the borrow
+#! checker. The rejection is codegen's "a HashMap key cannot contain a
+#! native handle", not a linearity error. (EXPECT_REJECTED.)
+
+pub mod Collections
+  pub nat type HashMap(K, V)
+  pub nat type String
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub KeyNotFound
+    pub InvalidUtf8
+  end
+
+  pub nat fun hash_map_new<K, V>() impure Result(HashMap(K, V), Error)
+  pub nat fun hash_map_insert<K, V>(map: &mut HashMap(K, V), key: K, value: V) impure Result(Unit, Error)
+  pub nat fun hash_map_free<K, V>(map: HashMap(K, V)) impure Unit
+  pub nat fun string_from_slice(bytes: &[U8]) impure Result(String, Error)
+  pub nat fun string_free(value: String) impure Unit
+end
+
+use Collections.hash_map_new
+use Collections.hash_map_insert
+use Collections.hash_map_free
+use Collections.string_from_slice
+use Collections.string_free
+
+pub type Named
+  pub id: I64
+  pub name: &Collections.String
+end
+
+pub fun main() impure I64
+  val map = match hash_map_new[Named, I64]()
+    Ok(m) => m
+    Err(error) => return 1
+  end
+
+  val key = match string_from_slice("hello")
+    Ok(s) => s
+    Err(error) => return fail_free_map(map)
+  end
+
+  val named = Named(id: 1, name: &key)
+
+  match hash_map_insert(&mut map, named, 42)
+    Ok(Unit) => Unit
+    Err(error) => return fail_free_map_key(map, key)
+  end
+
+  hash_map_free(map)
+  string_free(key)
+  return 0
+end
+
+fun fail_free_map(map: Collections.HashMap(Named, I64)) impure I64
+  hash_map_free(map)
+  return 1
+end
+
+fun fail_free_map_key(map: Collections.HashMap(Named, I64), key: Collections.String) impure I64
+  hash_map_free(map)
+  string_free(key)
+  return 1
+end

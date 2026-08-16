@@ -17,7 +17,9 @@ Cinnabar needs LLVM 21, a staged musl libc, and a handful of other pinned tools,
 nix develop
 ```
 
-This drops you into a shell with the right `rustc`, `llvm`, `clang`, `clippy`, `semgrep`, and friends already on `PATH`. `cargo build`/`cargo clippy` will not work outside this shell (no `llvm-config` on a bare host). A ready-made dev container (`compose.dev.yaml`, see [`CONTAINER_DEVELOPMENT.md`](CONTAINER_DEVELOPMENT.md)) is also available if you'd rather not install Nix locally.
+This drops you into a shell with the right `rustc`, `llvm`, `clang`, `clippy`, `semgrep`, and friends already on `PATH`. `cargo build`/`cargo clippy` will not work outside this shell (no `llvm-config` on a bare host).
+
+On Windows, run that same Nix inside WSL2 with the checkout on the distro's own filesystem rather than under `/mnt/c`; a Windows-hosted checkout reaches Linux over a 9p bridge that costs 30–50× on the small-file operations every build and gate run performs. A ready-made dev container (`compose.dev.yaml`) remains available where WSL2 is not an option. [`CONTAINER_DEVELOPMENT.md`](CONTAINER_DEVELOPMENT.md) covers both.
 
 ## Making a change
 

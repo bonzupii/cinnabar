@@ -1,4 +1,3 @@
-import { motion } from "motion/react";
 import { CheckIcon } from "@/components/brand/icons";
 import { isClean, locateSpan, type PlaygroundDiagnostic, type PlaygroundReport } from "@/lib/cinnabar-diagnostics";
 import { TOKEN_STYLE, tokenizeCinnabar } from "@/lib/cinnabar-syntax";
@@ -8,13 +7,9 @@ import { TOKEN_STYLE, tokenizeCinnabar } from "@/lib/cinnabar-syntax";
  * text carries diagnostic wording at small sizes; vermilion remains a mark on
  * the primary span rather than low-contrast body text.
  *
- * Content here can flip on every keystroke, sometimes several times before a
- * debounce settles. `AnimatePresence mode="wait"` was tried for the clean/
- * errors swap and dropped: a key change arriving mid-exit restarts the exit
- * of an element that's already animating out, and a fast enough typist could
- * leave the previous state's element exit-animating forever while the DOM
- * never mounts the current one. `animate`'s key change alone still gives the
- * swap a beat of motion, with no unmount/remount sequencing to race.
+ * Content can flip on every keystroke, so state changes render directly. A
+ * partially transparent transition would temporarily reduce diagnostic text
+ * below its required contrast against the fixed dark terminal ground.
  *
  * No `Window` chrome of its own: `PlaygroundEditor` docks this directly under
  * its own Window's titlebar, above the editor -- one frame for the whole
@@ -137,7 +132,7 @@ export default function PlaygroundDiagnostics({
 
   return (
     <div data-testid="playground-diagnostics" className={`border-hairline bg-code-terminal border-b ${className ?? ""}`}>
-      <div className="text-label border-hairline flex items-center gap-2 border-b px-4 py-2 font-mono text-[10px] tracking-[0.14em] uppercase sm:px-6">
+      <div className="text-term-output border-hairline flex items-center gap-2 border-b px-4 py-2 font-mono text-[10px] tracking-[0.14em] uppercase sm:px-6">
         Diagnostics
       </div>
       <pre
@@ -145,11 +140,8 @@ export default function PlaygroundDiagnostics({
         className="w-full overflow-x-auto px-4 py-4 font-mono text-[12.5px] leading-[1.75] sm:px-6 sm:text-[13.5px]"
       >
         <code>
-          <motion.span
+          <span
             key={clean ? "clean" : "errors"}
-            initial={{ opacity: 0.4 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.12 }}
             className="block"
           >
             {clean ? (
@@ -161,7 +153,7 @@ export default function PlaygroundDiagnostics({
                 <DiagnosticBlock key={index} diagnostic={diagnostic} source={source} />
               ))
             )}
-          </motion.span>
+          </span>
         </code>
       </pre>
     </div>

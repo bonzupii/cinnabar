@@ -20,15 +20,15 @@
 //! arm — never through an argument subexpression or a match scrutinee — and
 //! that marking is what lets LLVM's `-O2` deliver the language's
 //! O(1)-call-stack recursion guarantee with no runtime stack check anywhere
-//! in the emitted binary. Tail position alone does not earn the marker,
-//! though: `tail` promises the callee never reaches into the caller's
-//! frame, so a call handed an argument whose type can carry a reference
-//! into that frame is emitted as an ordinary call instead.
+//! in the emitted binary. A call is marked `tail` only when the typechecker's
+//! attached tail-safety fact (`NODE_CALLFACT`) says no argument carries a
+//! reference into the current frame; a reference into the caller's own frame
+//! would make the `tail` marker a false promise and the IR undefined at
+//! `-O2`.
 //!
 //! **Invariants:**
-//! - `tail` is asserted only where codegen can prove it. Every argument's
-//!   canonical type must be free of references, exclusive references, and
-//!   slice views, transitively through struct, enum, and array members.
+//! - `tail` is asserted only where the typechecker's attached tail-safety
+//!   fact says it is safe -- never re-derived here from an argument's type.
 //! - Nothing is re-derived here. Types come from the typechecker's
 //!   canonical keys, symbols from the resolver, variant tags from
 //!   `NODE_VARFACT`, field offsets from `NODE_FIELDKEY`. Codegen never
@@ -43,17 +43,14 @@
 
 use crate::ast::*;
 use crate::codegen::error::*;
-use crate::codegen::syscall;
 use crate::codegen::types::*;
-use crate::typecheck::{index_access_of, type_contains_ref, IDX_ACCESS_FALLIBLE};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::targets::TargetData;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, CallSiteValue, FunctionValue, IntValue, PointerValue,
-    ValueKind,
+    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue, ValueKind,
 };
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
@@ -1162,7 +1159,7 @@ fn emit_unary<'ctx, 'a>(
         // left to borrow.  Which of the two it is comes from the access
         // fact on the index node, not from the shape of the key here, so
         // the fallible path is decided in exactly one place for indexing.
-        if index_access_of(sess.5, inner) == IDX_ACCESS_FALLIBLE {
+        if node_d(sess.5, inner) == INDEX_FALLIBLE {
             return Ok(inner_ptr);
         }
         let out = declare_local(sess, key, "ref", span)?;
@@ -1826,24 +1823,15 @@ fn emit_index<'ctx, 'a>(
         len_val = slice_len_of(sess, base_ptr)?;
     }
 
-    // Whether this access is fallible was decided by the typechecker, which
-    // is the stage that either proved the index in range against a fixed
-    // array length or could not, and attached the answer to this node.
-    // Codegen reads that fact; it must not re-derive it from the shape of
-    // the attached type, because the shape does not carry the answer -- an
-    // in-range constant index into `[Result(T, E); N]` attaches the bare
-    // element key, which is itself a `Result`, and a shape test would send
-    // it down the fallible path and copy the wrong byte range.
-    let access = index_access_of(sess.5, expr);
-    if access == NONE {
-        return Err(builder_error(
-            node_file(sess.5, expr),
-            node_start(sess.5, expr),
-            node_end(sess.5, expr),
-            "internal: index expression with no attached access fact",
-        ));
-    }
-    if access != IDX_ACCESS_FALLIBLE {
+    // The typechecker attaches an explicit fallibility fact to the index
+    // node: INDEX_FALLIBLE for runtime and slice indices (whose result it
+    // types as Result(T, IndexError)), INDEX_INFALLIBLE for a constant array
+    // index proven in range (whose result is the bare element type).  The
+    // element type itself cannot be the signal: an array of Result elements
+    // indexed by a constant has a Result-typed result that is still
+    // infallible.  Reading the attached fact keeps codegen from re-deriving
+    // a decision the typechecker already made.
+    if node_d(sess.5, expr) != INDEX_FALLIBLE {
         let eptr = offset_elem_ptr(sess, elem_key, data_ptr, idx_val, span)?;
         return Ok(eptr);
     }
@@ -1889,75 +1877,6 @@ fn into_meta<'ctx>(value: BasicValueEnum<'ctx>) -> BasicMetadataValueEnum<'ctx> 
     value.into()
 }
 
-// Whether a value of `key` could hand a callee a pointer into the caller's
-// stack frame.  A reference, an exclusive reference, and a slice view all
-// can directly; a struct, enum, or array can by containing one, which is
-// the walk `typecheck::type_contains_ref` already performs for the borrow
-// checker's returned-borrow obligation -- the same question about the same
-// canonical keys, so it is read here rather than implemented a second time.
-//
-// A key whose shape codegen cannot see through -- an unresolved key, or a
-// type parameter that some instantiation may bind to a reference -- answers
-// "could".  The marker this feeds is a promise, so anything short of proof
-// has to withhold it.
-fn arg_may_carry_frame_ref(sess: &mut Session, key: i64) -> bool {
-    let kind = key_kind_of(sess.5, key);
-    if kind == TYD_UNKNOWN || kind == TYD_PARAM || kind == TYD_MONO {
-        return true;
-    }
-    let mut seen: Vec<i64> = Vec::new();
-    type_contains_ref(&mut *sess.5, &mut *sess.6, key, &mut seen)
-}
-
-// The single place a call is marked `tail`.
-//
-// Being in tail position is necessary but not sufficient.  LLVM's `tail`
-// marker is a promise that the callee never accesses the caller's stack
-// frame, and `return f(&local)` is in tail position while breaking exactly
-// that promise: the argument is a pointer into a frame the marker permits
-// the backend to release before `f` runs.  That is undefined behaviour at
-// -O2 rather than a missed optimization, so the marker is withheld unless
-// every argument's canonical type is provably frame-free.
-//
-// This is not a semantic change and not a lost guarantee.  Withholding
-// `tail` only stops codegen asserting something it cannot justify; LLVM's
-// own tail-call elimination re-derives the marker from a real escape
-// analysis of the emitted function, so a call that genuinely does not leak
-// the frame still gets the O(1)-stack treatment, and one that does never
-// could have had it.
-//
-// Self-tail-recursion needs no separate rule.  A function tail-calling
-// itself while passing a borrow of one of its own locals cannot both reuse
-// the frame and keep that borrow pointing at live storage -- the frame it
-// points into is the one about to be overwritten.  The borrow's type is
-// still `&T`, `&mut T`, or `&[T]`, so the argument check above declines
-// that call for the same reason it declines any other, and the language's
-// O(1)-stack guarantee holds for exactly the recursions that can honour it.
-fn mark_tail_call<'ctx>(
-    sess: &mut Session<'ctx, '_, '_>,
-    from: &[i64],
-    to: &[i64],
-    expr: i64,
-    call: CallSiteValue<'ctx>,
-    is_tail: bool,
-) {
-    if !is_tail {
-        return;
-    }
-    let arg_exprs = node_d(sess.5, expr);
-    let count = list_len(sess.6, arg_exprs);
-    let mut idx = 0i64;
-    while idx < count {
-        let arg = list_get(sess.6, arg_exprs, idx);
-        let akey = sub_key(sess, from, to, em_expr_ty(sess, arg));
-        if arg_may_carry_frame_ref(sess, akey) {
-            return;
-        }
-        idx += 1;
-    }
-    call.set_tail_call(true);
-}
-
 fn emit_call<'ctx, 'a>(
     sess: &mut Session<'ctx, '_, '_>,
     ctx: &mut FnCtx<'ctx, 'a>,
@@ -1998,7 +1917,9 @@ fn emit_call<'ctx, 'a>(
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(fn_val, &arg_vals, "").map_err(builder_fail)?;
-    mark_tail_call(sess, ctx.3, ctx.4, expr, call, is_tail);
+    if is_tail && callfact_tail_safe_of(sess.5, expr) == 1 {
+        call.set_tail_call(true);
+    }
     let out = declare_local(sess, ret_key, "call", span)?;
     let ret_val = match call.try_as_basic_value() {
         ValueKind::Basic(bv) => bv,
@@ -2090,7 +2011,9 @@ fn emit_deferred_trait_call<'ctx, 'a>(
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(fn_val, &arg_vals, "").map_err(builder_fail)?;
-    mark_tail_call(sess, ctx.3, ctx.4, expr, call, is_tail);
+    if is_tail && callfact_tail_safe_of(sess.5, expr) == 1 {
+        call.set_tail_call(true);
+    }
     let out = declare_local(sess, result, "call", span)?;
     let ret_val = match call.try_as_basic_value() {
         ValueKind::Basic(bv) => bv,
@@ -2153,8 +2076,7 @@ fn build_fn_sig<'ctx>(sess: &mut Session<'ctx, '_, '_>, params_list: i64, ret_ke
     let mut idx = 0i64;
     while idx < count {
         let pkey = list_get(sess.6, params_list, idx);
-        let ty = llvm_of(sess, pkey, span)?;
-        param_tys.push(ty.into());
+        param_tys.push(llvm_of(sess, pkey, span)?.into());
         idx += 1;
     }
     let ret_ty = llvm_of(sess, ret_key, span)?;
@@ -2246,133 +2168,146 @@ fn extern_realloc<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx>
     )
 }
 
-fn extern_memcmp<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
-    let i8p = ptr_ty(sess);
-    extern_fn(
-        sess,
-        "memcmp",
-        sess.0.i32_type().fn_type(&[i8p.into(), i8p.into(), sess.0.i64_type().into()], false),
-    )
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RuntimePlatform { Linux, DarwinOrBsd, Windows }
+
+fn runtime_platform(sess: &Session, span: (i64, i64, i64)) -> Result<RuntimePlatform, CodegenError> {
+    let triple = sess.1.get_triple().as_str().to_string_lossy().to_string();
+    if triple.contains("windows") { return Ok(RuntimePlatform::Windows); }
+    if triple.contains("linux") { return Ok(RuntimePlatform::Linux); }
+    if triple.contains("darwin") || triple.contains("freebsd") || triple.contains("openbsd") || triple.contains("netbsd") || triple.contains("dragonfly") { return Ok(RuntimePlatform::DarwinOrBsd); }
+    Err(builder_error(span.0, span.1, span.2, &format!("target '{}' has no supported C runtime ABI", triple)))
 }
 
-// The architecture whose syscall ABI this module targets.
-//
-// Read from the module's own triple rather than carried in `Session`, so
-// there is one source for it and no chance of the emitter and the linker
-// disagreeing about what is being built. An architecture with no
-// implemented ABI is a compile error naming the triple, never a guess: a
-// syscall number is meaningless on an architecture whose table is absent,
-// and emitting one anyway would call an arbitrary kernel entry point.
-fn target_arch(sess: &Session, span: (i64, i64, i64)) -> Result<syscall::Arch, CodegenError> {
-    let triple = sess.1.get_triple();
-    let text = triple.as_str().to_string_lossy().to_string();
-    match syscall::arch_of(&text) {
-        Some(arch) => Ok(arch),
-        None => Err(builder_error(
-            span.0,
-            span.1,
-            span.2,
-            &format!("no system-call ABI is implemented for target '{}': Memory, Terminal, and File issue Linux system calls directly on x86_64 and AArch64", text),
-        )),
-    }
+fn extern_mmap<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
+    let i32_ty = sess.0.i32_type();
+    extern_fn(sess, "mmap", ptr_ty(sess).fn_type(&[ptr_ty(sess).into(), sess.0.i64_type().into(), i32_ty.into(), i32_ty.into(), i32_ty.into(), sess.0.i64_type().into()], false))
 }
 
-// Issues one system call, widening every argument to the machine word the
-// ABI passes it in.
-fn emit_syscall<'ctx>(
-    sess: &mut Session<'ctx, '_, '_>,
-    call: syscall::Sys,
-    args: &[IntValue<'ctx>],
-    span: (i64, i64, i64),
-) -> Result<IntValue<'ctx>, CodegenError> {
-    let arch = target_arch(sess, span)?;
-    let mut widened: Vec<IntValue<'ctx>> = Vec::new();
-    let mut idx = 0usize;
-    while idx < args.len() {
-        let arg = match args.get(idx) {
-            Some(value) => *value,
-            None => break,
-        };
-        widened.push(word_of(sess, arg, span)?);
-        idx += 1;
-    }
-    syscall::emit(sess.0, sess.2, arch, call, &widened, span)
+fn extern_munmap<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
+    extern_fn(sess, "munmap", sess.0.i32_type().fn_type(&[ptr_ty(sess).into(), sess.0.i64_type().into()], false))
 }
 
-// Sign-extends a value to the machine word a syscall argument register
-// holds.  Sign-extension rather than zero-extension because several
-// arguments are signed: `AT_FDCWD` is -100 and `mmap`'s file descriptor is
-// -1 for an anonymous mapping.
-fn word_of<'ctx>(sess: &mut Session<'ctx, '_, '_>, value: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
-    let i64_ty = sess.0.i64_type();
-    if value.get_type().get_bit_width() >= 64 {
-        return Ok(value);
-    }
-    sess.2
-        .build_int_s_extend(value, i64_ty, "")
-        .map_err(|err| builder_error(span.0, span.1, span.2, &format!("internal: cannot widen a system-call argument: {}", err)))
+fn extern_open<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
+    let i32_ty = sess.0.i32_type();
+    extern_fn(sess, "open", i32_ty.fn_type(&[ptr_ty(sess).into(), i32_ty.into(), i32_ty.into()], false))
 }
 
-// A pointer as the integer a syscall argument register holds.
-fn ptr_word<'ctx>(sess: &mut Session<'ctx, '_, '_>, ptr: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
-    sess.2
-        .build_ptr_to_int(ptr, sess.0.i64_type(), "")
-        .map_err(|err| builder_error(span.0, span.1, span.2, &format!("internal: cannot pass a pointer to a system call: {}", err)))
+fn extern_read<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
+    let result = if target_is_windows(sess) { sess.0.i32_type() } else { sess.0.i64_type() };
+    extern_fn(sess, "read", result.fn_type(&[sess.0.i32_type().into(), ptr_ty(sess).into(), sess.0.i64_type().into()], false))
 }
 
-// The integer a syscall returned, as a pointer.
-fn word_ptr<'ctx>(sess: &mut Session<'ctx, '_, '_>, value: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
-    sess.2
-        .build_int_to_ptr(value, ptr_ty(sess), "")
-        .map_err(|err| builder_error(span.0, span.1, span.2, &format!("internal: cannot read a pointer out of a system-call result: {}", err)))
+fn extern_write<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
+    let result = if target_is_windows(sess) { sess.0.i32_type() } else { sess.0.i64_type() };
+    extern_fn(sess, "write", result.fn_type(&[sess.0.i32_type().into(), ptr_ty(sess).into(), sess.0.i64_type().into()], false))
 }
 
 fn extern_socket<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
     let i32_ty = sess.0.i32_type();
+    let result = if target_is_windows(sess) { sess.0.i64_type() } else { i32_ty };
     extern_fn(
         sess,
         "socket",
-        i32_ty.fn_type(&[i32_ty.into(), i32_ty.into(), i32_ty.into()], false),
+        result.fn_type(&[i32_ty.into(), i32_ty.into(), i32_ty.into()], false),
     )
 }
 
 fn extern_bind<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
     let i32_ty = sess.0.i32_type();
+    let socket_ty = if target_is_windows(sess) { sess.0.i64_type() } else { i32_ty };
     extern_fn(
         sess,
         "bind",
-        i32_ty.fn_type(&[i32_ty.into(), ptr_ty(sess).into(), i32_ty.into()], false),
+        i32_ty.fn_type(&[socket_ty.into(), ptr_ty(sess).into(), i32_ty.into()], false),
     )
 }
 
 fn extern_listen<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
     let i32_ty = sess.0.i32_type();
-    extern_fn(sess, "listen", i32_ty.fn_type(&[i32_ty.into(), i32_ty.into()], false))
+    let socket_ty = if target_is_windows(sess) { sess.0.i64_type() } else { i32_ty };
+    extern_fn(sess, "listen", i32_ty.fn_type(&[socket_ty.into(), i32_ty.into()], false))
 }
 
 fn extern_accept<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
     let i32_ty = sess.0.i32_type();
+    let socket_ty = if target_is_windows(sess) { sess.0.i64_type() } else { i32_ty };
+    let result = if target_is_windows(sess) { sess.0.i64_type() } else { i32_ty };
     extern_fn(
         sess,
         "accept",
-        i32_ty.fn_type(&[i32_ty.into(), ptr_ty(sess).into(), ptr_ty(sess).into()], false),
+        result.fn_type(&[socket_ty.into(), ptr_ty(sess).into(), ptr_ty(sess).into()], false),
     )
 }
 
 fn extern_send<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
     let i32_ty = sess.0.i32_type();
+    let socket_ty = if target_is_windows(sess) { sess.0.i64_type() } else { i32_ty };
+    let result = if target_is_windows(sess) { i32_ty } else { sess.0.i64_type() };
     extern_fn(
         sess,
         "send",
-        sess.0
-            .i64_type()
-            .fn_type(&[i32_ty.into(), ptr_ty(sess).into(), sess.0.i64_type().into(), i32_ty.into()], false),
+        result.fn_type(&[socket_ty.into(), ptr_ty(sess).into(), sess.0.i64_type().into(), i32_ty.into()], false),
     )
 }
 
 fn extern_close<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
     let i32_ty = sess.0.i32_type();
     extern_fn(sess, "close", i32_ty.fn_type(&[i32_ty.into()], false))
+}
+
+fn extern_wsa_startup<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
+    extern_fn(sess, "WSAStartup", sess.0.i32_type().fn_type(&[sess.0.i16_type().into(), ptr_ty(sess).into()], false))
+}
+
+fn extern_closesocket<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
+    extern_fn(sess, "closesocket", sess.0.i32_type().fn_type(&[sess.0.i64_type().into()], false))
+}
+
+fn extern_fork<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
+    extern_fn(sess, "fork", sess.0.i32_type().fn_type(&[], false))
+}
+
+fn extern_execve<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
+    let i8p = ptr_ty(sess);
+    extern_fn(sess, "execve", sess.0.i32_type().fn_type(&[i8p.into(), i8p.into(), i8p.into()], false))
+}
+
+fn extern_waitpid<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
+    let i32_ty = sess.0.i32_type();
+    extern_fn(sess, "waitpid", i32_ty.fn_type(&[i32_ty.into(), ptr_ty(sess).into(), i32_ty.into()], false))
+}
+
+fn extern_exit<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
+    extern_fn(sess, "_exit", sess.0.void_type().fn_type(&[sess.0.i32_type().into()], false))
+}
+
+fn target_is_windows(sess: &Session) -> bool {
+    sess.1.get_triple().as_str().to_string_lossy().contains("windows")
+}
+
+fn socket_argument<'ctx>(sess: &mut Session<'ctx, '_, '_>, fd: IntValue<'ctx>) -> Result<BasicMetadataValueEnum<'ctx>, CodegenError> {
+    if target_is_windows(sess) { return Ok(into_meta(fd.into())); }
+    let fd32 = sess.2.build_int_truncate(fd, sess.0.i32_type(), "").map_err(builder_fail)?;
+    Ok(into_meta(fd32.into()))
+}
+
+fn socket_result<'ctx>(sess: &mut Session<'ctx, '_, '_>, call: inkwell::values::CallSiteValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
+    let value = match call.try_as_basic_value() {
+        ValueKind::Basic(value) => value.into_int_value(),
+        ValueKind::Instruction(inst) => return Err(builder_error(span.0, span.1, span.2, &format!("internal: socket call returned void ({:?})", inst.get_opcode()))),
+    };
+    if value.get_type().get_bit_width() == 64 { return Ok(value); }
+    sess.2.build_int_s_extend(value, sess.0.i64_type(), "").map_err(builder_fail)
+}
+
+fn libc_io_result<'ctx>(sess: &mut Session<'ctx, '_, '_>, call: inkwell::values::CallSiteValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
+    let value = match call.try_as_basic_value() {
+        ValueKind::Basic(value) => value.into_int_value(),
+        ValueKind::Instruction(inst) => return Err(builder_error(span.0, span.1, span.2, &format!("internal: C I/O call returned void ({:?})", inst.get_opcode()))),
+    };
+    if value.get_type().get_bit_width() == 64 { return Ok(value); }
+    sess.2.build_int_s_extend(value, sess.0.i64_type(), "").map_err(builder_fail)
 }
 
 fn emit_native_call<'ctx, 'a>(
@@ -2410,7 +2345,9 @@ fn emit_native_call<'ctx, 'a>(
     ctx.6 = saved_tail;
     let arg_vals = arg_vals?;
     let call = sess.2.build_call(native_val, &arg_vals, "").map_err(builder_fail)?;
-    mark_tail_call(sess, ctx.3, ctx.4, expr, call, is_tail);
+    if is_tail && callfact_tail_safe_of(sess.5, expr) == 1 {
+        call.set_tail_call(true);
+    }
     let out = declare_local(sess, ret_key, "call", span)?;
     let ret_val = match call.try_as_basic_value() {
         ValueKind::Basic(bv) => bv,
@@ -2444,11 +2381,11 @@ fn emit_native_body<'ctx>(
     let mut idx = 0i64;
     while idx < pcount {
         let pkey = list_get(sess.6, params_list, idx);
-        let ptr = declare_local(sess, pkey, "p", span)?;
         let pval = match param_values.get(idx as usize) {
             Some(value) => *value,
             None => break,
         };
+        let ptr = declare_local(sess, pkey, "p", span)?;
         store_key(sess, ptr, pval)?;
         bind_local(&mut body_locals, idx, pkey, ptr);
         idx += 1;
@@ -2592,10 +2529,10 @@ fn dispatch_native<'ctx>(
         return native_file_open(sess, f, locals, ret_key, out, span);
     }
     if op == NAT_FILE_READ {
-        return native_file_transfer(sess, f, locals, syscall::Sys::Read, ret_key, out, span);
+        return native_file_transfer(sess, f, locals, false, ret_key, out, span);
     }
     if op == NAT_FILE_WRITE {
-        return native_file_transfer(sess, f, locals, syscall::Sys::Write, ret_key, out, span);
+        return native_file_transfer(sess, f, locals, true, ret_key, out, span);
     }
     if op == NAT_FILE_CLOSE {
         native_file_close(sess, locals, ret_key, out, span)?;
@@ -2645,6 +2582,12 @@ fn dispatch_native<'ctx>(
         native_net_close(sess, locals, ret_key, out, span)?;
         return Ok(out);
     }
+    if op == NAT_PROCESS_SPAWN {
+        return native_process_spawn(sess, f, locals, ret_key, out, span);
+    }
+    if op == NAT_PROCESS_WAIT {
+        return native_process_wait(sess, f, locals, ret_key, out, span);
+    }
     Err(builder_error(
         span.0,
         span.1,
@@ -2684,17 +2627,32 @@ fn native_allocate<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     // by the kernel. The requested length is what the handle records, so
     // the bounds checks in `write_u8`/`read_u8` still reject an offset
     // past what the program asked for, not merely past the page.
-    let zero = sess.0.i64_type().const_zero();
-    let prot = sess.0.i64_type().const_int(syscall::PROT_READ_WRITE as u64, false);
-    let flags = sess.0.i64_type().const_int(syscall::MAP_PRIVATE_ANONYMOUS as u64, false);
-    let no_fd = sess.0.i64_type().const_all_ones();
-    let raw = emit_syscall(sess, syscall::Sys::Mmap, &[zero, size, prot, flags, no_fd, zero], span)?;
-    // `mmap` reports failure as a small negative errno rather than as a
-    // null pointer, so the failure test is `raw < 0` — a returned address
-    // is never in that range for a user-space mapping.
-    let failed = sess.2.build_int_compare(IntPredicate::SLT, raw, sess.0.i64_type().const_zero(), "").map_err(builder_fail)?;
-    let data = word_ptr(sess, raw, span)?;
-    let null_cmp = failed;
+    let platform = runtime_platform(sess, span)?;
+    let data = if platform == RuntimePlatform::Windows {
+        let call = sess.2.build_call(extern_malloc(sess), &[into_meta(size.into())], "").map_err(builder_fail)?;
+        match call.try_as_basic_value() {
+            ValueKind::Basic(value) => value.into_pointer_value(),
+            ValueKind::Instruction(inst) => return Err(builder_error(span.0, span.1, span.2, &format!("internal: malloc returned void ({:?})", inst.get_opcode()))),
+        }
+    } else {
+        let constants = runtime_constants(platform);
+        let call = sess.2.build_call(extern_mmap(sess), &[
+            into_meta(ptr_ty(sess).const_null().into()), into_meta(size.into()),
+            into_meta(sess.0.i32_type().const_int(constants.prot_read_write, false).into()),
+            into_meta(sess.0.i32_type().const_int(constants.map_private_anonymous, false).into()),
+            into_meta(sess.0.i32_type().const_all_ones().into()), into_meta(sess.0.i64_type().const_zero().into()),
+        ], "").map_err(builder_fail)?;
+        match call.try_as_basic_value() {
+            ValueKind::Basic(value) => value.into_pointer_value(),
+            ValueKind::Instruction(inst) => return Err(builder_error(span.0, span.1, span.2, &format!("internal: mmap returned void ({:?})", inst.get_opcode()))),
+        }
+    };
+    let data_word = sess.2.build_ptr_to_int(data, sess.0.i64_type(), "").map_err(builder_fail)?;
+    let null_cmp = if platform == RuntimePlatform::Windows {
+        sess.2.build_int_compare(IntPredicate::EQ, data_word, sess.0.i64_type().const_zero(), "").map_err(builder_fail)?
+    } else {
+        sess.2.build_int_compare(IntPredicate::EQ, data_word, sess.0.i64_type().const_all_ones(), "").map_err(builder_fail)?
+    };
     let fail_block = new_block(sess, f, "alloc_fail");
     let ok_block = new_block(sess, f, "alloc_ok");
     let after = new_block(sess, f, "alloc_after");
@@ -2730,14 +2688,15 @@ fn native_deallocate<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ct
     let block_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let bd = struct_gep(sess, block_key, p0, 0, "", span)?;
     let data = load_ptr(sess, bd)?;
-    // `munmap` needs the mapping's length as well as its address, which is
-    // exactly the field `allocate` recorded in the handle. This is the
-    // second reason the handle must be fully initialized (Milestone 3): a
-    // garbage length here would unmap memory the program still owns.
+    // The allocation representation carries the requested length, so the
+    // POSIX mapping path can return exactly the region it acquired.
     let bl = struct_gep(sess, block_key, p0, 1, "", span)?;
     let len = load_i64(sess, bl)?;
-    let addr = ptr_word(sess, data, span)?;
-    emit_syscall(sess, syscall::Sys::Munmap, &[addr, len], span)?;
+    if runtime_platform(sess, span)? == RuntimePlatform::Windows {
+        sess.2.build_call(extern_free(sess), &[into_meta(data.into())], "").map_err(builder_fail)?;
+    } else {
+        sess.2.build_call(extern_munmap(sess), &[into_meta(data.into()), into_meta(len.into())], "").map_err(builder_fail)?;
+    }
     build_unit_value_into(sess, ret_key, out, span)?;
     Ok(())
 }
@@ -3106,11 +3065,23 @@ fn write_all<'ctx>(
     sess.2.position_at_end(body);
     let cursor = byte_offset(sess, data, done)?;
     let remaining = sess.2.build_int_sub(len, done, "").map_err(builder_fail)?;
-    let cursor_word = ptr_word(sess, cursor, span)?;
-    let wrote = emit_syscall(sess, syscall::Sys::Write, &[fd, cursor_word, remaining], span)?;
+    let fd32 = sess.2.build_int_truncate(fd, sess.0.i32_type(), "").map_err(builder_fail)?;
+    let call = sess.2.build_call(extern_write(sess), &[into_meta(fd32.into()), into_meta(cursor.into()), into_meta(remaining.into())], "").map_err(builder_fail)?;
+    let wrote = libc_io_result(sess, call, span)?;
     let progressed = sess.2.build_int_compare(IntPredicate::SGT, wrote, i64_ty.const_zero(), "").map_err(builder_fail)?;
     let advance = new_block(sess, function, "write_advance");
-    sess.2.build_conditional_branch(progressed, advance, after).map_err(builder_fail)?;
+    let retry = new_block(sess, function, "write_retry");
+    let stopped = new_block(sess, function, "write_stopped");
+    sess.2.build_conditional_branch(progressed, advance, stopped).map_err(builder_fail)?;
+    sess.2.position_at_end(stopped);
+    let failed = sess.2.build_int_compare(IntPredicate::EQ, wrote, i64_ty.const_all_ones(), "").map_err(builder_fail)?;
+    let failure = new_block(sess, function, "write_failure");
+    sess.2.build_conditional_branch(failed, failure, after).map_err(builder_fail)?;
+    sess.2.position_at_end(failure);
+    let interrupted = is_eintr(sess, wrote, span)?;
+    sess.2.build_conditional_branch(interrupted, retry, after).map_err(builder_fail)?;
+    sess.2.position_at_end(retry);
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
     sess.2.position_at_end(advance);
     let next = sess.2.build_int_add(done, wrote, "").map_err(builder_fail)?;
     store_key(sess, done_slot, next.into())?;
@@ -3130,6 +3101,461 @@ fn native_string_free<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'c
     Ok(())
 }
 
+// === HashMap: structural keys over an open-addressed table ===
+//
+// A map is an open-addressed table of slots, each slot a `{ flag, key,
+// value }` triple whose stride and field offsets derive from the slot's own
+// LLVM struct type (declared K and V, never a hand-counted byte size). The
+// flag marks a slot empty, occupied, or tombstoned (left by `remove` so a
+// probe past a removed key still reaches later keys that collided behind
+// it). Capacity is a power of two, so `(hash + step) & (capacity - 1)` maps
+// a hash to a probe sequence, and the table grows by rehashing before the
+// load factor reaches half.
+//
+// A key is hashed and compared *structurally*, field by field, not by its
+// raw ABI bytes: two keys are equal exactly when their declared fields are,
+// read recursively through nested structs, enums, arrays, and slice
+// contents. Padding bytes are never read, so no construction-time zeroing
+// is needed for correctness. The hash folds the same field values the
+// comparison reads -- the property a probe relies on -- and both are
+// emitted inline into the monomorphized native body, one implementation per
+// concrete K. Bucketing appears only as the final `& (capacity - 1)` after
+// hashing, never as a substitute for it.
+
+const HASH_SEED: u64 = 14695981039346656037;
+const HASH_PRIME: u64 = 1099511628211;
+const SLOT_EMPTY: u64 = 0;
+const SLOT_OCCUPIED: u64 = 1;
+const SLOT_TOMBSTONE: u64 = 2;
+const INITIAL_CAPACITY: u64 = 8;
+
+// The LLVM type of one slot: a flag word, the key, and the value.
+fn hash_map_slot_ty<'ctx>(sess: &mut Session<'ctx, '_, '_>, k_key: i64, v_key: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+    let flag = sess.0.i64_type().into();
+    let kty = llvm_of(sess, k_key, span)?;
+    let vty = llvm_of(sess, v_key, span)?;
+    Ok(sess.0.struct_type(&[flag, kty, vty], false).into())
+}
+
+// GEP to one field of a slot.
+fn slot_gep<'ctx>(sess: &mut Session<'ctx, '_, '_>, slot_ty: BasicTypeEnum<'ctx>, slot_ptr: PointerValue<'ctx>, index: u32) -> Result<PointerValue<'ctx>, CodegenError> {
+    sess.2.build_struct_gep(slot_ty, slot_ptr, index, "").map_err(builder_fail)
+}
+
+// The slot a probe step lands on: `(hash + step) & (capacity - 1)` strides
+// past the data pointer.
+fn probe_slot<'ctx>(sess: &mut Session<'ctx, '_, '_>, data: PointerValue<'ctx>, hash: IntValue<'ctx>, step: IntValue<'ctx>, cap: IntValue<'ctx>, slot_size: u64) -> Result<PointerValue<'ctx>, CodegenError> {
+    let sum = sess.2.build_int_add(hash, step, "").map_err(builder_fail)?;
+    let mask = sess.2.build_int_sub(cap, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    let index = sess.2.build_and(sum, mask, "").map_err(builder_fail)?;
+    let offset = sess.2.build_int_mul(index, sess.0.i64_type().const_int(slot_size, false), "").map_err(builder_fail)?;
+    byte_offset(sess, data, offset)
+}
+
+// One FNV-1a fold: `state = (state ^ word) * prime`. A real bit mixer, not
+// a raw field value or a byte-range checksum.
+fn fold_hash_word<'ctx>(sess: &mut Session<'ctx, '_, '_>, hash_slot: PointerValue<'ctx>, word: IntValue<'ctx>) -> Result<(), CodegenError> {
+    let current = load_i64(sess, hash_slot)?;
+    let xored = sess.2.build_xor(current, word, "").map_err(builder_fail)?;
+    let mixed = sess.2.build_int_mul(xored, sess.0.i64_type().const_int(HASH_PRIME, false), "").map_err(builder_fail)?;
+    store_key(sess, hash_slot, mixed.into())?;
+    Ok(())
+}
+
+// A scalar's bits as a full machine word. Zero-extension (never
+// sign-extension) so two equal values of any width or signedness fold the
+// same word.
+fn scalar_word<'ctx>(sess: &mut Session<'ctx, '_, '_>, value: IntValue<'ctx>) -> Result<IntValue<'ctx>, CodegenError> {
+    if value.get_type().get_bit_width() >= 64 {
+        Ok(value)
+    } else {
+        sess.2.build_int_z_extend(value, sess.0.i64_type(), "").map_err(builder_fail)
+    }
+}
+
+// A GEP to element `idx` of an `[N; T]` array, indexing the array type
+// itself (deref the array, then index the element) rather than casting the
+// array pointer to its element type and GEP-ing through that coincidence.
+fn array_elem_ptr<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, ptr: PointerValue<'ctx>, idx: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
+    let ty = llvm_of(sess, key, span)?;
+    let zero = sess.0.i64_type().const_zero();
+    let gep = unsafe { sess.2.build_gep(ty, ptr, &[zero, idx], "") }.map_err(builder_fail)?;
+    Ok(gep)
+}
+
+fn key_kind_label(kind: i64) -> &'static str {
+    if kind == TYD_REF || kind == TYD_REF_MUT {
+        "a reference"
+    } else if kind == TYD_SLICE {
+        "a slice"
+    } else {
+        "a native handle"
+    }
+}
+
+fn no_structural_equality<'ctx>(sess: &Session<'ctx, '_, '_>, key: i64, span: (i64, i64, i64)) -> CodegenError {
+    builder_error(
+        span.0,
+        span.1,
+        span.2,
+        &format!(
+            "a HashMap key cannot contain {}: only scalar, struct, enum, array, and slice-of-value keys have structural equality",
+            key_kind_label(key_kind_of(sess.5, key))
+        ),
+    )
+}
+
+// Structural key equality, emitted inline into the monomorphized native
+// body: two keys are equal exactly when their declared fields are, read
+// recursively through nested structs, enums, arrays, and slice contents.
+// Padding bytes are never read, and a reference-typed field compares what
+// it points to, not the address it holds.
+fn emit_key_eq<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, key: i64, a: PointerValue<'ctx>, b: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
+    let kind = key_kind_of(sess.5, key);
+    if kind == TYD_BUILTIN {
+        let va = load_key(sess, key, a, span)?.into_int_value();
+        let vb = load_key(sess, key, b, span)?.into_int_value();
+        return sess.2.build_int_compare(IntPredicate::EQ, va, vb, "").map_err(builder_fail);
+    }
+    if kind == TYD_STRUCT {
+        let item = em_sym_decl(sess, em_key_sym(sess, key));
+        let args = key_args_of(sess, key);
+        let fields = {
+            let nodes = &mut sess.5;
+            let lists = &mut sess.6;
+            struct_field_keys(nodes, lists, item, args)
+        };
+        let mut acc = sess.0.bool_type().const_all_ones();
+        let mut idx = 0usize;
+        while idx < fields.len() {
+            let fkey = match fields.get(idx) {
+                Some(pair) => pair.1,
+                None => break,
+            };
+            let fa = struct_gep(sess, key, a, idx as u32, "", span)?;
+            let fb = struct_gep(sess, key, b, idx as u32, "", span)?;
+            let feq = emit_key_eq(sess, f, fkey, fa, fb, span)?;
+            acc = sess.2.build_and(acc, feq, "").map_err(builder_fail)?;
+            idx += 1;
+        }
+        return Ok(acc);
+    }
+    if kind == TYD_ENUM {
+        let ta_ptr = struct_gep(sess, key, a, 0, "", span)?;
+        let ta = load_i64(sess, ta_ptr)?;
+        let tb_ptr = struct_gep(sess, key, b, 0, "", span)?;
+        let tb = load_i64(sess, tb_ptr)?;
+        let tag_eq = sess.2.build_int_compare(IntPredicate::EQ, ta, tb, "").map_err(builder_fail)?;
+        let result_slot = alloca_raw(sess, sess.0.bool_type().into(), "enum_eq", span)?;
+        store_key(sess, result_slot, sess.0.bool_type().const_zero().into())?;
+        let compare = new_block(sess, f, "enum_eq_compare");
+        let done = new_block(sess, f, "enum_eq_done");
+        sess.2.build_conditional_branch(tag_eq, compare, done).map_err(builder_fail)?;
+        sess.2.position_at_end(compare);
+        let item = em_sym_decl(sess, em_key_sym(sess, key));
+        let variants = node_e(sess.5, item);
+        let vcount = list_len(sess.6, variants);
+        let mut vi = 0i64;
+        while vi < vcount {
+            let arm = new_block(sess, f, "enum_eq_arm");
+            let next = if vi + 1 < vcount {
+                new_block(sess, f, "enum_eq_next")
+            } else {
+                done
+            };
+            let is_vi = sess.2.build_int_compare(IntPredicate::EQ, ta, sess.0.i64_type().const_int(vi as u64, false), "").map_err(builder_fail)?;
+            sess.2.build_conditional_branch(is_vi, arm, next).map_err(builder_fail)?;
+            sess.2.position_at_end(arm);
+            let mut variant_eq = sess.0.bool_type().const_all_ones();
+            let pcount = variant_payload_count(sess, key, vi);
+            if pcount > 0 {
+                let (pa, pty) = enum_payload_ptr(sess, a, key, vi, span)?;
+                let pb = enum_payload_ptr(sess, b, key, vi, span)?.0;
+                let mut fi = 0i64;
+                while fi < pcount {
+                    let fkey = variant_payload_key(sess, key, vi, fi, span)?;
+                    let fa = sess.2.build_struct_gep(pty, pa, fi as u32, "").map_err(builder_fail)?;
+                    let fb = sess.2.build_struct_gep(pty, pb, fi as u32, "").map_err(builder_fail)?;
+                    let feq = emit_key_eq(sess, f, fkey, fa, fb, span)?;
+                    variant_eq = sess.2.build_and(variant_eq, feq, "").map_err(builder_fail)?;
+                    fi += 1;
+                }
+            }
+            store_key(sess, result_slot, variant_eq.into())?;
+            sess.2.build_unconditional_branch(done).map_err(builder_fail)?;
+            sess.2.position_at_end(next);
+            vi += 1;
+        }
+        sess.2.position_at_end(done);
+        let result = sess.2.build_load(sess.0.bool_type(), result_slot, "").map_err(builder_fail)?.into_int_value();
+        return Ok(result);
+    }
+    if kind == TYD_ARRAY {
+        let elem = key_elem_of(sess.5, key);
+        let len = key_len_of(sess, key);
+        let mut acc = sess.0.bool_type().const_all_ones();
+        let mut idx = 0i64;
+        while idx < len {
+            let ival = sess.0.i64_type().const_int(idx as u64, false);
+            let ea = array_elem_ptr(sess, key, a, ival, span)?;
+            let eb = array_elem_ptr(sess, key, b, ival, span)?;
+            let feq = emit_key_eq(sess, f, elem, ea, eb, span)?;
+            acc = sess.2.build_and(acc, feq, "").map_err(builder_fail)?;
+            idx += 1;
+        }
+        return Ok(acc);
+    }
+    if kind == TYD_REF || kind == TYD_REF_MUT {
+        let elem = key_elem_of(sess.5, key);
+        if key_kind_of(sess.5, elem) == TYD_SLICE {
+            return emit_slice_eq(sess, f, elem, a, b, span);
+        }
+        let aref = load_ptr(sess, a)?;
+        let bref = load_ptr(sess, b)?;
+        return emit_key_eq(sess, f, elem, aref, bref, span);
+    }
+    Err(no_structural_equality(sess, key, span))
+}
+
+// Content equality of two `&[T]` slice views: equal length, then every
+// element equal, as a short-circuiting runtime loop. Two slices with equal
+// bytes but different backing addresses therefore compare equal.
+fn emit_slice_eq<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, slice_key: i64, a: PointerValue<'ctx>, b: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
+    let elem = key_elem_of(sess.5, slice_key);
+    let a_data = slice_data(sess, a)?;
+    let b_data = slice_data(sess, b)?;
+    let a_len = slice_len_of(sess, a)?;
+    let b_len = slice_len_of(sess, b)?;
+    let len_eq = sess.2.build_int_compare(IntPredicate::EQ, a_len, b_len, "").map_err(builder_fail)?;
+    let result_slot = alloca_raw(sess, sess.0.bool_type().into(), "slice_eq", span)?;
+    store_key(sess, result_slot, len_eq.into())?;
+    let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "slice_i", span)?;
+    store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
+    let cond = new_block(sess, f, "slice_eq_cond");
+    let body = new_block(sess, f, "slice_eq_body");
+    let mismatch = new_block(sess, f, "slice_eq_mismatch");
+    let done = new_block(sess, f, "slice_eq_done");
+    sess.2.build_conditional_branch(len_eq, cond, done).map_err(builder_fail)?;
+    sess.2.position_at_end(cond);
+    let i = load_i64(sess, i_slot)?;
+    let more = sess.2.build_int_compare(IntPredicate::ULT, i, a_len, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(more, body, done).map_err(builder_fail)?;
+    sess.2.position_at_end(body);
+    let ea = offset_elem_ptr(sess, elem, a_data, i, span)?;
+    let eb = offset_elem_ptr(sess, elem, b_data, i, span)?;
+    let elem_eq = emit_key_eq(sess, f, elem, ea, eb, span)?;
+    let next = new_block(sess, f, "slice_eq_next");
+    sess.2.build_conditional_branch(elem_eq, next, mismatch).map_err(builder_fail)?;
+    sess.2.position_at_end(mismatch);
+    store_key(sess, result_slot, sess.0.bool_type().const_zero().into())?;
+    sess.2.build_unconditional_branch(done).map_err(builder_fail)?;
+    sess.2.position_at_end(next);
+    let i2 = sess.2.build_int_add(i, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, i_slot, i2.into())?;
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(done);
+    let result = sess.2.build_load(sess.0.bool_type(), result_slot, "").map_err(builder_fail)?.into_int_value();
+    Ok(result)
+}
+
+// Folds a key's structural fields into `hash_slot`, so hash and equality
+// read the same values and cannot disagree. An enum's tag is folded, then
+// control dispatches on the tag so only the active variant's payload is
+// hashed -- an inactive variant's bytes are uninitialized, and reading them
+// as this variant's fields (a reference in particular) would dereference a
+// garbage pointer.
+fn emit_key_hash_into<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, key: i64, ptr: PointerValue<'ctx>, hash_slot: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
+    let kind = key_kind_of(sess.5, key);
+    if kind == TYD_BUILTIN {
+        let value = load_key(sess, key, ptr, span)?.into_int_value();
+        let word = scalar_word(sess, value)?;
+        fold_hash_word(sess, hash_slot, word)?;
+        return Ok(());
+    }
+    if kind == TYD_STRUCT {
+        let item = em_sym_decl(sess, em_key_sym(sess, key));
+        let args = key_args_of(sess, key);
+        let fields = {
+            let nodes = &mut sess.5;
+            let lists = &mut sess.6;
+            struct_field_keys(nodes, lists, item, args)
+        };
+        let mut idx = 0usize;
+        while idx < fields.len() {
+            let fkey = match fields.get(idx) {
+                Some(pair) => pair.1,
+                None => break,
+            };
+            let fptr = struct_gep(sess, key, ptr, idx as u32, "", span)?;
+            emit_key_hash_into(sess, f, fkey, fptr, hash_slot, span)?;
+            idx += 1;
+        }
+        return Ok(());
+    }
+    if kind == TYD_ENUM {
+        let tag_ptr = struct_gep(sess, key, ptr, 0, "", span)?;
+        let tag = load_i64(sess, tag_ptr)?;
+        fold_hash_word(sess, hash_slot, tag)?;
+        let item = em_sym_decl(sess, em_key_sym(sess, key));
+        let variants = node_e(sess.5, item);
+        let vcount = list_len(sess.6, variants);
+        let done = new_block(sess, f, "enum_hash_done");
+        let mut vi = 0i64;
+        while vi < vcount {
+            let arm = new_block(sess, f, "enum_hash_arm");
+            let next = if vi + 1 < vcount {
+                new_block(sess, f, "enum_hash_next")
+            } else {
+                done
+            };
+            let is_vi = sess.2.build_int_compare(IntPredicate::EQ, tag, sess.0.i64_type().const_int(vi as u64, false), "").map_err(builder_fail)?;
+            sess.2.build_conditional_branch(is_vi, arm, next).map_err(builder_fail)?;
+            sess.2.position_at_end(arm);
+            let pcount = variant_payload_count(sess, key, vi);
+            if pcount > 0 {
+                let (region, pty) = enum_payload_ptr(sess, ptr, key, vi, span)?;
+                let mut fi = 0i64;
+                while fi < pcount {
+                    let fkey = variant_payload_key(sess, key, vi, fi, span)?;
+                    let fptr = sess.2.build_struct_gep(pty, region, fi as u32, "").map_err(builder_fail)?;
+                    emit_key_hash_into(sess, f, fkey, fptr, hash_slot, span)?;
+                    fi += 1;
+                }
+            }
+            sess.2.build_unconditional_branch(done).map_err(builder_fail)?;
+            sess.2.position_at_end(next);
+            vi += 1;
+        }
+        sess.2.position_at_end(done);
+        return Ok(());
+    }
+    if kind == TYD_ARRAY {
+        let elem = key_elem_of(sess.5, key);
+        let len = key_len_of(sess, key);
+        let mut idx = 0i64;
+        while idx < len {
+            let eptr = array_elem_ptr(sess, key, ptr, sess.0.i64_type().const_int(idx as u64, false), span)?;
+            emit_key_hash_into(sess, f, elem, eptr, hash_slot, span)?;
+            idx += 1;
+        }
+        return Ok(());
+    }
+    if kind == TYD_REF || kind == TYD_REF_MUT {
+        let elem = key_elem_of(sess.5, key);
+        if key_kind_of(sess.5, elem) == TYD_SLICE {
+            emit_slice_hash_into(sess, f, elem, ptr, hash_slot, span)?;
+            return Ok(());
+        }
+        let referent = load_ptr(sess, ptr)?;
+        emit_key_hash_into(sess, f, elem, referent, hash_slot, span)?;
+        return Ok(());
+    }
+    Err(no_structural_equality(sess, key, span))
+}
+
+// Folds a `&[T]` slice's *contents* into the hash: the length, then every
+// element, so two equal-content slices hash equal wherever their bytes live.
+fn emit_slice_hash_into<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, slice_key: i64, view: PointerValue<'ctx>, hash_slot: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
+    let elem = key_elem_of(sess.5, slice_key);
+    let data = slice_data(sess, view)?;
+    let len = slice_len_of(sess, view)?;
+    fold_hash_word(sess, hash_slot, len)?;
+    let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "slice_i", span)?;
+    store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
+    let cond = new_block(sess, f, "slice_hash_cond");
+    let body = new_block(sess, f, "slice_hash_body");
+    let done = new_block(sess, f, "slice_hash_done");
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(cond);
+    let i = load_i64(sess, i_slot)?;
+    let more = sess.2.build_int_compare(IntPredicate::ULT, i, len, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(more, body, done).map_err(builder_fail)?;
+    sess.2.position_at_end(body);
+    let eptr = offset_elem_ptr(sess, elem, data, i, span)?;
+    emit_key_hash_into(sess, f, elem, eptr, hash_slot, span)?;
+    let i2 = sess.2.build_int_add(i, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, i_slot, i2.into())?;
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(done);
+    Ok(())
+}
+
+// Moves every occupied slot of a table into a fresh, zeroed one, probing
+// the new table for an empty slot per key. Called only on grow, so the new
+// table always has room; this drops tombstones, keeping a grown table at
+// most half occupied and free of stale markers.
+fn rehash_into<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    f: FunctionValue<'ctx>,
+    old: (PointerValue<'ctx>, IntValue<'ctx>),
+    new: (PointerValue<'ctx>, IntValue<'ctx>),
+    k_key: i64,
+    v_key: i64,
+    span: (i64, i64, i64),
+) -> Result<(), CodegenError> {
+    let (old_data, old_cap) = old;
+    let (new_data, new_cap) = new;
+    let slot_ty = hash_map_slot_ty(sess, k_key, v_key, span)?;
+    let slot_size = sess.3.get_abi_size(&slot_ty);
+    let slot_size_const = sess.0.i64_type().const_int(slot_size, false);
+    let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "old", span)?;
+    store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
+    let cond = new_block(sess, f, "rehash_cond");
+    let body = new_block(sess, f, "rehash_body");
+    let done = new_block(sess, f, "rehash_done");
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(cond);
+    let i = load_i64(sess, i_slot)?;
+    let more = sess.2.build_int_compare(IntPredicate::ULT, i, old_cap, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(more, body, done).map_err(builder_fail)?;
+    sess.2.position_at_end(body);
+    let offset = sess.2.build_int_mul(i, slot_size_const, "").map_err(builder_fail)?;
+    let old_slot = byte_offset(sess, old_data, offset)?;
+    let flag_ptr = slot_gep(sess, slot_ty, old_slot, 0)?;
+    let flag = load_i64(sess, flag_ptr)?;
+    let occupied = sess.2.build_int_compare(IntPredicate::EQ, flag, sess.0.i64_type().const_int(SLOT_OCCUPIED, false), "").map_err(builder_fail)?;
+    let move_it = new_block(sess, f, "rehash_move");
+    let skip = new_block(sess, f, "rehash_skip");
+    sess.2.build_conditional_branch(occupied, move_it, skip).map_err(builder_fail)?;
+    sess.2.position_at_end(move_it);
+    let old_key = slot_gep(sess, slot_ty, old_slot, 1)?;
+    let old_val = slot_gep(sess, slot_ty, old_slot, 2)?;
+    let hash_slot = alloca_raw(sess, sess.0.i64_type().into(), "rehash_key", span)?;
+    store_key(sess, hash_slot, sess.0.i64_type().const_int(HASH_SEED, false).into())?;
+    emit_key_hash_into(sess, f, k_key, old_key, hash_slot, span)?;
+    let hash = load_i64(sess, hash_slot)?;
+    let step_slot = alloca_raw(sess, sess.0.i64_type().into(), "rehash_step", span)?;
+    store_key(sess, step_slot, sess.0.i64_type().const_zero().into())?;
+    let probe_body = new_block(sess, f, "rehash_probe");
+    let place = new_block(sess, f, "rehash_place");
+    sess.2.build_unconditional_branch(probe_body).map_err(builder_fail)?;
+    sess.2.position_at_end(probe_body);
+    let step = load_i64(sess, step_slot)?;
+    let new_slot = probe_slot(sess, new_data, hash, step, new_cap, slot_size)?;
+    let new_flag_ptr = slot_gep(sess, slot_ty, new_slot, 0)?;
+    let new_flag = load_i64(sess, new_flag_ptr)?;
+    let empty = sess.2.build_int_compare(IntPredicate::EQ, new_flag, sess.0.i64_type().const_int(SLOT_EMPTY, false), "").map_err(builder_fail)?;
+    let next_probe = new_block(sess, f, "rehash_next");
+    sess.2.build_conditional_branch(empty, place, next_probe).map_err(builder_fail)?;
+    sess.2.position_at_end(next_probe);
+    let next_step = sess.2.build_int_add(step, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, step_slot, next_step.into())?;
+    sess.2.build_unconditional_branch(probe_body).map_err(builder_fail)?;
+    sess.2.position_at_end(place);
+    let new_key_ptr = slot_gep(sess, slot_ty, new_slot, 1)?;
+    let new_val_ptr = slot_gep(sess, slot_ty, new_slot, 2)?;
+    copy_value(sess, k_key, new_key_ptr, old_key, span)?;
+    copy_value(sess, v_key, new_val_ptr, old_val, span)?;
+    store_key(sess, new_flag_ptr, sess.0.i64_type().const_int(SLOT_OCCUPIED, false).into())?;
+    sess.2.build_unconditional_branch(skip).map_err(builder_fail)?;
+    sess.2.position_at_end(skip);
+    let next_i = sess.2.build_int_add(i, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, i_slot, next_i.into())?;
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(done);
+    Ok(())
+}
+
 fn native_hash_map_new<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let map_key = result_arg_key(sess, ret_key, 0);
     let map_val = declare_local(sess, map_key, "map", span)?;
@@ -3145,118 +3571,159 @@ fn native_hash_map_insert<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
     let p2 = get_local(locals, 2, span)?;
     let k_key = native_arg_key(sess, params_list, 1);
     let v_key = native_arg_key(sess, params_list, 2);
-    let ksize = sess.3.get_abi_size(&llvm_of(sess, k_key, span)?);
-    let vsize = sess.3.get_abi_size(&llvm_of(sess, v_key, span)?);
-    let stride_const = sess.0.i64_type().const_int(ksize + vsize, false);
-    let ksize_const = sess.0.i64_type().const_int(ksize, false);
-    let vsize_const = sess.0.i64_type().const_int(vsize, false);
+    let slot_ty = hash_map_slot_ty(sess, k_key, v_key, span)?;
+    let slot_size = sess.3.get_abi_size(&slot_ty);
+    let slot_size_const = sess.0.i64_type().const_int(slot_size, false);
     let map_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let map_ref = load_ptr(sess, p0)?;
     let dptr = struct_gep(sess, map_key, map_ref, 0, "", span)?;
     let lptr = struct_gep(sess, map_key, map_ref, 1, "", span)?;
     let cptr = struct_gep(sess, map_key, map_ref, 2, "", span)?;
-    let data = load_ptr(sess, dptr)?;
-    let len = load_i64(sess, lptr)?;
-    let key_base = sess.2.build_pointer_cast(p1, ptr_ty(sess), "").map_err(builder_fail)?;
-    let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "i", span)?;
-    store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
-    let scan_cond = new_block(sess, f, "map_cond");
-    let scan_body = new_block(sess, f, "map_body");
-    let found_block = new_block(sess, f, "map_found");
-    let append_block = new_block(sess, f, "map_append");
-    let after = new_block(sess, f, "map_after");
-    sess.2.build_unconditional_branch(scan_cond).map_err(builder_fail)?;
-    sess.2.position_at_end(scan_cond);
-    let i = load_i64(sess, i_slot)?;
-    let done = sess.2.build_int_compare(IntPredicate::ULT, i, len, "").map_err(builder_fail)?;
-    let next_i = new_block(sess, f, "map_next");
-    sess.2.build_conditional_branch(done, scan_body, append_block).map_err(builder_fail)?;
-    sess.2.position_at_end(scan_body);
-    let off = sess.2.build_int_mul(i, stride_const, "").map_err(builder_fail)?;
-    let keyptr = byte_offset(sess, data, off)?;
-    let memcmp = extern_memcmp(sess);
-    let cmp_call = sess.2.build_call(
-        memcmp,
-        &[into_meta(keyptr.into()), into_meta(key_base.into()), into_meta(ksize_const.into())],
-        "",
-    ).map_err(builder_fail)?;
-    let cmpv = match cmp_call.try_as_basic_value() {
-        ValueKind::Basic(bv) => bv.into_int_value(),
-        ValueKind::Instruction(inst) => {
-            return Err(builder_error(span.0, span.1, span.2, &format!("internal: memcmp returned void ({:?})", inst.get_opcode())));
-        }
-    };
-    let eq = sess.2.build_int_compare(IntPredicate::EQ, cmpv, sess.0.i32_type().const_zero(), "").map_err(builder_fail)?;
-    sess.2.build_conditional_branch(eq, found_block, next_i).map_err(builder_fail)?;
-    sess.2.position_at_end(next_i);
-    let one = sess.0.i64_type().const_int(1, false);
-    let i2 = sess.2.build_int_add(i, one, "").map_err(builder_fail)?;
-    store_key(sess, i_slot, i2.into())?;
-    sess.2.build_unconditional_branch(scan_cond).map_err(builder_fail)?;
-    sess.2.position_at_end(found_block);
-    let voff = sess.2.build_int_add(off, ksize_const, "").map_err(builder_fail)?;
-    let valueptr = byte_offset(sess, data, voff)?;
-    copy_value(sess, v_key, valueptr, p2, span)?;
-    let unit_key = result_arg_key(sess, ret_key, 0);
-    let unit_val = build_unit_value(sess, unit_key, span)?;
-    let ok_result = build_result_ok(sess, ret_key, unit_key, unit_val, span)?;
-    copy_to_out(sess, ret_key, out, ok_result, span)?;
-    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
-    sess.2.position_at_end(append_block);
-    let cap = load_i64(sess, cptr)?;
-    let need_grow = sess.2.build_int_compare(IntPredicate::EQ, len, cap, "").map_err(builder_fail)?;
+
+    // Grow (rehash) up front when the table is empty or already half full,
+    // so the probe below always has an empty or tombstoned slot to land in.
+    let zero = sess.0.i64_type().const_zero();
+    let len0 = load_i64(sess, lptr)?;
+    let cap0 = load_i64(sess, cptr)?;
+    let cap0_empty = sess.2.build_int_compare(IntPredicate::EQ, cap0, zero, "").map_err(builder_fail)?;
+    let len_doubled = sess.2.build_int_mul(len0, sess.0.i64_type().const_int(2, false), "").map_err(builder_fail)?;
+    let half_full = sess.2.build_int_compare(IntPredicate::SGE, len_doubled, cap0, "").map_err(builder_fail)?;
+    let need_grow = sess.2.build_or(cap0_empty, half_full, "").map_err(builder_fail)?;
     let grow_block = new_block(sess, f, "map_grow");
-    let do_append = new_block(sess, f, "map_do_append");
+    let probe_prep = new_block(sess, f, "map_probe_prep");
     let fail_block = new_block(sess, f, "map_fail");
-    sess.2.build_conditional_branch(need_grow, grow_block, do_append).map_err(builder_fail)?;
+    let after = new_block(sess, f, "map_after");
+    sess.2.build_conditional_branch(need_grow, grow_block, probe_prep).map_err(builder_fail)?;
+
     sess.2.position_at_end(grow_block);
     let old_data = load_ptr(sess, dptr)?;
-    let zero = sess.0.i64_type().const_zero();
-    let is_empty = sess.2.build_int_compare(IntPredicate::EQ, cap, zero, "").map_err(builder_fail)?;
-    let four = sess.0.i64_type().const_int(4, false);
-    let two = sess.0.i64_type().const_int(2, false);
-    let doubled = sess.2.build_int_mul(cap, two, "").map_err(builder_fail)?;
-    let newcap = sess.2.build_select(is_empty, four, doubled, "").map_err(builder_fail)?;
-    let needed = sess.2.build_int_mul(newcap.into_int_value(), stride_const, "").map_err(builder_fail)?;
-    let realloc = extern_realloc(sess);
-    let call = sess.2.build_call(realloc, &[into_meta(old_data.into()), into_meta(needed.into())], "").map_err(builder_fail)?;
+    let old_cap = load_i64(sess, cptr)?;
+    let old_cap_empty = sess.2.build_int_compare(IntPredicate::EQ, old_cap, zero, "").map_err(builder_fail)?;
+    let doubled_cap = sess.2.build_int_mul(old_cap, sess.0.i64_type().const_int(2, false), "").map_err(builder_fail)?;
+    let initial = sess.0.i64_type().const_int(INITIAL_CAPACITY, false);
+    let new_cap = sess.2.build_select(old_cap_empty, initial, doubled_cap, "").map_err(builder_fail)?.into_int_value();
+    let needed = sess.2.build_int_mul(new_cap, slot_size_const, "").map_err(builder_fail)?;
+    let malloc = extern_malloc(sess);
+    let call = sess.2.build_call(malloc, &[into_meta(needed.into())], "").map_err(builder_fail)?;
     let new_data = match call.try_as_basic_value() {
-        ValueKind::Basic(bv) => bv.into_pointer_value(),
-        ValueKind::Instruction(inst) => {
-            return Err(builder_error(span.0, span.1, span.2, &format!("internal: realloc returned void ({:?})", inst.get_opcode())));
-        }
+        ValueKind::Basic(value) => value.into_pointer_value(),
+        ValueKind::Instruction(inst) => return Err(builder_error(span.0, span.1, span.2, &format!("internal: malloc returned void ({:?})", inst.get_opcode()))),
     };
     let null_cmp = is_null_ptr(sess, new_data)?;
     let grow_ok = new_block(sess, f, "map_grow_ok");
     sess.2.build_conditional_branch(null_cmp, fail_block, grow_ok).map_err(builder_fail)?;
     sess.2.position_at_end(grow_ok);
-    store_key(sess, dptr, new_data.into())?;
-    store_key(sess, cptr, newcap)?;
-    sess.2.build_unconditional_branch(do_append).map_err(builder_fail)?;
-    sess.2.position_at_end(do_append);
-    let data2 = load_ptr(sess, dptr)?;
-    let len2 = load_i64(sess, lptr)?;
-    let entry_off = sess.2.build_int_mul(len2, stride_const, "").map_err(builder_fail)?;
-    let keyptr2 = byte_offset(sess, data2, entry_off)?;
-    // Zero-fill the new key and value slots before copying: struct and
-    // enum keys lowered with ABI layout carry padding bytes, and the scan
-    // compares whole keys with memcmp over ksize bytes.  Deterministic
-    // padding keeps that comparison well-defined (interim measure; the
-    // long-term fix is structural key equality).
     let zero8 = sess.0.i8_type().const_zero();
-    sess.2.build_memset(keyptr2, 1, zero8, ksize_const).map_err(builder_fail)?;
-    copy_value(sess, k_key, keyptr2, p1, span)?;
-    let voff2 = sess.2.build_int_add(entry_off, ksize_const, "").map_err(builder_fail)?;
-    let valueptr2 = byte_offset(sess, data2, voff2)?;
-    sess.2.build_memset(valueptr2, 1, zero8, vsize_const).map_err(builder_fail)?;
-    copy_value(sess, v_key, valueptr2, p2, span)?;
-    let len3 = sess.2.build_int_add(len2, one, "").map_err(builder_fail)?;
-    store_key(sess, lptr, len3.into())?;
+    sess.2.build_memset(new_data, 1, zero8, needed).map_err(builder_fail)?;
+    rehash_into(sess, f, (old_data, old_cap), (new_data, new_cap), k_key, v_key, span)?;
+    let old_null = is_null_ptr(sess, old_data)?;
+    let free_old = new_block(sess, f, "map_free_old");
+    let grow_done = new_block(sess, f, "map_grow_done");
+    sess.2.build_conditional_branch(old_null, grow_done, free_old).map_err(builder_fail)?;
+    sess.2.position_at_end(free_old);
+    sess.2.build_call(extern_free(sess), &[into_meta(old_data.into())], "").map_err(builder_fail)?;
+    sess.2.build_unconditional_branch(grow_done).map_err(builder_fail)?;
+    sess.2.position_at_end(grow_done);
+    store_key(sess, dptr, new_data.into())?;
+    store_key(sess, cptr, new_cap.into())?;
+    sess.2.build_unconditional_branch(probe_prep).map_err(builder_fail)?;
+
+    sess.2.position_at_end(probe_prep);
+    let data = load_ptr(sess, dptr)?;
+    let cap = load_i64(sess, cptr)?;
+    let hash_slot = alloca_raw(sess, sess.0.i64_type().into(), "key_hash", span)?;
+    store_key(sess, hash_slot, sess.0.i64_type().const_int(HASH_SEED, false).into())?;
+    emit_key_hash_into(sess, f, k_key, p1, hash_slot, span)?;
+    let hash = load_i64(sess, hash_slot)?;
+    let step_slot = alloca_raw(sess, sess.0.i64_type().into(), "step", span)?;
+    store_key(sess, step_slot, zero.into())?;
+    let insert_slot = alloca_raw(sess, sess.0.i64_type().into(), "insert_at", span)?;
+    let minus_one = sess.0.i64_type().const_int(u64::MAX, false);
+    store_key(sess, insert_slot, minus_one.into())?;
+    let probe_cond = new_block(sess, f, "map_probe_cond");
+    let probe_body = new_block(sess, f, "map_probe_body");
+    let exhausted = new_block(sess, f, "map_probe_exhausted");
+    sess.2.build_unconditional_branch(probe_cond).map_err(builder_fail)?;
+    sess.2.position_at_end(probe_cond);
+    let step = load_i64(sess, step_slot)?;
+    let more = sess.2.build_int_compare(IntPredicate::ULT, step, cap, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(more, probe_body, exhausted).map_err(builder_fail)?;
+    sess.2.position_at_end(probe_body);
+    let slot = probe_slot(sess, data, hash, step, cap, slot_size)?;
+    let flag_ptr = slot_gep(sess, slot_ty, slot, 0)?;
+    let flag = load_i64(sess, flag_ptr)?;
+    let empty_const = sess.0.i64_type().const_int(SLOT_EMPTY, false);
+    let occupied_const = sess.0.i64_type().const_int(SLOT_OCCUPIED, false);
+    let is_empty = sess.2.build_int_compare(IntPredicate::EQ, flag, empty_const, "").map_err(builder_fail)?;
+    let is_occupied = sess.2.build_int_compare(IntPredicate::EQ, flag, occupied_const, "").map_err(builder_fail)?;
+    let empty_case = new_block(sess, f, "map_slot_empty");
+    let occupied_case = new_block(sess, f, "map_slot_occupied");
+    let tombstone_case = new_block(sess, f, "map_slot_tombstone");
+    sess.2.build_conditional_branch(is_empty, empty_case, occupied_case).map_err(builder_fail)?;
+    let compare_block = new_block(sess, f, "map_compare");
+    let replace = new_block(sess, f, "map_replace");
+    let remember = new_block(sess, f, "map_remember");
+    let advance = new_block(sess, f, "map_advance");
+    sess.2.position_at_end(occupied_case);
+    sess.2.build_conditional_branch(is_occupied, compare_block, tombstone_case).map_err(builder_fail)?;
+    sess.2.position_at_end(compare_block);
+    let slot_key = slot_gep(sess, slot_ty, slot, 1)?;
+    let eq = emit_key_eq(sess, f, k_key, slot_key, p1, span)?;
+    sess.2.build_conditional_branch(eq, replace, advance).map_err(builder_fail)?;
+    sess.2.position_at_end(tombstone_case);
+    let have_slot = sess.2.build_int_compare(IntPredicate::EQ, load_i64(sess, insert_slot)?, minus_one, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(have_slot, remember, advance).map_err(builder_fail)?;
+    sess.2.position_at_end(remember);
+    store_key(sess, insert_slot, step.into())?;
+    sess.2.build_unconditional_branch(advance).map_err(builder_fail)?;
+    sess.2.position_at_end(empty_case);
+    let have_slot2 = sess.2.build_int_compare(IntPredicate::EQ, load_i64(sess, insert_slot)?, minus_one, "").map_err(builder_fail)?;
+    let remember2 = new_block(sess, f, "map_remember2");
+    let do_insert = new_block(sess, f, "map_insert");
+    sess.2.build_conditional_branch(have_slot2, remember2, do_insert).map_err(builder_fail)?;
+    sess.2.position_at_end(remember2);
+    store_key(sess, insert_slot, step.into())?;
+    sess.2.build_unconditional_branch(do_insert).map_err(builder_fail)?;
+    sess.2.position_at_end(advance);
+    let next_step = sess.2.build_int_add(step, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, step_slot, next_step.into())?;
+    sess.2.build_unconditional_branch(probe_cond).map_err(builder_fail)?;
+
+    sess.2.position_at_end(replace);
+    let slot_val = slot_gep(sess, slot_ty, slot, 2)?;
+    copy_value(sess, v_key, slot_val, p2, span)?;
+    let unit_key = result_arg_key(sess, ret_key, 0);
+    let unit_val = build_unit_value(sess, unit_key, span)?;
+    let ok_result = build_result_ok(sess, ret_key, unit_key, unit_val, span)?;
+    copy_to_out(sess, ret_key, out, ok_result, span)?;
+    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+
+    sess.2.position_at_end(exhausted);
+    // Defensive: a table kept below half occupancy always has an empty or
+    // tombstoned slot, so this is unreachable in practice. If it is ever
+    // reached, rehash into a larger table (which drops tombstones and
+    // guarantees room) and retry, rather than writing a slot that does not
+    // exist.
+    sess.2.build_unconditional_branch(grow_block).map_err(builder_fail)?;
+
+    sess.2.position_at_end(do_insert);
+    let at = load_i64(sess, insert_slot)?;
+    let target = probe_slot(sess, data, hash, at, cap, slot_size)?;
+    let target_flag = slot_gep(sess, slot_ty, target, 0)?;
+    let target_key = slot_gep(sess, slot_ty, target, 1)?;
+    let target_val = slot_gep(sess, slot_ty, target, 2)?;
+    copy_value(sess, k_key, target_key, p1, span)?;
+    copy_value(sess, v_key, target_val, p2, span)?;
+    store_key(sess, target_flag, occupied_const.into())?;
+    let len_now = load_i64(sess, lptr)?;
+    let len_next = sess.2.build_int_add(len_now, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, lptr, len_next.into())?;
     let unit_key2 = result_arg_key(sess, ret_key, 0);
     let unit_val2 = build_unit_value(sess, unit_key2, span)?;
     let ok_result2 = build_result_ok(sess, ret_key, unit_key2, unit_val2, span)?;
     copy_to_out(sess, ret_key, out, ok_result2, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+
     sess.2.position_at_end(fail_block);
     let err_key = result_arg_key(sess, ret_key, 1);
     let alloc_fail_tag = variant_tag_of(sess, err_key, sess.12.alloc_failed, span)?;
@@ -3271,62 +3738,62 @@ fn native_hash_map_insert<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
     Ok(out)
 }
 
+
 fn native_hash_map_get<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, locals: &Locals<'ctx>, params_list: i64, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
     let p0 = get_local(locals, 0, span)?;
     let p1 = get_local(locals, 1, span)?;
     let k_key = native_arg_key(sess, params_list, 1);
     let v_key = result_arg_key(sess, ret_key, 0);
-    let ksize = sess.3.get_abi_size(&llvm_of(sess, k_key, span)?);
-    let vsize = sess.3.get_abi_size(&llvm_of(sess, v_key, span)?);
-    let stride_const = sess.0.i64_type().const_int(ksize + vsize, false);
-    let ksize_const = sess.0.i64_type().const_int(ksize, false);
+    let slot_ty = hash_map_slot_ty(sess, k_key, v_key, span)?;
+    let slot_size = sess.3.get_abi_size(&slot_ty);
     let map_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let map_ref = load_ptr(sess, p0)?;
     let dptr = struct_gep(sess, map_key, map_ref, 0, "", span)?;
+    let cptr = struct_gep(sess, map_key, map_ref, 2, "", span)?;
     let data = load_ptr(sess, dptr)?;
-    let lptr = struct_gep(sess, map_key, map_ref, 1, "", span)?;
-    let len = load_i64(sess, lptr)?;
-    let key_base = sess.2.build_pointer_cast(p1, ptr_ty(sess), "").map_err(builder_fail)?;
-    let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "i", span)?;
-    store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
-    let scan_cond = new_block(sess, f, "g_cond");
-    let scan_body = new_block(sess, f, "g_body");
+    let cap = load_i64(sess, cptr)?;
+    let hash_slot = alloca_raw(sess, sess.0.i64_type().into(), "key_hash", span)?;
+    store_key(sess, hash_slot, sess.0.i64_type().const_int(HASH_SEED, false).into())?;
+    emit_key_hash_into(sess, f, k_key, p1, hash_slot, span)?;
+    let hash = load_i64(sess, hash_slot)?;
+    let step_slot = alloca_raw(sess, sess.0.i64_type().into(), "step", span)?;
+    store_key(sess, step_slot, sess.0.i64_type().const_zero().into())?;
+    let probe_cond = new_block(sess, f, "g_cond");
+    let probe_body = new_block(sess, f, "g_body");
     let found_block = new_block(sess, f, "g_found");
     let missing_block = new_block(sess, f, "g_missing");
     let after = new_block(sess, f, "g_after");
-    sess.2.build_unconditional_branch(scan_cond).map_err(builder_fail)?;
-    sess.2.position_at_end(scan_cond);
-    let i = load_i64(sess, i_slot)?;
-    let done = sess.2.build_int_compare(IntPredicate::ULT, i, len, "").map_err(builder_fail)?;
-    let next_i = new_block(sess, f, "g_next");
-    sess.2.build_conditional_branch(done, scan_body, missing_block).map_err(builder_fail)?;
-    sess.2.position_at_end(scan_body);
-    let off = sess.2.build_int_mul(i, stride_const, "").map_err(builder_fail)?;
-    let keyptr = byte_offset(sess, data, off)?;
-    let memcmp = extern_memcmp(sess);
-    let cmp_call = sess.2.build_call(
-        memcmp,
-        &[into_meta(keyptr.into()), into_meta(key_base.into()), into_meta(ksize_const.into())],
-        "",
-    ).map_err(builder_fail)?;
-    let cmpv = match cmp_call.try_as_basic_value() {
-        ValueKind::Basic(bv) => bv.into_int_value(),
-        ValueKind::Instruction(inst) => {
-            return Err(builder_error(span.0, span.1, span.2, &format!("internal: memcmp returned void ({:?})", inst.get_opcode())));
-        }
-    };
-    let eq = sess.2.build_int_compare(IntPredicate::EQ, cmpv, sess.0.i32_type().const_zero(), "").map_err(builder_fail)?;
-    sess.2.build_conditional_branch(eq, found_block, next_i).map_err(builder_fail)?;
-    sess.2.position_at_end(next_i);
-    let one = sess.0.i64_type().const_int(1, false);
-    let i2 = sess.2.build_int_add(i, one, "").map_err(builder_fail)?;
-    store_key(sess, i_slot, i2.into())?;
-    sess.2.build_unconditional_branch(scan_cond).map_err(builder_fail)?;
+    sess.2.build_unconditional_branch(probe_cond).map_err(builder_fail)?;
+    sess.2.position_at_end(probe_cond);
+    let step = load_i64(sess, step_slot)?;
+    let more = sess.2.build_int_compare(IntPredicate::ULT, step, cap, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(more, probe_body, missing_block).map_err(builder_fail)?;
+    sess.2.position_at_end(probe_body);
+    let slot = probe_slot(sess, data, hash, step, cap, slot_size)?;
+    let flag_ptr = slot_gep(sess, slot_ty, slot, 0)?;
+    let flag = load_i64(sess, flag_ptr)?;
+    let empty_const = sess.0.i64_type().const_int(SLOT_EMPTY, false);
+    let occupied_const = sess.0.i64_type().const_int(SLOT_OCCUPIED, false);
+    let is_empty = sess.2.build_int_compare(IntPredicate::EQ, flag, empty_const, "").map_err(builder_fail)?;
+    let is_occupied = sess.2.build_int_compare(IntPredicate::EQ, flag, occupied_const, "").map_err(builder_fail)?;
+    let occupied_or_tombstone = new_block(sess, f, "g_occupied_or_tombstone");
+    let compare_block = new_block(sess, f, "g_compare");
+    let advance = new_block(sess, f, "g_advance");
+    sess.2.build_conditional_branch(is_empty, missing_block, occupied_or_tombstone).map_err(builder_fail)?;
+    sess.2.position_at_end(occupied_or_tombstone);
+    sess.2.build_conditional_branch(is_occupied, compare_block, advance).map_err(builder_fail)?;
+    sess.2.position_at_end(compare_block);
+    let slot_key = slot_gep(sess, slot_ty, slot, 1)?;
+    let eq = emit_key_eq(sess, f, k_key, slot_key, p1, span)?;
+    sess.2.build_conditional_branch(eq, found_block, advance).map_err(builder_fail)?;
+    sess.2.position_at_end(advance);
+    let next_step = sess.2.build_int_add(step, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, step_slot, next_step.into())?;
+    sess.2.build_unconditional_branch(probe_cond).map_err(builder_fail)?;
     sess.2.position_at_end(found_block);
-    let voff = sess.2.build_int_add(off, ksize_const, "").map_err(builder_fail)?;
-    let valueptr = byte_offset(sess, data, voff)?;
+    let slot_val = slot_gep(sess, slot_ty, slot, 2)?;
     let v_val = declare_local(sess, v_key, "got", span)?;
-    copy_value(sess, v_key, v_val, valueptr, span)?;
+    copy_value(sess, v_key, v_val, slot_val, span)?;
     let ok_result = build_result_ok(sess, ret_key, v_key, v_val, span)?;
     copy_to_out(sess, ret_key, out, ok_result, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
@@ -3357,68 +3824,61 @@ fn native_hash_map_remove<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
     let p1 = get_local(locals, 1, span)?;
     let k_key = native_arg_key(sess, params_list, 1);
     let v_key = result_arg_key(sess, ret_key, 0);
-    let ksize = sess.3.get_abi_size(&llvm_of(sess, k_key, span)?);
-    let vsize = sess.3.get_abi_size(&llvm_of(sess, v_key, span)?);
-    let stride_const = sess.0.i64_type().const_int(ksize + vsize, false);
-    let ksize_const = sess.0.i64_type().const_int(ksize, false);
+    let slot_ty = hash_map_slot_ty(sess, k_key, v_key, span)?;
+    let slot_size = sess.3.get_abi_size(&slot_ty);
     let map_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let map_ref = load_ptr(sess, p0)?;
     let dptr = struct_gep(sess, map_key, map_ref, 0, "", span)?;
-    let data = load_ptr(sess, dptr)?;
     let lptr = struct_gep(sess, map_key, map_ref, 1, "", span)?;
-    let len = load_i64(sess, lptr)?;
-    let key_base = sess.2.build_pointer_cast(p1, ptr_ty(sess), "").map_err(builder_fail)?;
-    let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "i", span)?;
-    store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
-    let scan_cond = new_block(sess, f, "rm_cond");
-    let scan_body = new_block(sess, f, "rm_body");
+    let cptr = struct_gep(sess, map_key, map_ref, 2, "", span)?;
+    let data = load_ptr(sess, dptr)?;
+    let cap = load_i64(sess, cptr)?;
+    let hash_slot = alloca_raw(sess, sess.0.i64_type().into(), "key_hash", span)?;
+    store_key(sess, hash_slot, sess.0.i64_type().const_int(HASH_SEED, false).into())?;
+    emit_key_hash_into(sess, f, k_key, p1, hash_slot, span)?;
+    let hash = load_i64(sess, hash_slot)?;
+    let step_slot = alloca_raw(sess, sess.0.i64_type().into(), "step", span)?;
+    store_key(sess, step_slot, sess.0.i64_type().const_zero().into())?;
+    let probe_cond = new_block(sess, f, "rm_cond");
+    let probe_body = new_block(sess, f, "rm_body");
     let found_block = new_block(sess, f, "rm_found");
     let missing_block = new_block(sess, f, "rm_missing");
     let after = new_block(sess, f, "rm_after");
-    sess.2.build_unconditional_branch(scan_cond).map_err(builder_fail)?;
-    sess.2.position_at_end(scan_cond);
-    let i = load_i64(sess, i_slot)?;
-    let done = sess.2.build_int_compare(IntPredicate::ULT, i, len, "").map_err(builder_fail)?;
-    let next_i = new_block(sess, f, "rm_next");
-    sess.2.build_conditional_branch(done, scan_body, missing_block).map_err(builder_fail)?;
-    sess.2.position_at_end(scan_body);
-    let off = sess.2.build_int_mul(i, stride_const, "").map_err(builder_fail)?;
-    let keyptr = byte_offset(sess, data, off)?;
-    let memcmp = extern_memcmp(sess);
-    let cmp_call = sess.2.build_call(
-        memcmp,
-        &[into_meta(keyptr.into()), into_meta(key_base.into()), into_meta(ksize_const.into())],
-        "",
-    ).map_err(builder_fail)?;
-    let cmpv = match cmp_call.try_as_basic_value() {
-        ValueKind::Basic(bv) => bv.into_int_value(),
-        ValueKind::Instruction(inst) => {
-            return Err(builder_error(span.0, span.1, span.2, &format!("internal: memcmp returned void ({:?})", inst.get_opcode())));
-        }
-    };
-    let eq = sess.2.build_int_compare(IntPredicate::EQ, cmpv, sess.0.i32_type().const_zero(), "").map_err(builder_fail)?;
-    sess.2.build_conditional_branch(eq, found_block, next_i).map_err(builder_fail)?;
-    sess.2.position_at_end(next_i);
-    let one = sess.0.i64_type().const_int(1, false);
-    let i2 = sess.2.build_int_add(i, one, "").map_err(builder_fail)?;
-    store_key(sess, i_slot, i2.into())?;
-    sess.2.build_unconditional_branch(scan_cond).map_err(builder_fail)?;
+    sess.2.build_unconditional_branch(probe_cond).map_err(builder_fail)?;
+    sess.2.position_at_end(probe_cond);
+    let step = load_i64(sess, step_slot)?;
+    let more = sess.2.build_int_compare(IntPredicate::ULT, step, cap, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(more, probe_body, missing_block).map_err(builder_fail)?;
+    sess.2.position_at_end(probe_body);
+    let slot = probe_slot(sess, data, hash, step, cap, slot_size)?;
+    let flag_ptr = slot_gep(sess, slot_ty, slot, 0)?;
+    let flag = load_i64(sess, flag_ptr)?;
+    let empty_const = sess.0.i64_type().const_int(SLOT_EMPTY, false);
+    let occupied_const = sess.0.i64_type().const_int(SLOT_OCCUPIED, false);
+    let is_empty = sess.2.build_int_compare(IntPredicate::EQ, flag, empty_const, "").map_err(builder_fail)?;
+    let is_occupied = sess.2.build_int_compare(IntPredicate::EQ, flag, occupied_const, "").map_err(builder_fail)?;
+    let occupied_or_tombstone = new_block(sess, f, "rm_occupied_or_tombstone");
+    let compare_block = new_block(sess, f, "rm_compare");
+    let advance = new_block(sess, f, "rm_advance");
+    sess.2.build_conditional_branch(is_empty, missing_block, occupied_or_tombstone).map_err(builder_fail)?;
+    sess.2.position_at_end(occupied_or_tombstone);
+    sess.2.build_conditional_branch(is_occupied, compare_block, advance).map_err(builder_fail)?;
+    sess.2.position_at_end(compare_block);
+    let slot_key = slot_gep(sess, slot_ty, slot, 1)?;
+    let eq = emit_key_eq(sess, f, k_key, slot_key, p1, span)?;
+    sess.2.build_conditional_branch(eq, found_block, advance).map_err(builder_fail)?;
+    sess.2.position_at_end(advance);
+    let next_step = sess.2.build_int_add(step, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, step_slot, next_step.into())?;
+    sess.2.build_unconditional_branch(probe_cond).map_err(builder_fail)?;
     sess.2.position_at_end(found_block);
-    let voff = sess.2.build_int_add(off, ksize_const, "").map_err(builder_fail)?;
-    let valueptr = byte_offset(sess, data, voff)?;
+    let slot_val = slot_gep(sess, slot_ty, slot, 2)?;
     let v_val = declare_local(sess, v_key, "removed", span)?;
-    copy_value(sess, v_key, v_val, valueptr, span)?;
-    let i_found = load_i64(sess, i_slot)?;
-    let one_more = sess.2.build_int_add(i_found, one, "").map_err(builder_fail)?;
-    let remain = sess.2.build_int_sub(len, one_more, "").map_err(builder_fail)?;
-    let shift_bytes = sess.2.build_int_mul(remain, stride_const, "").map_err(builder_fail)?;
-    let dst_off = sess.2.build_int_mul(i_found, stride_const, "").map_err(builder_fail)?;
-    let src_off = sess.2.build_int_mul(one_more, stride_const, "").map_err(builder_fail)?;
-    let dst = byte_offset(sess, data, dst_off)?;
-    let src = byte_offset(sess, data, src_off)?;
-    sess.2.build_memmove(dst, 1, src, 1, shift_bytes).map_err(builder_fail)?;
-    let len2 = sess.2.build_int_sub(len, one, "").map_err(builder_fail)?;
-    store_key(sess, lptr, len2.into())?;
+    copy_value(sess, v_key, v_val, slot_val, span)?;
+    store_key(sess, flag_ptr, sess.0.i64_type().const_int(SLOT_TOMBSTONE, false).into())?;
+    let len_now = load_i64(sess, lptr)?;
+    let len_next = sess.2.build_int_sub(len_now, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
+    store_key(sess, lptr, len_next.into())?;
     let ok_result = build_result_ok(sess, ret_key, v_key, v_val, span)?;
     copy_to_out(sess, ret_key, out, ok_result, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
@@ -3441,7 +3901,7 @@ fn native_self_check<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: 
     Ok(())
 }
 
-// The largest path `File.open` accepts, matching Linux's own `PATH_MAX`.
+// The largest path staged in the compiler-generated C string buffer.
 //
 // A path arrives as a `&[U8]` carrying its own length, but `openat` wants a
 // NUL-terminated string, so the path is copied into a stack buffer with a
@@ -3450,43 +3910,64 @@ fn native_self_check<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: 
 // kernel would have produced.
 const PATH_MAX: u64 = 4096;
 
-/// `ENAMETOOLONG`, reported for a path at or over `PATH_MAX`.
-const ENAMETOOLONG: u64 = 36;
+struct RuntimeConstants { prot_read_write: u64, map_private_anonymous: u64, open_create: u64, open_truncate: u64, open_append: u64, open_binary: u64, name_too_long: u64, interrupted: u64 }
 
-// A Linux system call reports failure as a negative errno in its result
-// register.  This turns that into the positive code a `SystemFault` payload
-// carries, so a Cinnabar program sees the same number `errno` would hold.
-fn errno_of<'ctx>(sess: &mut Session<'ctx, '_, '_>, raw: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
-    sess.2
-        .build_int_neg(raw, "")
-        .map_err(|err| builder_error(span.0, span.1, span.2, &format!("internal: cannot read an error code out of a system-call result: {}", err)))
+fn runtime_constants(platform: RuntimePlatform) -> RuntimeConstants {
+    match platform {
+        RuntimePlatform::Linux => RuntimeConstants { prot_read_write: 3, map_private_anonymous: 0x22, open_create: 0o100, open_truncate: 0o1000, open_append: 0o2000, open_binary: 0, name_too_long: 36, interrupted: 4 },
+        RuntimePlatform::DarwinOrBsd => RuntimeConstants { prot_read_write: 3, map_private_anonymous: 0x1002, open_create: 0x200, open_truncate: 0x400, open_append: 0x8, open_binary: 0, name_too_long: 63, interrupted: 4 },
+        RuntimePlatform::Windows => RuntimeConstants { prot_read_write: 0, map_private_anonymous: 0, open_create: 0x100, open_truncate: 0x200, open_append: 0x8, open_binary: 0x8000, name_too_long: 36, interrupted: 4 },
+    }
+}
+
+fn runtime_errno<'ctx>(sess: &mut Session<'ctx, '_, '_>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
+    let name = match runtime_platform(sess, span)? {
+        RuntimePlatform::Linux => "__errno_location",
+        RuntimePlatform::DarwinOrBsd => "__error",
+        RuntimePlatform::Windows => "_errno",
+    };
+    let loc_fn = extern_fn(sess, name, ptr_ty(sess).fn_type(&[], false));
+    let call = sess.2.build_call(loc_fn, &[], "").map_err(builder_fail)?;
+    let loc = match call.try_as_basic_value() {
+        ValueKind::Basic(value) => value.into_pointer_value(),
+        ValueKind::Instruction(inst) => return Err(builder_error(span.0, span.1, span.2, &format!("internal: errno accessor returned void ({:?})", inst.get_opcode()))),
+    };
+    let err32 = sess.2.build_load(sess.0.i32_type(), loc, "").map_err(builder_fail)?.into_int_value();
+    sess.2.build_int_s_extend(err32, sess.0.i64_type(), "").map_err(builder_fail)
+}
+
+fn is_eintr<'ctx>(sess: &mut Session<'ctx, '_, '_>, result: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<inkwell::values::IntValue<'ctx>, CodegenError> {
+    let failed = sess.2.build_int_compare(IntPredicate::EQ, result, result.get_type().const_all_ones(), "").map_err(builder_fail)?;
+    let errno = runtime_errno(sess, span)?;
+    let interrupted = sess.0.i64_type().const_int(runtime_constants(runtime_platform(sess, span)?).interrupted, false);
+    let matches = sess.2.build_int_compare(IntPredicate::EQ, errno, interrupted, "").map_err(builder_fail)?;
+    sess.2.build_and(failed, matches, "").map_err(builder_fail)
 }
 
 // Builds `Err(SystemFault(code))` into `out`.
 //
-// Shared by every syscall-backed surface, so the mapping from a kernel
-// error to a Cinnabar value is stated once. `Net` reaches the same variant
-// through `__errno_location`, because its libc wrappers report that way;
-// the syscall path has the code in hand already.
+// Shared by every native surface that reports a platform error, so the
+// mapping from an errno to a Cinnabar value is stated once. Each caller
+// reads the code from the platform's errno accessor (`runtime_errno`) and
+// passes it here to be written into the `SystemFault` payload.
 fn system_fault_result<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: PointerValue<'ctx>, code: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let err_key = result_arg_key(sess, ret_key, 1);
     let tag = variant_tag_of(sess, err_key, sess.12.system_fault, span)?;
     let f0 = variant_payload_key(sess, err_key, tag, 0, span)?;
     let slot = declare_local(sess, f0, "errno", span)?;
-    let widened = word_of(sess, code, span)?;
-    store_key(sess, slot, widened.into())?;
+    store_key(sess, slot, code.into())?;
     let fail_val = build_enum_value(sess, err_key, tag, &[(f0, slot)], span)?;
     let err_result = build_result_err(sess, ret_key, err_key, fail_val, span)?;
     copy_to_out(sess, ret_key, out, err_result, span)
 }
 
-// Splits control flow on a raw syscall result: negative is a failure that
+// Splits control flow on a libc result: negative is a failure that
 // writes `Err(SystemFault(errno))` into `out` and jumps to the join block,
 // non-negative continues in the block this returns positioned at.
 //
 // The caller resumes emitting the success path immediately and branches to
 // the returned join block when done.
-fn syscall_result_branch<'ctx>(
+fn libc_result_branch<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     f: FunctionValue<'ctx>,
     ret_key: i64,
@@ -3501,7 +3982,7 @@ fn syscall_result_branch<'ctx>(
     let after = new_block(sess, f, "sys_after");
     sess.2.build_conditional_branch(ok_cmp, ok_block, fail_block).map_err(builder_fail)?;
     sess.2.position_at_end(fail_block);
-    let code = errno_of(sess, raw, span)?;
+    let code = runtime_errno(sess, span)?;
     system_fault_result(sess, ret_key, out, code, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
     sess.2.position_at_end(ok_block);
@@ -3527,9 +4008,10 @@ fn open_flags_of<'ctx>(
     let tag = load_i64(sess, tag_ptr)?;
     let read_only = variant_tag_of(sess, mode_key, sess.12.read_only, span)?;
     let truncate = variant_tag_of(sess, mode_key, sess.12.write_truncate, span)?;
-    let read_flags = i64_ty.const_int(syscall::O_RDONLY as u64, false);
-    let truncate_flags = i64_ty.const_int((syscall::O_WRONLY | syscall::O_CREAT | syscall::O_TRUNC) as u64, false);
-    let append_flags = i64_ty.const_int((syscall::O_WRONLY | syscall::O_CREAT | syscall::O_APPEND) as u64, false);
+    let constants = runtime_constants(runtime_platform(sess, span)?);
+    let read_flags = i64_ty.const_int(constants.open_binary, false);
+    let truncate_flags = i64_ty.const_int(1 | constants.open_create | constants.open_truncate | constants.open_binary, false);
+    let append_flags = i64_ty.const_int(1 | constants.open_create | constants.open_append | constants.open_binary, false);
     let is_read = sess.2.build_int_compare(IntPredicate::EQ, tag, i64_ty.const_int(read_only as u64, false), "").map_err(builder_fail)?;
     let is_truncate = sess.2.build_int_compare(IntPredicate::EQ, tag, i64_ty.const_int(truncate as u64, false), "").map_err(builder_fail)?;
     // Append is the remaining variant: the enum is exhaustive, so anything
@@ -3573,35 +4055,36 @@ fn native_file_open<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     sess.2.position_at_end(too_long);
     // A path the buffer cannot hold is reported with the code the kernel
     // itself would have returned, rather than a Cinnabar-specific one.
-    let name_too_long = sess.0.i64_type().const_int(ENAMETOOLONG, false);
+    let name_too_long = sess.0.i64_type().const_int(runtime_constants(runtime_platform(sess, span)?).name_too_long, false);
     system_fault_result(sess, ret_key, out, name_too_long, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
     sess.2.position_at_end(attempt);
     let flags = open_flags_of(sess, mode_key, p1, span)?;
-    let dir = sess.0.i64_type().const_int(syscall::AT_FDCWD as u64, false);
-    let mode_bits = sess.0.i64_type().const_int(syscall::CREATE_MODE as u64, false);
-    let path_word = ptr_word(sess, path, span)?;
-    // `openat` rather than `open`: AArch64's Linux ABI has no `open`, so
-    // this is one code path on both architectures instead of two.
-    let raw = emit_syscall(sess, syscall::Sys::OpenAt, &[dir, path_word, flags, mode_bits], span)?;
-    let join = syscall_result_branch(sess, f, ret_key, out, raw, span)?;
+    let flags32 = sess.2.build_int_truncate(flags, sess.0.i32_type(), "").map_err(builder_fail)?;
+    let call = sess.2.build_call(extern_open(sess), &[into_meta(path.into()), into_meta(flags32.into()), into_meta(sess.0.i32_type().const_int(0o644, false).into())], "").map_err(builder_fail)?;
+    let raw = match call.try_as_basic_value() {
+        ValueKind::Basic(value) => value.into_int_value(),
+        ValueKind::Instruction(inst) => return Err(builder_error(span.0, span.1, span.2, &format!("internal: open returned void ({:?})", inst.get_opcode()))),
+    };
+    let join = libc_result_branch(sess, f, ret_key, out, raw, span)?;
     let handle_key = result_arg_key(sess, ret_key, 0);
     let handle = declare_local(sess, handle_key, "file", span)?;
     init_native_handle(sess, handle_key, handle, span)?;
     let fd_slot = struct_gep(sess, handle_key, handle, 1, "", span)?;
-    store_key(sess, fd_slot, raw.into())?;
+    let raw64 = sess.2.build_int_s_extend(raw, sess.0.i64_type(), "").map_err(builder_fail)?;
+    store_key(sess, fd_slot, raw64.into())?;
     let ok_result = build_result_ok(sess, ret_key, handle_key, handle, span)?;
     copy_to_out(sess, ret_key, out, ok_result, span)?;
     sess.2.build_unconditional_branch(join).map_err(builder_fail)?;
-    // Both syscall outcomes meet at `join`; that joins in turn with the
-    // path-too-long branch, which never reached the system call.
+    // Both `open` outcomes meet at `join`; that joins in turn with the
+    // path-too-long branch, which never reached the open call.
     sess.2.position_at_end(join);
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
     sess.2.position_at_end(after);
     Ok(out)
 }
 
-// `read` and `write` differ only in which system call they issue and which
+// `read` and `write` differ only in their direction and which C entry point
 // direction the bytes travel, so one emitter serves both: the buffer is a
 // `&mut [U8]` to fill or a `&[U8]` to send, and the result is the count the
 // kernel reports.
@@ -3614,7 +4097,7 @@ fn native_file_transfer<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     f: FunctionValue<'ctx>,
     locals: &Locals<'ctx>,
-    call: syscall::Sys,
+    write: bool,
     ret_key: i64,
     out: PointerValue<'ctx>,
     span: (i64, i64, i64),
@@ -3626,9 +4109,30 @@ fn native_file_transfer<'ctx>(
     let fd = net_fd_of_handle(sess, handle_key, handle, span)?;
     let data = slice_data(sess, p1)?;
     let len = slice_len_of(sess, p1)?;
-    let buffer = ptr_word(sess, data, span)?;
-    let raw = emit_syscall(sess, call, &[fd, buffer, len], span)?;
-    let join = syscall_result_branch(sess, f, ret_key, out, raw, span)?;
+    let fd32 = sess.2.build_int_truncate(fd, sess.0.i32_type(), "").map_err(builder_fail)?;
+    let attempt = new_block(sess, f, "file_transfer_attempt");
+    let retry = new_block(sess, f, "file_transfer_retry");
+    let failed = new_block(sess, f, "file_transfer_failed");
+    sess.2.build_unconditional_branch(attempt).map_err(builder_fail)?;
+    sess.2.position_at_end(attempt);
+    let call = if write { extern_write(sess) } else { extern_read(sess) };
+    let emitted = sess.2.build_call(call, &[into_meta(fd32.into()), into_meta(data.into()), into_meta(len.into())], "").map_err(builder_fail)?;
+    let raw = libc_io_result(sess, emitted, span)?;
+    let raw_failed = sess.2.build_int_compare(IntPredicate::EQ, raw, raw.get_type().const_all_ones(), "").map_err(builder_fail)?;
+    let success = new_block(sess, f, "file_transfer_success");
+    let decide_failure = new_block(sess, f, "file_transfer_decide_failure");
+    sess.2.build_conditional_branch(raw_failed, decide_failure, success).map_err(builder_fail)?;
+    sess.2.position_at_end(decide_failure);
+    let interrupted = is_eintr(sess, raw, span)?;
+    sess.2.build_conditional_branch(interrupted, retry, failed).map_err(builder_fail)?;
+    sess.2.position_at_end(retry);
+    sess.2.build_unconditional_branch(attempt).map_err(builder_fail)?;
+    sess.2.position_at_end(failed);
+    let code = runtime_errno(sess, span)?;
+    system_fault_result(sess, ret_key, out, code, span)?;
+    let join = new_block(sess, f, "file_transfer_after");
+    sess.2.build_unconditional_branch(join).map_err(builder_fail)?;
+    sess.2.position_at_end(success);
     let count_key = result_arg_key(sess, ret_key, 0);
     let count = declare_local(sess, count_key, "count", span)?;
     store_key(sess, count, raw.into())?;
@@ -3651,7 +4155,8 @@ fn native_file_close<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ct
     let p0 = get_local(locals, 0, span)?;
     let handle_key = get_local_key(locals, 0, span)?;
     let fd = net_fd_of_handle(sess, handle_key, p0, span)?;
-    emit_syscall(sess, syscall::Sys::Close, &[fd], span)?;
+    let fd32 = sess.2.build_int_truncate(fd, sess.0.i32_type(), "").map_err(builder_fail)?;
+    sess.2.build_call(extern_close(sess), &[into_meta(fd32.into())], "").map_err(builder_fail)?;
     build_unit_value_into(sess, ret_key, out, span)?;
     Ok(())
 }
@@ -3693,7 +4198,7 @@ fn capture_command_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, wrapper: Functio
         None => return Err(builder_error(span.0, span.1, span.2, "internal: entry point has no argv parameter")),
     };
     let argc_global = runtime_global(sess, ARGC_GLOBAL, sess.0.i64_type().into());
-    let widened = word_of(sess, argc, span)?;
+    let widened = sess.2.build_int_s_extend(argc, sess.0.i64_type(), "").map_err(builder_fail)?;
     store_key(sess, argc_global.as_pointer_value(), widened.into())?;
     let argv_global = runtime_global(sess, ARGV_GLOBAL, ptr_ty(sess).into());
     store_key(sess, argv_global.as_pointer_value(), argv.into())?;
@@ -3880,14 +4385,25 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     let finish = new_block(sess, f, "line_finish");
     sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
     sess.2.position_at_end(cond);
-    let byte_word = ptr_word(sess, byte_slot, span)?;
-    let got = emit_syscall(sess, syscall::Sys::Read, &[i64_ty.const_zero(), byte_word, i64_ty.const_int(1, false)], span)?;
+    let read_call = sess.2.build_call(extern_read(sess), &[into_meta(sess.0.i32_type().const_zero().into()), into_meta(byte_slot.into()), into_meta(i64_ty.const_int(1, false).into())], "").map_err(builder_fail)?;
+    let got = libc_io_result(sess, read_call, span)?;
     // A non-positive result ends the line: zero is end of input, negative
     // is a read error. Both stop here, and `finish` decides between
     // returning what was read and reporting end of input.
     let progressed = sess.2.build_int_compare(IntPredicate::SGT, got, i64_ty.const_zero(), "").map_err(builder_fail)?;
     let keep = new_block(sess, f, "line_keep");
-    sess.2.build_conditional_branch(progressed, keep, finish).map_err(builder_fail)?;
+    let retry = new_block(sess, f, "line_retry");
+    let stopped = new_block(sess, f, "line_stopped");
+    sess.2.build_conditional_branch(progressed, keep, stopped).map_err(builder_fail)?;
+    sess.2.position_at_end(stopped);
+    let failed = sess.2.build_int_compare(IntPredicate::EQ, got, i64_ty.const_all_ones(), "").map_err(builder_fail)?;
+    let failure = new_block(sess, f, "line_failure");
+    sess.2.build_conditional_branch(failed, failure, finish).map_err(builder_fail)?;
+    sess.2.position_at_end(failure);
+    let interrupted = is_eintr(sess, got, span)?;
+    sess.2.build_conditional_branch(interrupted, retry, finish).map_err(builder_fail)?;
+    sess.2.position_at_end(retry);
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
     sess.2.position_at_end(keep);
     let byte = load_i8(sess, byte_slot)?;
     let is_newline = sess.2.build_int_compare(IntPredicate::EQ, byte, sess.0.i8_type().const_int(10, false), "").map_err(builder_fail)?;
@@ -3958,9 +4474,7 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     // `Ok` handed back a line that was never terminated — the same defect
     // the allocation path was fixed for, one screen up.
     //
-    // The syscall returns a negated errno, so negating it back is the errno
-    // itself.
-    let read_failed = sess.2.build_int_compare(IntPredicate::SLT, got, i64_ty.const_zero(), "").map_err(builder_fail)?;
+    let read_failed = sess.2.build_int_compare(IntPredicate::EQ, got, i64_ty.const_all_ones(), "").map_err(builder_fail)?;
     let failed_block = new_block(sess, f, "line_read_failed");
     let ended_block = new_block(sess, f, "line_ended");
     sess.2.build_conditional_branch(read_failed, failed_block, ended_block).map_err(builder_fail)?;
@@ -3968,7 +4482,7 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     sess.2.position_at_end(failed_block);
     let free_failed = extern_free(sess);
     sess.2.build_call(free_failed, &[into_meta(final_buf.into())], "").map_err(builder_fail)?;
-    let errno = sess.2.build_int_neg(got, "").map_err(builder_fail)?;
+    let errno = runtime_errno(sess, span)?;
     emit_payload_error(sess, ret_key, err_key, sess.12.read_failed, errno, out, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
 
@@ -4062,16 +4576,16 @@ fn net_fd_of_handle<'ctx>(sess: &mut Session<'ctx, '_, '_>, sock_key: i64, handl
 }
 
 fn net_errno<'ctx>(sess: &mut Session<'ctx, '_, '_>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
-    let loc_fn = extern_fn(sess, "__errno_location", ptr_ty(sess).fn_type(&[], false));
-    let call = sess.2.build_call(loc_fn, &[], "").map_err(builder_fail)?;
-    let loc = match call.try_as_basic_value() {
-        ValueKind::Basic(bv) => bv.into_pointer_value(),
-        ValueKind::Instruction(inst) => {
-            return Err(builder_error(span.0, span.1, span.2, &format!("internal: __errno_location returned void ({:?})", inst.get_opcode())));
-        }
-    };
-    let err32 = sess.2.build_load(sess.0.i32_type(), loc, "").map_err(builder_fail)?.into_int_value();
-    sess.2.build_int_s_extend(err32, sess.0.i64_type(), "").map_err(builder_fail)
+    if runtime_platform(sess, span)? == RuntimePlatform::Windows {
+        let error_fn = extern_fn(sess, "WSAGetLastError", sess.0.i32_type().fn_type(&[], false));
+        let call = sess.2.build_call(error_fn, &[], "").map_err(builder_fail)?;
+        let code = match call.try_as_basic_value() {
+            ValueKind::Basic(value) => value.into_int_value(),
+            ValueKind::Instruction(inst) => return Err(builder_error(span.0, span.1, span.2, &format!("internal: WSAGetLastError returned void ({:?})", inst.get_opcode()))),
+        };
+        return sess.2.build_int_s_extend(code, sess.0.i64_type(), "").map_err(builder_fail);
+    }
+    runtime_errno(sess, span)
 }
 
 fn net_fault_result<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
@@ -4101,7 +4615,18 @@ fn net_rc_branch<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>,
 }
 
 fn build_sockaddr_in<'ctx>(sess: &mut Session<'ctx, '_, '_>, port: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
-    let sa_ty = sess.0.i8_type().array_type(16);
+    // `struct sockaddr_in` is 16 bytes with 4-byte natural alignment (driven
+    // by its widest member, the u32 `sin_addr`) -- but the stores below, at
+    // byte offsets 2 and 4, get LLVM's default alignment for their value
+    // type (2, 4) regardless of what this alloca is actually declared to
+    // provide. Allocating as `[16 x i8]` (1-byte natural alignment) made
+    // those stores' align annotations claim more than the underlying memory
+    // was ever guaranteed to have -- undefined per LLVM's semantics, not
+    // just untidy: the optimizer is entitled to assume align metadata is
+    // honored. Allocating as four i32 words instead keeps the same 16 bytes
+    // but gives the buffer real 4-byte alignment, matching every store into
+    // it and the C struct this is standing in for.
+    let sa_ty = sess.0.i32_type().array_type(4);
     let sa = alloca_raw(sess, sa_ty.into(), "sa", span)?;
     let zero = sess.0.i64_type().const_zero();
     let fam_off = byte_offset(sess, sa, zero)?;
@@ -4129,8 +4654,7 @@ fn build_net_sock_ok<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: 
     let d = struct_gep(sess, sock_key, sock_val, 0, "", span)?;
     store_key(sess, d, ptr_ty(sess).const_null().into())?;
     let l = struct_gep(sess, sock_key, sock_val, 1, "", span)?;
-    let fd64 = sess.2.build_int_s_extend(fd, sess.0.i64_type(), "").map_err(builder_fail)?;
-    store_key(sess, l, fd64.into())?;
+    store_key(sess, l, fd.into())?;
     let c = struct_gep(sess, sock_key, sock_val, 2, "", span)?;
     store_key(sess, c, sess.0.i64_type().const_zero().into())?;
     let ok_result = build_result_ok(sess, ret_key, sock_key, sock_val, span)?;
@@ -4138,17 +4662,48 @@ fn build_net_sock_ok<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: 
 }
 
 fn native_net_socket<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
+    let after = new_block(sess, f, "socket_after");
+    if runtime_platform(sess, span)? == RuntimePlatform::Windows {
+        let started_global = runtime_global(sess, ".cnb.wsa.started", sess.0.i64_type().into());
+        let started = load_i64(sess, started_global.as_pointer_value())?;
+        let already_started = sess.2.build_int_compare(IntPredicate::NE, started, sess.0.i64_type().const_zero(), "").map_err(builder_fail)?;
+        let initialize = new_block(sess, f, "socket_initialize");
+        let socket_call = new_block(sess, f, "socket_call");
+        sess.2.build_conditional_branch(already_started, socket_call, initialize).map_err(builder_fail)?;
+        sess.2.position_at_end(initialize);
+        let data_ty = sess.0.i64_type().array_type(64);
+        let data = alloca_raw(sess, data_ty.into(), "wsa_data", span)?;
+        let startup = sess.2.build_call(extern_wsa_startup(sess), &[into_meta(sess.0.i16_type().const_int(0x202, false).into()), into_meta(data.into())], "").map_err(builder_fail)?;
+        let status = match startup.try_as_basic_value() {
+            ValueKind::Basic(value) => value.into_int_value(),
+            ValueKind::Instruction(inst) => return Err(builder_error(span.0, span.1, span.2, &format!("internal: WSAStartup returned void ({:?})", inst.get_opcode()))),
+        };
+        let initialized = sess.2.build_int_compare(IntPredicate::EQ, status, sess.0.i32_type().const_zero(), "").map_err(builder_fail)?;
+        let startup_failed = new_block(sess, f, "socket_startup_failed");
+        let startup_ready = new_block(sess, f, "socket_startup_ready");
+        sess.2.build_conditional_branch(initialized, startup_ready, startup_failed).map_err(builder_fail)?;
+        sess.2.position_at_end(startup_failed);
+        let code = sess.2.build_int_s_extend(status, sess.0.i64_type(), "").map_err(builder_fail)?;
+        system_fault_result(sess, ret_key, out, code, span)?;
+        sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+        sess.2.position_at_end(startup_ready);
+        store_key(sess, started_global.as_pointer_value(), sess.0.i64_type().const_int(1, false).into())?;
+        sess.2.build_unconditional_branch(socket_call).map_err(builder_fail)?;
+        sess.2.position_at_end(socket_call);
+    }
     let domain = sess.0.i32_type().const_int(2, false);
     let stype = sess.0.i32_type().const_int(1, false);
     let proto = sess.0.i32_type().const_zero();
     let call = sess.2.build_call(extern_socket(sess), &[into_meta(domain.into()), into_meta(stype.into()), into_meta(proto.into())], "").map_err(builder_fail)?;
-    let rc = match call.try_as_basic_value() {
-        ValueKind::Basic(bv) => bv.into_int_value(),
-        ValueKind::Instruction(inst) => {
-            return Err(builder_error(span.0, span.1, span.2, &format!("internal: socket returned void ({:?})", inst.get_opcode())));
-        }
-    };
-    let after = net_rc_branch(sess, f, ret_key, out, rc, span)?;
+    let rc = socket_result(sess, call, span)?;
+    let socket_ok = sess.2.build_int_compare(IntPredicate::SGE, rc, sess.0.i64_type().const_zero(), "").map_err(builder_fail)?;
+    let socket_failed = new_block(sess, f, "socket_failed");
+    let socket_ready = new_block(sess, f, "socket_ready");
+    sess.2.build_conditional_branch(socket_ok, socket_ready, socket_failed).map_err(builder_fail)?;
+    sess.2.position_at_end(socket_failed);
+    net_fault_result(sess, ret_key, out, span)?;
+    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+    sess.2.position_at_end(socket_ready);
     build_net_sock_ok(sess, ret_key, out, rc, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
     sess.2.position_at_end(after);
@@ -4161,11 +4716,11 @@ fn native_net_bind<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     let sock_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let handle = load_ptr(sess, p0)?;
     let fd = net_fd_of_handle(sess, sock_key, handle, span)?;
-    let fd32 = sess.2.build_int_truncate(fd, sess.0.i32_type(), "").map_err(builder_fail)?;
     let port = load_i64(sess, p1)?;
     let sa = build_sockaddr_in(sess, port, span)?;
     let addr_len = sess.0.i32_type().const_int(16, false);
-    let call = sess.2.build_call(extern_bind(sess), &[into_meta(fd32.into()), into_meta(sa.into()), into_meta(addr_len.into())], "").map_err(builder_fail)?;
+    let fd_arg = socket_argument(sess, fd)?;
+    let call = sess.2.build_call(extern_bind(sess), &[fd_arg, into_meta(sa.into()), into_meta(addr_len.into())], "").map_err(builder_fail)?;
     let rc = match call.try_as_basic_value() {
         ValueKind::Basic(bv) => bv.into_int_value(),
         ValueKind::Instruction(inst) => {
@@ -4188,10 +4743,10 @@ fn native_net_listen<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'c
     let sock_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let handle = load_ptr(sess, p0)?;
     let fd = net_fd_of_handle(sess, sock_key, handle, span)?;
-    let fd32 = sess.2.build_int_truncate(fd, sess.0.i32_type(), "").map_err(builder_fail)?;
     let backlog = load_i64(sess, p1)?;
     let backlog32 = sess.2.build_int_truncate(backlog, sess.0.i32_type(), "").map_err(builder_fail)?;
-    let call = sess.2.build_call(extern_listen(sess), &[into_meta(fd32.into()), into_meta(backlog32.into())], "").map_err(builder_fail)?;
+    let fd_arg = socket_argument(sess, fd)?;
+    let call = sess.2.build_call(extern_listen(sess), &[fd_arg, into_meta(backlog32.into())], "").map_err(builder_fail)?;
     let rc = match call.try_as_basic_value() {
         ValueKind::Basic(bv) => bv.into_int_value(),
         ValueKind::Instruction(inst) => {
@@ -4213,15 +4768,10 @@ fn native_net_accept<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'c
     let sock_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let handle = load_ptr(sess, p0)?;
     let fd = net_fd_of_handle(sess, sock_key, handle, span)?;
-    let fd32 = sess.2.build_int_truncate(fd, sess.0.i32_type(), "").map_err(builder_fail)?;
     let null_ptr = ptr_ty(sess).const_null();
-    let call = sess.2.build_call(extern_accept(sess), &[into_meta(fd32.into()), into_meta(null_ptr.into()), into_meta(null_ptr.into())], "").map_err(builder_fail)?;
-    let rc = match call.try_as_basic_value() {
-        ValueKind::Basic(bv) => bv.into_int_value(),
-        ValueKind::Instruction(inst) => {
-            return Err(builder_error(span.0, span.1, span.2, &format!("internal: accept returned void ({:?})", inst.get_opcode())));
-        }
-    };
+    let fd_arg = socket_argument(sess, fd)?;
+    let call = sess.2.build_call(extern_accept(sess), &[fd_arg, into_meta(null_ptr.into()), into_meta(null_ptr.into())], "").map_err(builder_fail)?;
+    let rc = socket_result(sess, call, span)?;
     let after = net_rc_branch(sess, f, ret_key, out, rc, span)?;
     build_net_sock_ok(sess, ret_key, out, rc, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
@@ -4235,17 +4785,12 @@ fn native_net_send<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     let sock_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let handle = load_ptr(sess, p0)?;
     let fd = net_fd_of_handle(sess, sock_key, handle, span)?;
-    let fd32 = sess.2.build_int_truncate(fd, sess.0.i32_type(), "").map_err(builder_fail)?;
     let data = slice_data(sess, p1)?;
     let len = slice_len_of(sess, p1)?;
     let flags = sess.0.i32_type().const_zero();
-    let call = sess.2.build_call(extern_send(sess), &[into_meta(fd32.into()), into_meta(data.into()), into_meta(len.into()), into_meta(flags.into())], "").map_err(builder_fail)?;
-    let rc = match call.try_as_basic_value() {
-        ValueKind::Basic(bv) => bv.into_int_value(),
-        ValueKind::Instruction(inst) => {
-            return Err(builder_error(span.0, span.1, span.2, &format!("internal: send returned void ({:?})", inst.get_opcode())));
-        }
-    };
+    let fd_arg = socket_argument(sess, fd)?;
+    let call = sess.2.build_call(extern_send(sess), &[fd_arg, into_meta(data.into()), into_meta(len.into()), into_meta(flags.into())], "").map_err(builder_fail)?;
+    let rc = socket_result(sess, call, span)?;
     let after = net_rc_branch(sess, f, ret_key, out, rc, span)?;
     let usize_key = result_arg_key(sess, ret_key, 0);
     let sent = declare_local(sess, usize_key, "sent", span)?;
@@ -4261,9 +4806,325 @@ fn native_net_close<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx
     let p0 = get_local(locals, 0, span)?;
     let sock_key = get_local_key(locals, 0, span)?;
     let fd = net_fd_of_handle(sess, sock_key, p0, span)?;
-    let fd32 = sess.2.build_int_truncate(fd, sess.0.i32_type(), "").map_err(builder_fail)?;
-    sess.2.build_call(extern_close(sess), &[into_meta(fd32.into())], "").map_err(builder_fail)?;
+    if runtime_platform(sess, span)? == RuntimePlatform::Windows {
+        sess.2.build_call(extern_closesocket(sess), &[into_meta(fd.into())], "").map_err(builder_fail)?;
+    } else {
+        let fd32 = sess.2.build_int_truncate(fd, sess.0.i32_type(), "").map_err(builder_fail)?;
+        sess.2.build_call(extern_close(sess), &[into_meta(fd32.into())], "").map_err(builder_fail)?;
+    }
     build_unit_value_into(sess, ret_key, out, span)
+}
+
+/// `ENOMEM`, reported when an allocation this native needs (as opposed to
+/// the child's own memory, which the kernel is responsible for) fails.
+const ENOMEM: u64 = 12;
+
+/// Builds a fresh, NUL-terminated heap copy of a Cinnabar `String`'s bytes
+/// -- what `execve`'s `argv`/`envp` entries need and a length-prefixed
+/// `String` does not provide on its own. Unlike `nul_terminated_path`'s
+/// fixed stack buffer (fine for the one path a single `File.open` call
+/// needs), this runs once per element of a runtime-sized argv list: an
+/// `alloca` emitted inside that loop's body would be one stack slot shared
+/// by every iteration, silently aliasing every earlier argument's storage
+/// once the loop moved on. A fresh `malloc` per element is what makes each
+/// argument's buffer outlive the loop that built it.
+///
+/// Returns a null pointer if the allocation failed, exactly what
+/// `is_null_ptr` on the result reports -- the caller branches on that
+/// before ever reading the buffer, so the copy below never runs against a
+/// null destination.
+fn heap_nul_terminated<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    f: FunctionValue<'ctx>,
+    data: PointerValue<'ctx>,
+    len: IntValue<'ctx>,
+    span: (i64, i64, i64),
+) -> Result<PointerValue<'ctx>, CodegenError> {
+    let one = sess.0.i64_type().const_int(1, false);
+    let buf_size = sess.2.build_int_add(len, one, "").map_err(builder_fail)?;
+    let malloc = extern_malloc(sess);
+    let call = sess.2.build_call(malloc, &[into_meta(buf_size.into())], "").map_err(builder_fail)?;
+    let buf = match call.try_as_basic_value() {
+        ValueKind::Basic(bv) => bv.into_pointer_value(),
+        ValueKind::Instruction(inst) => {
+            return Err(builder_error(span.0, span.1, span.2, &format!("internal: malloc returned void ({:?})", inst.get_opcode())));
+        }
+    };
+    let result_slot = alloca_raw(sess, ptr_ty(sess).into(), "argbuf", span)?;
+    store_key(sess, result_slot, buf.into())?;
+    let failed = is_null_ptr(sess, buf)?;
+    let copy_block = new_block(sess, f, "argbuf_copy");
+    let after = new_block(sess, f, "argbuf_after");
+    sess.2.build_conditional_branch(failed, after, copy_block).map_err(builder_fail)?;
+    sess.2.position_at_end(copy_block);
+    sess.2.build_memcpy(buf, 1, data, 1, len).map_err(builder_fail)?;
+    let nul_off = byte_offset(sess, buf, len)?;
+    sess.2.build_store(nul_off, sess.0.i8_type().const_zero()).map_err(builder_fail)?;
+    sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
+    sess.2.position_at_end(after);
+    load_ptr(sess, result_slot)
+}
+
+fn native_process_spawn<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    f: FunctionValue<'ctx>,
+    locals: &Locals<'ctx>,
+    ret_key: i64,
+    out: PointerValue<'ctx>,
+    span: (i64, i64, i64),
+) -> Result<PointerValue<'ctx>, CodegenError> {
+    // fork/execve have no Windows C-runtime equivalent, so this surface is
+    // POSIX-only for now -- the same "never guess a platform ABI" stance
+    // the rest of the runtime takes rather than emitting a link-time
+    // failure for a symbol Windows does not provide.
+    if runtime_platform(sess, span)? == RuntimePlatform::Windows {
+        return Err(builder_error(
+            span.0,
+            span.1,
+            span.2,
+            "Process.spawn is not implemented for Windows targets: it needs fork/execve, which have no Windows C-runtime equivalent",
+        ));
+    }
+    let p0 = get_local(locals, 0, span)?;
+    let argv_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
+    let elem_key = list_get(sess.6, key_args_of(sess, argv_key), 0);
+    let argv_ref = load_ptr(sess, p0)?;
+    let dptr = struct_gep(sess, argv_key, argv_ref, 0, "", span)?;
+    let lptr = struct_gep(sess, argv_key, argv_ref, 1, "", span)?;
+    let data = load_ptr(sess, dptr)?;
+    let len = load_i64(sess, lptr)?;
+    let esize = sess.3.get_abi_size(&llvm_of(sess, elem_key, span)?);
+    let stride_const = sess.0.i64_type().const_int(esize, false);
+
+    let merge = new_block(sess, f, "spawn_merge");
+    let enomem = sess.0.i64_type().const_int(ENOMEM, false);
+
+    // The `char*[]` execve needs: `len` entries plus one trailing NULL,
+    // eight bytes each regardless of target word size since this compiler
+    // only targets LP64 triples.
+    let one = sess.0.i64_type().const_int(1, false);
+    let eight = sess.0.i64_type().const_int(8, false);
+    let n_plus_1 = sess.2.build_int_add(len, one, "").map_err(builder_fail)?;
+    let argv_bytes = sess.2.build_int_mul(n_plus_1, eight, "").map_err(builder_fail)?;
+    let malloc = extern_malloc(sess);
+    let argv_call = sess.2.build_call(malloc, &[into_meta(argv_bytes.into())], "").map_err(builder_fail)?;
+    let argv_arr = match argv_call.try_as_basic_value() {
+        ValueKind::Basic(bv) => bv.into_pointer_value(),
+        ValueKind::Instruction(inst) => {
+            return Err(builder_error(span.0, span.1, span.2, &format!("internal: malloc returned void ({:?})", inst.get_opcode())));
+        }
+    };
+    let argv_oom = new_block(sess, f, "spawn_argv_oom");
+    let build_argv = new_block(sess, f, "spawn_build_argv");
+    let argv_null = is_null_ptr(sess, argv_arr)?;
+    sess.2.build_conditional_branch(argv_null, argv_oom, build_argv).map_err(builder_fail)?;
+    sess.2.position_at_end(argv_oom);
+    system_fault_result(sess, ret_key, out, enomem, span)?;
+    sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
+    sess.2.position_at_end(build_argv);
+
+    let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "i", span)?;
+    store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
+    let cond = new_block(sess, f, "spawn_cond");
+    let body = new_block(sess, f, "spawn_body");
+    let elem_oom = new_block(sess, f, "spawn_elem_oom");
+    let next = new_block(sess, f, "spawn_next");
+    let after_loop = new_block(sess, f, "spawn_after_loop");
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(cond);
+    let i = load_i64(sess, i_slot)?;
+    let done = sess.2.build_int_compare(IntPredicate::ULT, i, len, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(done, body, after_loop).map_err(builder_fail)?;
+    sess.2.position_at_end(body);
+    let off = sess.2.build_int_mul(i, stride_const, "").map_err(builder_fail)?;
+    let str_ptr = byte_offset(sess, data, off)?;
+    let s_data_slot = struct_gep(sess, elem_key, str_ptr, 0, "", span)?;
+    let s_data = load_ptr(sess, s_data_slot)?;
+    let s_len_slot = struct_gep(sess, elem_key, str_ptr, 1, "", span)?;
+    let s_len = load_i64(sess, s_len_slot)?;
+    let buf = heap_nul_terminated(sess, f, s_data, s_len, span)?;
+    let buf_null = is_null_ptr(sess, buf)?;
+    sess.2.build_conditional_branch(buf_null, elem_oom, next).map_err(builder_fail)?;
+    sess.2.position_at_end(elem_oom);
+    system_fault_result(sess, ret_key, out, enomem, span)?;
+    sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
+    sess.2.position_at_end(next);
+    let slot = byte_offset(sess, argv_arr, sess.2.build_int_mul(i, eight, "").map_err(builder_fail)?)?;
+    store_key(sess, slot, buf.into())?;
+    let i2 = sess.2.build_int_add(i, one, "").map_err(builder_fail)?;
+    store_key(sess, i_slot, i2.into())?;
+    sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
+    sess.2.position_at_end(after_loop);
+    let term_off = sess.2.build_int_mul(len, eight, "").map_err(builder_fail)?;
+    let term_slot = byte_offset(sess, argv_arr, term_off)?;
+    store_key(sess, term_slot, ptr_ty(sess).const_null().into())?;
+
+    // An empty environment: `Process` has no way to name a variable's
+    // value yet (`Runtime`'s environment-variable gap, tracked separately),
+    // so the honest thing is a real, explicit empty `envp` rather than
+    // silently forwarding whatever this process happened to inherit.
+    let envp_call = sess.2.build_call(malloc, &[into_meta(eight.into())], "").map_err(builder_fail)?;
+    let envp = match envp_call.try_as_basic_value() {
+        ValueKind::Basic(bv) => bv.into_pointer_value(),
+        ValueKind::Instruction(inst) => {
+            return Err(builder_error(span.0, span.1, span.2, &format!("internal: malloc returned void ({:?})", inst.get_opcode())));
+        }
+    };
+    let envp_oom = new_block(sess, f, "spawn_envp_oom");
+    let do_clone = new_block(sess, f, "spawn_do_clone");
+    let envp_null = is_null_ptr(sess, envp)?;
+    sess.2.build_conditional_branch(envp_null, envp_oom, do_clone).map_err(builder_fail)?;
+    sess.2.position_at_end(envp_oom);
+    system_fault_result(sess, ret_key, out, enomem, span)?;
+    sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
+    sess.2.position_at_end(do_clone);
+    store_key(sess, envp, ptr_ty(sess).const_null().into())?;
+
+    let fork_call = sess.2.build_call(extern_fork(sess), &[], "").map_err(builder_fail)?;
+    let fork_res = match fork_call.try_as_basic_value() {
+        ValueKind::Basic(value) => value.into_int_value(),
+        ValueKind::Instruction(inst) => return Err(builder_error(span.0, span.1, span.2, &format!("internal: fork returned void ({:?})", inst.get_opcode()))),
+    };
+    let zero32 = sess.0.i32_type().const_zero();
+    let is_child = sess.2.build_int_compare(IntPredicate::EQ, fork_res, zero32, "").map_err(builder_fail)?;
+    let child_block = new_block(sess, f, "spawn_child");
+    let parent_check = new_block(sess, f, "spawn_parent_check");
+    sess.2.build_conditional_branch(is_child, child_block, parent_check).map_err(builder_fail)?;
+
+    sess.2.position_at_end(child_block);
+    // argv[0] is the program path: whatever the caller put first, exactly
+    // as `execve`'s own contract requires. A failed `execve` returns (it
+    // never returns on success) into a process that is still this
+    // compiler's own address space, mid-fork -- letting it fall through
+    // to the parent's own continuation would run the rest of this native,
+    // then the caller's own code, twice. `_exit` (the non-flushing entry
+    // point, so it cannot be caught and retried) with 127 is the shell's
+    // own convention for "the command could not be executed", not a
+    // Cinnabar-specific choice.
+    let path_ptr = load_ptr(sess, argv_arr)?;
+    // Neither call's return value is a value this block ever reads:
+    // `execve` returning at all is already the failure case, and `_exit`
+    // never returns. `?` still propagates a genuine builder-construction
+    // error from either.
+    sess.2.build_call(extern_execve(sess), &[into_meta(path_ptr.into()), into_meta(argv_arr.into()), into_meta(envp.into())], "").map_err(builder_fail)?;
+    sess.2.build_call(extern_exit(sess), &[into_meta(sess.0.i32_type().const_int(127, false).into())], "").map_err(builder_fail)?;
+    // Not `unreachable`: that the kernel never returns from `exit_group`
+    // is a fact about the kernel, not something this compiler's type
+    // checker proved the way it proves a `match` exhaustive -- exactly the
+    // "cannot happen with nothing proving it" `undefined_behaviour.rs`
+    // exists to catch. If it somehow did return, falling through into the
+    // parent's own continuation would run the rest of this native, then
+    // the caller's own code, a second time in what only started as the
+    // child; spinning in place is the honest terminator for a branch this
+    // compiler cannot actually rule out.
+    let trap = new_block(sess, f, "spawn_child_trap");
+    sess.2.build_unconditional_branch(trap).map_err(builder_fail)?;
+    sess.2.position_at_end(trap);
+    sess.2.build_unconditional_branch(trap).map_err(builder_fail)?;
+
+    sess.2.position_at_end(parent_check);
+    // Only the child ever needed `argv_arr`/`envp` past this point -- it
+    // either replaced its own image with them (execve succeeding) or
+    // exited before returning here (execve failing). The parent's own copy
+    // of every buffer this native built, from here on, is a leak: freed
+    // once, right after `fork`, regardless of whether `fork` itself
+    // succeeded (the buffers still exist even if spawning did not).
+    let free = extern_free(sess);
+    let free_i_slot = alloca_raw(sess, sess.0.i64_type().into(), "free_i", span)?;
+    store_key(sess, free_i_slot, sess.0.i64_type().const_zero().into())?;
+    let free_cond = new_block(sess, f, "spawn_free_cond");
+    let free_body = new_block(sess, f, "spawn_free_body");
+    let free_after = new_block(sess, f, "spawn_free_after");
+    sess.2.build_unconditional_branch(free_cond).map_err(builder_fail)?;
+    sess.2.position_at_end(free_cond);
+    let free_i = load_i64(sess, free_i_slot)?;
+    let free_more = sess.2.build_int_compare(IntPredicate::ULT, free_i, len, "").map_err(builder_fail)?;
+    sess.2.build_conditional_branch(free_more, free_body, free_after).map_err(builder_fail)?;
+    sess.2.position_at_end(free_body);
+    let entry_off = sess.2.build_int_mul(free_i, eight, "").map_err(builder_fail)?;
+    let entry_slot = byte_offset(sess, argv_arr, entry_off)?;
+    let entry_ptr = load_ptr(sess, entry_slot)?;
+    sess.2.build_call(free, &[into_meta(entry_ptr.into())], "").map_err(builder_fail)?;
+    let free_i2 = sess.2.build_int_add(free_i, one, "").map_err(builder_fail)?;
+    store_key(sess, free_i_slot, free_i2.into())?;
+    sess.2.build_unconditional_branch(free_cond).map_err(builder_fail)?;
+    sess.2.position_at_end(free_after);
+    sess.2.build_call(free, &[into_meta(argv_arr.into())], "").map_err(builder_fail)?;
+    sess.2.build_call(free, &[into_meta(envp.into())], "").map_err(builder_fail)?;
+
+    let spawned = sess.2.build_int_compare(IntPredicate::SGT, fork_res, zero32, "").map_err(builder_fail)?;
+    let parent_ok = new_block(sess, f, "spawn_parent_ok");
+    let clone_failed = new_block(sess, f, "spawn_clone_failed");
+    sess.2.build_conditional_branch(spawned, parent_ok, clone_failed).map_err(builder_fail)?;
+    sess.2.position_at_end(clone_failed);
+    let code = runtime_errno(sess, span)?;
+    system_fault_result(sess, ret_key, out, code, span)?;
+    sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
+    sess.2.position_at_end(parent_ok);
+    let child_key = result_arg_key(sess, ret_key, 0);
+    let child_val = declare_local(sess, child_key, "child", span)?;
+    init_native_handle(sess, child_key, child_val, span)?;
+    let pid_slot = struct_gep(sess, child_key, child_val, 1, "", span)?;
+    let pid64 = sess.2.build_int_s_extend(fork_res, sess.0.i64_type(), "").map_err(builder_fail)?;
+    store_key(sess, pid_slot, pid64.into())?;
+    let ok_result = build_result_ok(sess, ret_key, child_key, child_val, span)?;
+    copy_to_out(sess, ret_key, out, ok_result, span)?;
+    sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
+
+    sess.2.position_at_end(merge);
+    Ok(out)
+}
+
+fn native_process_wait<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    f: FunctionValue<'ctx>,
+    locals: &Locals<'ctx>,
+    ret_key: i64,
+    out: PointerValue<'ctx>,
+    span: (i64, i64, i64),
+) -> Result<PointerValue<'ctx>, CodegenError> {
+    // Same POSIX-only scoping as `spawn`: `waitpid` has no Windows
+    // C-runtime equivalent in this first slice.
+    if runtime_platform(sess, span)? == RuntimePlatform::Windows {
+        return Err(builder_error(
+            span.0,
+            span.1,
+            span.2,
+            "Process.wait is not implemented for Windows targets: it needs waitpid, which has no Windows C-runtime equivalent",
+        ));
+    }
+    let p0 = get_local(locals, 0, span)?;
+    let child_key = get_local_key(locals, 0, span)?;
+    let pid_slot = struct_gep(sess, child_key, p0, 1, "", span)?;
+    let pid = load_i64(sess, pid_slot)?;
+    let status_slot = alloca_raw(sess, sess.0.i32_type().into(), "status", span)?;
+    let pid32 = sess.2.build_int_truncate(pid, sess.0.i32_type(), "").map_err(builder_fail)?;
+    let wait_call = sess.2.build_call(extern_waitpid(sess), &[into_meta(pid32.into()), into_meta(status_slot.into()), into_meta(sess.0.i32_type().const_zero().into())], "").map_err(builder_fail)?;
+    let raw = match wait_call.try_as_basic_value() {
+        ValueKind::Basic(value) => value.into_int_value(),
+        ValueKind::Instruction(inst) => return Err(builder_error(span.0, span.1, span.2, &format!("internal: waitpid returned void ({:?})", inst.get_opcode()))),
+    };
+    let join = libc_result_branch(sess, f, ret_key, out, raw, span)?;
+    // The kernel packs the child's status as `((exit_code & 0xff) << 8) |
+    // termination_signal`: a clean exit has the low byte zero. Reading a
+    // signaled child's exit code as if it had one is the one case this
+    // first slice does not distinguish -- the low byte can be checked by a
+    // caller that cares, since `wait`'s own contract is "the encoded status
+    // word `waitpid` returned", not a codegen-imposed simplification of it.
+    let status = sess.2.build_load(sess.0.i32_type(), status_slot, "").map_err(builder_fail)?.into_int_value();
+    let status64 = sess.2.build_int_z_extend(status, sess.0.i64_type(), "").map_err(builder_fail)?;
+    let eight = sess.0.i64_type().const_int(8, false);
+    let shifted = sess.2.build_right_shift(status64, eight, false, "").map_err(builder_fail)?;
+    let mask = sess.0.i64_type().const_int(0xff, false);
+    let exit_code = sess.2.build_and(shifted, mask, "").map_err(builder_fail)?;
+    let code_key = result_arg_key(sess, ret_key, 0);
+    let code_val = declare_local(sess, code_key, "code", span)?;
+    store_key(sess, code_val, exit_code.into())?;
+    let ok_result = build_result_ok(sess, ret_key, code_key, code_val, span)?;
+    copy_to_out(sess, ret_key, out, ok_result, span)?;
+    sess.2.build_unconditional_branch(join).map_err(builder_fail)?;
+    sess.2.position_at_end(join);
+    Ok(out)
 }
 
 fn emit_cont_step<'ctx>(

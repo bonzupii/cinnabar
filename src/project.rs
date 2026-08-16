@@ -390,14 +390,28 @@ fn canonicalize_confined_existing(root: &Path, path: &Path, role: &str) -> Resul
     Ok(resolved)
 }
 
-fn validate_confined_sidecar(root: &Path, path: &Path, role: &str) -> Result<(), ManifestError> {
-    if sidecar_present(path, role)? {
-        let resolved = canonicalize_confined_existing(root, path, role)?;
-        if !resolved.is_file() {
-            return Err(ManifestError::source_less(format!("{} '{}' is not a file", role, path.display())));
-        }
-        return Ok(());
+/// Resolve an existing project file and prove it stays inside the root,
+/// returning the resolved path rather than the spelling the caller gave.
+///
+/// The resolved path is what the read and write paths below act on: it
+/// contains no symlink, so a concurrent re-point of the original spelling
+/// cannot redirect a later `read_to_string` or `write` that used it.
+fn confine_existing_file(root: &Path, path: &Path, role: &str) -> Result<PathBuf, ManifestError> {
+    let resolved = canonicalize_confined_existing(root, path, role)?;
+    if !resolved.is_file() {
+        return Err(ManifestError::source_less(format!("{} '{}' is not a file", role, path.display())));
     }
+    Ok(resolved)
+}
+
+/// Prove that a not-yet-existing project file's parent directory is confined
+/// to the root, so creating the file there cannot escape it.
+///
+/// This is the one case where acting on the caller's spelling is correct:
+/// there is no file yet to resolve, so confinement is established on the
+/// directory that will contain it, and the file name itself is a plain
+/// component already checked by `validate_relative_path`.
+fn confine_parent_dir(root: &Path, path: &Path, role: &str) -> Result<(), ManifestError> {
     let parent = match path.parent() {
         Some(value) => value,
         None => return Err(ManifestError::source_less(format!("{} '{}' has no parent directory", role, path.display()))),
@@ -405,6 +419,44 @@ fn validate_confined_sidecar(root: &Path, path: &Path, role: &str) -> Result<(),
     let resolved_parent = canonicalize_confined_existing(root, parent, role)?;
     if !resolved_parent.is_dir() {
         return Err(ManifestError::source_less(format!("{} parent '{}' is not a directory", role, parent.display())));
+    }
+    Ok(())
+}
+
+/// Confines and reads a project file in one step, reading the resolved path.
+///
+/// A check-then-use pair on the original spelling — canonicalize to prove it
+/// stays inside the root, then re-open the spelling and re-follow whatever
+/// symlink it points at *now* — lets a concurrent writer re-point that
+/// symlink between the two and make the read land outside the confinement
+/// the check just established. Reading the resolved path closes the gap:
+/// there is no symlink left in it to re-point. The caller has already
+/// established the file exists (`sidecar_present`); resolving it again makes
+/// the confine and the read agree on one target.
+fn read_confined(root: &Path, path: &Path, role: &str) -> Result<String, ManifestError> {
+    let resolved = confine_existing_file(root, path, role)?;
+    let text = fs::read_to_string(&resolved)
+        .map_err(|read_error| format!("cannot read {} '{}': {}", role, resolved.display(), read_error))?;
+    Ok(text)
+}
+
+/// Confines and writes a project file in one step.
+///
+/// Writing has the same re-point race reading had, plus a create case: an
+/// existing sidecar is written through its resolved path (no symlink left to
+/// re-point), while a sidecar that does not exist yet is written into its
+/// confined parent directory. `update_snapshots` reaches both shapes — an
+/// existing snapshot is rewritten and a first snapshot is created — so one
+/// helper owns both rather than splitting the race in half at the call site.
+fn write_confined(root: &Path, path: &Path, role: &str, contents: &str) -> Result<(), ManifestError> {
+    if sidecar_present(path, role)? {
+        let resolved = confine_existing_file(root, path, role)?;
+        fs::write(&resolved, contents)
+            .map_err(|write_error| format!("cannot write {} '{}': {}", role, resolved.display(), write_error))?;
+    } else {
+        confine_parent_dir(root, path, role)?;
+        fs::write(path, contents)
+            .map_err(|write_error| format!("cannot write {} '{}': {}", role, path.display(), write_error))?;
     }
     Ok(())
 }
@@ -573,6 +625,101 @@ pub fn run_tests(executable: &Path, manifest: &ProjectManifest, update_snapshots
     Ok(TestSummary { discovered: tests.len(), passed, failed })
 }
 
+/// One rejection test, as a reviewer needs to see it: the snapshot on
+/// disk and what the compiler prints now.
+pub struct SnapshotEntry {
+    /// The test source, relative to the project root.
+    pub test: String,
+    /// The `.stderr` sidecar, relative to the project root.
+    pub snapshot: String,
+    /// Whether the sidecar file exists. False leaves `expected` empty and
+    /// `agrees` false.
+    pub recorded: bool,
+    /// The sidecar's contents, normalized, or empty when there is none.
+    pub expected: String,
+    /// What the compiler prints today, normalized the same way.
+    pub actual: String,
+    /// Whether the compiler still rejects the program at all.
+    pub rejected: bool,
+}
+
+impl SnapshotEntry {
+    /// Whether the recorded snapshot still describes what the compiler
+    /// prints.
+    pub fn agrees(&self) -> bool {
+        self.recorded && self.expected == self.actual
+    }
+}
+
+/// Every rejection test in the project, with its snapshot and its current
+/// diagnostic.
+///
+/// This runs the same discovery, the same compile, and the same
+/// normalization `run_tests` does, so a reviewer is shown exactly the
+/// comparison the test suite makes — not a second one that could call a
+/// difference where the suite sees none.
+pub fn snapshot_report(executable: &Path, manifest: &ProjectManifest) -> Result<Vec<SnapshotEntry>, ManifestError> {
+    let tests = discover_tests(manifest)?;
+    let mut entries = Vec::new();
+    for test in &tests {
+        let snapshot = snapshot_path(test);
+        let recorded = sidecar_present(&snapshot, "diagnostic snapshot")?;
+        if !is_rejection_test(test) && !recorded {
+            continue;
+        }
+        let project_relative = test
+            .strip_prefix(&manifest.root)
+            .map_err(|prefix_error| format!("cannot relativize test '{}': {}", test.display(), prefix_error))?;
+        let snapshot_relative = snapshot
+            .strip_prefix(&manifest.root)
+            .map_err(|prefix_error| format!("cannot relativize snapshot '{}': {}", snapshot.display(), prefix_error))?;
+        let mut compile_command = Command::new(executable);
+        compile_command.current_dir(&manifest.root).arg(project_relative);
+        let compile = output_with_timeout(
+            &mut compile_command,
+            Duration::from_secs(TEST_COMPILE_TIMEOUT_SECS),
+            &format!("compiler for '{}'", test.display()),
+        )?;
+        let expected = if recorded {
+            normalize_text(&read_confined(&manifest.root, &snapshot, "diagnostic snapshot")?)
+        } else {
+            String::new()
+        };
+        entries.push(SnapshotEntry {
+            test: project_relative.to_string_lossy().to_string(),
+            snapshot: snapshot_relative.to_string_lossy().to_string(),
+            recorded,
+            expected,
+            actual: diagnostic_text(&compile),
+            rejected: !compile.status.success(),
+        });
+    }
+    Ok(entries)
+}
+
+/// Write one snapshot, as `--update-snapshots` would.
+///
+/// The target must be the sidecar of a discovered test. Confinement is not
+/// sufficient on its own: `write_confined` establishes that a path lies
+/// inside the project, which the sources, the manifest, and every other
+/// regular file in the tree also satisfy, so a caller passing an arbitrary
+/// project-relative path would rewrite one of those with snapshot text.
+/// Discovery already names the complete set of files acceptance may touch,
+/// so membership in that set is the check, and a path that does not name
+/// one — including one spelled with `..` segments that would resolve to
+/// one — is refused rather than normalized into range.
+pub fn accept_snapshot(manifest: &ProjectManifest, snapshot_relative: &str, text: &str) -> Result<(), ManifestError> {
+    let snapshot = manifest.root.join(snapshot_relative);
+    let discovered = discover_tests(manifest)?;
+    if !discovered.iter().any(|test| snapshot_path(test) == snapshot) {
+        return Err(ManifestError::source_less(format!(
+            "'{}' is not the diagnostic snapshot of a discovered test",
+            snapshot_relative
+        )));
+    }
+    write_confined(&manifest.root, &snapshot, "diagnostic snapshot", text)
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct TestSummary {
     pub discovered: usize,
@@ -681,21 +828,30 @@ fn exit_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.exit", path.display()))
 }
 
+/// What a rejected compile printed, wherever it printed it.
+///
+/// The reporter renders through ariadne, which writes to standard output,
+/// so a snapshot that read only `stderr` would record an empty string and
+/// pin nothing — which is exactly what a diagnostic snapshot exists not to
+/// do. Both streams are read so the sidecar holds the diagnostic the user
+/// saw, in the order they saw it.
+fn diagnostic_text(compile: &Output) -> String {
+    let mut text = String::from_utf8_lossy(&compile.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&compile.stderr));
+    normalize_text(&text)
+}
+
 fn check_rejection(root: &Path, test: &Path, snapshot: &Path, compile: &Output, update_snapshots: bool) -> Result<(), ManifestError> {
     if compile.status.success() {
         return Err(ManifestError::source_less(format!("{}: expected rejection but compilation succeeded", test.display())));
     }
-    let actual = normalize_text(&String::from_utf8_lossy(&compile.stderr));
+    let actual = diagnostic_text(compile);
     if update_snapshots {
-        validate_confined_sidecar(root, snapshot, "diagnostic snapshot")?;
-        fs::write(snapshot, &actual)
-            .map_err(|write_error| format!("cannot update snapshot '{}': {}", snapshot.display(), write_error))?;
+        write_confined(root, snapshot, "diagnostic snapshot", &actual)?;
         return Ok(());
     }
     if sidecar_present(snapshot, "diagnostic snapshot")? {
-        validate_confined_sidecar(root, snapshot, "diagnostic snapshot")?;
-        let expected = fs::read_to_string(snapshot)
-            .map_err(|read_error| format!("cannot read snapshot '{}': {}", snapshot.display(), read_error))?;
+        let expected = read_confined(root, snapshot, "diagnostic snapshot")?;
         if normalize_text(&expected) != actual {
             return Err(ManifestError::source_less(format!("{}: diagnostic snapshot differs from '{}'", test.display(), snapshot.display())));
         }
@@ -726,9 +882,7 @@ fn expected_exit(root: &Path, test: &Path) -> Result<i32, ManifestError> {
     if !sidecar_present(&path, "expected exit sidecar")? {
         return Ok(0);
     }
-    validate_confined_sidecar(root, &path, "expected exit sidecar")?;
-    let text = fs::read_to_string(&path)
-        .map_err(|read_error| format!("cannot read expected exit '{}': {}", path.display(), read_error))?;
+    let text = read_confined(root, &path, "expected exit sidecar")?;
     text.trim()
         .parse::<i32>()
         .map_err(|parse_error| ManifestError::source_less(format!("invalid exit status in '{}': {}", path.display(), parse_error)))
@@ -747,8 +901,39 @@ fn status_matches(status: ExitStatus, expected: i32, test: &Path) -> Result<(), 
     }
 }
 
+/// A diagnostic reduced to what it says.
+///
+/// Converts CRLF to LF and strips CSI escape sequences (ESC `[` through a
+/// final byte in 0x40..=0x7E), which the reporter emits whether or not a
+/// terminal is attached. Bytes following an ESC that is not `[` are kept.
 fn normalize_text(text: &str) -> String {
-    text.replace("\r\n", "\n")
+    let unified = text.replace("\r\n", "\n");
+    let mut out = String::with_capacity(unified.len());
+    let mut characters = unified.chars();
+    while let Some(character) = characters.next() {
+        if character != '\u{1b}' {
+            out.push(character);
+            continue;
+        }
+        // A CSI sequence: ESC '[' then parameter and intermediate bytes,
+        // ended by a byte in the final range. Anything else following an
+        // ESC is left alone rather than guessed at.
+        match characters.next() {
+            Some('[') => {
+                for following in characters.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&following) {
+                        break;
+                    }
+                }
+            }
+            Some(other) => {
+                out.push(character);
+                out.push(other);
+            }
+            None => out.push(character),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1026,13 +1211,13 @@ mod tests {
         let snapshot = root.join("tests").join("case.reject.cnb.stderr");
         assert!(symlink(&external_snapshot, &snapshot).is_ok());
 
-        let result = validate_confined_sidecar(&root, &snapshot, "diagnostic snapshot");
+        let result = read_confined(&root, &snapshot, "diagnostic snapshot");
         assert!(result.is_err());
 
         let dangling_snapshot = root.join("tests").join("dangling.reject.cnb.stderr");
         let absent_external = outside.join("absent.stderr");
         assert!(symlink(&absent_external, &dangling_snapshot).is_ok());
-        let dangling_result = validate_confined_sidecar(&root, &dangling_snapshot, "diagnostic snapshot");
+        let dangling_result = read_confined(&root, &dangling_snapshot, "diagnostic snapshot");
         assert!(dangling_result.is_err());
     }
 }

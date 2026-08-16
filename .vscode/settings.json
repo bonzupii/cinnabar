@@ -1,3 +1,4 @@
 {
-  "cinnabar.server.mode": "docker-compose"
+  "cinnabar.server.mode": "path",
+  "cinnabar.server.path": "container/bin/cinnabar-lsp-nix"
 }

@@ -44,37 +44,47 @@ export type LocatedSpan = {
   length: number;
 };
 
+const NEWLINE_BYTE = 10; // '\n', identical in ASCII and UTF-8
+
 /**
  * Locates a byte span within `source` for display — line/column, the line's
  * text, and where within that line the span falls, clipped at the line break
  * if the span crosses one.
  *
- * Byte offsets rather than UTF-16 code units: the compiler's spans are byte
- * offsets into the UTF-8 source, and every fixture and playground program is
- * ASCII-only source text (comments and strings aside), so indexing `source`
- * by JS string index is byte-accurate here — a real multi-byte identifier
- * would need a UTF-8-aware remap, which the language's casing rules make
- * unreachable for anything but string/comment contents.
+ * The compiler's spans are byte offsets into the UTF-8 source, not UTF-16
+ * code units, so `start`/`end` cannot index the JS string `source` directly
+ * once it carries any character outside the ASCII range — the language
+ * allows non-ASCII in string and comment contents (casing rules only
+ * confine identifiers), so that's reachable from real playground input, not
+ * just a theoretical case. Re-encoding to bytes once and locating the line
+ * boundaries and column offset in that byte space, then decoding only the
+ * located slices back to text, keeps every offset in the same coordinate
+ * system the compiler used to produce it.
  */
 export function locateSpan(source: string, start: number, end: number): LocatedSpan {
-  const lineStart = source.lastIndexOf("\n", Math.max(start - 1, 0)) + 1;
-  let lineEnd = source.indexOf("\n", start);
-  if (lineEnd === -1) lineEnd = source.length;
+  const bytes = new TextEncoder().encode(source);
+  const decoder = new TextDecoder();
 
-  const precedingNewlines = countChar(source, "\n", start);
+  const lineStart = bytes.lastIndexOf(NEWLINE_BYTE, Math.max(start - 1, 0)) + 1;
+  let lineEnd = bytes.indexOf(NEWLINE_BYTE, start);
+  if (lineEnd === -1) lineEnd = bytes.length;
+
+  const precedingNewlines = countByte(bytes, NEWLINE_BYTE, start);
+  const beforeCaret = decoder.decode(bytes.slice(lineStart, Math.min(start, bytes.length)));
+  const spanText = decoder.decode(bytes.slice(start, Math.min(end, lineEnd)));
   return {
     line: precedingNewlines + 1,
-    column: start - lineStart + 1,
-    lineText: source.slice(lineStart, lineEnd),
-    columnOffset: start - lineStart,
-    length: Math.max(0, Math.min(end, lineEnd) - start),
+    column: beforeCaret.length + 1,
+    lineText: decoder.decode(bytes.slice(lineStart, lineEnd)),
+    columnOffset: beforeCaret.length,
+    length: Math.max(0, spanText.length),
   };
 }
 
-function countChar(source: string, char: string, upTo: number): number {
+function countByte(bytes: Uint8Array, target: number, upTo: number): number {
   let count = 0;
-  for (let index = 0; index < upTo && index < source.length; index += 1) {
-    if (source[index] === char) count += 1;
+  for (let index = 0; index < upTo && index < bytes.length; index += 1) {
+    if (bytes[index] === target) count += 1;
   }
   return count;
 }

@@ -1,0 +1,73 @@
+# The playground image: the compiler, a small API, and nothing else.
+#
+# Two stages. The first builds the compiler against LLVM 21; the second is
+# the runtime, which carries the compiler, the linker and headers a build
+# needs, Node for the API, and no build toolchain of its own.
+#
+# The container is where a submission is actually contained. The API's caps
+# on size, time and concurrency are necessary but they do not constrain what
+# a program can *do* — only the runtime does that, and only with the options
+# in compose.playground.yaml applied. See README.md.
+
+FROM docker.io/library/rust:1-bookworm AS build
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates gnupg lsb-release wget \
+ && wget -qO /usr/share/keyrings/llvm.asc https://apt.llvm.org/llvm-snapshot.gpg.key \
+ && echo "deb [signed-by=/usr/share/keyrings/llvm.asc] http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-21 main" \
+      > /etc/apt/sources.list.d/llvm21.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends llvm-21-dev libpolly-21-dev clang-21 lld-21 \
+      libzstd-dev libxml2-dev libffi-dev zlib1g-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+ENV LLVM_SYS_211_PREFIX=/usr/lib/llvm-21
+ENV PATH=/usr/lib/llvm-21/bin:$PATH
+
+WORKDIR /src
+COPY Cargo.toml Cargo.lock build.rs ./
+# `src/docs.rs` embeds the manifesto with `include_str!`, so it is a build
+# input and not documentation here: without it the crate does not compile.
+COPY MANIFESTO.md ./
+COPY src ./src
+COPY crates ./crates
+COPY tests ./tests
+RUN cargo build --release --bin cinnabar
+
+FROM docker.io/library/debian:bookworm-slim AS runtime
+
+# `opt`, `llc` and `clang` are not developer conveniences here: they are
+# stages of a Cinnabar build, invoked by the compiler itself to optimize,
+# assemble and link. `llvm-21` installs all three under /usr/lib/llvm-21/bin,
+# which is not on the runtime PATH, so each is linked into /usr/local/bin.
+# Omitting `opt` does not fail the build: the compiler still emits IR, and
+# only `--run` (and the playground's execute path) discovers it is missing.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates gnupg wget \
+ && wget -qO /usr/share/keyrings/llvm.asc https://apt.llvm.org/llvm-snapshot.gpg.key \
+ && echo "deb [signed-by=/usr/share/keyrings/llvm.asc] http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-21 main" \
+      > /etc/apt/sources.list.d/llvm21.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends llvm-21 clang-21 nodejs \
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -s /usr/lib/llvm-21/bin/opt /usr/local/bin/opt \
+ && ln -s /usr/lib/llvm-21/bin/llc /usr/local/bin/llc \
+ && ln -s /usr/bin/clang-21 /usr/local/bin/clang
+
+COPY --from=build /src/target/release/cinnabar /usr/local/bin/cinnabar
+COPY playground/server /srv/server
+COPY playground/web/dist /srv/web
+
+# Never root. The runtime options in the Compose file drop every capability
+# on top of this, but an image that would run as root without them is one
+# bad deployment away from having none of that protection.
+RUN useradd --system --create-home --home-dir /home/playground --shell /usr/sbin/nologin playground
+USER playground
+
+ENV CINNABAR_BIN=/usr/local/bin/cinnabar
+ENV PLAYGROUND_STATIC_ROOT=/srv/web
+ENV NODE_ENV=production
+ENV PORT=8080
+EXPOSE 8080
+
+CMD ["node", "/srv/server/src/main.js"]

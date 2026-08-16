@@ -38,7 +38,7 @@ test("revealed content ends fully visible", async ({ page }) => {
   await settleAnimations(page);
 
   // The reveal wraps the card, so opacity is asserted on the wrapper.
-  const card = page.locator(".reveal").filter({ hasText: "Linear resource management" }).first();
+  const card = page.locator(".reveal").filter({ hasText: "Ownership without ceremony" }).first();
   await expect(card).toBeVisible();
   await expect(card).toHaveClass(/is-in/);
   await expect(card).toHaveCSS("opacity", "1");
@@ -51,7 +51,7 @@ test("content below the fold is opaque once scrolled to", async ({ page }) => {
   await scrollThroughPage(page);
   await settleAnimations(page);
 
-  const closing = page.locator(".reveal").filter({ hasText: /under active early development/i }).first();
+  const closing = page.locator(".reveal").filter({ hasText: /early development, with the contracts written down/i }).first();
   await expect(closing).toBeVisible();
   await expect(closing).toHaveCSS("opacity", "1");
 });
@@ -62,7 +62,7 @@ test("reduced motion renders the final state with no animation at all", async ({
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/");
 
-  const closing = page.locator(".reveal").filter({ hasText: /under active early development/i }).first();
+  const closing = page.locator(".reveal").filter({ hasText: /early development, with the contracts written down/i }).first();
   // Not merely faster — present immediately, without being scrolled to.
   await expect(closing).toHaveCSS("opacity", "1");
 });

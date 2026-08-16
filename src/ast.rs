@@ -39,20 +39,52 @@ pub type Diag = (String, i64, i64, i64);
 
 // A secondary explanatory note attached to a primary diagnostic:
 // (index of the diagnostic in the errors vec at attach time, message,
-// file, start, end).  Notes carry real source spans of facts the checker
-// already computed (a binding site, a path's last move, a branch exit) —
-// never fabricated locations.  Rendering is the consumer's choice: the CLI
-// shows them as secondary labels under --explain-borrow, the language
-// server as related information.
-pub type Note = (i64, String, i64, i64, i64);
+// file, start, end, kind).  Notes carry real source spans of facts the
+// checker already computed (a binding site, a path's last move, a branch
+// exit) — never fabricated locations.  Rendering is the consumer's choice:
+// the CLI shows them as secondary labels under --explain-borrow, the
+// language server as related information.
+pub type Note = (i64, String, i64, i64, i64, i64);
+
+// What role a note plays in the explanation, assigned by the stage that
+// raised it.  The message is prose meant for a reader and is free to be
+// reworded; the kind is what a tool may branch on, so an editor drawing a
+// value's path through a function does not have to recognize the checker's
+// sentences to know which span is the binding and which is a consuming
+// branch.  A note whose role is not one of these is NOTE_CONTEXT: it
+// supports the diagnostic without making a claim about a linear value's
+// flow.
+pub const NOTE_CONTEXT: i64 = 0;
+pub const NOTE_BINDING: i64 = 1; // where the value under discussion was bound
+pub const NOTE_CONSUMED: i64 = 2; // a path along which it is consumed
+pub const NOTE_LIVE: i64 = 3; // a path along which it is still live
+pub const NOTE_MOVED: i64 = 4; // a site that already moved it
+pub const NOTE_GUIDANCE: i64 = 5; // what to do about it, at the site to do it
+
+/// The symbolic name of a note kind, for the surfaces that report one.
+pub fn note_kind_name(kind: i64) -> &'static str {
+    if kind == NOTE_BINDING {
+        "binding"
+    } else if kind == NOTE_CONSUMED {
+        "consumed"
+    } else if kind == NOTE_LIVE {
+        "live"
+    } else if kind == NOTE_MOVED {
+        "moved"
+    } else if kind == NOTE_GUIDANCE {
+        "guidance"
+    } else {
+        "context"
+    }
+}
 
 // Attach a note to the most recently pushed diagnostic.  A note with no
 // diagnostic to explain is dropped rather than invented.
-pub fn push_note_for_last(errors: &[Diag], notes: &mut Vec<Note>, message: &str, file: i64, start: i64, end: i64) {
+pub fn push_note_for_last(errors: &[Diag], notes: &mut Vec<Note>, message: &str, file: i64, start: i64, end: i64, kind: i64) {
     if errors.is_empty() {
         return;
     }
-    notes.push((errors.len() as i64 - 1, message.to_string(), file, start, end));
+    notes.push((errors.len() as i64 - 1, message.to_string(), file, start, end, kind));
 }
 
 pub const NONE: i64 = -1;
@@ -143,7 +175,17 @@ pub const EXPR_STRUCT_LIT: i64 = 5; // b: path segments name-id list, c: field n
 pub const EXPR_ARRAY: i64 = 6; // b: element expr-id list
 pub const EXPR_MATCH: i64 = 7; // b: scrutinee expr id, c: arm ids list
 pub const EXPR_TRY: i64 = 8; // b: inner expr id
-pub const EXPR_INDEX: i64 = 9; // b: base expr id, c: index expr id
+pub const EXPR_INDEX: i64 = 9; // b: base expr id, c: index expr id, d: fallibility flag (INDEX_*)
+
+// Slot-d flag on EXPR_INDEX rows.  The typechecker attaches this fact once,
+// and codegen reads it rather than re-deriving fallibility from the shape of
+// the result type: an array whose element is itself a `Result` is infallible
+// when indexed by a compile-time-proven constant, even though its result type
+// is a `Result`.  `INDEX_FALLIBLE` marks a runtime or slice index typed as
+// `Result(T, IndexError)`; `INDEX_INFALLIBLE` marks a constant array index
+// typed as the bare element type.
+pub const INDEX_INFALLIBLE: i64 = 0;
+pub const INDEX_FALLIBLE: i64 = 1;
 pub const EXPR_FIELD_ACCESS: i64 = 10; // b: base expr id, c: field name id; `expr.field` on a non-path base
 
 pub const LIT_INT: i64 = 0;
@@ -659,6 +701,8 @@ pub const NAT_FILE_WRITE: i64 = 32;
 pub const NAT_FILE_CLOSE: i64 = 33;
 pub const NAT_TERM_READ_LINE: i64 = 34;
 pub const NAT_RUNTIME_ARGS: i64 = 35;
+pub const NAT_PROCESS_SPAWN: i64 = 37;
+pub const NAT_PROCESS_WAIT: i64 = 38;
 
 /// The source spelling of a binary operator opcode.  Every stage that names
 /// an operator in a diagnostic reads it from here, so a message from the
@@ -1041,6 +1085,70 @@ pub fn alloc_localfact(nodes: &mut Vec<i64>, source: i64, name: i64, key: i64, i
             NONE,
         ],
     )
+}
+
+// Tail-safety-fact rows.  (tag=NODE_CALLFACT, a=call expr id, b=tail-safe
+// flag, c=frame-local root name id or NONE).  The typechecker computes, for
+// every call, whether any argument carries a reference rooted in the
+// current function's frame — which is what would make LLVM's `tail` marker
+// a false promise that the callee never touches the caller's frame — and
+// attaches the result so codegen marks a call `tail` only when it is safe
+// (Single-Fact Rule).  Slot `c` names the offending frame-local binding for
+// the self-recursion rejection diagnostic; it is NONE when the call is
+// tail-safe.
+
+pub const NODE_CALLFACT: i64 = 21;
+
+pub fn alloc_callfact(nodes: &mut Vec<i64>, call: i64, tail_safe: i64, root_name: i64) -> i64 {
+    alloc_node(
+        nodes,
+        &[NODE_CALLFACT, NO_FILE, NO_FILE, NO_FILE, call, tail_safe, root_name, NONE, NONE, NONE],
+    )
+}
+
+pub fn callfact_tail_safe_of(nodes: &[i64], call: i64) -> i64 {
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_CALLFACT && node_a(nodes, idx) == call {
+            return node_b(nodes, idx);
+        }
+        idx += 1;
+    }
+    0
+}
+
+pub fn callfact_root_name_of(nodes: &[i64], call: i64) -> i64 {
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_CALLFACT && node_a(nodes, idx) == call {
+            return node_c(nodes, idx);
+        }
+        idx += 1;
+    }
+    NONE
+}
+
+// Pattern-binding-fact rows.  (tag=NODE_PATFACT, a=pattern node, b=match
+// scrutinee expr id).  The typechecker attaches one per binding pattern
+// (PAT_BIND and the rest binder of PAT_ARRAY) so the tail-safety trace can
+// resolve a match-arm binding's origin to the scrutinee it destructures
+// without re-walking the arm list (Single-Fact Rule).
+
+pub const NODE_PATFACT: i64 = 22;
+
+pub fn alloc_patfact(nodes: &mut Vec<i64>, pat: i64, scrutinee: i64) -> i64 {
+    alloc_node(nodes, &[NODE_PATFACT, NO_FILE, NO_FILE, NO_FILE, pat, scrutinee, NONE, NONE, NONE, NONE])
+}
+
+pub fn patfact_scrutinee_of(nodes: &[i64], pat: i64) -> i64 {
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_PATFACT && node_a(nodes, idx) == pat {
+            return node_b(nodes, idx);
+        }
+        idx += 1;
+    }
+    NONE
 }
 
 pub fn alloc_fieldkey(nodes: &mut Vec<i64>, key: i64, name: i64, fkey: i64, idx: i64) -> i64 {

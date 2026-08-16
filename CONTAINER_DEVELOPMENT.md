@@ -1,11 +1,47 @@
-# Reusable Nix development container
+# Development environments
 
-Status: implemented. This workflow gives Windows-hosted checkouts the repository's Nix toolchain without installing LLVM or Nix on Windows. Native Linux development remains Nix-first:
+Status: implemented. Native Linux development is Nix-first:
 
 ```bash
 nix develop
 nix develop --command ./pre_commit_check.sh
 ```
+
+On Windows there are two ways to reach that same toolchain. **Nix inside WSL2 is the default**; the container below is the fallback for hosts where WSL2 is unavailable or unwanted.
+
+## Default on Windows: Nix inside WSL2
+
+The toolchain comes from `flake.nix` either way, so this is not a second environment — it is the same one without a container around it. It is also the shape CI runs: `.github/workflows/ci.yml` invokes `nix develop --command ./pre_commit_check.sh` on a plain `ubuntu-latest` runner, with no container anywhere.
+
+What makes this the default is the filesystem. A Windows-hosted checkout reaches Linux through a 9p bridge, and that bridge dominates every source read: `git status` on this repository measures ~1.1 s across it against ~0.005 s on the distro's own ext4, and bulk small-file operations run 30–50× slower. `target/`, the Cargo home and the Nix store already live in Linux-native volumes under the container workflow, so compilation itself is not what suffers — what suffers is Cargo's fingerprint pass, repeated once per `cargo` invocation and roughly forty times per gate run, plus Semgrep's repository walk and rust-analyzer's file watching.
+
+**The checkout must live on the distro's filesystem.** Keeping it under `/mnt/c` and merely dropping the container gains nothing: the 9p bridge is still in the path.
+
+```bash
+# In the distro, as root once: Nix needs /nix to exist and be yours.
+mkdir -m 0755 /nix && chown "$USER" /nix
+printf 'build-users-group =\nexperimental-features = nix-command flakes\nsandbox = false\n' > /etc/nix/nix.conf
+```
+
+Then, as your user, install Nix single-user and clone onto ext4 — never onto `/mnt/c`:
+
+```bash
+sh <(curl -fsSL https://releases.nixos.org/nix/nix-2.35.1/install) --no-daemon
+git clone https://github.com/bonzupii/cinnabar.git ~/dev/cinnabar
+cd ~/dev/cinnabar && nix develop --command ./pre_commit_check.sh
+```
+
+The installer is version-pinned for the same reason `container/Containerfile` pins it: an unpinned installer would float the largest piece of software in the environment while everything around it stayed fixed.
+
+Open the checkout with VS Code's **WSL** extension (`code --remote wsl+<distro> ~/dev/cinnabar`), not Dev Containers. The extension host then runs inside the distro, and `.vscode/settings.json` works unmodified — `cinnabar.server.mode` is `path` with `cinnabar.server.path` set to `container/bin/cinnabar-lsp-nix`, which rebuilds the server and serves it through `nix develop`. That wrapper and its `rust-analyzer-nix` sibling invoke only Nix; despite their location under `container/`, no container is involved.
+
+For rust-analyzer, point `rust-analyzer.server.path` at the absolute wrapper path in your user settings — `/home/<user>/dev/cinnabar/container/bin/rust-analyzer-nix`. It is left out of the checked-in workspace settings because that extension resolves the setting itself, and a repository-relative value is not portable across the machines that read this file.
+
+Git worktrees need no special handling here: `git worktree add` works directly, because the `gitdir:` pointer problem the container workflow solves below exists only when Windows Git writes a `C:/...` path that Linux cannot follow.
+
+## Fallback: reusable Nix development container
+
+This workflow gives Windows-hosted checkouts the repository's Nix toolchain without installing WSL2 or Nix on Windows. It pays the 9p cost described above; prefer it when WSL2 is not an option.
 
 ## What is shared and what is isolated
 
@@ -151,7 +187,17 @@ Every helper in this repository is a single `.sh`, deliberately: a shell copy an
 
 The extension lands in the `cinnabar-vscode-server` volume alongside the server itself, so it survives service recreation and worktree switches. Re-run the helper after changing the extension, then reload the window.
 
-`cinnabar.server.mode` stays `docker-compose` in `.vscode/settings.json` and means "use the repository's development server" rather than "shell out to Docker". Which of those it does depends on where the editor runs:
+`.vscode/settings.json` ships `cinnabar.server.mode` as `path`, not `docker-compose`, because Compose mode requires `container/local/<cache-key>/worktree.env` — a generated, ignored file that a fresh clone does not have. A default that throws until the reader runs a helper they have not read about yet is not a default. `path` mode with the repository-relative wrapper works in every checkout, container or not.
+
+To use Compose mode, set it in this workspace after running `configure-worktree.sh`:
+
+```json
+{
+  "cinnabar.server.mode": "docker-compose"
+}
+```
+
+It then means "use the repository's development server" rather than "shell out to Docker". Which of those it does depends on where the editor runs:
 
 | Editor location | Launch |
 |---|---|

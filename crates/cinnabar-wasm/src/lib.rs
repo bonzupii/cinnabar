@@ -64,15 +64,10 @@ pub fn hover(source: &str, offset: i32) -> String {
         }),
         None => Value::Null,
     };
-    match serde_json::to_string(&value) {
-        Ok(rendered) => rendered,
-        Err(serialize_error) => json!({
-            "text": Value::Null,
-            "source": Value::Null,
-            "serialization_error": serialize_error.to_string(),
-        })
-        .to_string(),
-    }
+    // `Value`'s Display impl serializes to the same compact JSON as
+    // `serde_json::to_string`, but infallibly: the value can never contain
+    // a non-finite float, so there is no error to discard here.
+    value.to_string()
 }
 
 fn source_json(files: &[(String, String)], file: i64, start: i64, end: i64) -> Value {

@@ -191,20 +191,24 @@ More real examples live in [`tests/fixtures/`](tests/fixtures/), especially [`te
 
 ## Building the compiler
 
-Cinnabar targets **LLVM 21** (via the `inkwell` crate) and requires `clang`/`llc`/`opt` on `PATH`, plus a static musl libc to link Cinnabar binaries against. The project ships a Nix flake that provisions all of this:
+Cinnabar targets **LLVM 21** (via the `inkwell` crate) and requires `clang`/`llc`/`opt` on `PATH`. Static `--static` builds on Linux self-provision musl from upstream at build time (see `build.rs`). The project ships a Nix flake that provisions the LLVM toolchain:
 
 ```bash
 nix develop
 cargo build --release
 ```
 
-Outside of `nix develop`, `cargo build`/`cargo clippy` will fail unless you have a matching LLVM 21 toolchain and `MUSL_LIBC_A` (pointing at a static `libc.a`) configured yourself — see [`build.rs`](build.rs) and [`flake.nix`](flake.nix) for the exact discovery logic and paths.
+Outside of `nix develop`, `cargo build`/`cargo clippy` will fail unless you have a matching LLVM 21 toolchain and `clang` on `PATH`. `build.rs` self-provisions musl from upstream for static builds (via `curl`/`wget`, `tar`, `make`, and `sha256sum`), so no host musl package is required; `MUSL_LIBC_A` remains available as a manual override. See [`build.rs`](build.rs) and [`flake.nix`](flake.nix) for the exact discovery logic and paths.
 
-### Docker Desktop and Windows worktrees
+### Windows contributors
 
-Windows contributors can run the same Nix environment in one reusable Docker Compose service. Its named Nix and Cargo caches survive branch changes, while every worktree receives an isolated Rust `target` volume. The setup also includes the linked-worktree Git mounts needed by Nix and a rust-analyzer wrapper that runs inside `nix develop`.
+Run the same flake under WSL2, with the checkout on the distro's own filesystem. This is the default and needs no Docker: `flake.nix` supplies the toolchain, which is also how CI runs the gate — on a plain `ubuntu-latest` runner with no container anywhere.
 
-See [`CONTAINER_DEVELOPMENT.md`](CONTAINER_DEVELOPMENT.md) for setup, VS Code attachment, worktree switching, and verification commands. Native Linux development remains Nix-first and does not require Docker.
+Keeping the checkout under `/mnt/c` is the one thing to avoid. A Windows-hosted checkout reaches Linux over a 9p bridge, and that bridge costs roughly 30–50× on the small-file operations Cargo's fingerprint pass, Semgrep's walk, and rust-analyzer's watcher perform constantly; `git status` on this repository measures ~1.1 s across it against ~0.005 s on ext4.
+
+Where WSL2 is unavailable, a reusable Docker Compose service runs the same environment instead. Its named Nix and Cargo caches survive branch changes, every worktree receives an isolated Rust `target` volume, and it carries the linked-worktree Git mounts Nix needs — mounts that exist only to repair the `C:/…` `gitdir:` pointer Windows Git writes, which is not a problem WSL2 has.
+
+See [`CONTAINER_DEVELOPMENT.md`](CONTAINER_DEVELOPMENT.md) for both paths, VS Code setup, worktree switching, and verification commands. Native Linux development remains Nix-first and does not require Docker.
 
 ## Using the compiler
 
@@ -214,8 +218,8 @@ discovered by walking upward from the supplied path.
 
 ```
 cinnabar <FILE> [-o|--output PATH] [--dump-ast] [--dump-typed-ast] [--print-layout]
-                [--emit-llvm] [--emit-obj] [--explain-borrow[=human|json]] [--run]
-                [-O|--opt-level {0,1,2,3,s,z}]
+                [--emit-llvm] [--emit-obj] [--explain-borrow[=human|json]] [--emit-json]
+                [--run] [-O|--opt-level {0,1,2,3,s,z}]
 cinnabar <COMMAND> [ARGS]
 ```
 
@@ -234,6 +238,7 @@ full description, not a one-line summary.
 | `--emit-llvm` | Write the emitter's LLVM IR (before optimization) to the input path with `.ll` and stop |
 | `--emit-obj` | Optimize and assemble to a relocatable object at the input path with `.o`, skipping the static link |
 | `--explain-borrow[=human\|json]` | Attach secondary labels to borrow/linearity errors: which paths consume a value, where it was bound (and its linear type), where it was previously moved. `=json` emits them as structured diagnostics instead |
+| `--emit-json` | Write the invocation's result to standard output as one JSON document instead of terminal text — see [Machine-readable output](#machine-readable-output). Cannot be combined with `--run`, which gives the program's own output the same stream |
 | `--run` | Execute the produced binary after a successful build; `cinnabar` then exits `0` if the program exited `0` and non-zero otherwise |
 | `-O, --opt-level <LEVEL>` | LLVM optimization level: `0`, `1`, `2`, `3`, `s`, `z` (default `2`) |
 
@@ -248,6 +253,50 @@ lex, parse, resolve, typecheck, borrow-check, or codegen failure is rendered as 
 source-located diagnostics (via [`ariadne`](https://github.com/zesterer/ariadne)) and exits
 non-zero. There is no partial output: a build either produces its artifact or produces diagnostics.
 
+### Machine-readable output
+
+Every introspection surface above was written for a terminal. `--emit-json` writes the same facts
+to standard output as **exactly one JSON document per invocation**, so an editor, a playground, or
+a snapshot reviewer can consume them without scraping formatted text.
+
+| Invocation | Document |
+|---|---|
+| `<FILE> --dump-ast --emit-json` | `cinnabar.ast.v1` — the node arena as parsing left it |
+| `<FILE> --dump-typed-ast --emit-json` | `cinnabar.typed-ast.v1` — the same arena with every front-end attachment filled in |
+| `<FILE> --print-layout --emit-json` | `cinnabar.layout.v1` — sizes, alignments, field offsets, enum variant tags |
+| any other invocation with `--emit-json` | `cinnabar.diagnostics.v1` — every diagnostic the run produced, **empty when the program was accepted** |
+
+Each document names its shape in a `format` field, which is what a consumer should branch on.
+
+```bash
+cinnabar main.cnb --check-only --emit-json     # {"format":"cinnabar.diagnostics.v1","diagnostics":[]}
+cinnabar main.cnb --dump-typed-ast --emit-json | jq '.nodes[] | select(.tag == "EXPR")'
+cinnabar main.cnb --print-layout --emit-json   | jq '.types[] | select(.kind == "struct")'
+```
+
+**The arena documents** (`ast` / `typed-ast`) carry `names` (the interning table), `lists` (the list
+arena), `root` (the index into `lists` of the top-level item list), and `nodes`. Each node reports
+its `id`, symbolic `tag`, raw `file`/`start`/`end`/`slots`, and a `detail` object naming what the
+row means — the resolved symbol, the canonical type key with its rendering, the variant tag, the
+field offset fact. The two documents have the same shape and differ only in which attachment slots
+are still `-1`.
+
+**Spans.** A row or diagnostic with a real source origin carries a `source` object with byte
+offsets *and* the line/UTF-16-column pair the language server computes from the same mapping, so an
+editor and a `--emit-json` consumer cannot disagree about where something points. A fact with no
+Cinnabar source origin — an internal failure, a linker error, a type-descriptor row whose leading
+slots hold linearity flags rather than a span — reports `"source": null` rather than a plausible
+location. Nothing here invents a position; see the "Honest Diagnostics" goal in
+[`MANIFESTO.md`](MANIFESTO.md).
+
+**The diagnostic envelope** carries, per diagnostic, its `severity`, `message`, `source`, and
+`explanations` — the same secondary labels `--explain-borrow` renders in a terminal, including the
+borrow checker's consume paths, binding sites, and prior move sites. `--explain-borrow=json`
+remains as the older spelling of that request and now emits this same envelope.
+
+`--emit-json` applies to the single-file invocation form. It cannot be combined with `--run`, since
+the executed program writes to the same stream the document would.
+
 ### Working on a project
 
 | Command | What it does |
@@ -258,7 +307,8 @@ non-zero. There is no partial output: a build either produces its artifact or pr
 | `cinnabar check [PATH]` | Load, resolve, typecheck, and borrow-check; stop before code generation. Needs no LLVM and links nothing |
 | `cinnabar test [PATH] [--update-snapshots]` | Compile and run every `.cnb` file under the manifest's `TESTS` directory, recursively |
 | `cinnabar fmt [--check] <FILE>` | Rewrite one file into canonical form, or (with `--check`) exit non-zero if it isn't already |
-| `cinnabar doc [PATH] [-o DIR]` | Render every public declaration into `<project>/target/doc/index.html` |
+| `cinnabar doc [PATH] [-o DIR] [--emit-json]` | Render every public declaration into `<project>/target/doc/index.html`, or with `--emit-json` write it as a `cinnabar.docs.v1` document for a documentation site to lay out itself |
+| `cinnabar snapshots [PATH] [--address ADDR] [--emit-json]` | Review diagnostic snapshot changes one fixture at a time, on a loopback page. Accepting writes that one `.stderr` sidecar; `test --update-snapshots` accepts all of them at once |
 | `cinnabar burn [PATH] [--address ADDR]` | Serve those docs plus the manifesto over HTTP, pinned to this compiler's version (default `127.0.0.1:7878`) |
 
 `PATH` defaults to `.` and may be a project directory, a `build.cnb`, or a source path inside the

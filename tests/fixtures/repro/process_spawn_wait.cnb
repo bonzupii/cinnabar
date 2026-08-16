@@ -1,0 +1,123 @@
+#! `Process.spawn`/`Process.wait`: `fork`, `execve`, and `waitpid` issued
+#! as external C/POSIX calls, matching the `Memory`/`Terminal`/`File`
+#! runtime convention of one libc entry point per native. `fork` rather
+#! than any platform-specific syscall, so one code path serves every
+#! POSIX platform; `spawn`/`wait` are scoped to POSIX for now (Windows
+#! has no fork/execve/waitpid C-runtime equivalent).
+#!
+#! `argv` is a `Vec(String)` the caller builds and still owns afterward --
+#! `spawn` only borrows it -- so every `String` pushed into it is drained
+#! and freed before the `Vec` itself is freed, the same Resolvability Rule
+#! `vec_pop_drain.cnb` exercises for a `Vec` of a different linear element.
+#! `Process.Child` is consumed by `wait`, the same "own it, consume it
+#! exactly once" shape `File.Handle` already has with `close`.
+#!
+#! Exit code 0 means every check passed; a non-zero code names the check.
+
+pub mod Collections
+  pub nat type Vec(T)
+  pub nat type String
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize, Usize)
+    pub InvalidUtf8
+  end
+
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_push<T>(vec: &mut Vec(T), value: T) impure Result(Unit, Error)
+  pub nat fun vec_pop<T>(vec: &mut Vec(T)) impure Result(T, Error)
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
+  pub nat fun string_from_slice(bytes: &[U8]) impure Result(String, Error)
+  pub nat fun string_free(value: String) impure Unit
+end
+
+pub mod Process
+  #! A spawned child, reaped exactly once by `wait`.
+  pub nat type Child
+
+  pub type Error
+    pub SystemFault(I64)
+  end
+
+  pub nat fun spawn(argv: &Collections.Vec(Collections.String)) impure Result(Child, Error)
+  pub nat fun wait(child: Child) impure Result(I64, Error)
+end
+
+use Collections.vec_new
+use Collections.vec_push
+use Collections.vec_pop
+use Collections.vec_free
+use Collections.string_from_slice
+use Collections.string_free
+use Process.spawn
+use Process.wait
+
+fun fail_argv_free(argv: Collections.Vec(Collections.String), code: I64) impure I64
+  while true
+    match vec_pop(&mut argv)
+      Ok(s) => string_free(s)
+      Err(error) => break
+    end
+  end
+  vec_free(argv)
+  return code
+end
+
+fun run(path: &[U8], want_exit: I64, fail_base: I64) impure I64
+  val argv = match vec_new[Collections.String]()
+    Ok(v) => v
+    Err(error) => return fail_base
+  end
+
+  val arg0 = match string_from_slice(path)
+    Ok(s) => s
+    Err(error) => return fail_argv_free(argv, fail_base + 1)
+  end
+
+  match vec_push(&mut argv, arg0)
+    Ok(Unit) => Unit
+    Err(error) => return fail_argv_free(argv, fail_base + 2)
+  end
+
+  val child = match spawn(&argv)
+    Ok(c) => c
+    Err(error) => return fail_argv_free(argv, fail_base + 3)
+  end
+
+  val code = match wait(child)
+    Ok(c) => c
+    Err(error) => return fail_argv_free(argv, fail_base + 4)
+  end
+
+  while true
+    match vec_pop(&mut argv)
+      Ok(s) => string_free(s)
+      Err(error) => break
+    end
+  end
+  vec_free(argv)
+
+  if code != want_exit
+    return fail_base + 5
+  end
+  return 0
+end
+
+pub fun main() impure I64
+  #! `/bin/true` always exits 0 -- proves spawn+wait+exit-code decoding
+  #! for the ordinary, successful case.
+  val ok = run("/bin/true", 0, 10)
+  if ok != 0
+    return ok
+  end
+
+  #! `/bin/false` always exits 1 -- proves a non-zero exit code actually
+  #! reaches the caller rather than being reported as 0 or as an error.
+  val nonzero = run("/bin/false", 1, 20)
+  if nonzero != 0
+    return nonzero
+  end
+
+  return 0
+end

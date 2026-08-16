@@ -2,7 +2,11 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const { createLaunchPlan, findRepositoryRoot } = require("../lsp-launcher");
+const {
+  createLaunchPlan,
+  findRepositoryRoot,
+  findRootWithMarkers
+} = require("../lsp-launcher");
 
 const repositoryRoot = path.join(process.cwd(), "fixture-workspace", "cinnabar");
 const composeFile = path.join(repositoryRoot, "compose.dev.yaml");
@@ -22,6 +26,15 @@ function repositoryPathExists(candidate) {
 
 function builtRepositoryPathExists(candidate) {
   return repositoryPathExists(candidate) || candidate === serverBinary;
+}
+
+// A checkout that has generated nothing: the tracked root files are present and
+// container/local/** is not.
+function nativeRepositoryPathExists(candidate) {
+  return (
+    candidate === path.join(repositoryRoot, "flake.nix") ||
+    candidate === path.join(repositoryRoot, "Cargo.toml")
+  );
 }
 
 test("auto mode uses the installed cinnabar-lsp command without a configured path", () => {
@@ -61,10 +74,54 @@ test("path mode requires and uses the configured executable", () => {
   assert.deepEqual(
     createLaunchPlan({
       mode: "path",
-      serverPath: "/opt/cinnabar/bin/cinnabar-lsp",
+      serverPath: path.join(path.sep, "opt", "cinnabar", "bin", "cinnabar-lsp"),
       workspaceFolders: []
     }),
-    { command: "/opt/cinnabar/bin/cinnabar-lsp", args: [] }
+    { command: path.join(path.sep, "opt", "cinnabar", "bin", "cinnabar-lsp"), args: [] }
+  );
+});
+
+test("path mode resolves a relative executable against the repository, not the editor cwd", () => {
+  const wrapper = path.join("container", "bin", "cinnabar-lsp-nix");
+  assert.deepEqual(
+    createLaunchPlan({
+      mode: "path",
+      serverPath: wrapper,
+      workspaceFolders: [path.join(repositoryRoot, "editors", "vscode")],
+      pathExists: nativeRepositoryPathExists
+    }),
+    {
+      command: path.join(repositoryRoot, wrapper),
+      args: [],
+      options: { cwd: repositoryRoot }
+    }
+  );
+});
+
+test("path mode finds the repository without any generated container file", () => {
+  // A fresh clone has no container/local/**, so a root discovered only by the
+  // Compose markers would be unreachable here.
+  assert.equal(nativeRepositoryPathExists(environmentFile), false);
+  assert.equal(
+    findRootWithMarkers(
+      ["flake.nix", "Cargo.toml"],
+      [path.join(repositoryRoot, "editors", "vscode")],
+      nativeRepositoryPathExists
+    ),
+    repositoryRoot
+  );
+});
+
+test("a relative path outside any checkout names the setting and the fix", () => {
+  assert.throws(
+    () =>
+      createLaunchPlan({
+        mode: "path",
+        serverPath: path.join("container", "bin", "cinnabar-lsp-nix"),
+        workspaceFolders: [path.join(path.sep, "workspace", "other")],
+        pathExists: () => false
+      }),
+    /relative cinnabar\.server\.path .*flake\.nix and Cargo\.toml.*absolute path/s
   );
 });
 
@@ -180,6 +237,13 @@ test("the checked-in extension package owns the launcher and workspace settings 
 
   assert.equal(extensionPackage.scripts.test, "node --test");
   assert.equal(extensionPackage.files.includes("lsp-launcher.js"), true);
-  assert.deepEqual(workspaceSettings, { "cinnabar.server.mode": "docker-compose" });
+  // The checked-in default drives the repository's own toolchain without a
+  // container: the wrapper runs the server through `nix develop`, which is what
+  // CI uses too.  Compose mode remains selectable but cannot be the default —
+  // it needs container/local/**, which a fresh clone does not have.
+  assert.deepEqual(workspaceSettings, {
+    "cinnabar.server.mode": "path",
+    "cinnabar.server.path": path.posix.join("container", "bin", "cinnabar-lsp-nix")
+  });
   assert.doesNotMatch(JSON.stringify(workspaceSettings), /(?:[Tt]emp|cinnabar-lsp-docker)/);
 });

@@ -30,7 +30,6 @@
             semgrep
             valgrind
             gdb
-#            musl
             coq
             # wasm32-unknown-unknown target support for crates/cinnabar-wasm:
             # rustc already carries that target's std, but linking a cdylib
@@ -53,7 +52,6 @@
             export NIX_CFLAGS_COMPILE=""
             export NIX_HARDENING_ENABLE=""
             export RUST_BACKTRACE=full
-            export MUSL_LIBC_A="${pkgs.musl}/lib/libc.a"
           '';
         };
       }

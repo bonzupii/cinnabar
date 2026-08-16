@@ -1655,6 +1655,196 @@ fn variant_payload_len(state: &mut State, variant: i64) -> i64 {
     }
 }
 
+// Sentinel for a tail-unsafe call whose reference cannot be pinned to a
+// single frame-local binding to name (a `match`/`try` returning a
+// reference).  It is still rejected and still truthfully reported; only the
+// variable name is absent.
+const TAIL_ROOT_UNNAMED: i64 = -2;
+
+// The frame-local root of a reference argument (MANIFESTO's tail-call law).
+// Returns the name id of a binding in the current function's frame that
+// `expr`'s reference value is rooted in, `TAIL_ROOT_UNNAMED` when it is
+// frame-rooted but no single binding names it, or NONE when the value
+// provably does not point into the current frame.  A reference points into
+// the frame only when it was (transitively) borrowed from a local or
+// by-value parameter of the current function; a reference received as an
+// incoming reference parameter, or read from static storage, points outside
+// it and is safe to pass through a tail call.
+fn expr_frame_root(state: &mut State, expr: i64) -> i64 {
+    if node_tag(state.1, expr) != NODE_EXPR {
+        return NONE;
+    }
+    let key = expr_ty_of(state.1, expr);
+    if key == NONE {
+        return NONE;
+    }
+    let mut seen: Vec<i64> = Vec::new();
+    if !type_contains_ref(state.1, state.2, key, &mut seen) {
+        return NONE;
+    }
+    let kind = node_a(state.1, expr);
+    if kind == EXPR_LIT {
+        // The only reference-typed literal is a string, which is static.
+        return NONE;
+    }
+    if kind == EXPR_PATH {
+        return path_value_root(state, expr);
+    }
+    if kind == EXPR_UNARY {
+        let op = node_b(state.1, expr);
+        if op == UN_REF || op == UN_REF_MUT {
+            return place_frame_root(state, node_c(state.1, expr));
+        }
+        return NONE;
+    }
+    if kind == EXPR_FIELD_ACCESS {
+        return expr_frame_root(state, node_b(state.1, expr));
+    }
+    if kind == EXPR_INDEX {
+        return expr_frame_root(state, node_b(state.1, expr));
+    }
+    if kind == EXPR_CALL {
+        // A returned borrow derives from an input reference or static, so
+        // the call result is frame-rooted iff one of its own arguments is.
+        let args = node_d(state.1, expr);
+        let count = list_len(state.2, args);
+        let mut idx = 0i64;
+        while idx < count {
+            let root = expr_frame_root(state, list_get(state.2, args, idx));
+            if root != NONE {
+                return root;
+            }
+            idx += 1;
+        }
+        return NONE;
+    }
+    if kind == EXPR_STRUCT_LIT {
+        let values = node_d(state.1, expr);
+        let count = list_len(state.2, values);
+        let mut idx = 0i64;
+        while idx < count {
+            let root = expr_frame_root(state, list_get(state.2, values, idx));
+            if root != NONE {
+                return root;
+            }
+            idx += 1;
+        }
+        return NONE;
+    }
+    if kind == EXPR_ARRAY {
+        let elems = node_b(state.1, expr);
+        let count = list_len(state.2, elems);
+        let mut idx = 0i64;
+        while idx < count {
+            let root = expr_frame_root(state, list_get(state.2, elems, idx));
+            if root != NONE {
+                return root;
+            }
+            idx += 1;
+        }
+        return NONE;
+    }
+    TAIL_ROOT_UNNAMED
+}
+
+// The frame root of a `&`/`&mut` operand: the binding whose *storage* the
+// borrowed place occupies.  Storage is outside the current frame only when
+// it is static or reached through an incoming reference parameter, so a
+// bare path (a local, a by-value parameter, or a reference parameter's own
+// slot — `&param` is `&&T`, pointing at the parameter's frame slot) is
+// frame storage, while a field/index reached through a reference is
+// wherever that reference points.
+fn place_frame_root(state: &mut State, place: i64) -> i64 {
+    if node_tag(state.1, place) != NODE_EXPR {
+        return TAIL_ROOT_UNNAMED;
+    }
+    let kind = node_a(state.1, place);
+    if kind == EXPR_PATH {
+        let sym = expr_sym_of(state.1, place);
+        if sym != NONE {
+            return NONE;
+        }
+        let segs = node_b(state.1, place);
+        let first = list_first(state.2, segs);
+        let found = lookup_full(state.4, first);
+        if found.0 == NONE {
+            return TAIL_ROOT_UNNAMED;
+        }
+        return first;
+    }
+    if kind == EXPR_FIELD_ACCESS || kind == EXPR_INDEX {
+        let base = node_b(state.1, place);
+        let base_key = expr_ty_of(state.1, base);
+        if base_key != NONE {
+            let bk = key_kind(state.1, base_key);
+            if bk == TYD_REF || bk == TYD_REF_MUT {
+                return expr_frame_root(state, base);
+            }
+        }
+        return place_frame_root(state, base);
+    }
+    TAIL_ROOT_UNNAMED
+}
+
+// The frame root of a reference-typed path value: NONE when the value
+// points outside the frame (an incoming reference parameter, or a
+// module-level constant/static), the root binding's name otherwise.
+fn path_value_root(state: &mut State, expr: i64) -> i64 {
+    let sym = expr_sym_of(state.1, expr);
+    if sym != NONE {
+        return NONE;
+    }
+    let segs = node_b(state.1, expr);
+    let first = list_first(state.2, segs);
+    let found = lookup_full(state.4, first);
+    if found.0 == NONE {
+        return TAIL_ROOT_UNNAMED;
+    }
+    if found.2 != NONE && node_tag(state.1, found.2) == NODE_PARAM {
+        let kind = key_kind(state.1, found.0);
+        if kind == TYD_REF || kind == TYD_REF_MUT {
+            return NONE;
+        }
+    }
+    // A local binding of reference type points wherever its defining value
+    // points: an immutable `val`'s defining value is its initializer, and a
+    // match-arm binding's is the scrutinee.  A `var` can be reassigned, so
+    // its origin cannot be pinned statically and is conservatively treated
+    // as frame-rooted.
+    if found.2 != NONE && node_tag(state.1, found.2) == NODE_STMT && node_a(state.1, found.2) == STMT_LET && found.1 == 0 {
+        return expr_frame_root(state, node_e(state.1, found.2));
+    }
+    if found.2 != NONE && node_tag(state.1, found.2) == NODE_PAT {
+        let scrutinee = patfact_scrutinee_of(state.1, found.2);
+        if scrutinee != NONE {
+            return expr_frame_root(state, scrutinee);
+        }
+    }
+    first
+}
+
+// Computes and attaches the tail-safety fact for a call (MANIFESTO's
+// tail-call law): whether any argument carries a reference into the current
+// frame, which would make LLVM's `tail` marker a false promise.  Attached
+// during body checking so the scope used to resolve a binding's kind is the
+// exact scope the body was checked under; codegen and the self-recursion
+// rejection both read the attached fact.
+fn attach_call_tail_safe(state: &mut State, expr: i64) {
+    let args = node_d(state.1, expr);
+    let count = list_len(state.2, args);
+    let mut idx = 0i64;
+    let mut root = NONE;
+    while idx < count {
+        let r = expr_frame_root(state, list_get(state.2, args, idx));
+        if r != NONE {
+            root = r;
+        }
+        idx += 1;
+    }
+    let tail_safe = if root == NONE { 1 } else { 0 };
+    alloc_callfact(state.1, expr, tail_safe, root);
+}
+
 // The O(1) call-stack guarantee (MANIFESTO): every self-recursive call
 // must be in strict tail position — the direct expression value of a
 // `return`, or the non-diverging result expression of a match in tail
@@ -1719,10 +1909,11 @@ fn tail_walk_expr(state: &mut State, fn_node: i64, expr: i64, tail: i64) {
     }
     let kind = node_a(state.1, expr);
     if kind == EXPR_CALL {
+        let inst = expr_sym_of(state.1, expr);
+        let fn_slot = inst_fn_of(state.1, inst);
+        let is_self = node_tag(state.1, fn_slot) == NODE_FN && fn_slot == fn_node;
         if tail == 0 {
-            let inst = expr_sym_of(state.1, expr);
-            let fn_slot = inst_fn_of(state.1, inst);
-            if node_tag(state.1, fn_slot) == NODE_FN && fn_slot == fn_node {
+            if is_self {
                 push_error(
                     state.3,
                     &format!(
@@ -1733,6 +1924,33 @@ fn tail_walk_expr(state: &mut State, fn_node: i64, expr: i64, tail: i64) {
                     node_start(state.1, expr),
                     node_end(state.1, expr),
                 );
+            }
+        } else if is_self {
+            // A self-tail call that passes a borrow of its own frame cannot
+            // be a real tail call: reusing the frame would invalidate the
+            // borrow (MANIFESTO's O(1) call-stack guarantee).
+            let root = callfact_root_name_of(state.1, expr);
+            if root != NONE {
+                if root >= 0 {
+                    push_error(
+                        state.3,
+                        &format!(
+                            "cannot pass borrow of local variable '{}' into tail-recursive call: local does not outlive the frame jump",
+                            name_text(state.0, root)
+                        ),
+                        node_file(state.1, expr),
+                        node_start(state.1, expr),
+                        node_end(state.1, expr),
+                    );
+                } else {
+                    push_error(
+                        state.3,
+                        "cannot pass a borrow rooted in this function's frame into tail-recursive call: the borrow does not outlive the frame jump",
+                        node_file(state.1, expr),
+                        node_start(state.1, expr),
+                        node_end(state.1, expr),
+                    );
+                }
             }
         }
         // Argument expressions are always evaluated in non-tail position, so
@@ -1817,6 +2035,7 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
                     node_file(state.1, declared),
                     node_start(state.1, declared),
                     node_end(state.1, declared),
+                    NOTE_CONTEXT,
                 );
             }
             dkey
@@ -1844,6 +2063,7 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
                     node_file(state.1, declared_ty),
                     node_start(state.1, declared_ty),
                     node_end(state.1, declared_ty),
+                    NOTE_CONTEXT,
                 );
             }
         }
@@ -1902,6 +2122,7 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
                         node_file(state.1, state.17),
                         node_start(state.1, state.17),
                         node_end(state.1, state.17),
+                        NOTE_CONTEXT,
                     );
                 }
             }
@@ -1931,6 +2152,7 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
                 node_file(state.1, origin),
                 node_start(state.1, origin),
                 node_end(state.1, origin),
+                NOTE_CONTEXT,
             );
         }
     } else if is_option_key(state.1, key) {
@@ -1944,6 +2166,7 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
                 node_file(state.1, origin),
                 node_start(state.1, origin),
                 node_end(state.1, origin),
+                NOTE_CONTEXT,
             );
         }
     }
@@ -2084,7 +2307,7 @@ fn suggest_value_name(state: &mut State, source: i64, misspelled: i64) {
         idx += 1;
     }
     if let Some(suggestion) = suggest::suggest(&text, &candidates) {
-        push_note_for_last(state.3, state.16, &suggestion.message, suggestion.file, suggestion.start, suggestion.end);
+        push_note_for_last(state.3, state.16, &suggestion.message, suggestion.file, suggestion.start, suggestion.end, NOTE_GUIDANCE);
     }
 }
 
@@ -2131,6 +2354,7 @@ fn collect_const_item(state: &mut State, item: i64) {
             node_file(state.1, decl_ty),
             node_start(state.1, decl_ty),
             node_end(state.1, decl_ty),
+            NOTE_CONTEXT,
         );
     }
     alloc_node(state.1, &[NODE_CONSTVAL, NO_FILE, NO_FILE, NO_FILE, sym, value, NONE, NONE, NONE, NONE]);
@@ -3067,37 +3291,6 @@ fn index_result_key(state: &mut State, payload: i64) -> i64 {
     canon_tyinfo(state.1, state.2, TYD_ENUM, result_sym, args, NONE, NONE)
 }
 
-// Whether one specific index expression's access is fallible.  `check_index`
-// decides it once -- an index it proves in range against a fixed array
-// length reads the element directly, anything else goes through
-// `Result(T, IndexError)` -- and records it in the `EXPR_INDEX` row's third
-// operand slot, which the parser leaves at `NONE` because an index has only
-// a base and an index expression.  A spare slot on the node that owns the
-// fact, rather than a side table, for the same reason a type descriptor's
-// linearity flag rides in a spare slot of its own row.
-//
-// Codegen must read this instead of re-deriving fallibility from the shape
-// of the type attached to the node.  The shapes are not distinguishable: an
-// in-range constant index into `[Result(T, E); N]` attaches the bare element
-// key, and that key *is* a `Result` enum, so a shape test sends an
-// infallible access down the fallible path and copies the wrong bytes.
-pub const IDX_ACCESS_IN_RANGE: i64 = 0;
-pub const IDX_ACCESS_FALLIBLE: i64 = 1;
-
-// `NONE` for any node that is not an index expression, so a caller holding
-// an arbitrary expression id cannot mistake another expression kind's third
-// operand (a right-hand operand id, say) for this fact.
-pub fn index_access_of(nodes: &[i64], expr: i64) -> i64 {
-    if node_tag(nodes, expr) != NODE_EXPR || node_a(nodes, expr) != EXPR_INDEX {
-        return NONE;
-    }
-    node_d(nodes, expr)
-}
-
-fn index_set_access(nodes: &mut [i64], expr: i64, access: i64) -> bool {
-    node_set_d(nodes, expr, access)
-}
-
 fn check_index(state: &mut State, expr: i64, borrow: i64, expected: i64, ret: i64, impure: i64, self_key: i64) -> i64 {
     let base = node_b(state.1, expr);
     let index = node_c(state.1, expr);
@@ -3146,14 +3339,14 @@ fn check_index(state: &mut State, expr: i64, borrow: i64, expected: i64, ret: i6
             if value < 0 || value >= fixed_len {
                 push_error(state.3, &format!("array index out of bounds: index is {} but array length is {}", value, fixed_len), file, start, end);
             }
-            index_set_access(state.1, expr, IDX_ACCESS_IN_RANGE);
             expr_set_ty(state.1, expr, payload);
+            node_set_d(state.1, expr, INDEX_INFALLIBLE);
             return payload;
         }
     }
-    index_set_access(state.1, expr, IDX_ACCESS_FALLIBLE);
     let key = index_result_key(state, payload);
     expr_set_ty(state.1, expr, key);
+    node_set_d(state.1, expr, INDEX_FALLIBLE);
     key
 }
 
@@ -3196,6 +3389,7 @@ fn check_assign_target(state: &mut State, target: i64, ret: i64, impure: i64, se
                         node_file(state.1, decl),
                         node_start(state.1, decl),
                         node_end(state.1, decl),
+                        NOTE_CONTEXT,
                     );
                 }
             }
@@ -3240,6 +3434,7 @@ fn check_assign_target(state: &mut State, target: i64, ret: i64, impure: i64, se
                         node_file(state.1, decl),
                         node_start(state.1, decl),
                         node_end(state.1, decl),
+                        NOTE_CONTEXT,
                     );
                 }
             }
@@ -3556,6 +3751,7 @@ fn check_call(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64
         }
     }
     attach_extraction_binding(state, expr, sym);
+    attach_call_tail_safe(state, expr);
     expr_set_ty(state.1, expr, result);
     result
 }
@@ -4197,7 +4393,7 @@ fn check_match(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
     let mut idx = 0i64;
     while idx < count {
         let arm = list_get(state.2, arms, idx);
-        let arm_key = check_arm(state, arm, s_key, ret, impure, self_key, merged);
+        let arm_key = check_arm(state, arm, (s_key, scrutinee), ret, impure, self_key, merged);
         let div = stmt_diverges(state.1, state.2, node_b(state.1, arm));
         if div == 0 {
             if first {
@@ -4228,9 +4424,9 @@ fn check_match(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
     merged
 }
 
-fn check_arm(state: &mut State, arm: i64, s_key: i64, ret: i64, impure: i64, self_key: i64, expected: i64) -> i64 {
+fn check_arm(state: &mut State, arm: i64, scrut: (i64, i64), ret: i64, impure: i64, self_key: i64, expected: i64) -> i64 {
     push_scope(state.4);
-    check_pattern(state, node_a(state.1, arm), s_key);
+    check_pattern(state, node_a(state.1, arm), scrut.0, scrut.1);
     attach_local_facts(state, arm);
     let body = node_b(state.1, arm);
     let key = if node_tag(state.1, body) == NODE_STMT && node_a(state.1, body) == STMT_EXPR {
@@ -4247,7 +4443,7 @@ fn check_arm(state: &mut State, arm: i64, s_key: i64, ret: i64, impure: i64, sel
     key
 }
 
-fn check_pattern(state: &mut State, pat: i64, s_key: i64) -> i64 {
+fn check_pattern(state: &mut State, pat: i64, s_key: i64, scrutinee: i64) -> i64 {
     if node_tag(state.1, pat) != NODE_PAT {
         return unknown_key(state.1, state.2);
     }
@@ -4257,6 +4453,10 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64) -> i64 {
     let end = node_end(state.1, pat);
     if kind == PAT_BIND {
         let name = node_b(state.1, pat);
+        // The bound value is (a subpart of) the match scrutinee, so its
+        // frame-rootedness is the scrutinee's; the tail-safety trace reads
+        // this fact back without re-walking the arm list.
+        alloc_patfact(state.1, pat, scrutinee);
         bind(state.4, name, s_key, 0, pat);
         pat_set_ty(state.1, pat, s_key);
         return s_key;
@@ -4321,7 +4521,7 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64) -> i64 {
             while idx < pcount {
                 let declared = ty_key_of(state.1, list_get(state.2, payload_decl, idx));
                 let concrete = subst_key(state.1, state.2, declared, &from, &to);
-                check_pattern(state, list_get(state.2, payload_pats, idx), concrete);
+                check_pattern(state, list_get(state.2, payload_pats, idx), concrete, scrutinee);
                 idx += 1;
             }
         }
@@ -4339,12 +4539,16 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64) -> i64 {
     let ecount = list_len(state.2, elems);
     let mut idx = 0i64;
     while idx < ecount {
-        check_pattern(state, list_get(state.2, elems, idx), elem);
+        check_pattern(state, list_get(state.2, elems, idx), elem, scrutinee);
         idx += 1;
     }
     let rest = node_c(state.1, pat);
     if rest != NONE {
         let rest_key = rest_type_of(state.1, state.2, s_key, inner);
+        // A rest binding is a slice view of the scrutinee, so its
+        // frame-rootedness is the scrutinee's; the tail-safety trace reads
+        // this fact back without re-walking the arm list.
+        alloc_patfact(state.1, pat, scrutinee);
         bind(state.4, rest, rest_key, 0, pat);
         pat_set_rest_key(state.1, pat, rest_key);
     }

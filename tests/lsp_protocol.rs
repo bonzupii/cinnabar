@@ -974,3 +974,185 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
     );
     Ok(())
 }
+
+#[test]
+fn stdio_serves_symbols_folding_rename_tokens_hints_and_actions() -> Result<(), Box<dyn Error>> {
+    let timeout = Duration::from_secs(20);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cinnabar-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let outcome = (|| -> Result<(), Box<dyn Error>> {
+        let mut writer = child.stdin.take().ok_or("cinnabar-lsp stdin was not piped")?;
+        let stdout = child.stdout.take().ok_or("cinnabar-lsp stdout was not piped")?;
+        let reader = MessageReader::new(stdout);
+
+        send_message(
+            &mut writer,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "capabilities": {}, "clientInfo": { "name": "extended-features-test" } }
+            }),
+        )?;
+        let initialized = read_response_within(&reader, 1, timeout)?;
+        let capabilities = initialized
+            .pointer("/result/capabilities")
+            .cloned()
+            .ok_or("initialize response had no capabilities")?;
+        for key in [
+            "foldingRangeProvider",
+            "documentSymbolProvider",
+            "workspaceSymbolProvider",
+            "inlayHintProvider",
+            "codeActionProvider",
+        ] {
+            assert_eq!(capabilities.get(key).and_then(Value::as_bool), Some(true), "{}: {}", key, capabilities);
+        }
+        assert!(capabilities.get("renameProvider").is_some(), "renameProvider: {}", capabilities);
+        let legend_types = capabilities
+            .pointer("/semanticTokensProvider/legend/tokenTypes")
+            .and_then(Value::as_array)
+            .ok_or("semanticTokensProvider legend missing")?;
+        assert!(legend_types.iter().any(|value| value.as_str() == Some("function")));
+
+        send_message(&mut writer, &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }))?;
+
+        let entry = fixture("multi_file/main.cnb");
+        let uri = file_uri(&entry);
+        let source = std::fs::read_to_string(&entry)?;
+        send_message(
+            &mut writer,
+            &json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {
+                    "textDocument": { "uri": uri, "languageId": "cinnabar", "version": 1, "text": source }
+                }
+            }),
+        )?;
+        let diagnostics = read_diagnostics_for_uri(&reader, &uri, "multi-file diagnostics")?;
+        assert_eq!(diagnostic_count(&diagnostics), Some(0), "diagnostics: {}", diagnostics);
+
+        send_message(
+            &mut writer,
+            &json!({
+                "jsonrpc": "2.0", "id": 2, "method": "textDocument/documentSymbol",
+                "params": { "textDocument": { "uri": uri } }
+            }),
+        )?;
+        let symbols = read_response_within(&reader, 2, timeout)?;
+        let symbol_names: Vec<&str> = symbols
+            .pointer("/result")
+            .and_then(Value::as_array)
+            .ok_or("documentSymbol response was not an array")?
+            .iter()
+            .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+            .collect();
+        assert!(symbol_names.contains(&"main"), "document symbols: {:?}", symbol_names);
+
+        send_message(
+            &mut writer,
+            &json!({
+                "jsonrpc": "2.0", "id": 3, "method": "textDocument/foldingRange",
+                "params": { "textDocument": { "uri": uri } }
+            }),
+        )?;
+        let folding = read_response_within(&reader, 3, timeout)?;
+        assert!(folding.pointer("/result").and_then(Value::as_array).is_some(), "folding: {}", folding);
+
+        let call_offset = source.find("add(10").ok_or("fixture no longer calls add(10")?;
+        let call_line = source[..call_offset].matches('\n').count() as i64;
+        let call_char = (call_offset - source[..call_offset].rfind('\n').map(|i| i + 1).unwrap_or(0)) as i64;
+        send_message(
+            &mut writer,
+            &json!({
+                "jsonrpc": "2.0", "id": 4, "method": "textDocument/rename",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "position": { "line": call_line, "character": call_char },
+                    "newName": "sum"
+                }
+            }),
+        )?;
+        let rename = read_response_within(&reader, 4, timeout)?;
+        let changes = rename
+            .pointer("/result/changes")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("rename response had no changes: {}", rename))?;
+        assert_eq!(changes.len(), 2, "rename should touch main.cnb and Math.cnb: {:?}", changes.keys().collect::<Vec<_>>());
+
+        send_message(
+            &mut writer,
+            &json!({
+                "jsonrpc": "2.0", "id": 5, "method": "textDocument/semanticTokens/full",
+                "params": { "textDocument": { "uri": uri } }
+            }),
+        )?;
+        let tokens = read_response_within(&reader, 5, timeout)?;
+        let data = tokens.pointer("/result/data").and_then(Value::as_array).ok_or("semantic tokens had no data")?;
+        assert!(!data.is_empty(), "expected at least one semantic token");
+        assert_eq!(data.len() % 5, 0, "semantic token data must come in groups of five");
+
+        send_message(
+            &mut writer,
+            &json!({
+                "jsonrpc": "2.0", "id": 6, "method": "textDocument/inlayHint",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "range": {
+                        "start": { "line": 0, "character": 0 },
+                        "end": { "line": 10, "character": 0 }
+                    }
+                }
+            }),
+        )?;
+        let hints = read_response_within(&reader, 6, timeout)?;
+        assert!(hints.pointer("/result").and_then(Value::as_array).is_some(), "inlay hints: {}", hints);
+
+        send_message(
+            &mut writer,
+            &json!({
+                "jsonrpc": "2.0", "id": 7, "method": "workspace/symbol",
+                "params": { "query": "add" }
+            }),
+        )?;
+        let workspace = read_response_within(&reader, 7, timeout)?;
+        let workspace_names: Vec<&str> = workspace
+            .pointer("/result")
+            .and_then(Value::as_array)
+            .ok_or("workspace/symbol response was not an array")?
+            .iter()
+            .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+            .collect();
+        assert!(workspace_names.contains(&"add"), "workspace symbols: {:?}", workspace_names);
+
+        send_message(
+            &mut writer,
+            &json!({
+                "jsonrpc": "2.0", "id": 8, "method": "textDocument/codeAction",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "range": {
+                        "start": { "line": 0, "character": 0 },
+                        "end": { "line": 10, "character": 0 }
+                    },
+                    "context": { "diagnostics": [] }
+                }
+            }),
+        )?;
+        let actions = read_response_within(&reader, 8, timeout)?;
+        assert!(actions.pointer("/result").and_then(Value::as_array).is_some(), "code actions: {}", actions);
+
+        Ok(())
+    })();
+
+    let kill_result = child.kill();
+    let status = child.wait()?;
+    if outcome.is_ok() && kill_result.is_err() && !status.success() {
+        return Err(format!("cinnabar-lsp exited before test cleanup: {}", status).into());
+    }
+    outcome
+}

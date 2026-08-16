@@ -1,8 +1,11 @@
-//! HTML rendering for the API documentation and the Cinnabook.
+//! The published API documentation, as a page and as a document.
 //!
 //! `render_api_docs` walks the parsed item lists and emits one article per
 //! public declaration, taking the prose from the `NODE_DOC` rows the parser
-//! attached to each item. `render_cinnabook` folds that output together
+//! attached to each item. `docs_json` walks the same item lists, applies
+//! the same `node_b == 1` visibility test, and emits one object per
+//! declaration with its kind, name, `attached_docs` paragraphs, members and
+//! span. `render_cinnabook` folds that output together
 //! with the manifesto into a single version-pinned page, and
 //! `serve_cinnabook` serves a rendered page over HTTP.
 //!
@@ -17,13 +20,136 @@
 //!   included — it is published as text, not as markup.
 
 use crate::ast::*;
+use crate::emit_json::DOCS_FORMAT;
+use serde_json::{json, Value};
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 
 pub fn render_api_docs(names: &[String], nodes: &[i64], lists: &[Vec<i64>], root: i64) -> String {
     let mut body = String::new();
     render_item_list(names, nodes, lists, root, 1, &mut body);
     page("Cinnabar API documentation", &body)
+}
+
+/// Every public declaration reachable from the entry, as one document.
+///
+/// The same walk the page above does, reported rather than laid out: the
+/// visibility test, the declaration kinds, and the attached prose are the
+/// ones `render_api_docs` uses, so a site built on this cannot publish a
+/// declaration the page would have hidden.
+pub fn docs_json(names: &[String], nodes: &[i64], lists: &[Vec<i64>], root: i64, files: &[(String, String)]) -> Value {
+    json!({
+        "format": DOCS_FORMAT,
+        "version": env!("CARGO_PKG_VERSION"),
+        "files": crate::emit_json::files_json(files),
+        "declarations": declarations_json(names, nodes, lists, root, files)
+    })
+}
+
+fn declarations_json(
+    names: &[String],
+    nodes: &[i64],
+    lists: &[Vec<i64>],
+    item_list: i64,
+    files: &[(String, String)],
+) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    let mut idx = 0i64;
+    while idx < list_len(lists, item_list) {
+        let item = list_get(lists, item_list, idx);
+        // The same visibility test the page makes, read off the parsed item
+        // rather than decided again here.
+        if node_tag(nodes, item) == NODE_ITEM && node_b(nodes, item) == 1 {
+            out.push(declaration_json(names, nodes, lists, item, files));
+        }
+        idx += 1;
+    }
+    out
+}
+
+fn declaration_json(
+    names: &[String],
+    nodes: &[i64],
+    lists: &[Vec<i64>],
+    item: i64,
+    files: &[(String, String)],
+) -> Value {
+    let kind = node_a(nodes, item);
+    let (label, name) = item_label_and_name(names, nodes, item);
+    let mut entry = json!({
+        "kind": label,
+        "name": name,
+        "documentation": attached_docs(names, nodes, lists, item),
+        "source": crate::emit_json::source_json(files, node_file(nodes, item), node_start(nodes, item), node_end(nodes, item))
+    });
+    let members = if kind == ITEM_STRUCT {
+        members_json(names, nodes, lists, node_e(nodes, item), "Field", files)
+    } else if kind == ITEM_ENUM {
+        members_json(names, nodes, lists, node_e(nodes, item), "Variant", files)
+    } else if kind == ITEM_TRAIT {
+        methods_json(names, nodes, lists, node_e(nodes, item), files)
+    } else {
+        Vec::new()
+    };
+    if let Some(object) = entry.as_object_mut() {
+        if !members.is_empty() {
+            object.insert("members".to_string(), Value::Array(members));
+        }
+        if kind == ITEM_MODULE {
+            object.insert(
+                "declarations".to_string(),
+                Value::Array(declarations_json(names, nodes, lists, node_e(nodes, item), files)),
+            );
+        }
+    }
+    entry
+}
+
+fn members_json(
+    names: &[String],
+    nodes: &[i64],
+    lists: &[Vec<i64>],
+    members: i64,
+    label: &str,
+    files: &[(String, String)],
+) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    let mut idx = 0i64;
+    while idx < list_len(lists, members) {
+        let member = list_get(lists, members, idx);
+        if node_c(nodes, member) == 1 {
+            out.push(json!({
+                "kind": label,
+                "name": name_text(names, node_a(nodes, member)),
+                "documentation": attached_docs(names, nodes, lists, member),
+                "source": crate::emit_json::source_json(files, node_file(nodes, member), node_start(nodes, member), node_end(nodes, member))
+            }));
+        }
+        idx += 1;
+    }
+    out
+}
+
+fn methods_json(
+    names: &[String],
+    nodes: &[i64],
+    lists: &[Vec<i64>],
+    methods: i64,
+    files: &[(String, String)],
+) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    let mut idx = 0i64;
+    while idx < list_len(lists, methods) {
+        let method = list_get(lists, methods, idx);
+        out.push(json!({
+            "kind": "Method",
+            "name": name_text(names, node_a(nodes, method)),
+            "documentation": attached_docs(names, nodes, lists, method),
+            "source": crate::emit_json::source_json(files, node_file(nodes, method), node_start(nodes, method), node_end(nodes, method))
+        }));
+        idx += 1;
+    }
+    out
 }
 
 pub fn render_cinnabook(api_html: &str) -> String {
@@ -47,33 +173,37 @@ pub fn render_cinnabook(api_html: &str) -> String {
     page("Cinnabook", &body)
 }
 
-pub fn serve_cinnabook(address: &str, page_text: &str, mut on_connection_error: impl FnMut(&str)) -> Result<(), String> {
+pub fn serve_cinnabook(
+    address: &str,
+    page_text: &str,
+    mut report_error: impl FnMut(&str),
+) -> Result<(), String> {
     let listener = TcpListener::bind(address)
         .map_err(|bind_error| format!("cannot bind Cinnabook server to '{}': {}", address, bind_error))?;
     // Only the bind is fatal: once the socket is listening, a connection
     // that fails to accept, read, or write is that one visitor's problem —
     // a browser closing mid-response must not take the server down for
     // every future visitor. Per-connection failures are reported to the
-    // caller through `on_connection_error` (never printed directly here —
-    // this is library code, and only the CLI entry point in `main.rs`
-    // decides how a message reaches the user) and the loop moves on.
+    // caller through `report_error` (never printed directly here — this is
+    // library code, and only the CLI entry point in `main.rs` decides how a
+    // message reaches the user), which renders them, and the loop moves on.
     for incoming in listener.incoming() {
         let mut stream = match incoming {
             Ok(stream) => stream,
             Err(accept_error) => {
-                on_connection_error(&format!("cannot accept Cinnabook connection: {}", accept_error));
+                let message = format!("cannot accept Cinnabook connection: {}", accept_error);
+                report_error(&message);
                 continue;
             }
         };
-        let mut request = [0u8; 2048];
-        let bytes_read = match stream.read(&mut request) {
-            Ok(count) => count,
+        let request_len = match read_headers(&mut stream) {
+            Ok(len) => len,
             Err(read_error) => {
-                on_connection_error(&format!("cannot read Cinnabook request: {}", read_error));
+                report_error(&read_error);
                 continue;
             }
         };
-        if bytes_read == 0 {
+        if request_len == 0 {
             continue;
         }
         let response = format!(
@@ -82,10 +212,40 @@ pub fn serve_cinnabook(address: &str, page_text: &str, mut on_connection_error: 
             page_text
         );
         if let Err(write_error) = stream.write_all(response.as_bytes()) {
-            on_connection_error(&format!("cannot write Cinnabook response: {}", write_error));
+            let message = format!("cannot write Cinnabook response: {}", write_error);
+            report_error(&message);
         }
     }
     Ok(())
+}
+
+/// Read a request through its header terminator, so the connection can be
+/// closed without leaving unread bytes behind.
+///
+/// A single `read` can return a partial request. Closing a socket that still
+/// holds unread bytes resets the connection (RST) instead of finishing it
+/// (FIN), which a client observes as "connection reset by peer". Reading
+/// until the header terminator consumes everything a header-only request
+/// sent, so the close that follows is a clean FIN. An empty request is also
+/// read cleanly (zero bytes) so the caller can skip it without reporting it.
+fn read_headers(stream: &mut TcpStream) -> Result<usize, String> {
+    let mut buffer = [0u8; 2048];
+    let mut request = Vec::new();
+    loop {
+        let count = stream
+            .read(&mut buffer)
+            .map_err(|read_error| format!("cannot read Cinnabook request: {}", read_error))?;
+        if count == 0 {
+            return Ok(request.len());
+        }
+        request.extend_from_slice(&buffer[..count]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(request.len());
+        }
+        if request.len() > 1_048_576 {
+            return Err("Cinnabook request headers exceed one MiB".to_string());
+        }
+    }
 }
 
 fn render_item_list(
@@ -196,7 +356,13 @@ fn render_methods(names: &[String], nodes: &[i64], lists: &[Vec<i64>], methods: 
     }
 }
 
-fn render_attached_docs(names: &[String], nodes: &[i64], lists: &[Vec<i64>], target: i64, output: &mut String) {
+/// The prose the parser attached to `target`, paragraph by paragraph.
+///
+/// Scans `NODE_DOC` rows for ones whose slot `a` equals `target` and
+/// returns each non-empty interned paragraph. Both `render_attached_docs`
+/// and `declaration_json` format this vector.
+fn attached_docs(names: &[String], nodes: &[i64], lists: &[Vec<i64>], target: i64) -> Vec<String> {
+    let mut paragraphs: Vec<String> = Vec::new();
     let mut node = 0i64;
     let count = nodes.len() as i64 / NODE_STRIDE;
     while node < count {
@@ -207,12 +373,19 @@ fn render_attached_docs(names: &[String], nodes: &[i64], lists: &[Vec<i64>], tar
                 let text = name_text(names, list_get(lists, docs, idx));
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
-                    output.push_str(&format!("<p>{}</p>", escape_html(trimmed).replace('\n', "<br>")));
+                    paragraphs.push(trimmed.to_string());
                 }
                 idx += 1;
             }
         }
         node += 1;
+    }
+    paragraphs
+}
+
+fn render_attached_docs(names: &[String], nodes: &[i64], lists: &[Vec<i64>], target: i64, output: &mut String) {
+    for paragraph in attached_docs(names, nodes, lists, target) {
+        output.push_str(&format!("<p>{}</p>", escape_html(&paragraph).replace('\n', "<br>")));
     }
 }
 

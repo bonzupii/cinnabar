@@ -23,6 +23,7 @@ pub(crate) const EXPECT_OK: &[(&str, i32)] = &[
     ("array_test", 0),
     ("borrow_index", 0),
     ("enum_array_index", 0),
+    ("result_array_index", 0),
     ("idx10d_mut_disjoint", 30),
     ("idx10e_same_expr_disjoint", 30),
     ("rec_test", 120),
@@ -76,5 +77,10 @@ pub(crate) const EXPECT_OK: &[(&str, i32)] = &[
     ("slice_test", 0),
     ("vec_pop_drain", 0),
     ("hash_map_remove_drain", 0),
+    ("hash_map_struct_key", 0),
+    ("hash_map_collision", 0),
+    ("hash_map_resize", 0),
+    ("hash_map_slice_key", 0),
     ("native_slice_view", 0),
+    ("process_spawn_wait", 0),
 ];

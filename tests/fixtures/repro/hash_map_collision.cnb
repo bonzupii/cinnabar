@@ -1,0 +1,81 @@
+#! A forced collision: two distinct I64 keys that land in the same initial
+#! bucket. The table starts at capacity 8 and probes `(hash + step) &
+#! (capacity - 1)`, so two keys hash to the same bucket exactly when their
+#! FNV-1a results agree in the low 3 bits. For a scalar key `k` that fold is
+#! `(SEED ^ k) * PRIME mod 2^64`; PRIME is 3 mod 8 and SEED is 5 mod 8, so
+#! the low 3 bits are `((5 ^ (k mod 8)) * 3) mod 8`, which depends on `k`
+#! only through `k mod 8`. Keys 1 and 9 therefore hash to the same bucket,
+#! forcing the linear probe past an occupied, non-equal slot. Both must come
+#! back with their own value; a missing key must still report KeyNotFound.
+
+pub const KEY_A: I64 = 1
+pub const KEY_B: I64 = 9
+pub const VALUE_A: I64 = 100
+pub const VALUE_B: I64 = 900
+pub const MISSING_KEY: I64 = 3
+
+pub mod Collections
+  pub nat type HashMap(K, V)
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub KeyNotFound
+  end
+
+  pub nat fun hash_map_new<K, V>() impure Result(HashMap(K, V), Error)
+  pub nat fun hash_map_insert<K, V>(map: &mut HashMap(K, V), key: K, value: V) impure Result(Unit, Error)
+  pub nat fun hash_map_get<K, V>(map: &HashMap(K, V), key: K) impure Result(V, Error)
+  pub nat fun hash_map_free<K, V>(map: HashMap(K, V)) impure Unit
+end
+
+use Collections.hash_map_new
+use Collections.hash_map_insert
+use Collections.hash_map_get
+use Collections.hash_map_free
+
+fun fail_free_map(map: Collections.HashMap(I64, I64), code: I64) impure I64
+  hash_map_free(map)
+  return code
+end
+
+pub fun main() impure I64
+  val map = match hash_map_new[I64, I64]()
+    Ok(m) => m
+    Err(error) => return 1
+  end
+
+  match hash_map_insert(&mut map, KEY_A, VALUE_A)
+    Ok(Unit) => Unit
+    Err(error) => return fail_free_map(map, 2)
+  end
+
+  match hash_map_insert(&mut map, KEY_B, VALUE_B)
+    Ok(Unit) => Unit
+    Err(error) => return fail_free_map(map, 3)
+  end
+
+  val got_a = match hash_map_get(&map, KEY_A)
+    Ok(value) => value
+    Err(error) => return fail_free_map(map, 4)
+  end
+  if got_a != VALUE_A
+    return fail_free_map(map, 5)
+  end
+
+  val got_b = match hash_map_get(&map, KEY_B)
+    Ok(value) => value
+    Err(error) => return fail_free_map(map, 6)
+  end
+  if got_b != VALUE_B
+    return fail_free_map(map, 7)
+  end
+
+  match hash_map_get(&map, MISSING_KEY)
+    Ok(value) => return fail_free_map(map, 8)
+    Err(Collections.KeyNotFound) => Unit
+    Err(error) => return fail_free_map(map, 8)
+  end
+
+  hash_map_free(map)
+  return 0
+end

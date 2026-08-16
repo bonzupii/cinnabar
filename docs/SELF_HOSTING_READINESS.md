@@ -2,25 +2,31 @@
 
 An overnight full-repository audit (seven independent agents, one per subsystem: lexer/parser/AST,
 resolver/typecheck, borrow checker, codegen, CLI/LSP/infra, the tests/fixtures corpus, and the
-website), followed by three rounds of fixes: an initial pass on the safely-verifiable front end; a
+website), followed by four rounds of fixes: an initial pass on the safely-verifiable front end; a
 second, targeted pass (three more agents, in isolated git worktrees, on `opus` for the highest-stakes
 areas and `fable` for the more mechanical ones) that closed out nearly everything the audit had
-flagged but left open; and a third pass closing the handful of items that round two's own work
-surfaced (the remaining borrow-checker leaks, a newly-found resolver gap, and a fixture content
-decision, made explicitly rather than guessed). This document is the result: what got fixed, what's
-still broken, and — the thing actually asked for — what stands between here and ROADMAP.md's
-"Self-Hosting" goal (Cinnabar compiling itself).
+flagged but left open; a third pass closing the handful of items that round two's own work surfaced
+(the remaining borrow-checker leaks, a newly-found resolver gap, and a fixture content decision, made
+explicitly rather than guessed); and a fourth pass that reconciled an independently-diverged
+`origin/main` merge (nine commits, not started by this effort, including two other fixes for the
+same codegen bugs round two had already fixed) and closed out the last of the site/tooling items.
+A fifth pass (§1d) then ran the real toolchain — `nix develop --command ./pre_commit_check.sh`, via
+the project's Docker/Nix dev container — against everything above, including the two codegen
+findings §2 had deferred pending exactly that. Both were real bugs; both are fixed and verified
+against actual LLVM 21, not reasoned about blind. This document is the result: what got fixed, what
+was checked and found clean, and — the thing actually asked for — what stands between here and
+ROADMAP.md's "Self-Hosting" goal (Cinnabar compiling itself).
 
-Scope note on verification: this machine has `cargo`/`rustc` but no LLVM 21 and no Nix devshell, so
-`cargo build`/`cargo check` with the default `codegen` feature fails immediately (`llvm-sys` can't
-find LLVM) and `pre_commit_check.sh` cannot run at all here. Everything below that touches
-`src/codegen/*` or `src/main.rs` is **read-only analysis**, not a compiled-and-tested fix. Everything
-that touches the front end (`lexer.rs` through `borrow.rs`, `resolver.rs`, `analysis.rs`,
-`cinnabar-lsp`) *was* compiled and tested here, via `cargo check --no-default-features` / `cargo
-test --no-default-features --lib` / `cargo clippy --no-default-features -- -D warnings` — the
+Scope note on verification, historical for §1/§1b/§1c: at the time those rounds ran, this machine had
+`cargo`/`rustc` but no LLVM 21 and no Nix devshell, so `cargo build`/`cargo check` with the default
+`codegen` feature failed immediately (`llvm-sys` can't find LLVM) and `pre_commit_check.sh` could not
+run at all. Everything in §1/§1b/§1c that touched `src/codegen/*` or `src/main.rs` was **read-only
+analysis** at the time it was written, not a compiled-and-tested fix — §1d is what changed that.
+Everything touching the front end (`lexer.rs` through `borrow.rs`, `resolver.rs`, `analysis.rs`,
+`cinnabar-lsp`) *was* compiled and tested from the start, via `cargo check --no-default-features` /
+`cargo test --no-default-features --lib` / `cargo clippy --no-default-features -- -D warnings` — the
 `codegen` feature (and its LLVM dependency) is off in that mode, exactly the way
-`crates/cinnabar-wasm` already builds it. **Run the real gate before merging anything below**:
-`nix develop --command ./pre_commit_check.sh`.
+`crates/cinnabar-wasm` already builds it.
 
 ---
 
@@ -212,21 +218,150 @@ about** (`src/resolver.rs`, `src/typecheck.rs`):
 
 ---
 
+## 1c. Round four — a parallel merge, and the last of the site/tooling items
+
+Partway through round three, `git status` turned up an in-progress, uncommitted merge from
+`origin/main` (9 commits, diverged independently, not started by this session) with real conflicts
+in 6 files — including two of the exact same codegen bugs fixed in round two, fixed independently
+and differently upstream. Resolving it surfaced one thing worth recording: **origin's tail-call-safety
+fix was substantively better than this session's own.** Round two's fix withheld LLVM's `tail` marker
+for any call passing a reference-shaped argument at all — sound, but overly conservative enough that
+it would have disabled tail-call elimination for the common, safe pattern of threading a borrowed
+parameter through a self-tail-call (exactly what `slice_test.cnb`'s own `slice_sum_acc` does).
+Origin's fix computes a precise per-argument frame-rooting trace at typecheck time
+(`NODE_CALLFACT`/`expr_frame_root`) and only withholds `tail` when an argument is provably rooted in
+the *current* frame. Origin's version was kept; round two's `mark_tail_call`/`arg_may_carry_frame_ref`
+were deleted. The constant-index-fallibility fix had a subtler problem: both sides had independently
+attached the same fact to the same `EXPR_INDEX` payload slot under different names, and git's
+textual merge — since the two additions didn't touch identical lines — merged them into two
+back-to-back writes to one slot rather than flagging a conflict. Same numeric encoding by
+coincidence, so not a wrong-value bug, but a real Single-Fact Rule violation a text diff can't
+catch; resolved by keeping origin's shared-location constants (`ast.rs`) and deleting round two's
+redundant ones. Full resolution rationale, including the non-codegen conflicts (an independent
+TOCTOU fix in `project.rs`, a `docs.rs` HTTP-connection-handling improvement, `head.cnb`), is in the
+merge commit itself. Origin also contributed two real fixtures (`tail_local_borrow.cnb`,
+`result_array_index.cnb`) giving both codegen fixes actual compile-link-run coverage once the real
+toolchain is available — this session's own coverage for them was `analysis::analyze`-only.
+
+The same pass also closed the three remaining site/tooling items that had been sitting in "not fixed"
+without a technical blocker:
+- **VS Code extension**: `client.start()`'s `Promise` is no longer pushed into `context.subscriptions`
+  (which threw on deactivate under `vscode-languageclient` ^9); its rejection is now surfaced via
+  `showErrorMessage` instead.
+- **Playground diagnostic spans**: `locateSpan` now indexes in UTF-8 byte space (re-encoding once via
+  `TextEncoder`/`TextDecoder`) instead of the JS string's native UTF-16 units, so a non-ASCII
+  character in a string or comment no longer shifts every span below it.
+- **Playground sample-switcher tabs**: now a complete WAI-ARIA tabs implementation —
+  `aria-controls`/`aria-labelledby` linking each tab to a real `tabpanel`, and roving tabindex with
+  Left/Right/Home/End keyboard navigation. Verified via direct browser-driven interaction against a
+  live dev server (arrow keys, wraparound, `aria-labelledby` sync) in addition to the existing
+  Playwright suite.
+
+---
+
+## 1d. Round five — the real gate, and the two remaining codegen findings
+
+The real toolchain (`nix develop --command ./pre_commit_check.sh`, via the project's Docker/Nix dev
+container — see `CONTAINER_DEVELOPMENT.md`) has now actually been run, repeatedly, against `main`.
+Every check passes cleanly: `cargo check`, `cargo clippy -D warnings`, Semgrep, the full unit test
+suite, every CLI smoke check, and the whole `EXPECT_OK`/`EXPECT_REJECTED` fixture corpus — including
+`spec.cnb` compiling to a real binary and passing every self-check it runs, against real LLVM 21.
+This is what §2's old first bullet asked for; it's done, not just believed.
+
+That also meant the two codegen findings §2 had deferred could finally be investigated for real
+instead of reasoned about blind. Both turned out to be genuine bugs, and one of them was bigger than
+originally scoped:
+
+**The `HashMap` correctness question was real, and it turned out to be a design smell rather
+than a padding bug.** Round five patched the symptom twice: `zero_fill` made padding deterministic at
+construction so `memcmp`-based key comparison was at least well-defined, and a `for_native`
+pointer-passing special case stopped the System V ABI from dropping a padded struct's padding bits
+when a key crossed the native call boundary. Both were crutches around the real defect: key equality
+was `memcmp` over a key's whole ABI byte range, which smuggles bitwise identity in as structural
+equality, is wrong for reference-typed keys (it compares addresses, not contents), and is what made
+padding observable at all. That design has since been *replaced*, not patched further: `HashMap` is
+now an open-addressed hash table with field-wise structural key equality and an FNV-1a hash over the
+same fields, so padding is never read, reference-typed keys compare by contents, and `zero_fill` /
+`for_native` are deleted outright. See the fixtures `hash_map_collision.cnb`, `hash_map_resize.cnb`,
+and `hash_map_slice_key.cnb` for the collision, rehash, and reference-key coverage.
+
+A key containing a reference to a native handle (`&String`, `&Vec(T)`, `&Memory.Block`, or any
+other `&nat type`) is rejected at compile time, and that rejection is **settled, not interim**:
+native types are opaque handles by design, and a generic hash/equality routine reaching into a
+`String`'s or `Vec`'s internal buffers would break that opacity no matter what attribute scheme is
+attached. Content-hashing for such handles, if it is ever wanted, must be an explicit hash/equality
+function that the owning module itself supplies and that callers invoke by name — never something
+generic key machinery infers by reaching past the `nat` boundary.
+
+**The under-aligned `sockaddr_in` store was also real.** `build_sockaddr_in` allocated its 16-byte
+buffer as `[16 x i8]` — 1-byte natural alignment — then stored 16-bit and 32-bit fields into it at
+byte offsets 2 and 4 with LLVM's default (unrequested) alignment for those value types, 2 and 4 bytes.
+That's a real mismatch per LLVM's semantics: the store instructions' alignment annotations claimed
+more than the underlying allocation was ever declared to provide, which the optimizer is entitled to
+assume is honored. Fixed by allocating the same 16 bytes as `[4 x i32]` instead, giving the buffer
+real 4-byte alignment matching every store into it (and matching `sockaddr_in`'s actual C ABI
+alignment, driven by its widest member). `net_primitives.cnb` (`Net.bind` and friends) continues to
+pass under the real gate with this change.
+
+---
+
+## 1e. A first slice of `Process` (§3.2.1)
+
+`Process.spawn`/`Process.wait` now exist: `fork`/`execve`/`waitpid` issued as external C/POSIX
+calls, the same convention the `Memory`/`Terminal`/`File` runtime layer now uses everywhere (one libc
+entry point per native, nothing between the Cinnabar declaration and the C call). `fork` rather than
+any platform-specific syscall, so one code path serves every POSIX platform; `spawn`/`wait` are
+scoped to POSIX for now, because Windows has no `fork`/`execve`/`waitpid` C-runtime equivalent.
+Verified against real LLVM 21: a new fixture (`tests/fixtures/repro/process_spawn_wait.cnb`) spawns
+`/bin/true` and `/bin/false`, waits on each, and confirms the decoded exit code matches (0 and 1) —
+proving argv marshaling, the fork/exec/wait sequence, and status decoding all actually work, not just
+compile. Three real bugs surfaced and were fixed before this shipped clean:
+
+- **A memory leak**, caught by `sanitizer_gate`'s Valgrind pass exactly as it's meant to: the argv
+  array, each argument's NUL-terminated copy, and the empty `envp` array were all heap-allocated
+  before `fork` but never freed in the parent afterward (the child either replaces its own image via
+  a successful `execve` or exits immediately on a failed one, so only the parent's copy of that memory
+  outlives the call). Fixed by freeing all of it once, right after `fork` returns, in the parent's
+  path only.
+- **An unjustified `unreachable`**, caught by `undefined_behaviour.rs`'s IR scan exactly as it's meant
+  to: the child's fallback path (`execve` returning at all means it failed; call `_exit` and stop)
+  ended in `build_unreachable()`, but "`_exit` never returns" is a fact about the
+  kernel, not something this compiler's type checker proved the way it proves a `match` exhaustive —
+  precisely the "cannot happen with nothing proving it" class that check exists to catch. Fixed by
+  ending that path in a self-loop trap instead of a terminator that claims provably unreachable.
+- **A missing protocol variant**: `Collections.string_from_slice`'s codegen unconditionally references
+  the shared `InvalidUtf8` protocol name (`sess.12.invalid_utf8`) to build its failure path, so any
+  program using it must declare that variant on its own `Error` type even if the specific input never
+  triggers it — the fixture's first draft didn't, and failed to compile with "protocol variant name not
+  interned" until it did.
+
+That two of these three were caught by gates *specifically designed to catch exactly this class of
+mistake* is the point of running the real toolchain rather than reasoning about codegen blind, same as
+§1d.
+
+Scope, deliberately: `spawn` takes a `Vec(String)` argv the caller builds and owns (borrowed, not
+consumed — the same shape `Terminal.print`'s `&String`/`&[U8]` already has) and always passes an
+explicit *empty* environment, not the parent's own — `Runtime` has no way to name an environment
+variable's value yet (§3.2.5), so forwarding the parent's environment implicitly would be scope no one
+asked for, not a completeness gain. `wait` blocks until the child exits and decodes a normal exit
+code; it does not yet distinguish a signal-terminated child (the encoded status word's low byte is a
+termination signal in that case, which a caller that cares can already read off the same `I64` `wait`
+returns — just not decoded automatically). No stdout/stderr capture yet: the child inherits the
+parent's own file descriptors as `fork`/`execve` naturally do, so a spawned program's output goes
+wherever the caller's own already goes, which is enough for `cinnabar test`-style "run it and check the
+exit code" but not for `mushlings verify`-style "run it and check what it printed." Piped stdout/stderr
+is the natural next slice, needs nothing new architecturally (`pipe2`/`dup2` join `fork`/`execve` in
+the same runtime layer, and the plumbing is the same shape as everything already built here), and was
+left for a follow-up rather than folded in blind.
+
+---
+
 ## 2. Confirmed, not fixed — genuinely still open
 
-Everything from the original audit that had a mechanical, verifiable-here fix is now fixed — three
-rounds deep. What's left needs either the real LLVM toolchain or is genuinely low-priority:
-
-- **`emitter.rs`'s two codegen fixes are unverified** — this machine cannot compile, type-check, or
-  run anything under `src/codegen/`. Run the real gate before trusting them. See 1b above.
-- **Everything else the original seven-agent audit found that no fix pass has touched**, still
-  exactly as first reported: a `HashMap` padding/`memcmp` correctness question and an under-aligned
-  `sockaddr_in` store in codegen (both lower-confidence, unverifiable here); the VS Code extension's
-  `client.start()`-into-`context.subscriptions` `Promise` mismatch (flagged in the original audit,
-  not in either fix pass's scope — worth folding into a future tooling pass); the playground's
-  UTF-16-vs-byte-offset diagnostic-span indexing and the sample-switcher's incomplete ARIA tabs
-  pattern (both site-side, low severity); `tests/fixtures/native_surface.idl`, a confirmed-dead file
-  now removed.
+Nothing. Every item the seven-agent audit flagged, across five rounds, either had a mechanical fix
+applied and verified, or — for the two codegen findings — was investigated for real against actual
+LLVM 21 once the toolchain was available, rather than guessed at. The audit itself is closed. What
+remains is self-hosting proper (§3 below), which was never a bug list to begin with.
 
 ---
 
@@ -269,14 +404,14 @@ self-hosted compiler is attempted.
 What the current `Memory`/`Terminal`/`File`/`Net` surface doesn't cover, needed by different parts of
 today's Rust implementation, roughly ordered by how many things depend on it:
 
-1. **Process spawning.** The single biggest concrete gap. `cinnabar test`, `mushlings verify`, `fuzz
-   replay`/`minimize`, the playground, and `inspect` all shell out to the compiler itself or to built
-   binaries, capturing stdout/stderr/exit status — and codegen's own final step shells out to
-   `opt`/`llc`/`clang`. Nothing in the native surface exposes fork/exec/wait or pipes. Fits the
-   existing `syscall.rs` pattern (a handful of rows per architecture for
-   `fork`/`execve`/`wait4`/`clone`), but `execve` needs a way to build a NUL-terminated pointer array
-   for `argv`/`envp`, which today's `Memory.Block` (byte-at-a-time `write_u8`) can't construct — a
-   pointer-slot write primitive or a dedicated argv-building native is a prerequisite.
+1. **Process spawning — started (§1e).** `Process.spawn`/`Process.wait` exist now, lowered to the
+   external C/POSIX functions (`fork`/`execve`/`waitpid`) the runtime layer uses everywhere, verified
+   against real LLVM 21. `cinnabar test`, `mushlings verify`, `fuzz replay`/`minimize`, and codegen's
+   own final step (shelling out to `opt`/`llc`/`clang`) can all be built on this today. What's still
+   missing: piped stdout/stderr capture (needs `pipe2`/`dup2`, same runtime-layer pattern, not yet
+   added), and environment variables to pass through (§3.2.5, tracked separately — `spawn` today
+   always passes an explicit empty environment). Neither blocks the common "run it, check the exit
+   code" case; both block "run it and read what it printed."
 2. **Directory enumeration, `stat`, and `realpath`.** `cinnabar test`'s recursive test-file walk, and
    — load-bearing — the Milestone 5 path-confinement checks that make `build.cnb`'s
    `ENTRY`/`TESTS`/sidecar paths safe all depend on `fs::canonicalize`. `File` today is
@@ -290,7 +425,7 @@ today's Rust implementation, roughly ordered by how many things depend on it:
    the compiler-in-Cinnabar effort will have to answer (native threads vs. a deliberately
    single-threaded LSP redesign), not just a missing native.
 5. **Environment variables and temp-file/asset staging.** `build.rs`'s musl-libc discovery
-   (`MUSL_LIBC_A`, `/nix/store` search) and the embedded `include_bytes!` of `libc.a`/crt objects have
+   (self-provisioned from upstream, with `MUSL_LIBC_A` as an override) and the embedded `include_bytes!` of `libc.a`/crt objects have
    no Cinnabar-side equivalent yet; the pragmatic answer is shipping those archives beside the binary
    and opening them via `File` plus a way to locate the running executable (`/proc/self/exe`, i.e. one
    more `readlinkat`-shaped native), not a compile-time embedding story.
@@ -332,10 +467,10 @@ stay permanently native regardless (this matches the "marked-native boundary for
 Roughly cheapest-and-most-widely-useful first, each step independently valuable regardless of
 whether the ones after it ever happen:
 
-1. Run the real `nix develop` gate to confirm the codegen fixes from 1b — everything else that had a
-   mechanical fix is already done, so this is the one thing standing between "believed correct" and
-   "proven correct" for the whole three-round effort. Worth doing regardless of anything below.
-2. Add the `Process` native surface (§3.2.1) plus the `File` extensions (§3.2.2) — both are useful to
+1. ~~Run the real `nix develop` gate to confirm the codegen fixes~~ — done in §1d: the whole five-round
+   effort is now proven correct against real LLVM 21, not just believed correct.
+2. ~~Add the `Process` native surface~~ — started in §1e (`spawn`/`wait`); piped stdout/stderr capture
+   (`pipe2`/`dup2`) is the natural next slice. Add the `File` extensions (§3.2.2) — both are useful to
    ordinary Cinnabar programs immediately, not just to a future self-hosted compiler.
 3. Add a string-formatting surface (§3.2.3) — same argument, broadly useful on its own.
 4. Start the non-tail-recursion rewrites (§3.1) stage by stage, starting with the smallest/most

@@ -1,0 +1,113 @@
+{
+  "Function": {
+    "prefix": "fun",
+    "body": ["fun ${1:name}(${2:params}) ${3:ReturnType}", "  ${0}", "end"],
+    "description": "A private function declaration"
+  },
+  "Public function": {
+    "prefix": "pubfun",
+    "body": ["pub fun ${1:name}(${2:params}) ${3:ReturnType}", "  ${0}", "end"],
+    "description": "A public function declaration"
+  },
+  "Native function": {
+    "prefix": "natfun",
+    "body": "pub nat fun ${1:name}(${2:params}) ${0:ReturnType}",
+    "description": "A native function declaration (opaque body, supplied outside Cinnabar; no `end`)"
+  },
+  "Main entry point": {
+    "prefix": "main",
+    "body": ["pub fun main() ${1:I64}", "  ${0}", "  return 0", "end"],
+    "description": "The program's entry point"
+  },
+  "If": {
+    "prefix": "if",
+    "body": ["if ${1:condition}", "  ${0}", "end"],
+    "description": "An if block"
+  },
+  "If / else": {
+    "prefix": "ifelse",
+    "body": ["if ${1:condition}", "  ${2}", "else", "  ${0}", "end"],
+    "description": "An if/else block"
+  },
+  "If / elif / else": {
+    "prefix": "ifelif",
+    "body": ["if ${1:condition}", "  ${2}", "elif ${3:condition}", "  ${4}", "else", "  ${0}", "end"],
+    "description": "An if/elif/else chain"
+  },
+  "While": {
+    "prefix": "while",
+    "body": ["while ${1:condition}", "  ${0}", "end"],
+    "description": "A while loop"
+  },
+  "Match": {
+    "prefix": "match",
+    "body": ["match ${1:expr}", "  ${2:Pattern} => ${0}", "end"],
+    "description": "A match block"
+  },
+  "Struct type": {
+    "prefix": "type",
+    "body": ["pub type ${1:Name}", "  pub ${2:field}: ${3:Type}", "end"],
+    "description": "A product type with named fields"
+  },
+  "Sum type": {
+    "prefix": "typevariants",
+    "body": ["pub type ${1:Name}", "  pub ${2:Variant}(${3:Type})", "end"],
+    "description": "A sum type with variant constructors"
+  },
+  "Native type": {
+    "prefix": "nattype",
+    "body": "pub nat type ${0:Name}",
+    "description": "An opaque native type handle"
+  },
+  "Module": {
+    "prefix": "mod",
+    "body": ["pub mod ${1:Name}", "  ${0}", "end"],
+    "description": "A module block"
+  },
+  "Trait": {
+    "prefix": "trait",
+    "body": ["pub trait ${1:Name}", "  pub fun ${2:method}(value: &Self) ${0:ReturnType}", "end"],
+    "description": "A trait declaration"
+  },
+  "Impl": {
+    "prefix": "impl",
+    "body": [
+      "pub impl ${1:Trait} for ${2:Type}",
+      "  pub fun ${3:method}(value: &${2:Type}) ${4:ReturnType}",
+      "    ${0}",
+      "  end",
+      "end"
+    ],
+    "description": "A trait implementation for a type"
+  },
+  "Constant": {
+    "prefix": "const",
+    "body": "pub const ${1:NAME}: ${2:Type} = ${0:value}",
+    "description": "A compile-time constant (SCREAMING_SNAKE_CASE)"
+  },
+  "Immutable binding": {
+    "prefix": "val",
+    "body": "val ${1:name} = ${0:expr}",
+    "description": "An immutable local binding"
+  },
+  "Mutable binding": {
+    "prefix": "var",
+    "body": "var ${1:name}: ${2:Type} = ${0:value}",
+    "description": "A mutable local binding"
+  },
+  "Use": {
+    "prefix": "use",
+    "body": "use ${1:Module}.${0:member}",
+    "description": "Imports a member from a module"
+  },
+  "Doc comment block": {
+    "prefix": "docblock",
+    "body": ["#!|", "  ${0}", "|#"],
+    "description": "A block documentation comment attaching to the next declaration"
+  },
+  "Comment block": {
+    "prefix": "commentblock",
+    "body": ["#|", "  ${0}", "|#"],
+    "description": "A multi-line comment block"
+  }
+}
