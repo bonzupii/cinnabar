@@ -89,8 +89,14 @@ function PlaygroundLineNumbers({
   );
 }
 
-export default function PlaygroundEditor() {
-  const [source, setSource] = useState(PLAYGROUND_SAMPLES[0].code);
+export type PlaygroundEditorProps =
+  | { mode?: "full" }
+  | { mode: "embedded"; initialSource: string };
+
+export default function PlaygroundEditor(props: PlaygroundEditorProps = {}) {
+  const embedded = props.mode === "embedded";
+  const initialSource = embedded ? props.initialSource : PLAYGROUND_SAMPLES[0].code;
+  const [source, setSource] = useState(initialSource);
   const [report, setReport] = useState<PlaygroundReport | null>(null);
   const latestRequest = useRef(0);
   const viewRef = useRef<EditorView | null>(null);
@@ -148,13 +154,13 @@ export default function PlaygroundEditor() {
 
   return (
     <div className="flex flex-col gap-6">
-      <p className="text-secondary text-[15px] leading-[1.7] text-pretty">
+      {!embedded ? <p className="text-secondary text-[15px] leading-[1.7] text-pretty">
         The tabs below load six starter programs, each a complete, self-contained example rather
         than an excerpt. Load one, then edit it: every keystroke is checked, live, by the same
         front end the real compiler runs.
-      </p>
+      </p> : null}
 
-      <div>
+      {!embedded ? <div>
         <div
           role="tablist"
           aria-label="Load a sample"
@@ -185,7 +191,7 @@ export default function PlaygroundEditor() {
         <p className="text-secondary mt-3 text-[14px] leading-[1.6] text-pretty">
           {selectedSample.summary}
         </p>
-      </div>
+      </div> : null}
 
       {/*
         One frame for the whole tool: diagnostics dock directly under the
@@ -204,10 +210,18 @@ export default function PlaygroundEditor() {
             onChange={setSource}
             theme={cinnabarEditorTheme}
             extensions={EXTENSIONS}
-            minHeight="24rem"
+            height={embedded ? "12rem" : undefined}
+            minHeight={embedded ? undefined : "24rem"}
+            aria-label={embedded ? "Editable Cinnabar source" : "Cinnabar source"}
             basicSetup={BASIC_SETUP}
             onCreateEditor={(view) => {
               viewRef.current = view;
+              view.contentDOM.setAttribute(
+                "aria-label",
+                embedded ? "Editable Cinnabar source" : "Cinnabar source",
+              );
+              view.scrollDOM.tabIndex = 0;
+              view.scrollDOM.setAttribute("aria-label", "Cinnabar source editor");
             }}
           />
         </div>

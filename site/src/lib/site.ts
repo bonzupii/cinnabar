@@ -34,8 +34,7 @@ export const SITE_URL =
  * is the rendered copy; this is the string the <meta> tag needs, where
  * markdown would appear verbatim.
  */
-export const TAGLINE =
-  "A statically-typed systems language with Austral-style linear types, checked by a flow-sensitive borrow checker. There is no #[allow], and no flag that turns a check off.";
+export const TAGLINE = "Systems programming without safety escape hatches.";
 
 /** Plate 00 and 11 — the line the dev put on the repo. */
 export const QUIP = "Probably better than Rust.";
@@ -51,7 +50,7 @@ export const QUIP = "Probably better than Rust.";
  * slogan. It now appears once, where linear typing is actually explained.
  */
 export const DESCRIPTION =
-  "A statically-typed systems language for compilers, runtimes, kernels, firmware and network stacks. Resource handles are linear and borrow-checked without lifetime annotations, there is no garbage collector, and there is no #[allow] to switch a check off.";
+  "Cinnabar combines linear resource ownership with flow-sensitive borrow checking, without lifetime annotations, a garbage collector, or safety escape hatches.";
 
 /** Plate 12 — the metadata strip. */
 export const BADGES = ["Apache-2.0", "LLVM 21", "musl · static"] as const;
@@ -78,9 +77,15 @@ export type IconName = "doc" | "build" | "reference" | "architecture" | "check" 
  */
 export const NAV: readonly NavItem[] = [
   {
-    href: "/manifesto/",
-    label: "Manifesto",
-    blurb: "The normative language specification.",
+    href: "/playground/",
+    label: "Playground",
+    blurb: "Type Cinnabar, checked in your browser.",
+    icon: "playground",
+  },
+  {
+    href: "/learn/",
+    label: "Learn",
+    blurb: "Start with the language's core ideas.",
     icon: "doc",
   },
   {
@@ -90,14 +95,8 @@ export const NAV: readonly NavItem[] = [
     icon: "build",
   },
   {
-    href: "/playground/",
-    label: "Playground",
-    blurb: "Type Cinnabar, checked in your browser.",
-    icon: "playground",
-  },
-  {
     href: "/reference/",
-    label: "Reference",
+    label: "CLI Reference",
     blurb: "Every CLI flag, command and manifest field.",
     icon: "reference",
   },
@@ -116,7 +115,25 @@ export const NAV: readonly NavItem[] = [
 ] as const;
 
 /** Every route the export produces, for the sitemap and the link checker. */
-export const ROUTES = ["/", ...NAV.map((item) => item.href)] as const;
+export const EXPORTED_ROUTES = [
+  "/",
+  "/playground/",
+  "/learn/",
+  "/learn/why-cinnabar/",
+  "/learn/linear-types/",
+  "/learn/borrowing/",
+  "/learn/error-handling/",
+  "/learn/first-program/",
+  "/install/",
+  "/reference/",
+  "/architecture/",
+  "/manifesto/",
+  "/roadmap/",
+  "/contributing/development/",
+] as const;
+
+/** Backwards-compatible route registry name used by export checks. */
+export const ROUTES = EXPORTED_ROUTES;
 
 /** Marks the active nav item, treating nested routes as part of their family. */
 export function isActiveRoute(pathname: string, href: string): boolean {

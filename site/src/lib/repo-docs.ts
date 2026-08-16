@@ -74,6 +74,18 @@ export async function readRepoDoc(name: RepoDocName): Promise<string> {
   return rewriteRepoLinks(stripLeadingHeading(raw));
 }
 
+const REPO_FIXTURES = {
+  explainLeak: "tests/fixtures/explain_leak.cnb",
+  linearBranchConsume: "tests/fixtures/linear_branch_consume.cnb",
+} as const;
+
+export type RepoFixtureName = keyof typeof REPO_FIXTURES;
+
+/** Reads one explicitly allowlisted compiler fixture for an editable example. */
+export async function readRepoFixture(name: RepoFixtureName): Promise<string> {
+  return readFile(path.join(REPO_ROOT, REPO_FIXTURES[name]), "utf8");
+}
+
 /**
  * Turns a backticked filename in prose into a link to it on GitHub.
  *

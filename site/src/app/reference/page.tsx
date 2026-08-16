@@ -23,7 +23,7 @@ export const og = {
 };
 
 export const metadata: Metadata = {
-  title: "Reference",
+  title: "CLI Reference",
   description:
     "The Cinnabar CLI: every flag for compiling a single file, every project subcommand, the build.cnb manifest, the test layout, and the local test profiles.",
   alternates: { canonical: "/reference/" },
@@ -57,7 +57,7 @@ export default async function ReferencePage() {
   return (
     <article className="pb-28">
       <PageHeader
-        section="Reference"
+        section="CLI Reference"
         note="cinnabar <COMMAND> --help prints the full description"
         icon={DocIcon}
         title="Two ways to invoke it."

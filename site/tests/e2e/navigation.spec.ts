@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { ROUTES } from "./routes";
+import { NAV_ROUTES, ROUTES } from "./routes";
 
 test("the header marks the current section", async ({ page }) => {
-  await page.goto("/manifesto/");
+  await page.goto("/learn/linear-types/");
   const nav = page.getByRole("navigation", { name: "Primary" });
-  await expect(nav.getByRole("link", { name: "Manifesto" })).toHaveAttribute(
+  await expect(nav.getByRole("link", { name: "Learn" })).toHaveAttribute(
     "aria-current",
     "page",
   );
@@ -15,7 +15,7 @@ test("the header marks the current section", async ({ page }) => {
 });
 
 test("every header link reaches its page", async ({ page }) => {
-  for (const route of ROUTES.slice(1)) {
+  for (const route of NAV_ROUTES) {
     await page.goto("/");
     await page
       .getByRole("navigation", { name: "Primary" })
@@ -102,7 +102,7 @@ test("no page overflows horizontally on a phone", async ({ page }) => {
 test("the footer links to every documentation page", async ({ page }) => {
   await page.goto("/");
   const footer = page.getByRole("navigation", { name: "Footer" });
-  for (const route of ROUTES.slice(1)) {
+  for (const route of NAV_ROUTES) {
     await expect(footer.getByRole("link", { name: new RegExp(route.name, "i") })).toBeVisible();
   }
 });

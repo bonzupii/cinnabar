@@ -144,10 +144,10 @@ export type PlaygroundSample = {
 
 export const PLAYGROUND_SAMPLES: readonly PlaygroundSample[] = [
   {
-    id: SAMPLES[0].id,
-    label: SAMPLES[0].label,
-    code: SAMPLES[0].code,
-    icon: SAMPLES[0].icon,
+    id: "hanoi",
+    label: "Tail recursion",
+    code: SAMPLES.find((sample) => sample.id === "hanoi")?.code ?? "",
+    icon: SAMPLES.find((sample) => sample.id === "hanoi")?.icon ?? BuildIcon,
     summary:
       "Every self-recursive call in tail position lowers to a jump — no runtime stack guard, no stack-overflow crash, however deep the recursion goes.",
   },
@@ -160,10 +160,10 @@ export const PLAYGROUND_SAMPLES: readonly PlaygroundSample[] = [
       "A Memory.Block handle must be consumed exactly once on every path out of scope — allocated, written, read, then freed, checked at compile time with no garbage collector.",
   },
   {
-    id: SAMPLES[2].id,
-    label: SAMPLES[2].label,
-    code: SAMPLES[2].code,
-    icon: SAMPLES[2].icon,
+    id: "slice",
+    label: "Slices and patterns",
+    code: SAMPLES.find((sample) => sample.id === "slice")?.code ?? "",
+    icon: SAMPLES.find((sample) => sample.id === "slice")?.icon ?? BuildIcon,
     summary:
       "Array and slice patterns destructure with a rest binding (rest @ ..), and a tail-recursive fold walks a slice without ever indexing into it.",
   },

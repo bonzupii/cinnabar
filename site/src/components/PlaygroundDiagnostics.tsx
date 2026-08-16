@@ -4,16 +4,9 @@ import { isClean, locateSpan, type PlaygroundDiagnostic, type PlaygroundReport }
 import { TOKEN_STYLE, tokenizeCinnabar } from "@/lib/cinnabar-syntax";
 
 /*
- * Renders a live `check()` report against the same terminal palette
- * `DiagnosticTranscript` uses (plate 10: vermilion for the error and its
- * primary span, grey for everything else) — but as a plain gutter-and-caret
- * layout rather than DiagnosticTranscript's hand-joined box-drawing rails.
- *
- * That renderer exists to reproduce one fixed, hand-authored transcript
- * character-for-character against ariadne's own output; this one draws an
- * arbitrary, changing span on every keystroke, so it settles for the same
- * palette and a `^^^^` caret run under the span instead of replicating
- * ariadne's box-joining geometry live.
+ * Renders a live `check()` report as a plain gutter-and-caret layout. Bright
+ * text carries diagnostic wording at small sizes; vermilion remains a mark on
+ * the primary span rather than low-contrast body text.
  *
  * Content here can flip on every keystroke, sometimes several times before a
  * debounce settles. `AnimatePresence mode="wait"` was tried for the clean/
@@ -39,27 +32,30 @@ function SourceExcerpt({ source, diagnostic }: { source: string; diagnostic: Pla
   return (
     <>
       <span className="block">
-        <span className="text-term-gutter">{"    ╭─[ "}</span>
+        <span className="text-term-output">{"    ╭─[ "}</span>
         <span className="text-term-flag">
           {span.path}:{located.line}:{located.column}
         </span>
-        <span className="text-term-gutter">{" ]"}</span>
+        <span className="text-term-output">{" ]"}</span>
       </span>
-      <span className="text-term-gutter block">{"    │"}</span>
+      <span className="text-term-output block">{"    │"}</span>
       <span className="block">
-        <span className="text-term-gutter">{` ${gutterLabel} │ `}</span>
+        <span className="text-term-output">{` ${gutterLabel} │ `}</span>
         {tokenizeCinnabar(located.lineText).map((token, position) =>
           token.kind === "text" ? (
             <span key={position}>{token.value}</span>
           ) : (
-            <span key={position} className={TOKEN_STYLE[token.kind]}>
+            <span
+              key={position}
+              className={token.kind === "keyword" ? "text-term-command" : TOKEN_STYLE[token.kind]}
+            >
               {token.value}
             </span>
           ),
         )}
       </span>
       <span className="block">
-        <span className="text-term-gutter">{"     │ "}</span>
+        <span className="text-term-output">{"     │ "}</span>
         <span className="text-term-error">
           {" ".repeat(located.columnOffset)}
           {"^".repeat(caretWidth)}
@@ -73,7 +69,7 @@ function DiagnosticBlock({ diagnostic, source }: { diagnostic: PlaygroundDiagnos
   return (
     <div className="mb-5 last:mb-0">
       <span className="block">
-        <span className="text-term-error font-semibold">Error</span>
+        <span className="text-term-command font-semibold">Error</span>
         <span className="text-term-command font-semibold">: {diagnostic.message}</span>
       </span>
       <SourceExcerpt source={source} diagnostic={diagnostic} />
@@ -103,7 +99,7 @@ function CleanState() {
 function FailureState({ message }: { message: string }) {
   return (
     <span className="block">
-      <span className="text-term-error font-semibold">Error</span>
+      <span className="text-term-command font-semibold">Error</span>
       <span className="text-term-command font-semibold">: {message}</span>
     </span>
   );

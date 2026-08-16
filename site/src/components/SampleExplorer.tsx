@@ -5,6 +5,11 @@ import CodeBlock from "@/components/CodeBlock";
 import { SAMPLES } from "@/content/samples";
 import { ICON } from "@/lib/constants";
 
+const DISPLAY_SAMPLES = [
+  ...SAMPLES.filter((sample) => sample.id === "vec"),
+  ...SAMPLES.filter((sample) => sample.id !== "vec"),
+];
+
 /*
  * A tablist over the fixture samples.
  *
@@ -25,7 +30,7 @@ export default function SampleExplorer({
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   const select = (index: number) => {
-    const next = (index + SAMPLES.length) % SAMPLES.length;
+    const next = (index + DISPLAY_SAMPLES.length) % DISPLAY_SAMPLES.length;
     setSelected(next);
     tabRefs.current[next]?.focus();
   };
@@ -48,14 +53,14 @@ export default function SampleExplorer({
         break;
       case "End":
         event.preventDefault();
-        select(SAMPLES.length - 1);
+        select(DISPLAY_SAMPLES.length - 1);
         break;
       default:
         break;
     }
   };
 
-  const sample = SAMPLES[selected];
+  const sample = DISPLAY_SAMPLES[selected];
 
   return (
     <div>
@@ -65,7 +70,7 @@ export default function SampleExplorer({
         onKeyDown={onKeyDown}
         className="border-hairline flex flex-wrap border-b"
       >
-        {SAMPLES.map((item, index) => {
+        {DISPLAY_SAMPLES.map((item, index) => {
           const active = index === selected;
           const Icon = item.icon;
           return (

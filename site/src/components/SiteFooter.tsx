@@ -51,6 +51,14 @@ export default function SiteFooter() {
                   </Link>
                 );
               })}
+              <Link href="/manifesto/" className={LINK}>
+                <DocIcon size={ICON.inline} />
+                Manifesto
+              </Link>
+              <Link href="/contributing/development/" className={LINK}>
+                <DiagnosticIcon size={ICON.inline} />
+                Contributing
+              </Link>
             </nav>
 
             <div className="flex flex-col gap-3">

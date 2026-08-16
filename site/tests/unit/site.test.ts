@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isActiveRoute, NAV, ROUTES } from "@/lib/site";
+import { EXPORTED_ROUTES, isActiveRoute, NAV } from "@/lib/site";
 
 describe("isActiveRoute", () => {
   it("matches the home route only exactly", () => {
@@ -26,8 +26,9 @@ describe("isActiveRoute", () => {
 });
 
 describe("navigation", () => {
-  it("exposes every nav route in ROUTES, plus home", () => {
-    expect(ROUTES).toEqual(["/", ...NAV.map((item) => item.href)]);
+  it("exposes every primary route in the complete export registry", () => {
+    expect(EXPORTED_ROUTES[0]).toBe("/");
+    for (const item of NAV) expect(EXPORTED_ROUTES).toContain(item.href);
   });
 
   it("uses trailing slashes throughout, matching the export shape", () => {

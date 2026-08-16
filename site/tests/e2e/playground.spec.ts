@@ -1,4 +1,11 @@
 import { expect, test } from "@playwright/test";
+
+test("the homepage embeds the real checker with an editable rejected fixture", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByText("tests/fixtures/explain_leak.cnb", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("playground-diagnostics")).toContainText(/linear|consum/i);
+  await expect(page.locator(".cm-content").first()).toHaveAttribute("contenteditable", "true");
+});
 import { preparePage } from "./prepare";
 
 /*

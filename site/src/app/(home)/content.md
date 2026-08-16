@@ -1,95 +1,39 @@
 <!-- @tagline -->
 
-A statically-typed systems language with Austral-style linear types, checked by
-a flow-sensitive borrow checker. There is no `#[allow]`, and no flag that turns
-a check off.
+Systems programming without safety escape hatches.
 
 <!-- @hero-why -->
 
-It is meant for compilers, runtimes, kernels, firmware and network stacks —
-where a garbage collector, hidden control flow and a runtime panic are all
-unacceptable. The compiler is written in Rust and emits native code through
-LLVM 21.
+Cinnabar combines **linear resource ownership** with a **flow-sensitive borrow
+checker**. The compiler proves where resources go without lifetime annotations,
+a garbage collector, or a switch that weakens a safety rule.
 
-<!-- @hero-steps -->
+<!-- @hero-proof -->
 
-- `nix develop` provisions LLVM 21, clang and the static musl libc the compiler
-  links against.
-- `cargo build --release` builds `cinnabar` and, with `--bin cinnabar-lsp`, the
-  language server.
-- `cinnabar init` scaffolds `build.cnb`, `main.cnb` and `tests/smoke.cnb`, and
-  refuses to overwrite any of them.
+Edit the rejected fixture above. Each change runs through the browser build of
+the real lexer, parser, resolver, typechecker, and borrow checker. Linking and
+execution remain native-toolchain jobs.
 
-<!-- @invariants-title -->
+<!-- @promises-note -->
 
-What zero-trust means.
+The language contract, in practical terms
 
-<!-- @invariants -->
+<!-- @promises -->
 
-Cinnabar assumes an author may optimise for finishing the task rather than for
-long-term correctness — under deadline pressure, or because the author is a
-code-generating model. It therefore grants no mechanism to bypass, suppress,
-weaken or defer its safety, ownership, failure-handling and explicitness
-invariants. A design that needs an exception is not representable in the
-language.
+### Ownership without ceremony
 
-There is no `#[allow]`, no warning severity, no suppression pragma, and no
-escape hatch to add one. If you are looking for the flag that turns a check off,
-its absence is the feature.
+Linear handles must be consumed exactly once on every path. Borrow scopes are
+inferred from control flow, so APIs do not carry lifetime syntax.
 
-<!-- @highlights-note -->
+### Rules without escape hatches
 
-README.md · language highlights
+There are errors, not warnings, and no suppression attributes. Invalid resource
+flow and unhandled failure are rejected with source-located diagnostics.
 
-<!-- @highlights -->
+### Predictable runtime behavior
 
-<!--
-  README.md's own list. Each heading is keyed by its slug to an icon in
-  src/content/highlights.ts; rewording a heading means updating that key.
--->
-
-### Linear resource management
-
-Native handles — Memory.Block, Vec(T), String, HashMap(K, V) — must be consumed
-exactly once on every path. No double-free, no use-after-move, no leaks, checked
-statically.
-
-### No lifetime annotations
-
-Borrow scopes are flow-sensitive and inferred by the compiler. An ambiguous
-returned borrow is a compile error, resolved by restructuring the API, not by
-annotating.
-
-### No dereference operator
-
-There is no * and no ->. References are reached through field access, method
-calls and pattern matching; the compiler manages the indirection internally.
-
-### Errors only, never warnings
-
-There is no lint severity and no #[allow]. A program either compiles cleanly or
-is rejected with a real diagnostic.
-
-### No panics reachable from user code
-
-Division, modulo and dynamic indexing return Result instead of trapping.
-Provable zero-division and out-of-range constant indices are compile-time errors
-instead.
-
-### O(1) call-stack recursion
-
-Every self-recursive call must be in strict tail position. LLVM turns it into a
-jump, so there is no runtime stack guard and no stack-overflow crash.
-
-### Explicit everything
-
-val/var, pub, impure, try — and casing itself — are compiler-enforced grammar,
-not convention. A mis-cased identifier is a lexical error.
-
-### Static, freestanding binaries
-
-Every program links statically against a staged musl libc. No dynamic-linker
-dependency in the output binary, and no dependency on the host's libc.
+No garbage collector and no user-reachable panic path. Division, indexing, and
+allocation expose failure as values; successful builds link to static binaries.
 
 <!-- @samples-note -->
 
@@ -97,55 +41,34 @@ Verbatim from tests/fixtures/
 
 <!-- @sample-hanoi -->
 
-Structs and strict tail position. hanoi_acc calls itself as the direct value of
-a return, which is the only self-recursive call the typechecker accepts; LLVM
-turns it into a jump at -O2.
+Strict tail recursion lowers to a jump, keeping call-stack use constant.
 
 <!-- @sample-vec -->
 
-vec is a native handle, so it carries a consumption obligation. Both the error
-path and the success path have to discharge it — hence the fail_vec helper,
-which frees before returning.
+The native vector carries a linear consumption obligation across success and
+error paths.
 
 <!-- @sample-slice -->
 
-Array rest-patterns and a tail-recursive fold. Match is exhaustive: every
-variant, array length and rest pattern has to be covered, and there is no
-catch-all arm to cover them with.
+Exhaustive array rest-patterns bind the remaining elements for a recursive fold.
 
-<!-- @diagnostics-note -->
+<!-- @depth-title -->
 
-Illustrative · not captured compiler output
+Start with the idea, then inspect the machine.
 
-<!-- @diagnostics-rules -->
+<!-- @depth -->
 
-Vermilion marks the error and its primary span. Secondary spans, notes and help
-stay grey. There is no warning colour, because there are no warnings.
+The learning path explains why the language exists before introducing ownership,
+borrowing, explicit failure, and a first project. The CLI and architecture pages
+then document the tools and compiler pipeline without duplicating the normative
+specification.
 
-<!-- @pipeline-note -->
+<!-- @status-title -->
 
-src/main.rs wires the stages in this order
+Early development, with the contracts written down.
 
-<!-- @manifest-title -->
+<!-- @status -->
 
-build.cnb is source, not a config format.
-
-<!-- @manifest -->
-
-The manifest is read back through the compiler's own front end, so it obeys the
-same casing, typing and literal rules as any other program — and a mistake in it
-is reported as an ordinary diagnostic pointing at the offending line.
-
-`NAME` names the built artifact and must be a single path component. `ENTRY` and
-`TESTS` are relative paths confined to the project root; `TESTS` defaults to
-`tests` when omitted.
-
-<!-- @closing-title -->
-
-Cinnabar is under active early development.
-
-<!-- @closing -->
-
-Six of the eight milestones in `ROADMAP.md` are complete and two are partial.
-Self-hosting — Cinnabar compiling itself — is a long-term goal and a
-completeness test, not a gate for any individual feature.
+The compiler already exercises the fixed front-end pipeline and native backend;
+the roadmap records what is resolved, in progress, and still open without
+reducing that work to a misleading completion percentage.

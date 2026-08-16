@@ -34,8 +34,8 @@ function slugs(route: string, block: string): string[] {
 }
 
 describe("the home route", () => {
-  it("binds an icon to every highlight, and no icon to a highlight that is gone", () => {
-    expect(slugs("(home)", "highlights").sort()).toEqual(
+  it("binds an icon to every promise, and no icon to a promise that is gone", () => {
+    expect(slugs("(home)", "promises").sort()).toEqual(
       Object.keys(HIGHLIGHT_ICONS).sort(),
     );
   });

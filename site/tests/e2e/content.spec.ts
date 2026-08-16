@@ -23,27 +23,12 @@ test("markdown headings carry ids so in-document anchors resolve", async ({ page
   await expect(heading).toHaveAttribute("id", "8-casing-is-syntax");
 });
 
-test("repo-relative links are rewritten rather than left broken", async ({ page }) => {
+test("the architecture summary links to its complete source", async ({ page }) => {
   await page.goto("/architecture/");
-
-  /*
-   * Matched through the DOM rather than by role: the rendered document sits
-   * inside a collapsed Disclosure, so its links are not in the accessibility
-   * tree until it is opened. This is a check on how the markup is written —
-   * which is also what a crawler reads — not on what is on screen.
-   */
-  // A document with its own page here links to that page...
-  const manifestoLink = page
-    .getByRole("main")
-    .locator("a", { hasText: /^MANIFESTO\.md$/ })
-    .first();
-  await expect(manifestoLink).toHaveAttribute("href", "/manifesto/");
-
-  // ...and everything else goes to GitHub.
-  const sourceLink = page.locator("a", { hasText: /^AGENTS\.md$/ }).first();
+  const sourceLink = page.getByRole("link", { name: "ARCHITECTURE.md" });
   await expect(sourceLink).toHaveAttribute(
     "href",
-    /^https:\/\/github\.com\/bonzupii\/cinnabar\/blob\/main\//,
+    "https://github.com/bonzupii/cinnabar/blob/main/ARCHITECTURE.md",
   );
 });
 
@@ -101,7 +86,7 @@ test("code samples are highlighted in the Cinnabar Dark theme", async ({ page })
   await expect(type).toHaveCSS("color", "rgb(237, 233, 230)");
 
   // A constant declaration is not coloured as a keyword.
-  const constant = panel.locator("code span").filter({ hasText: /^DISKS$/ }).first();
+  const constant = panel.locator("code span").filter({ hasText: /^BAD_NEW$/ }).first();
   await expect(constant).toHaveCSS("color", "rgb(237, 233, 230)");
 });
 

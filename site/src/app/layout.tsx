@@ -6,7 +6,7 @@ import MushroomEasterEgg from "@/components/MushroomEasterEgg";
 import { og } from "./(home)/page";
 import { ogImage } from "@/lib/og-image";
 import { THEME_INIT_SCRIPT } from "@/lib/theme";
-import { DESCRIPTION, SITE_URL, TAGLINE } from "@/lib/site";
+import { DESCRIPTION, SITE_URL } from "@/lib/site";
 import "./globals.css";
 
 /*
@@ -43,10 +43,10 @@ export const metadata: Metadata = {
    * which has the room for them.
    */
   title: {
-    default: "Cinnabar — a linear-typed systems language for compilers and kernels",
+    default: "Cinnabar — systems programming without safety escape hatches",
     template: "%s · Cinnabar",
   },
-  description: TAGLINE,
+  description: DESCRIPTION,
   applicationName: "Cinnabar",
   alternates: { canonical: "/" },
   keywords: [
@@ -62,7 +62,7 @@ export const metadata: Metadata = {
   ],
   openGraph: {
     siteName: "Cinnabar",
-    title: "Cinnabar — a linear-typed systems language for compilers and kernels",
+    title: "Cinnabar — systems programming without safety escape hatches",
     description: DESCRIPTION,
     type: "website",
     locale: "en_US",
@@ -71,7 +71,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "Cinnabar — a linear-typed systems language for compilers and kernels",
+    title: "Cinnabar — systems programming without safety escape hatches",
     description: DESCRIPTION,
     images: [ogImage("/", og)],
   },

@@ -1,329 +1,99 @@
 import Wordmark from "@/components/brand/Wordmark";
-import CodeBlock from "@/components/CodeBlock";
-import ShellBlock from "@/components/ShellBlock";
-import DiagnosticTranscript, {
-  DiagnosticLegend,
-} from "@/components/DiagnosticTranscript";
+import PlaygroundEditor from "@/components/PlaygroundEditor";
 import SampleExplorer from "@/components/SampleExplorer";
 import SectionHeading from "@/components/SectionHeading";
 import Markdown, { InlineMarkdown } from "@/components/Markdown";
 import Reveal from "@/components/Reveal";
 import { Eyebrow } from "@/components/PageHeader";
 import { Action, ArrowLink } from "@/components/ui";
-import {
-  BuildIcon,
-  CodegenIcon,
-  DiagnosticIcon,
-  DocIcon,
-  GitHubIcon,
-  LinearIcon,
-} from "@/components/brand/icons";
+import { BuildIcon, CodegenIcon, DocIcon, GitHubIcon, LinearIcon } from "@/components/brand/icons";
 import { HIGHLIGHT_ICONS } from "@/content/highlights";
-import { STAGES } from "@/content/pipeline";
-import { MANIFEST_SAMPLE, SAMPLES } from "@/content/samples";
+import { SAMPLES } from "@/content/samples";
 import { ICON } from "@/lib/constants";
 import { readPageContent } from "@/lib/page-content";
+import { readRepoFixture } from "@/lib/repo-docs";
 import { BADGES, REPO_URL, STATUS_BADGE } from "@/lib/site";
 
-/** Social image copy, rendered by /og-image. The root layout points at it. */
 export const og = {
   eyebrow: "Systems language",
-  title: "For compilers, runtimes, kernels and firmware.",
-  // No backticks: this string is also drawn into the social image by Satori,
-  // which has no markdown and would print them.
-  description:
-    "Statically typed, compiled through LLVM 21 to static native binaries. Handles are linear, borrows are checked without lifetime annotations, and no flag turns a check off.",
-  alt: "Cinnabar — a linear-typed systems language for compilers, runtimes, kernels and firmware.",
+  title: "Systems programming without safety escape hatches.",
+  description: "Linear resource ownership and flow-sensitive borrow checking, without lifetime annotations or a garbage collector.",
+  alt: "Cinnabar — systems programming without safety escape hatches.",
 };
 
-const INSTALL_SHELL = [
-  "nix develop",
-  "cargo build --release",
-  "cinnabar init hello && cinnabar run hello",
-];
-
 export default async function Home() {
-  const content = await readPageContent("(home)");
+  const [content, fixture] = await Promise.all([
+    readPageContent("(home)"),
+    readRepoFixture("explainLeak"),
+  ]);
 
   return (
     <>
-      {/* Hero — the cover of plate 00, and the README hero of plate 12. */}
       <section className="mx-auto max-w-350 px-6 pt-16 pb-20 sm:px-10 sm:pt-24 sm:pb-28">
-        {/*
-          The wordmark is the page's heading — the home page's subject is the
-          project itself. Wordmark carries the accessible name "Cinnabar", so
-          the h1 announces that rather than the letterforms it draws.
-        */}
-        <h1>
-          <Wordmark
-            size="clamp(56px, 11.5vw, 184px)"
-            step="display"
-            letter="var(--text)"
-            className="block"
-          />
-        </h1>
-
-        {/*
-          Text and CTA on the left, the terminal on the right, from the
-          wordmark down — not a narrow text column stacked above a full-width
-          terminal grid. That stack read as wasted space on a wide viewport:
-          the tagline/badges topped out under half the section's width while
-          the terminal below spanned all of it. A real two-column split uses
-          the same width consistently and gets the terminal above the fold.
-        */}
-        <div className="mt-10 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:gap-16">
+        <h1><Wordmark size="clamp(56px, 11.5vw, 184px)" step="display" letter="var(--text)" className="block" /></h1>
+        <div className="mt-10 grid gap-12 lg:grid-cols-[minmax(0,0.88fr)_minmax(0,1.12fr)] lg:gap-14">
           <div className="flex flex-col gap-6">
-            {/*
-              The quip and the repository URL used to sit in a second column
-              here. Both are gone: the repository is one click away in the
-              header and again in the footer, and the hero's job is to say
-              what the language is, not to make a joke about another one.
-            */}
-            <div className="text-text text-[20px] leading-[1.4] tracking-[-0.015em] sm:text-[27px]">
-              <InlineMarkdown>{content.block("tagline")}</InlineMarkdown>
+            <h2 className="text-text text-[32px] leading-[1.04] font-bold tracking-[-0.03em] sm:text-[48px]">{content.block("tagline")}</h2>
+            <div className="text-secondary text-[18px] leading-[1.65] text-pretty"><InlineMarkdown>{content.block("hero-why")}</InlineMarkdown></div>
+            <div className="rule-grid mt-2 flex w-fit flex-wrap">
+              {BADGES.map((badge) => <span key={badge} className="bg-ground text-secondary grow px-4 py-2.5 text-center font-mono text-xs">{badge}</span>)}
+              <span className="bg-cinnabar text-on-cinnabar grow px-4 py-2.5 text-center font-mono text-xs font-medium">{STATUS_BADGE}</span>
             </div>
-            {/*
-              What it is, then what it is for. A reader deciding whether to
-              keep reading needs the domain and the implementation, and both
-              are stated in README.md's opening two paragraphs. No max-width
-              cap: the column itself (half the section, minus the gap) is
-              already a comfortable measure.
-            */}
-            <div className="text-secondary text-[16px] leading-[1.7]">
-              <InlineMarkdown>{content.block("hero-why")}</InlineMarkdown>
-            </div>
-
-            {/*
-              Plate 12's badge strip.
-
-              `grow` on every badge is the same class of fix as the arena
-              stack on /architecture/ and the window body: a `.rule-grid`
-              paints `--hairline` as its own background, so any part of it
-              the children do not cover shows as a grey block rather than as
-              a rule. `w-fit` is `fit-content`, which clamps to the space
-              available — so on a phone the strip is as wide as the column
-              while its badges have wrapped onto two lines, and the tail of
-              the last line was left uncovered. Flex distributes free space
-              per line, so growing the badges fills whichever line is short
-              and changes nothing at a width where they all fit on one.
-            */}
-            <div className="rule-grid mt-5 flex w-fit flex-wrap">
-              {BADGES.map((badge) => (
-                <span
-                  key={badge}
-                  className="bg-ground text-secondary grow px-4 py-2.5 text-center font-mono text-xs"
-                >
-                  {badge}
-                </span>
-              ))}
-              <span className="bg-cinnabar text-on-cinnabar grow px-4 py-2.5 text-center font-mono text-xs font-medium">
-                {STATUS_BADGE}
-              </span>
-            </div>
-
-            <div className="mt-3 flex flex-wrap items-center gap-4">
-              <Action href="/manifesto/" variant="primary" icon={DocIcon}>
-                Read the manifesto
-              </Action>
-              <Action href="/install/" icon={BuildIcon}>
-                Install
-              </Action>
-              <Action href={REPO_URL} variant="ghost" icon={GitHubIcon} external>
-                Source
-              </Action>
+            <div className="mt-2 flex flex-wrap items-center gap-4">
+              <Action href="/playground/" variant="primary" icon={CodegenIcon}>Try in Playground</Action>
+              <Action href="/manifesto/" icon={DocIcon}>Manifesto</Action>
+              <Action href="/install/" variant="ghost" icon={BuildIcon}>Install</Action>
+              <Action href={REPO_URL} variant="ghost" icon={GitHubIcon} external>Source</Action>
             </div>
           </div>
-
-          {/*
-            The three commands, beside what each one actually does. The shell
-            block on its own told a reader how to start but not what starting
-            would cost them — the flake, the build, the scaffold.
-          */}
-          <div className="flex flex-col gap-5">
-            <ShellBlock lines={INSTALL_SHELL} cwd="~/src" />
-            <div className="flex flex-col gap-5 [&_li]:text-[15px] [&_ul]:mt-0">
-              <Markdown>{content.block("hero-steps")}</Markdown>
-              <ArrowLink href="/install/">Full build instructions</ArrowLink>
+          <div className="min-w-0">
+            <div className="mb-4 flex items-center justify-between gap-4">
+              <Eyebrow>Real compiler front end</Eyebrow>
+              <span className="text-label font-mono text-[11px]">tests/fixtures/explain_leak.cnb</span>
             </div>
+            <PlaygroundEditor mode="embedded" initialSource={fixture} />
+            <p className="text-secondary mt-4 text-[13px] leading-[1.65]">{content.block("hero-proof")}</p>
           </div>
         </div>
       </section>
 
-      {/* The stance the rest of the language follows from — MANIFESTO.md's opening. */}
       <section className="border-hairline bg-panel border-y">
-        {/*
-          One column, headline then body. It was a two-column split, which set
-          the headline against a body column narrower than the section it sits
-          in; the passage is the argument the whole language follows from and
-          reads better given the full measure.
-        */}
-        <Reveal className="mx-auto flex max-w-350 flex-col gap-8 px-6 py-20 sm:px-10">
-          <h2 className="text-text text-[32px] leading-[1.03] font-bold tracking-[-0.03em] sm:text-[46px]">
-            {content.block("invariants-title")}
-          </h2>
-          <div className="[&_p]:max-w-none [&_p:first-child]:mt-0">
-            <Markdown>{content.block("invariants")}</Markdown>
-          </div>
-        </Reveal>
-      </section>
-
-      {/* Highlights — README's own list, in the board's hairline grid. */}
-      <section className="mx-auto max-w-350 px-6 py-24 sm:px-10">
-        <SectionHeading
-          title="Language highlights"
-          note={content.block("highlights-note")}
-          icon={LinearIcon}
-        />
-
-        <div className="rule-grid mt-11 grid sm:grid-cols-2 lg:grid-cols-4">
-          {content.items("highlights").map(({ slug, title, body }, index) => {
-            // Throws at build time if content.md gains a highlight that
-            // highlights.ts has no icon for, or reworders one it does.
-            const Icon = HIGHLIGHT_ICONS[slug];
-            if (!Icon) {
-              throw new Error(
-                `No icon bound for highlight "${slug}" in src/content/highlights.ts`,
-              );
-            }
-            return (
-              <Reveal
-                key={slug}
-                delay={Math.min(index * 0.04, 0.2)}
-                className="bg-panel hover:bg-panel-raised panel-hover flex flex-col gap-5 p-8"
-              >
+        <div className="mx-auto max-w-350 px-6 py-24 sm:px-10">
+          <SectionHeading title="Three promises" note={content.block("promises-note")} icon={LinearIcon} />
+          <div className="rule-grid mt-11 grid lg:grid-cols-2">
+            {content.items("promises").map(({ slug, title, body }, index) => {
+              const Icon = HIGHLIGHT_ICONS[slug];
+              if (!Icon) throw new Error(`No icon bound for promise "${slug}"`);
+              return <Reveal key={slug} delay={index * 0.05} className={`bg-ground hover:bg-panel-raised panel-hover flex flex-col gap-5 p-8 sm:p-10 ${index === 0 ? "lg:col-span-2 lg:grid lg:grid-cols-[auto_minmax(0,1fr)] lg:items-start lg:gap-x-8" : ""}`}>
                 <Icon size={ICON.card} className="text-text" />
-                <h3 className="text-text text-[17px] leading-snug font-bold tracking-[-0.015em]">
-                  {title}
-                </h3>
-                <p className="text-secondary text-[14.5px] leading-[1.65] text-pretty">
-                  {body}
-                </p>
-              </Reveal>
-            );
-          })}
-        </div>
-      </section>
-
-      {/* Samples, every one verbatim from the fixture corpus. */}
-      <section className="border-hairline border-t">
-        <div className="mx-auto max-w-350 px-6 py-24 sm:px-10">
-          <SectionHeading
-            title="A taste of the language"
-            note={content.block("samples-note")}
-            icon={CodegenIcon}
-          />
-          <Reveal className="mt-11">
-            <SampleExplorer
-              summaries={Object.fromEntries(
-                SAMPLES.map((sample) => [
-                  sample.id,
-                  content.block(`sample-${sample.id}`),
-                ]),
-              )}
-            />
-          </Reveal>
-        </div>
-      </section>
-
-      {/* Diagnostics — plate 10. */}
-      <section className="border-hairline bg-panel border-t">
-        <div className="mx-auto max-w-350 px-6 py-24 sm:px-10">
-          <SectionHeading
-            title="Diagnostics"
-            note={content.block("diagnostics-note")}
-            icon={DiagnosticIcon}
-          />
-
-          <div className="mt-11 grid min-w-0 gap-10 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
-            <Reveal className="min-w-0">
-              <DiagnosticTranscript />
-            </Reveal>
-
-            <Reveal delay={0.06} className="flex min-w-0 flex-col gap-8">
-              <div className="flex flex-col gap-4">
-                <Eyebrow>Rules</Eyebrow>
-                <div className="[&_p]:max-w-none [&_p]:text-[15px] [&_p:first-child]:mt-0">
-                  <Markdown>{content.block("diagnostics-rules")}</Markdown>
-                </div>
-              </div>
-              <DiagnosticLegend />
-            </Reveal>
+                <div><h3 className="text-text text-[22px] leading-snug font-bold tracking-[-0.02em]">{title}</h3><div className="mt-3 text-secondary text-[15px] leading-[1.7] text-pretty"><InlineMarkdown>{body}</InlineMarkdown></div></div>
+              </Reveal>;
+            })}
           </div>
         </div>
       </section>
 
-      {/* The pipeline, as a strip. */}
-      <section className="border-hairline border-t">
+      <section className="border-hairline border-b">
         <div className="mx-auto max-w-350 px-6 py-24 sm:px-10">
-          <SectionHeading
-            title="One fixed pipeline"
-            note={content.block("pipeline-note")}
-            icon={BuildIcon}
-          />
-
-          <div className="rule-grid mt-11 grid sm:grid-cols-2 lg:grid-cols-4">
-            {STAGES.map((stage, index) => (
-              <Reveal
-                key={stage.name}
-                delay={Math.min(index * 0.04, 0.2)}
-                className="bg-panel flex flex-col gap-2.5 p-6"
-              >
-                <h3 className="text-text text-[15px] font-bold tracking-[-0.01em]">
-                  {stage.name}
-                </h3>
-                <span className="text-label font-mono text-[11px] break-all">
-                  {stage.file}
-                </span>
-              </Reveal>
-            ))}
-            <Reveal className="bg-ground flex flex-col justify-center gap-3 p-6">
-              <ArrowLink href="/architecture/">Read the walkthrough</ArrowLink>
-            </Reveal>
-          </div>
+          <SectionHeading title="A taste of the language" note={content.block("samples-note")} icon={CodegenIcon} />
+          <Reveal className="mt-11"><SampleExplorer summaries={Object.fromEntries(SAMPLES.map((sample) => [sample.id, content.block(`sample-${sample.id}`)]))} /></Reveal>
         </div>
       </section>
 
-      {/* The manifest is Cinnabar source, which is worth showing. */}
-      <section className="border-hairline bg-panel border-t">
-        <Reveal className="mx-auto grid max-w-350 gap-12 px-6 py-24 sm:px-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-center">
-          <div className="flex flex-col gap-6">
-            <Eyebrow>The manifest</Eyebrow>
-            <h2 className="text-text text-[28px] leading-tight font-bold tracking-tight sm:text-[38px]">
-              {content.block("manifest-title")}
-            </h2>
-            <div className="[&_p:first-child]:mt-0">
-              <Markdown>{content.block("manifest")}</Markdown>
-            </div>
-            <ArrowLink href="/reference/#manifest">Manifest reference</ArrowLink>
-          </div>
-          <CodeBlock code={MANIFEST_SAMPLE} path="build.cnb" title="The manifest" />
+      <section className="mx-auto grid max-w-350 gap-12 px-6 py-24 sm:px-10 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
+        <Reveal className="flex flex-col gap-5"><Eyebrow>Go deeper</Eyebrow><h2 className="text-text text-[30px] leading-tight font-bold tracking-tight sm:text-[40px]">{content.block("depth-title")}</h2><Markdown>{content.block("depth")}</Markdown></Reveal>
+        <Reveal delay={0.06} className="rule-grid grid sm:grid-cols-2">
+          <div className="bg-panel flex flex-col gap-3 p-7"><ArrowLink href="/learn/">Learn the language</ArrowLink><p className="text-secondary text-sm">Concepts, examples, and a first program.</p></div>
+          <div className="bg-panel flex flex-col gap-3 p-7"><ArrowLink href="/install/">Install Cinnabar</ArrowLink><p className="text-secondary text-sm">Toolchain requirements and build steps.</p></div>
+          <div className="bg-panel flex flex-col gap-3 p-7"><ArrowLink href="/reference/">CLI reference</ArrowLink><p className="text-secondary text-sm">Commands, flags, manifests, and tests.</p></div>
+          <div className="bg-panel flex flex-col gap-3 p-7"><ArrowLink href="/architecture/">Compiler architecture</ArrowLink><p className="text-secondary text-sm">The fixed pipeline and canonical facts.</p></div>
         </Reveal>
       </section>
 
-      {/* Close. */}
-      <section className="border-hairline border-t">
-        <Reveal className="mx-auto flex max-w-350 flex-col gap-8 px-6 py-24 sm:px-10 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex flex-col gap-4">
-            <h2 className="text-text max-w-[20ch] text-[28px] leading-tight font-bold tracking-tight sm:text-[38px]">
-              {content.block("closing-title")}
-            </h2>
-            <div className="[&_p:first-child]:mt-0">
-              <Markdown>{content.block("closing")}</Markdown>
-            </div>
-          </div>
-          {/*
-            `lg:flex-none` is what keeps these two on one line: as a flex item
-            of the row above they were shrinkable, so the prose beside them
-            squeezed the pair until the second wrapped under the first. Below
-            `lg` the parent stacks and `flex-wrap` still applies, so a narrow
-            phone can wrap them rather than overflow.
-          */}
-          <div className="flex flex-wrap gap-4 lg:flex-none lg:flex-nowrap">
-            <Action href="/roadmap/" variant="primary">
-              Roadmap
-            </Action>
-            <Action href="/architecture/">Architecture</Action>
-          </div>
+      <section className="border-hairline bg-panel border-t">
+        <Reveal className="mx-auto flex max-w-350 flex-col gap-6 px-6 py-20 sm:px-10 lg:flex-row lg:items-center lg:justify-between">
+          <div><Eyebrow>Project status</Eyebrow><h2 className="text-text mt-4 text-[28px] font-bold tracking-tight">{content.block("status-title")}</h2><p className="text-secondary mt-3 max-w-[70ch] leading-[1.7]">{content.block("status")}</p></div>
+          <Action href="/roadmap/" variant="primary">Read the roadmap</Action>
         </Reveal>
       </section>
     </>

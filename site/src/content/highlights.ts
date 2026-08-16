@@ -1,13 +1,4 @@
-import {
-  BorrowIcon,
-  CheckIcon,
-  CodegenIcon,
-  DiagnosticIcon,
-  FmtIcon,
-  LinearIcon,
-  RunIcon,
-  StaticLinkIcon,
-} from "@/components/brand/icons";
+import { DiagnosticIcon, LinearIcon, StaticLinkIcon } from "@/components/brand/icons";
 
 /*
  * The icon each language highlight is drawn with.
@@ -23,12 +14,7 @@ import {
  */
 
 export const HIGHLIGHT_ICONS: Record<string, typeof LinearIcon> = {
-  "linear-resource-management": LinearIcon,
-  "no-lifetime-annotations": BorrowIcon,
-  "no-dereference-operator": FmtIcon,
-  "errors-only-never-warnings": DiagnosticIcon,
-  "no-panics-reachable-from-user-code": CheckIcon,
-  "o1-call-stack-recursion": RunIcon,
-  "explicit-everything": CodegenIcon,
-  "static-freestanding-binaries": StaticLinkIcon,
+  "ownership-without-ceremony": LinearIcon,
+  "rules-without-escape-hatches": DiagnosticIcon,
+  "predictable-runtime-behavior": StaticLinkIcon,
 };
