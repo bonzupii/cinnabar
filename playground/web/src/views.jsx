@@ -255,9 +255,15 @@ export function ProgramView({ result }) {
     );
   }
   const { exitCode, stdout, stderr, truncated } = result.program;
+  // A status is not a verdict. `main` returns I64, so a program that
+  // computes its answer and returns it exits non-zero on purpose — the
+  // bundled division example returns 5 — and painting that with the error
+  // colour reports a successful run as a failure. The failure the reader
+  // needs to see is the program not finishing at all, which is the branch
+  // above; here the run completed and the status is just the value.
   return (
     <div className="program">
-      <p className={exitCode === 0 ? "exit exit--ok" : "exit exit--nonzero"}>Exited with status {exitCode}</p>
+      <p className={exitCode === 0 ? "exit exit--ok" : "exit exit--status"}>Exited with status {exitCode}</p>
       {stdout ? (
         <>
           <h3>stdout</h3>

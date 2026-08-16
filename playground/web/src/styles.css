@@ -1,157 +1,408 @@
-/* The playground's own styles: two panes, a tab strip, and tables.
+/* The playground's chrome: a title bar, two resizable panes, and a status
+ * bar — the shape of an editor, because that is what this is.
  *
- * Light and dark are both defined on tokens rather than one being an
- * afterthought, because a compiler's output is read for long stretches and
- * a reader's system preference is the right default.
+ * Colours come from `src/brand.js`, which copies the site's tokens and is
+ * checked against them by `test/brand.drift.test.js`. Nothing here invents
+ * a colour: the board allows one accent and five greys, so hue is spent
+ * only on the accent and everything else is separated by weight, size, and
+ * position instead.
+ *
+ * There is no light theme, and that is deliberate rather than unfinished.
+ * Plate 09's code theme is specified against the dark ground and plate 05
+ * keeps the screen system dark; the site's own stylesheet exempts code
+ * surfaces from the light/dark preference for exactly this reason. This
+ * page is a code surface from edge to edge.
  */
 
 :root {
-  color-scheme: light dark;
-  --bg: #ffffff;
-  --bg-raised: #f6f6f7;
-  --border: #dcdce0;
-  --text: #1b1b1f;
-  --text-dim: #61616b;
-  --accent: #b7410e;
-  --ok: #1a7f37;
-  --error: #b32d2e;
-  --kind-binding: #2c6fbb;
-  --kind-consumed: #1a7f37;
-  --kind-live: #b32d2e;
-  --kind-moved: #7a4fbf;
-  --kind-guidance: #96690a;
-  --kind-context: #61616b;
-  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-}
+  color-scheme: dark;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #17171a;
-    --bg-raised: #1f1f23;
-    --border: #33333a;
-    --text: #e9e9ec;
-    --text-dim: #9a9aa5;
-    --accent: #e8643a;
-    --ok: #56d364;
-    --error: #ff7b72;
-    --kind-binding: #79b8ff;
-    --kind-consumed: #56d364;
-    --kind-live: #ff7b72;
-    --kind-moved: #d2a8ff;
-    --kind-guidance: #e3b341;
-    --kind-context: #9a9aa5;
-  }
+  --ground: #100e0d;
+  --panel: #171514;
+  --panel-raised: #242120;
+  --hairline: #302c2a;
+  --hairline-strong: #423d3a;
+
+  --mute: #6e6763;
+  --grey: #7c7570;
+  --secondary: #a29b96;
+  --bright: #c9c2bd;
+  --text: #ede9e6;
+  --label: #928a85;
+
+  --cinnabar: #e0442a;
+  --cinnabar-deep: #a82d1b;
+  --cinnabar-text: #f26a4f;
+  --on-cinnabar: #100e0d;
+
+  --code-ground: #100e0d;
+  --code-terminal: #0b0a09;
+
+  --syn-keyword: #e0442a;
+  --syn-type: #ede9e6;
+  --syn-identifier: #c9c2bd;
+  --syn-literal: #a29b96;
+  --syn-punctuation: #9a928d;
+  --syn-comment: #8a837e;
+
+  --sans: "Schibsted Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* One spacing step, used everywhere, so the gaps between things are
+   * multiples of each other rather than a different number per component. */
+  --gap: 10px;
+  --pad: 32px;
+
+  --row-title: 64px;
+  --row-tabs: 52px;
+  --row-status: 36px;
 }
 
 * { box-sizing: border-box; }
 
 body {
   margin: 0;
-  background: var(--bg);
+  background: var(--ground);
   color: var(--text);
-  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 400 15px/1.7 var(--sans);
+  -webkit-font-smoothing: antialiased;
 }
 
-.app { display: flex; flex-direction: column; height: 100vh; }
+/* A mono label in the board's idiom: small, letterspaced, and lifted to
+ * --label rather than left in the two darkest greys, which do not carry
+ * text at AA. */
+.label {
+  font: 500 11px/1 var(--mono);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--label);
+}
 
-.masthead {
+.app {
   display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-  align-items: flex-start;
-  justify-content: space-between;
-  padding: 16px 20px 12px;
-  border-bottom: 1px solid var(--border);
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
 }
-.masthead h1 { margin: 0 0 4px; font-size: 18px; letter-spacing: -0.01em; }
-.masthead p { margin: 0; max-width: 68ch; color: var(--text-dim); }
-.masthead__actions { display: flex; gap: 8px; align-items: center; }
 
-.picker { display: flex; align-items: center; gap: 6px; color: var(--text-dim); }
-.picker select,
+/* ---- title bar ---------------------------------------------------- */
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--gap) * 3);
+  height: var(--row-title);
+  flex: 0 0 var(--row-title);
+  padding: 0 var(--pad);
+  background: var(--panel);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.brand { display: flex; align-items: center; gap: calc(var(--gap) + 2px); min-width: 0; }
+.brand__name { margin: 0; font: 600 15px/1 var(--sans); letter-spacing: 0.01em; color: var(--text); }
+.brand__what {
+  font: 400 13px/1.45 var(--sans);
+  color: var(--grey);
+  white-space: nowrap;
+  padding-left: calc(var(--gap) + 2px);
+  border-left: 1px solid var(--hairline-strong);
+}
+@media (max-width: 1040px) { .brand__what { display: none; } }
+
+.titlebar__spacer { flex: 1 1 auto; }
+.titlebar__actions { display: flex; align-items: center; gap: calc(var(--gap) + 2px); }
+
+.picker { display: flex; align-items: center; gap: var(--gap); }
+.picker select {
+  font: 400 13px/1 var(--sans);
+  padding: 10px 12px;
+  border-radius: 3px;
+  border: 1px solid var(--hairline-strong);
+  background: var(--panel-raised);
+  color: var(--bright);
+  cursor: pointer;
+  max-width: 220px;
+}
+.picker select:focus-visible,
+button:focus-visible { outline: 2px solid var(--cinnabar); outline-offset: 1px; }
+
 button {
-  font: inherit;
-  padding: 6px 12px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--bg-raised);
-  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font: 500 13px/1 var(--sans);
+  padding: 12px 18px;
+  border-radius: 3px;
+  border: 1px solid var(--hairline-strong);
+  background: var(--panel-raised);
+  color: var(--bright);
   cursor: pointer;
 }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-button:disabled { opacity: 0.55; cursor: default; }
+button:hover:not(:disabled) { color: var(--text); border-color: var(--grey); }
+button.primary {
+  background: var(--cinnabar);
+  border-color: var(--cinnabar);
+  /* Near-white, at the language owner's direction. The board's own pairing
+   * for text on vermilion is --on-cinnabar (the ground), which measures
+   * 4.6:1; --text measures 3.5:1 on the same fill, which is under AA for
+   * text this size. Deepening the fill to --cinnabar-deep would carry
+   * near-white at 5.7:1 if that ratio is wanted back. */
+  color: var(--text);
+  font-weight: 600;
+}
+button.primary:hover:not(:disabled) {
+  background: var(--cinnabar-deep);
+  border-color: var(--cinnabar-deep);
+  color: var(--text);
+}
+button:disabled { opacity: 0.45; cursor: default; }
+.kbd {
+  margin-left: 3px;
+  font: 500 10px/1 var(--mono);
+  opacity: 0.75;
+}
 
-.blurb { margin: 0; padding: 8px 20px; color: var(--text-dim); border-bottom: 1px solid var(--border); }
+/* ---- panes --------------------------------------------------------- */
 
-.panes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); flex: 1; min-height: 0; }
-@media (max-width: 900px) { .panes { grid-template-columns: minmax(0, 1fr); grid-template-rows: 1fr 1fr; } }
-.pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-.pane--editor { border-right: 1px solid var(--border); }
-.editor { flex: 1; min-height: 0; }
+.panes { display: flex; flex: 1 1 auto; min-height: 0; }
 
-.verdict { padding: 8px 16px; border-bottom: 1px solid var(--border); font-weight: 500; }
-.verdict--ok { color: var(--ok); }
-.verdict--error { color: var(--error); }
-.verdict--idle, .verdict--pending { color: var(--text-dim); }
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  background: var(--ground);
+}
 
-.tabs { display: flex; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--border); overflow-x: auto; }
-.tab { border: none; background: none; border-radius: 6px 6px 0 0; color: var(--text-dim); white-space: nowrap; }
-.tab--active { color: var(--text); background: var(--bg-raised); }
+/* The drag handle reads as a hairline until it is used, so the layout does
+ * not advertise a control the reader did not ask for. */
+.handle {
+  flex: 0 0 auto;
+  width: 1px;
+  background: var(--hairline);
+  position: relative;
+  cursor: col-resize;
+}
+.handle::after {
+  content: "";
+  position: absolute;
+  inset: 0 -3px;
+}
+.handle:hover,
+.handle:active,
+.handle:focus-visible { background: var(--cinnabar); outline: none; }
 
-.tabbody { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px 32px; }
-.empty, .note { color: var(--text-dim); }
+/* A pane header is a tab strip: the editor's is the open file, the output's
+ * is the compiler's surfaces. Same row height, same rules, so the two
+ * columns line up. */
+.panehead {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  height: var(--row-tabs);
+  flex: 0 0 var(--row-tabs);
+  background: var(--panel);
+  border-bottom: 1px solid var(--hairline);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.panehead::-webkit-scrollbar { display: none; }
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  padding: 0 22px;
+  border: none;
+  border-right: 1px solid var(--hairline);
+  border-radius: 0;
+  background: transparent;
+  color: var(--grey);
+  font: 400 13px/1 var(--sans);
+  white-space: nowrap;
+  position: relative;
+}
+.tab:hover:not(:disabled) { color: var(--bright); border-color: var(--hairline); }
+.tab--active { background: var(--ground); color: var(--text); }
+/* The accent marks which surface is open. It is the one hue on the page,
+ * so it is spent on the thing the reader is looking at. */
+.tab--active::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; top: 0;
+  height: 2px;
+  background: var(--cinnabar);
+}
+.tab__file { font-family: var(--mono); font-size: 12.5px; }
+.tab__count {
+  font: 500 10px/1 var(--mono);
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: var(--cinnabar);
+  color: var(--on-cinnabar);
+}
+
+/* `overflow: hidden` is load-bearing: it stops a momentarily-oversized
+ * editor from painting over the status bar while it is being re-measured. */
+/* The left inset is the gutter's margin. Monaco has no option for it — its
+ * line numbers sit against the container's edge — and the host's background
+ * is the same code ground the editor paints, so the padding reads as part
+ * of the editor rather than as a border around it. */
+.editor { flex: 1 1 auto; min-height: 0; min-width: 0; overflow: hidden; padding-left: 12px; }
+
+.blurb {
+  margin: 0;
+  padding: 20px var(--pad);
+  color: var(--secondary);
+  font-size: 13.5px;
+  background: var(--ground);
+  border-bottom: 1px solid var(--hairline);
+}
+.blurb code { font-family: var(--mono); font-size: 12px; color: var(--bright); }
+
+.tabbody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 34px var(--pad) 76px;
+}
+
+/* ---- status bar ---------------------------------------------------- */
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--gap) * 2);
+  height: var(--row-status);
+  flex: 0 0 var(--row-status);
+  padding: 0 var(--pad);
+  background: var(--panel);
+  border-top: 1px solid var(--hairline);
+  font: 400 12.5px/1 var(--sans);
+  color: var(--secondary);
+  overflow: hidden;
+}
+.statusbar__verdict { display: flex; align-items: center; gap: calc(var(--gap) + 2px); min-width: 0; }
+.statusbar__text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A dot, not a colour-coded sentence: accepted and rejected differ by fill
+ * and by the words, which survives being read by someone who cannot tell
+ * the accent from the grey. */
+.dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+.dot--ok { background: var(--bright); }
+.dot--error { background: var(--cinnabar); }
+.dot--pending { background: var(--label); animation: pulse 1s ease-in-out infinite; }
+.dot--idle { background: var(--hairline-strong); }
+@keyframes pulse { 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) { .dot--pending { animation: none; } }
+
+.statusbar--error .statusbar__text { color: var(--cinnabar-text); }
+.statusbar__spacer { flex: 1 1 auto; }
+.statusbar__fact { font-family: var(--mono); font-size: 11px; color: var(--label); white-space: nowrap; }
+@media (max-width: 760px) { .statusbar__fact--wide { display: none; } }
+
+/* ---- output surfaces ------------------------------------------------ */
+
+.empty, .note { color: var(--grey); }
 
 .diagnostics, .explanations { list-style: none; margin: 0; padding: 0; }
-.diagnostic { margin-bottom: 16px; }
+.diagnostic { margin-bottom: 30px; }
 .diagnostic__head, .explanation button {
-  display: block; width: 100%; text-align: left; background: none; border: none;
-  border-left: 3px solid var(--error); padding: 6px 10px; border-radius: 0 4px 4px 0;
+  display: block; width: 100%; text-align: left;
+  background: none; border: none; border-radius: 0;
+  border-left: 2px solid var(--cinnabar);
+  padding: 12px 16px;
+  color: var(--text);
+  font: 400 13.5px/1.65 var(--sans);
 }
-.diagnostic__head:hover, .explanation button:hover { background: var(--bg-raised); }
+.diagnostic__head:hover, .explanation button:hover { background: var(--panel); color: var(--text); border-color: var(--cinnabar); }
 .diagnostic__severity {
-  display: inline-block; margin-right: 8px; font-size: 11px; text-transform: uppercase;
-  letter-spacing: 0.08em; color: var(--error);
+  display: inline-block; margin-right: 8px;
+  font: 500 10px/1 var(--mono); letter-spacing: 0.09em; text-transform: uppercase;
+  color: var(--cinnabar-text);
 }
-.diagnostic__where, .explanation__where { display: block; margin-top: 4px; font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
-.explanations { margin: 6px 0 0 20px; }
-.explanation button { border-left-color: var(--kind-context); }
+.diagnostic__where, .explanation__where {
+  display: block; margin-top: 6px;
+  font-family: var(--mono); font-size: 11px; color: var(--label);
+}
+
+.explanations { margin: 10px 0 0 22px; display: grid; gap: 6px; }
+.explanation button { border-left-color: var(--hairline-strong); }
 .explanation__kind {
-  display: inline-block; margin-right: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  display: inline-block; margin-right: 8px;
+  font: 500 10px/1 var(--mono); letter-spacing: 0.09em; text-transform: uppercase;
 }
-.explanation--binding button { border-left-color: var(--kind-binding); }
-.explanation--binding .explanation__kind { color: var(--kind-binding); }
-.explanation--consumed button { border-left-color: var(--kind-consumed); }
-.explanation--consumed .explanation__kind { color: var(--kind-consumed); }
-.explanation--live button { border-left-color: var(--kind-live); }
-.explanation--live .explanation__kind { color: var(--kind-live); }
-.explanation--moved button { border-left-color: var(--kind-moved); }
-.explanation--moved .explanation__kind { color: var(--kind-moved); }
-.explanation--guidance button { border-left-color: var(--kind-guidance); }
-.explanation--guidance .explanation__kind { color: var(--kind-guidance); }
 
-.arena__caption { margin: 0 0 10px; color: var(--text-dim); }
+/* The checker's six note kinds, told apart by their own uppercase label and
+ * by depth of grey. The board forbids adding colours, so the accent marks
+ * the kind that names the fault — the path where a linear value is still
+ * live — and the rest step down the ramp from evidence to context. */
+.explanation--live button { border-left-color: var(--cinnabar); }
+.explanation--live .explanation__kind { color: var(--cinnabar-text); }
+.explanation--consumed button { border-left-color: var(--bright); }
+.explanation--consumed .explanation__kind { color: var(--bright); }
+.explanation--moved button { border-left-color: var(--secondary); }
+.explanation--moved .explanation__kind { color: var(--secondary); }
+.explanation--binding button { border-left-color: var(--secondary); }
+.explanation--binding .explanation__kind { color: var(--secondary); }
+.explanation--guidance button { border-left-color: var(--label); }
+.explanation--guidance .explanation__kind { color: var(--label); }
+.explanation--context button { border-left-color: var(--hairline-strong); }
+.explanation--context .explanation__kind { color: var(--grey); }
+
+.arena__caption { margin: 0 0 24px; color: var(--grey); font-size: 12px; }
 .table-scroll { overflow-x: auto; }
-table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 12px; }
-th, td { text-align: left; padding: 3px 10px 3px 0; border-bottom: 1px solid var(--border); vertical-align: top; }
-th { color: var(--text-dim); font-weight: 500; position: sticky; top: 0; background: var(--bg); }
-td.num { text-align: right; white-space: nowrap; color: var(--text-dim); }
+table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 12.5px; }
+th, td { text-align: left; padding: 10px 24px 10px 0; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--ground);
+  font: 500 10px/1.6 var(--mono); letter-spacing: 0.09em; text-transform: uppercase;
+  color: var(--label);
+  border-bottom-color: var(--hairline-strong);
+}
+td { color: var(--secondary); }
+td.num { text-align: right; white-space: nowrap; color: var(--label); }
 
-.detail__kind { color: var(--accent); margin-right: 8px; }
-.detail__fact { margin-right: 10px; white-space: nowrap; }
-.detail__name { color: var(--text-dim); }
+.detail__kind { color: var(--cinnabar-text); margin-right: 8px; }
+.detail__fact { margin-right: 10px; white-space: nowrap; color: var(--bright); }
+.detail__name { color: var(--label); }
 .detail__name::after { content: "="; }
 
-.layout__type { margin-bottom: 20px; }
-.layout__type h3 { margin: 0 0 6px; font-size: 14px; }
-.layout__kind { color: var(--accent); margin-right: 6px; }
-.layout__size { display: block; font-weight: 400; font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
+.layout__type { margin-bottom: 38px; }
+.layout__type h3 { margin: 0 0 9px; font: 500 13px/1.4 var(--sans); color: var(--text); }
+.layout__kind { color: var(--cinnabar-text); margin-right: 6px; font-family: var(--mono); font-size: 12px; }
+.layout__size { display: block; font: 400 11px/1.6 var(--mono); color: var(--label); }
 .layout__members { max-width: 640px; }
-.layout__opaque { color: var(--text-dim); margin: 4px 0 0; }
+.layout__opaque { color: var(--grey); margin: 4px 0 0; }
 
-pre { margin: 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+/* Code output keeps the code ground, so an IR listing and the editor above
+ * it are the same surface rather than two different blacks. */
+pre {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--syn-identifier);
+}
+.ir, .program pre {
+  background: var(--code-terminal);
+  border: 1px solid var(--hairline);
+  border-radius: 3px;
+  padding: 20px 24px;
+  overflow-x: auto;
+}
 .ir { max-height: none; }
-.failure pre { color: var(--error); }
-.program h3 { margin: 14px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); }
-.exit { font-family: var(--mono); margin: 0; }
-.exit--ok { color: var(--ok); }
-.exit--nonzero { color: var(--error); }
+.failure pre { color: var(--cinnabar-text); }
+.failure p { color: var(--text); }
+.program h3 {
+  margin: 30px 0 10px;
+  font: 500 10px/1 var(--mono); letter-spacing: 0.09em; text-transform: uppercase;
+  color: var(--label);
+}
+.exit { font-family: var(--mono); font-size: 12px; margin: 0; }
+.exit--ok { color: var(--bright); }
+/* The run completed; the status is the value `main` returned, not a fault. */
+.exit--status { color: var(--bright); }

@@ -13,8 +13,10 @@ import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 // holding one language: Cinnabar.
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
 import { registerCinnabar } from "cinnabar-monaco";
+import { registerCinnabarTheme } from "./monacoTheme.js";
 
 const languageId = registerCinnabar(monaco);
+const themeId = registerCinnabarTheme(monaco);
 
 const Editor = forwardRef(function Editor({ value, onChange, diagnostics }, ref) {
   const host = useRef(null);
@@ -27,20 +29,45 @@ const Editor = forwardRef(function Editor({ value, onChange, diagnostics }, ref)
     editor.current = monaco.editor.create(host.current, {
       value,
       language: languageId,
+      // The split is draggable, so this editor's width changes without the
+      // window's ever doing so. `automaticLayout` watches the container for
+      // exactly that.
       automaticLayout: true,
       minimap: { enabled: false },
       fontLigatures: false,
       scrollBeyondLastLine: false,
       renderWhitespace: "none",
       tabSize: 2,
-      theme: window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "vs-dark" : "vs",
+      // Plate 09 is specified against the dark ground and plate 05 keeps the
+      // screen system dark, so the code surface does not follow the
+      // visitor's light/dark preference — the same rule the site applies to
+      // its own `<pre>` blocks.
+      theme: themeId,
+      fontFamily: '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+      fontSize: 14,
+      lineHeight: 26,
+      // The code gets the same air the panels around it do: a top inset so
+      // the first line is not against the tab strip, and a gap between the
+      // line numbers and the text so the gutter reads as a margin rather
+      // than as a column pressed up against the code.
+      padding: { top: 26, bottom: 40 },
+      lineNumbersMinChars: 3,
+      lineDecorationsWidth: 20,
+      glyphMargin: false,
+      smoothScrolling: true,
+      cursorBlinking: "smooth",
+      roundedSelection: false,
+      overviewRulerBorder: false,
+      scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10, useShadows: false },
+      guides: { indentation: true, highlightActiveIndentation: false },
     });
-    const subscription = editor.current.onDidChangeModelContent(() => {
-      onChange(editor.current.getValue());
+    const instance = editor.current;
+    const subscription = instance.onDidChangeModelContent(() => {
+      onChange(instance.getValue());
     });
     return () => {
       subscription.dispose();
-      editor.current?.dispose();
+      instance.dispose();
       editor.current = null;
     };
     // Created once. `value` is applied below when it changes from outside,
