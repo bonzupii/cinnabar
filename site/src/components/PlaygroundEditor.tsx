@@ -97,6 +97,8 @@ export default function PlaygroundEditor(props: PlaygroundEditorProps = {}) {
   const embedded = props.mode === "embedded";
   const initialSource = embedded ? props.initialSource : PLAYGROUND_SAMPLES[0].code;
   const [source, setSource] = useState(initialSource);
+  const [editorView, setEditorView] = useState<EditorView | null>(null);
+  const [editorScrollTop, setEditorScrollTop] = useState(0);
   const [report, setReport] = useState<PlaygroundReport | null>(null);
   const latestRequest = useRef(0);
   const viewRef = useRef<EditorView | null>(null);
@@ -133,6 +135,15 @@ export default function PlaygroundEditor(props: PlaygroundEditorProps = {}) {
   useEffect(() => {
     preloadChecker();
   }, []);
+
+  useEffect(() => {
+    if (!embedded || !editorView) return;
+    const scroller = editorView.scrollDOM;
+    const updateGutter = () => setEditorScrollTop(scroller.scrollTop);
+    updateGutter();
+    scroller.addEventListener("scroll", updateGutter, { passive: true });
+    return () => scroller.removeEventListener("scroll", updateGutter);
+  }, [editorView, embedded]);
 
   useEffect(() => {
     const requestId = (latestRequest.current += 1);
@@ -201,8 +212,14 @@ export default function PlaygroundEditor(props: PlaygroundEditorProps = {}) {
       */}
       <Window path={ENTRY_PATH} title="Cinnabar source">
         <PlaygroundDiagnostics report={report} source={source} />
-        <div className="bg-code-ground flex">
-          <PlaygroundLineNumbers lineCount={lineCount} onHoverLine={onHoverLine} />
+        <div className={`bg-code-ground flex ${embedded ? "h-48 overflow-hidden" : ""}`}>
+          <div className={embedded ? "h-48 flex-none overflow-hidden" : "contents"}>
+            <div
+              style={embedded ? { transform: `translateY(-${editorScrollTop}px)` } : undefined}
+            >
+              <PlaygroundLineNumbers lineCount={lineCount} onHoverLine={onHoverLine} />
+            </div>
+          </div>
           <CodeMirror
             key={loadKey}
             className="min-w-0 flex-1"
@@ -216,6 +233,7 @@ export default function PlaygroundEditor(props: PlaygroundEditorProps = {}) {
             basicSetup={BASIC_SETUP}
             onCreateEditor={(view) => {
               viewRef.current = view;
+              setEditorView(view);
               view.contentDOM.setAttribute(
                 "aria-label",
                 embedded ? "Editable Cinnabar source" : "Cinnabar source",

@@ -5,6 +5,23 @@ test("the homepage embeds the real checker with an editable rejected fixture", a
   await expect(page.getByText("tests/fixtures/explain_leak.cnb", { exact: true })).toBeVisible();
   await expect(page.getByTestId("playground-diagnostics")).toContainText(/linear|consum/i);
   await expect(page.locator(".cm-content").first()).toHaveAttribute("contenteditable", "true");
+
+  const terminal = page.locator("figure").filter({ hasText: "playground.cnb" }).first();
+  const terminalBox = await terminal.boundingBox();
+  expect(terminalBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(520);
+
+  const scroller = terminal.locator(".cm-scroller");
+  await scroller.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await expect
+    .poll(() =>
+      terminal
+        .locator(".bg-code-ground > div:first-child > div")
+        .getAttribute("style"),
+    )
+    .toMatch(/translateY\(-[1-9][0-9.]*px\)/);
 });
 import { preparePage } from "./prepare";
 
