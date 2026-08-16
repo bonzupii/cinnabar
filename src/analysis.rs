@@ -87,6 +87,7 @@ pub fn analyze(entry_path: &str, overlay: &[(String, String)]) -> Analysis {
         }
     };
     let mut deferred: Vec<Diag> = Vec::new();
+    let mut seeds = Seeds::new();
     let resolved = resolver::resolve(
         &mut names,
         &mut nodes,
@@ -94,15 +95,17 @@ pub fn analyze(entry_path: &str, overlay: &[(String, String)]) -> Analysis {
         resolver::Diagnostics { errors: &mut errors, notes: &mut notes, deferred: &mut deferred },
         root,
         &ext_mods,
+        &mut seeds,
     );
     let mut typechecked = false;
     let mut impls_list = NONE;
     if resolved {
-        let (ok, impls) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods);
+        let mut check = CheckContext { errors: &mut errors, notes: &mut notes, seeds: &seeds };
+        let (ok, impls) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut check, root, &ext_mods);
         impls_list = impls;
         typechecked = true;
         if ok {
-            borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods);
+            borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut check, root, &ext_mods);
         }
     }
     // Unused items are reported only once the stages that can explain a

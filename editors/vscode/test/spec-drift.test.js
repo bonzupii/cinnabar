@@ -85,12 +85,23 @@ function compilerKeywords() {
 }
 
 function compilerBuiltinTypes() {
-  const source = readRepositoryFile("src", "typecheck.rs");
+  const source = readRepositoryFile("src", "resolver.rs");
+  const ints = /fn builtin_int_names\([\s\S]*?\n\}/.exec(source);
+  assert.notEqual(ints, null, "could not find builtin_int_names in src/resolver.rs");
   const block = /fn seed_builtins\([\s\S]*?\n\}/.exec(source);
-  assert.notEqual(block, null, "could not find seed_builtins in src/typecheck.rs");
-  const names = [...block[0].matchAll(/intern\(names, "([A-Za-z0-9_]+)"\)/g)].map((m) => m[1]);
-  assert.ok(names.length > 0, "seed_builtins parsed as interning nothing");
-  return new Set(names);
+  assert.notEqual(block, null, "could not find seed_builtins in src/resolver.rs");
+  const names = new Set();
+  for (const match of ints[0].matchAll(/intern\(names, "([A-Za-z0-9_]+)"\)/g)) {
+    names.add(match[1]);
+  }
+  const boolName = /intern\(state\.0, "([A-Za-z0-9_]+)"\)/.exec(block[0]);
+  assert.notEqual(boolName, null, "could not find the Bool intern in src/resolver.rs");
+  names.add(boolName[1]);
+  for (const match of block[0].matchAll(/seed_primitive\(state, root, "([A-Za-z0-9_]+)"/g)) {
+    names.add(match[1]);
+  }
+  assert.ok(names.size > 0, "seed_builtins parsed as interning nothing");
+  return names;
 }
 
 test("every compiler keyword is highlighted by the grammar", () => {

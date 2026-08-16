@@ -2055,12 +2055,13 @@ pub fn borrow_check(
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
-    errors: &mut Vec<Diag>,
-    notes: &mut Vec<Note>,
+    check: &mut CheckContext,
     root: i64,
     ext_mods: &[(i64, i64)],
 ) -> bool {
-    let before = errors.len();
+    let before = check.errors.len();
+    let err_id = check.seeds.name(SEED_NAME_ERR);
+    let ok_id = check.seeds.name(SEED_NAME_OK);
 
     let mut summaries: Vec<(i64, Vec<i64>)> = Vec::new();
     let mut scratch: Vec<Diag> = Vec::new();
@@ -2098,8 +2099,6 @@ pub fn borrow_check(
                             Vec::new(),
                         );
                         let mut b: B = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), NONE, NONE, NONE, NONE, Vec::new(), Vec::new());
-                        let err_id = find_name(names, "Err");
-                        let ok_id = find_name(names, "Ok");
                         let mut ctx: Ctx = (names, nodes, lists, &mut scratch, &mut summaries, err_id, ok_id, &mut scratch_notes);
                         if build_fn(&mut f, &mut b, &mut ctx, *fn_node) {
                             compute_summary(&f, &mut ctx, 0, *fn_node)
@@ -2120,29 +2119,28 @@ pub fn borrow_check(
             break;
         }
         if round > cap {
-            push_internal(errors, "internal: callee-origin summaries did not converge");
+            push_internal(check.errors, "internal: callee-origin summaries did not converge");
             return false;
         }
     }
 
-    check_item_list(names, nodes, lists, errors, notes, &mut summaries, root);
+    check_item_list(&mut *check, names, nodes, lists, &mut summaries, root);
     let mut idx = 0usize;
     while idx < ext_mods.len() {
         match ext_mods.get(idx) {
-            Some(pair) => check_item_list(names, nodes, lists, errors, notes, &mut summaries, pair.1),
+            Some(pair) => check_item_list(&mut *check, names, nodes, lists, &mut summaries, pair.1),
             None => break,
         }
         idx += 1;
     }
-    errors.len() == before
+    check.errors.len() == before
 }
 
 fn check_item_list(
+    check: &mut CheckContext,
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
-    errors: &mut Vec<Diag>,
-    notes: &mut Vec<Note>,
     summaries: &mut Vec<(i64, Vec<i64>)>,
     list: i64,
 ) {
@@ -2153,13 +2151,13 @@ fn check_item_list(
         if node_tag(nodes, item) == NODE_ITEM {
             let kind = node_a(nodes, item);
             if kind == ITEM_MODULE {
-                check_item_list(names, nodes, lists, errors, notes, summaries, node_e(nodes, item));
+                check_item_list(&mut *check, names, nodes, lists, summaries, node_e(nodes, item));
             } else if kind == ITEM_FUN || kind == ITEM_NATIVE_FUN {
-                check_fn(names, nodes, lists, errors, notes, summaries, node_d(nodes, item));
+                check_fn(&mut *check, names, nodes, lists, summaries, node_d(nodes, item));
             } else if kind == ITEM_IMPL {
-                check_fn_list(names, nodes, lists, errors, notes, summaries, node_f(nodes, item));
+                check_fn_list(&mut *check, names, nodes, lists, summaries, node_f(nodes, item));
             } else if kind == ITEM_TRAIT {
-                check_fn_list(names, nodes, lists, errors, notes, summaries, node_e(nodes, item));
+                check_fn_list(&mut *check, names, nodes, lists, summaries, node_e(nodes, item));
             }
         }
         idx += 1;
@@ -2167,28 +2165,26 @@ fn check_item_list(
 }
 
 fn check_fn_list(
+    check: &mut CheckContext,
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
-    errors: &mut Vec<Diag>,
-    notes: &mut Vec<Note>,
     summaries: &mut Vec<(i64, Vec<i64>)>,
     list: i64,
 ) {
     let count = list_len(lists, list);
     let mut idx = 0i64;
     while idx < count {
-        check_fn(names, nodes, lists, errors, notes, summaries, list_get(lists, list, idx));
+        check_fn(&mut *check, names, nodes, lists, summaries, list_get(lists, list, idx));
         idx += 1;
     }
 }
 
 fn check_fn(
+    check: &mut CheckContext,
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
-    errors: &mut Vec<Diag>,
-    notes: &mut Vec<Note>,
     summaries: &mut Vec<(i64, Vec<i64>)>,
     fn_node: i64,
 ) {
@@ -2208,10 +2204,10 @@ fn check_fn(
         Vec::new(),
         Vec::new(),
     );
+    let err_id = check.seeds.name(SEED_NAME_ERR);
+    let ok_id = check.seeds.name(SEED_NAME_OK);
     let mut b: B = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), NONE, NONE, NONE, NONE, Vec::new(), Vec::new());
-    let err_id = find_name(names, "Err");
-    let ok_id = find_name(names, "Ok");
-    let mut ctx: Ctx = (names, nodes, lists, errors, summaries, err_id, ok_id, notes);
+    let mut ctx: Ctx = (names, nodes, lists, check.errors, summaries, err_id, ok_id, check.notes);
     if !build_fn(&mut f, &mut b, &mut ctx, fn_node) {
         return;
     }

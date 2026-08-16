@@ -67,23 +67,24 @@ type State<'a> = (
     // The return-type node of the function currently being checked, so a
     // return-type mismatch can label the declaration it violates.
     i64,
+    // Resolver-seeded primitive type symbols and the `Self` name.
+    &'a Seeds,
 );
 
 pub fn typecheck(
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
-    errors: &mut Vec<Diag>,
-    notes: &mut Vec<Note>,
+    check: &mut CheckContext,
     root: i64,
     ext_mods: &[(i64, i64)],
 ) -> (bool, i64) {
-    seed_builtins(names, nodes, lists);
-    let unit_sym = find_type_sym_by_name(nodes, intern(names, "Unit"));
-    let result_sym = find_type_sym_by_name(nodes, intern(names, "Result"));
-    let option_sym = find_type_sym_by_name(nodes, intern(names, "Option"));
-    let div_err_sym = find_type_sym_by_name(nodes, intern(names, "DivError"));
-    let index_err_sym = find_type_sym_by_name(nodes, intern(names, "IndexError"));
+    seed_builtins(nodes, lists, check.seeds);
+    let unit_sym = check.seeds.sym(SEED_SYM_UNIT);
+    let result_sym = check.seeds.sym(SEED_SYM_RESULT);
+    let option_sym = check.seeds.sym(SEED_SYM_OPTION);
+    let div_err_sym = check.seeds.sym(SEED_SYM_DIV_ERROR);
+    let index_err_sym = check.seeds.sym(SEED_SYM_INDEX_ERROR);
     let mut impls: Vec<i64> = Vec::new();
     let mut vars: Vec<(i64, i64)> = Vec::new();
     let mut origins: Vec<(i64, i64, i64)> = Vec::new();
@@ -94,7 +95,7 @@ pub fn typecheck(
         names,
         nodes,
         lists,
-        errors,
+        check.errors,
         &mut env,
         &mut impls,
         &mut vars,
@@ -107,8 +108,9 @@ pub fn typecheck(
         0,
         0,
         &mut local_fact_sources,
-        notes,
+        check.notes,
         0,
+        check.seeds,
     );
 
     collect_types(&mut state, root);
@@ -225,53 +227,19 @@ fn builtin_key_of_sym(nodes: &[i64], sym: i64) -> i64 {
     NONE
 }
 
-fn seed_builtins(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut [Vec<i64>]) {
-    let ints = [
-        (intern(names, "I8"), BUILTIN_I8),
-        (intern(names, "I16"), BUILTIN_I16),
-        (intern(names, "I32"), BUILTIN_I32),
-        (intern(names, "I64"), BUILTIN_I64),
-        (intern(names, "Isize"), BUILTIN_ISIZE),
-        (intern(names, "U8"), BUILTIN_U8),
-        (intern(names, "U16"), BUILTIN_U16),
-        (intern(names, "U32"), BUILTIN_U32),
-        (intern(names, "U64"), BUILTIN_U64),
-        (intern(names, "Usize"), BUILTIN_USIZE),
-    ];
-    let mut idx = 0usize;
-    while idx < ints.len() {
-        let (name_id, sub) = match ints.get(idx) {
-            Some(pair) => *pair,
-            None => break,
-        };
-        seed_builtin(nodes, lists, name_id, sub);
-        idx += 1;
+fn seed_builtins(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], seeds: &Seeds) {
+    let mut sub = 0i64;
+    while sub <= BUILTIN_USIZE {
+        seed_builtin(nodes, lists, seeds.sym(SEED_SYM_I8 + sub as usize), sub);
+        sub += 1;
     }
-    let bool_name = intern(names, "Bool");
-    seed_builtin(nodes, lists, bool_name, BUILTIN_BOOL);
+    seed_builtin(nodes, lists, seeds.sym(SEED_SYM_BOOL), BUILTIN_BOOL);
 }
 
-fn seed_builtin(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], name: i64, sub: i64) {
-    let sym = find_type_sym_by_name(nodes, name);
+fn seed_builtin(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], sym: i64, sub: i64) {
     if sym != NONE {
         canon_tyinfo(nodes, lists, TYD_BUILTIN, sym, NONE, NONE, sub);
     }
-}
-
-fn find_type_sym_by_name(nodes: &[i64], name: i64) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_SYM {
-            let kind = node_a(nodes, idx);
-            if (kind == SYM_TYPE || kind == SYM_STRUCT || kind == SYM_ENUM || kind == SYM_TRAIT)
-                && node_b(nodes, idx) == name
-            {
-                return idx;
-            }
-        }
-        idx += 1;
-    }
-    NONE
 }
 
 fn push_scope(env: &mut Vec<Vec<i64>>) {
@@ -1387,7 +1355,7 @@ fn verify_impl_method(state: &mut State, trait_sym: i64, for_key: i64, method: i
         pidx += 1;
     }
     let self_var = fresh_var_local(&mut t_vars);
-    bind(state.4, intern(state.0, "Self"), self_var, 0, NONE);
+    bind(state.4, state.18.name(SEED_NAME_SELF), self_var, 0, NONE);
     let t_params = node_c(state.1, trait_method);
     let i_params = node_c(state.1, method);
     let tn = list_len(state.2, t_params);

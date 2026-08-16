@@ -37,15 +37,8 @@
 
 pub type Diag = (String, i64, i64, i64);
 
-// A secondary explanatory note attached to a primary diagnostic:
-// (index of the diagnostic in the errors vec at attach time, message,
-// file, start, end, kind).  Notes carry real source spans of facts the
-// checker already computed (a binding site, a path's last move, a branch
-// exit) — never fabricated locations.  Rendering is the consumer's choice:
-// the CLI shows them as secondary labels under --explain-borrow, the
-// language server as related information.
+// (diagnostic index, message, file, start, end, kind)
 pub type Note = (i64, String, i64, i64, i64, i64);
-
 // What role a note plays in the explanation, assigned by the stage that
 // raised it.  The message is prose meant for a reader and is free to be
 // reworded; the kind is what a tool may branch on, so an editor drawing a
@@ -103,13 +96,13 @@ pub const NODE_E: i64 = 8;
 pub const NODE_F: i64 = 9;
 
 pub const NODE_TOKEN: i64 = 0;
-pub const NODE_ITEM: i64 = 1;
-pub const NODE_FN: i64 = 2;
-pub const NODE_PARAM: i64 = 3;
-pub const NODE_FIELD: i64 = 4;
-pub const NODE_VARIANT: i64 = 5;
-pub const NODE_ARM: i64 = 6;
-pub const NODE_TY: i64 = 7;
+pub const NODE_ITEM: i64 = 1; // a: kind, b: is_pub, c: sym, d..f kind-specific
+pub const NODE_FN: i64 = 2; // a: name, b: type-param list, c: param list, d: ret ty, e: is_impure, f: body stmt list
+pub const NODE_PARAM: i64 = 3; // a: name, b: ty
+pub const NODE_FIELD: i64 = 4; // a: name, b: ty, c: is_pub
+pub const NODE_VARIANT: i64 = 5; // a: name, b: payload-type list, c: is_pub
+pub const NODE_ARM: i64 = 6; // a: pattern, b: body stmt list
+pub const NODE_TY: i64 = 7; // a: kind, b..c kind-specific
 pub const NODE_EXPR: i64 = 8;
 pub const NODE_STMT: i64 = 9;
 pub const NODE_PAT: i64 = 10;
@@ -117,7 +110,7 @@ pub const NODE_SYM: i64 = 11;
 pub const NODE_TYINFO: i64 = 12;
 pub const NODE_INST: i64 = 13;
 pub const NODE_CONSTVAL: i64 = 14;
-pub const NODE_DOC: i64 = 20;
+pub const NODE_DOC: i64 = 20; // a: target node, b: doc name-id list
 
 // Token rows.  (tag=NODE_TOKEN, a=kind, b=name, c=value).
 
@@ -129,10 +122,6 @@ pub const TOK_NL: i64 = 4; // newline (statement boundary)
 pub const TOK_SYM: i64 = 5; // operator or punctuation symbol, by interned name
 pub const TOK_DOC: i64 = 6; // documentation comment body, by interned name
 pub const TOK_STRING: i64 = 7; // string literal, escapes decoded, by interned name
-
-// Documentation attachment rows. (tag=NODE_DOC, a=target node, b=doc name-id list).
-// The lexer records comment bodies once and the parser attaches each consecutive
-// group to the declaration it precedes. Consumers never rescan source comments.
 
 // Item rows.  (tag=NODE_ITEM, a=kind, b=is_pub, c=sym, d..f kind-specific).
 
@@ -146,13 +135,6 @@ pub const ITEM_FUN: i64 = 6; // d: fn id
 pub const ITEM_NATIVE_FUN: i64 = 7; // d: fn id
 pub const ITEM_CONST: i64 = 8; // d: name, e: type id, f: value expr id
 pub const ITEM_NATIVE_TYPE: i64 = 9; // d: name, e: type param name-id list
-
-// Function rows.  (tag=NODE_FN, a=name, b=type_param_list, c=param_list, d=ret_ty, e=is_impure, f=body_stmt_list).
-// Parameter rows.  (tag=NODE_PARAM, a=name, b=ty).
-// Struct-field rows.  (tag=NODE_FIELD, a=name, b=ty, c=is_pub).
-// Enum-variant rows.  (tag=NODE_VARIANT, a=name, b=payload_type_list, c=is_pub).
-// Match-arm rows.  (tag=NODE_ARM, a=pattern, b=body_stmt_list).
-// Type rows.  (tag=NODE_TY, a=kind, b..c kind-specific).
 
 pub const TY_NAMED: i64 = 0; // b: name id
 pub const TY_PATH: i64 = 1; // b: segments name-id list
@@ -773,6 +755,97 @@ pub const PRIM_RESULT: i64 = 2;
 pub const PRIM_OPTION: i64 = 3;
 pub const PRIM_DIV_ERROR: i64 = 4;
 pub const PRIM_INDEX_ERROR: i64 = 5;
+
+pub const SEED_NAME_OK: usize = 0;
+pub const SEED_NAME_ERR: usize = 1;
+pub const SEED_NAME_SOME: usize = 2;
+pub const SEED_NAME_NONE: usize = 3;
+pub const SEED_NAME_DIV_BY_ZERO: usize = 4;
+pub const SEED_NAME_ALLOC_FAILED: usize = 5;
+pub const SEED_NAME_ACCESS_OOB: usize = 6;
+pub const SEED_NAME_INDEX_OOB: usize = 7;
+pub const SEED_NAME_KEY_NOT_FOUND: usize = 8;
+pub const SEED_NAME_INVALID_UTF8: usize = 9;
+pub const SEED_NAME_EXIT_DIAG: usize = 10;
+pub const SEED_NAME_SYSTEM_FAULT: usize = 11;
+pub const SEED_NAME_READ_ONLY: usize = 12;
+pub const SEED_NAME_WRITE_TRUNCATE: usize = 13;
+pub const SEED_NAME_END_OF_INPUT: usize = 14;
+pub const SEED_NAME_READ_FAILED: usize = 15;
+pub const SEED_NAME_SELF: usize = 16;
+pub const SEED_NAME_COUNT: usize = 17;
+
+pub const SEED_SYM_UNIT: usize = 0;
+pub const SEED_SYM_RESULT: usize = 1;
+pub const SEED_SYM_OPTION: usize = 2;
+pub const SEED_SYM_DIV_ERROR: usize = 3;
+pub const SEED_SYM_INDEX_ERROR: usize = 4;
+// SEED_SYM_I8..SEED_SYM_BOOL follow BUILTIN order.
+pub const SEED_SYM_I8: usize = 5;
+pub const SEED_SYM_BOOL: usize = SEED_SYM_I8 + BUILTIN_BOOL as usize;
+pub const SEED_SYM_COUNT: usize = SEED_SYM_BOOL + 1;
+
+/// Fixed slots the resolver fills; later stages read instead of re-deriving.
+#[derive(Clone, Copy)]
+pub struct Seeds {
+    names: [i64; SEED_NAME_COUNT],
+    syms: [i64; SEED_SYM_COUNT],
+}
+
+impl Default for Seeds {
+    fn default() -> Seeds {
+        Seeds::new()
+    }
+}
+
+impl Seeds {
+    pub fn new() -> Seeds {
+        Seeds {
+            names: [NONE; SEED_NAME_COUNT],
+            syms: [NONE; SEED_SYM_COUNT],
+        }
+    }
+
+    pub fn name(&self, slot: usize) -> i64 {
+        match self.names.get(slot) {
+            Some(id) => *id,
+            None => NONE,
+        }
+    }
+
+    pub fn sym(&self, slot: usize) -> i64 {
+        match self.syms.get(slot) {
+            Some(id) => *id,
+            None => NONE,
+        }
+    }
+
+    pub fn set_name(&mut self, slot: usize, id: i64) {
+        if let Some(cell) = self.names.get_mut(slot) {
+            *cell = id;
+        }
+    }
+
+    pub fn set_sym(&mut self, slot: usize, id: i64) {
+        if let Some(cell) = self.syms.get_mut(slot) {
+            *cell = id;
+        }
+    }
+}
+
+/// Diagnostics and seeds shared by the typechecker and borrow checker.
+pub struct CheckContext<'a> {
+    pub errors: &'a mut Vec<Diag>,
+    pub notes: &'a mut Vec<Note>,
+    pub seeds: &'a Seeds,
+}
+
+// Declaration-order indices of the seeded Result/Option enums.
+pub const BUILTIN_RESULT_OK: i64 = 0;
+pub const BUILTIN_RESULT_ERR: i64 = 1;
+pub const BUILTIN_OPTION_SOME: i64 = 0;
+pub const BUILTIN_OPTION_NONE: i64 = 1;
+pub const EXIT_DIAG_VARIANT_INDEX: i64 = 2;
 
 pub fn alloc_tyinfo(nodes: &mut Vec<i64>, key: i64, kind: i64, sym: i64, args: i64, elem: i64, len: i64) -> i64 {
     alloc_node(nodes, &[NODE_TYINFO, NO_FILE, NO_FILE, NO_FILE, key, kind, sym, args, elem, len])

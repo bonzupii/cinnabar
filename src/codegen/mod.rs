@@ -23,7 +23,8 @@ pub mod error;
 pub mod layout;
 pub mod types;
 
-use crate::codegen::emitter::{emit_program, protocol_of, InstFns, Session};
+use crate::ast::Seeds;
+use crate::codegen::emitter::{emit_program, InstFns, Session};
 use crate::codegen::error::*;
 use crate::codegen::types::{EnumInfos, KeyTypes, PayloadStructs};
 use inkwell::context::Context;
@@ -93,8 +94,9 @@ pub fn compile_and_link(
     impls_list: i64,
     target: &BuildTarget,
     entry_span: (i64, i64, i64),
+    seeds: &Seeds,
 ) -> Result<(), CodegenError> {
-    let ir_text = emit_to_ir(names, nodes, lists, impls_list, entry_span, target.platform)?;
+    let ir_text = emit_to_ir(names, nodes, lists, impls_list, entry_span, target.platform, seeds)?;
     let temp_root = make_temp_root()?;
     let ir_path = temp_path(target.out, "ll");
     let obj_path = temp_path(target.out, "o");
@@ -114,8 +116,9 @@ pub fn compile_to_ir(
     impls_list: i64,
     entry_span: (i64, i64, i64),
     platform: &str,
+    seeds: &Seeds,
 ) -> Result<String, CodegenError> {
-    emit_to_ir(names, nodes, lists, impls_list, entry_span, platform)
+    emit_to_ir(names, nodes, lists, impls_list, entry_span, platform, seeds)
 }
 
 /// Emit, optimize, and assemble the program to a relocatable object file at
@@ -128,8 +131,9 @@ pub fn compile_to_object(
     impls_list: i64,
     target: &BuildTarget,
     entry_span: (i64, i64, i64),
+    seeds: &Seeds,
 ) -> Result<(), CodegenError> {
-    let ir_text = emit_to_ir(names, nodes, lists, impls_list, entry_span, target.platform)?;
+    let ir_text = emit_to_ir(names, nodes, lists, impls_list, entry_span, target.platform, seeds)?;
     let temp_root = make_temp_root()?;
     let ir_path = temp_path(target.out, "ll");
     let obj_path = temp_path(target.out, "o");
@@ -197,6 +201,7 @@ fn emit_to_ir(
     impls_list: i64,
     entry_span: (i64, i64, i64),
     platform: &str,
+    seeds: &Seeds,
 ) -> Result<String, CodegenError> {
     let context = Context::create();
     let module = context.create_module("cinnabar");
@@ -209,47 +214,24 @@ fn emit_to_ir(
     let enum_infos: EnumInfos = Vec::new();
     let payload_structs: PayloadStructs = Vec::new();
     let inst_fns: InstFns = Vec::new();
-    run_emitter(
-        (&context, &module, &builder, &target_data),
+    let mut sess: Session<'_, '_, '_> = (
+        &context,
+        &module,
+        &builder,
+        &target_data,
         names,
         &mut *nodes,
         &mut *lists,
-        (key_types, enum_infos, payload_structs, inst_fns),
-        impls_list,
-        entry_span,
-    )?;
-    verify_module(&module)?;
-    Ok(module.print_to_string().to_string())
-}
-
-fn run_emitter<'ctx, 'm, 'a>(
-    llvm: (&'ctx Context, &'m Module<'ctx>, &'m inkwell::builder::Builder<'ctx>, &'m TargetData),
-    names: &'a [String],
-    nodes: &'a mut Vec<i64>,
-    lists: &'a mut Vec<Vec<i64>>,
-    caches: (KeyTypes<'ctx>, EnumInfos, PayloadStructs<'ctx>, InstFns<'ctx>),
-    impls_list: i64,
-    entry_span: (i64, i64, i64),
-) -> Result<(), CodegenError> {
-    let (context, module, builder, target_data) = llvm;
-    let (key_types, enum_infos, payload_structs, inst_fns) = caches;
-    let protocol = protocol_of(names);
-    let mut sess: Session<'ctx, 'm, 'a> = (
-        context,
-        module,
-        builder,
-        target_data,
-        names,
-        nodes,
-        lists,
         key_types,
         enum_infos,
         payload_structs,
         inst_fns,
         impls_list,
-        protocol,
+        *seeds,
     );
-    emit_program(&mut sess, entry_span)
+    emit_program(&mut sess, entry_span)?;
+    verify_module(&module)?;
+    Ok(module.print_to_string().to_string())
 }
 
 pub(crate) fn host_target() -> Result<(TargetData, TargetTriple), CodegenError> {

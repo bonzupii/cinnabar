@@ -1,0 +1,16 @@
+#! The exit-status enum's third declared variant carries the process exit
+#! code no matter what it is called.  The typechecker enforces the shape
+#! (2 or 3 variants, the third carrying one integer-scalar payload) and
+#! codegen reads that variant by declared position, never by its
+#! identifier string.  This enum names its diagnostic variant `Code`
+#! instead of `ExitDiagnostic`; the process must still exit with 42.
+
+pub type Exit
+  pub Success
+  pub Failure
+  pub Code(I64)
+end
+
+pub fun main() impure Exit
+  return Code(42)
+end

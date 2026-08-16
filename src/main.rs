@@ -785,19 +785,21 @@ fn main() -> ExitCode {
         dump_program(&names, &nodes, &lists, root);
         return ExitCode::SUCCESS;
     }
+    let mut seeds = Seeds::new();
     let resolver_diagnostics = resolver::Diagnostics {
         errors: &mut errors,
         notes: &mut notes,
         deferred: &mut deferred,
     };
-    if !resolver::resolve(&mut names, &mut nodes, &mut lists, resolver_diagnostics, root, &ext_mods) {
+    if !resolver::resolve(&mut names, &mut nodes, &mut lists, resolver_diagnostics, root, &ext_mods, &mut seeds) {
         return report_diagnostics(json_out, &errors, &notes, &files);
     }
-    let (ok, impls_list) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods);
+    let mut check = CheckContext { errors: &mut errors, notes: &mut notes, seeds: &seeds };
+    let (ok, impls_list) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut check, root, &ext_mods);
     if !ok {
         return report_diagnostics(json_out, &errors, &notes, &files);
     }
-    if !borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods) {
+    if !borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut check, root, &ext_mods) {
         // The structured envelope always carries the checker's notes: a
         // consumer asked for machine-readable output, and there is no
         // terminal to keep uncluttered. --explain-borrow=json is the older
@@ -854,7 +856,7 @@ fn main() -> ExitCode {
     let entry_span = entry_span_of(&files);
     if args.emit_llvm {
         let out = emit_out_path(&args, "ll");
-        let written = compile_to_ir(&names, &mut nodes, &mut lists, impls_list, entry_span, &args.target)
+        let written = compile_to_ir(&names, &mut nodes, &mut lists, impls_list, entry_span, &args.target, &seeds)
             .and_then(|ir_text| write_output_text(&out, &ir_text));
         if let Err(codegen_err) = written {
             return report_codegen_error(json_out, &codegen_err, &files);
@@ -873,7 +875,7 @@ fn main() -> ExitCode {
             platform: &args.target,
         };
         if let Err(codegen_err) =
-            compile_to_object(&names, &mut nodes, &mut lists, impls_list, &target, entry_span)
+            compile_to_object(&names, &mut nodes, &mut lists, impls_list, &target, entry_span, &seeds)
         {
             return report_codegen_error(json_out, &codegen_err, &files);
         }
@@ -910,7 +912,7 @@ fn main() -> ExitCode {
         },
         platform: &args.target,
     };
-    if let Err(codegen_err) = compile_and_link(&names, &mut nodes, &mut lists, impls_list, &target, entry_span) {
+    if let Err(codegen_err) = compile_and_link(&names, &mut nodes, &mut lists, impls_list, &target, entry_span, &seeds) {
         return report_codegen_error(json_out, &codegen_err, &files);
     }
     if args.run {

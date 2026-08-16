@@ -58,6 +58,8 @@ type State<'a> = (
     // walk over these from `main`, not a "was this name mentioned anywhere"
     // flag — two dead functions that call each other are still dead.
     &'a mut Vec<(i64, i64)>,
+    // Seeded builtin names and symbols, filled during resolution.
+    &'a mut Seeds,
 );
 
 /// The owner of references that belong to no nameable item.
@@ -99,6 +101,7 @@ pub fn resolve(
     diagnostics: Diagnostics,
     root: i64,
     ext_mods: &[(i64, i64)],
+    seeds: &mut Seeds,
 ) -> bool {
     let Diagnostics { errors, notes, deferred } = diagnostics;
     let mut scopes: Vec<Vec<i64>> = Vec::new();
@@ -125,6 +128,7 @@ pub fn resolve(
         notes,
         &mut owners,
         &mut edges,
+        seeds,
     );
     seed_builtins(&mut state, root_scope, root);
 
@@ -696,7 +700,19 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
         let name = node_d(state.1, item);
         let full = qualified_name(state.0, state.2, prefix, name);
         let sym = alloc_sym(state.1, SYM_ENUM, full, item, scope, NONE);
-        sym_set_prim_kind(state.1, sym, prim_kind_of(state.0, full));
+        let prim = prim_kind_of(state.0, full);
+        sym_set_prim_kind(state.1, sym, prim);
+        if prim == PRIM_UNIT {
+            state.13.set_sym(SEED_SYM_UNIT, sym);
+        } else if prim == PRIM_RESULT {
+            state.13.set_sym(SEED_SYM_RESULT, sym);
+        } else if prim == PRIM_OPTION {
+            state.13.set_sym(SEED_SYM_OPTION, sym);
+        } else if prim == PRIM_DIV_ERROR {
+            state.13.set_sym(SEED_SYM_DIV_ERROR, sym);
+        } else if prim == PRIM_INDEX_ERROR {
+            state.13.set_sym(SEED_SYM_INDEX_ERROR, sym);
+        }
         let declared = insert_decl(state, scope, name, sym, NS_TYPE, 2, (file, start, end));
         item_set_sym(state.1, item, sym);
         let sub = alloc_scope(state.4, state.5, state.6, state.7, scope, prefix, 1);
@@ -890,6 +906,35 @@ fn collect_trait_methods(state: &mut State, sub: i64, trait_full: i64, item: i64
 }
 
 fn seed_builtins(state: &mut State, root_scope: i64, root: i64) {
+    let seed_names: &[(&str, usize)] = &[
+        ("Ok", SEED_NAME_OK),
+        ("Err", SEED_NAME_ERR),
+        ("Some", SEED_NAME_SOME),
+        ("None", SEED_NAME_NONE),
+        ("DivByZero", SEED_NAME_DIV_BY_ZERO),
+        ("AllocationFailed", SEED_NAME_ALLOC_FAILED),
+        ("AccessOutOfBounds", SEED_NAME_ACCESS_OOB),
+        ("IndexOutOfBounds", SEED_NAME_INDEX_OOB),
+        ("KeyNotFound", SEED_NAME_KEY_NOT_FOUND),
+        ("InvalidUtf8", SEED_NAME_INVALID_UTF8),
+        ("ExitDiagnostic", SEED_NAME_EXIT_DIAG),
+        ("SystemFault", SEED_NAME_SYSTEM_FAULT),
+        ("ReadOnly", SEED_NAME_READ_ONLY),
+        ("WriteTruncate", SEED_NAME_WRITE_TRUNCATE),
+        ("EndOfInput", SEED_NAME_END_OF_INPUT),
+        ("ReadFailed", SEED_NAME_READ_FAILED),
+        ("Self", SEED_NAME_SELF),
+    ];
+    let mut nidx = 0usize;
+    while nidx < seed_names.len() {
+        let (text, slot) = match seed_names.get(nidx) {
+            Some(pair) => *pair,
+            None => break,
+        };
+        let name_id = intern(state.0, text);
+        state.13.set_name(slot, name_id);
+        nidx += 1;
+    }
     let ints = builtin_int_names(state.0);
     let mut idx = 0usize;
     while idx < ints.len() {
@@ -897,12 +942,14 @@ fn seed_builtins(state: &mut State, root_scope: i64, root: i64) {
             Some(id) => *id,
             None => break,
         };
-        let scope = seed_builtin_type(state, root_scope, name_id);
-        seed_int_from(state, scope, name_id);
+        let sym = seed_builtin_type(state, root_scope, name_id);
+        state.13.set_sym(SEED_SYM_I8 + idx, sym);
+        seed_int_from(state, node_e(state.1, sym), name_id);
         idx += 1;
     }
     let bool_name = intern(state.0, "Bool");
-    seed_builtin_type(state, root_scope, bool_name);
+    let bool_sym = seed_builtin_type(state, root_scope, bool_name);
+    state.13.set_sym(SEED_SYM_BOOL, bool_sym);
     seed_primitive(state, root, "Unit", &[], &[("Unit", &[])]);
     seed_primitive(state, root, "Result", &["T", "E"], &[("Ok", &["T"]), ("Err", &["E"])]);
     seed_primitive(state, root, "Option", &["T"], &[("Some", &["T"]), ("None", &[])]);
@@ -1603,7 +1650,7 @@ fn seed_builtin_type(state: &mut State, root_scope: i64, name: i64) -> i64 {
     let sub = alloc_scope(state.4, state.5, state.6, state.7, root_scope, prefix, 1);
     let sym = alloc_sym(state.1, SYM_TYPE, name, NONE, sub, sub);
     push_entry(state.4, root_scope, name, sym, NS_TYPE, NONE);
-    sub
+    sym
 }
 
 fn resolve_imports(state: &mut State, scope: i64, list: i64) {
@@ -2575,6 +2622,54 @@ mod tests {
         let overlay = [("scratch.cnb".to_string(), source.to_string())];
         let result = crate::analysis::analyze("scratch.cnb", &overlay);
         result.errors.iter().map(|d| d.0.clone()).collect()
+    }
+
+    #[test]
+    fn seeded_identity_table_fills_every_slot() {
+        let mut names: Vec<String> = Vec::new();
+        let mut nodes: Vec<i64> = Vec::new();
+        let mut lists: Vec<Vec<i64>> = Vec::new();
+        let mut errors: Vec<Diag> = Vec::new();
+        let mut notes: Vec<Note> = Vec::new();
+        let mut deferred: Vec<Diag> = Vec::new();
+        let overlay = [("scratch.cnb".to_string(), "pub fun main() I32\n  return 0\nend\n".to_string())];
+        let (loaded, files) = crate::module_loader::load_with_overlay(
+            &mut names,
+            &mut nodes,
+            &mut lists,
+            &mut errors,
+            "scratch.cnb",
+            &overlay,
+        );
+        let (root, ext_mods) = match loaded {
+            Some(program) => program,
+            None => {
+                assert!(false, "module load failed: {:?}", errors);
+                return;
+            }
+        };
+        assert_eq!(files.len(), 1, "overlay source was not loaded");
+        let mut seeds = Seeds::new();
+        let resolved = resolve(
+            &mut names,
+            &mut nodes,
+            &mut lists,
+            Diagnostics { errors: &mut errors, notes: &mut notes, deferred: &mut deferred },
+            root,
+            &ext_mods,
+            &mut seeds,
+        );
+        assert!(resolved, "resolve failed: {:?}", errors);
+        let mut nidx = 0usize;
+        while nidx < SEED_NAME_COUNT {
+            assert_ne!(seeds.name(nidx), NONE, "seed name slot {} left empty", nidx);
+            nidx += 1;
+        }
+        let mut sidx = 0usize;
+        while sidx < SEED_SYM_COUNT {
+            assert_ne!(seeds.sym(sidx), NONE, "seed sym slot {} left empty", sidx);
+            sidx += 1;
+        }
     }
 
     // An import nothing names is an error (Manifesto, "Compile-Time
