@@ -91,7 +91,7 @@
         "cinnabar.server.path": {
           "type": "string",
           "default": "",
-          "description": "Path to the cinnabar-lsp executable used by auto mode when set, or required by path mode."
+          "description": "Path to the cinnabar-lsp executable used by auto mode when set, or required by path mode. A relative path resolves against the repository root, so container/bin/cinnabar-lsp-nix selects the repository's own Nix-driven server."
         },
         "cinnabar.compiler.path": {
           "type": "string",

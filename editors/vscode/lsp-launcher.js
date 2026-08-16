@@ -13,6 +13,15 @@ const WRAPPER_SEGMENTS = ["container", "bin", "cinnabar-lsp-nix"];
 // marker beats sniffing for /.dockerenv or a missing docker binary: those also
 // match unrelated containers that cannot serve this repository.
 const IN_CONTAINER_ENV_VAR = "CINNABAR_IN_DEV_CONTAINER";
+// Compose mode needs both of these: the file it passes to `-f` and the
+// generated environment file it passes to `--env-file`.
+const COMPOSE_ROOT_MARKERS = [COMPOSE_FILE, WORKTREE_ENV_FILE];
+// A relative `cinnabar.server.path` resolves against the repository root, and
+// that root must be discoverable in a checkout that has generated nothing:
+// `container/local/**` is ignored and absent until configure-worktree.sh runs,
+// so the Compose markers cannot serve this purpose.  `flake.nix` and
+// `Cargo.toml` are both tracked and both sit at the root.
+const NATIVE_ROOT_MARKERS = ["flake.nix", "Cargo.toml"];
 
 function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
@@ -22,7 +31,7 @@ function isInsideDevContainer(env) {
   return isNonEmptyString((env || {})[IN_CONTAINER_ENV_VAR]);
 }
 
-function findRepositoryRoot(workspaceFolders, pathExists = fs.existsSync) {
+function findRootWithMarkers(markers, workspaceFolders, pathExists = fs.existsSync) {
   const folders = Array.isArray(workspaceFolders) ? workspaceFolders : [];
 
   for (const workspaceFolder of folders) {
@@ -32,9 +41,7 @@ function findRepositoryRoot(workspaceFolders, pathExists = fs.existsSync) {
 
     let candidate = path.resolve(workspaceFolder);
     while (true) {
-      const composeFile = path.join(candidate, COMPOSE_FILE);
-      const environmentFile = path.join(candidate, WORKTREE_ENV_FILE);
-      if (pathExists(composeFile) && pathExists(environmentFile)) {
+      if (markers.every((marker) => pathExists(path.join(candidate, marker)))) {
         return candidate;
       }
 
@@ -47,6 +54,10 @@ function findRepositoryRoot(workspaceFolders, pathExists = fs.existsSync) {
   }
 
   return undefined;
+}
+
+function findRepositoryRoot(workspaceFolders, pathExists = fs.existsSync) {
+  return findRootWithMarkers(COMPOSE_ROOT_MARKERS, workspaceFolders, pathExists);
 }
 
 function directLaunchPlan(command) {
@@ -71,7 +82,28 @@ function createLaunchPlan({ mode, serverPath, workspaceFolders, pathExists, env 
     if (configuredPath === "") {
       throw new Error("cinnabar.server.path must be set when cinnabar.server.mode is 'path'.");
     }
-    return directLaunchPlan(configuredPath);
+    if (path.isAbsolute(configuredPath)) {
+      return directLaunchPlan(configuredPath);
+    }
+    // A relative setting names a path in the repository, not in whatever
+    // directory the extension host happened to start in.  Spawning it as
+    // written resolves it against that unrelated cwd and fails with a bare
+    // ENOENT, which reports a misconfigured editor as a missing server.
+    const repositoryRoot = findRootWithMarkers(
+      NATIVE_ROOT_MARKERS,
+      workspaceFolders,
+      pathExists
+    );
+    if (repositoryRoot === undefined) {
+      throw new Error(
+        `A relative cinnabar.server.path ('${configuredPath}') resolves against the repository root, but no workspace folder sits at or below a Cinnabar checkout containing flake.nix and Cargo.toml. Set an absolute path instead.`
+      );
+    }
+    return {
+      command: path.join(repositoryRoot, configuredPath),
+      args: [],
+      options: { cwd: repositoryRoot }
+    };
   }
 
   if (requestedMode === "docker-compose") {
@@ -127,5 +159,6 @@ function createLaunchPlan({ mode, serverPath, workspaceFolders, pathExists, env 
 
 module.exports = {
   createLaunchPlan,
-  findRepositoryRoot
+  findRepositoryRoot,
+  findRootWithMarkers
 };
