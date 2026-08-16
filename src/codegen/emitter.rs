@@ -529,22 +529,11 @@ fn struct_field_fact_row(sess: &Session, struct_key: i64, name: i64, span: (i64,
     Ok(row)
 }
 
-// The declared-order tag was attached to the varfact row by the
-// typechecker; no ITEM_ENUM variant-list re-search (Single-Fact Rule).
-fn variant_index_of_raw(sess: &Session, enum_key: i64, variant_sym: i64) -> i64 {
+fn variant_index_of(sess: &Session, variant_sym: i64, span: (i64, i64, i64)) -> Result<i64, CodegenError> {
     if variant_sym == NONE {
-        return NONE;
+        return Err(builder_error(span.0, span.1, span.2, "internal: variant not found in its enum"));
     }
-    let vdecl = node_c(sess.5, variant_sym);
-    let name = node_a(sess.5, vdecl);
-    if name == NONE {
-        return NONE;
-    }
-    varfact_index_of(sess.5, enum_key, name)
-}
-
-fn variant_index_of(sess: &Session, enum_key: i64, variant_sym: i64, span: (i64, i64, i64)) -> Result<i64, CodegenError> {
-    let idx = variant_index_of_raw(sess, enum_key, variant_sym);
+    let idx = sym_variant_tag_of(sess.5, variant_sym);
     if idx == NONE {
         return Err(builder_error(span.0, span.1, span.2, "internal: variant not found in its enum"));
     }
@@ -559,7 +548,7 @@ fn variant_tag_of(sess: &Session, key: i64, name_id: i64, span: (i64, i64, i64))
     if vsym == NONE {
         return Err(builder_error(span.0, span.1, span.2, &format!("internal: variant '{}' not found in its enum", em_name(sess, name_id))));
     }
-    variant_index_of(sess, key, vsym, span)
+    variant_index_of(sess, vsym, span)
 }
 
 // The third declared variant when it carries one int payload, else NONE.
@@ -1085,7 +1074,7 @@ fn emit_path<'ctx, 'a>(
         }
         if kind == SYM_VARIANT {
             let key = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, expr));
-            let idx = variant_index_of(sess, key, sym, span)?;
+            let idx = variant_index_of(sess, sym, span)?;
             return build_enum_value(sess, key, idx, &[], span);
         }
         return Err(builder_error(
@@ -1378,7 +1367,7 @@ fn emit_div_rem_result<'ctx>(
     sess.2.build_conditional_branch(is_zero, err_block, ok_block).map_err(builder_fail)?;
     sess.2.position_at_end(err_block);
     let err_key = result_arg_key(sess, result_key, 1);
-    let err_tag = variant_tag_of(sess, err_key, sess.12.name(SEED_NAME_DIV_BY_ZERO), span)?;
+    let err_tag = BUILTIN_DIV_ERROR_DIV_BY_ZERO;
     let div_error = declare_local(sess, err_key, "div_err_val", span)?;
     build_enum_value_into(sess, err_key, err_tag, &[], div_error, span)?;
     build_enum_value_into(sess, result_key, BUILTIN_RESULT_ERR, &[(err_key, div_error)], out, span)?;
@@ -1490,7 +1479,7 @@ fn emit_struct_lit<'ctx, 'a>(
         return Ok(ptr);
     }
     if kind == SYM_VARIANT {
-        let idx = variant_index_of(sess, key, sym, span)?;
+        let idx = variant_index_of(sess, sym, span)?;
         let values = node_d(sess.5, expr);
         let count = list_len(sess.6, values);
         let mut payloads: Vec<(i64, PointerValue<'ctx>)> = Vec::new();
@@ -1613,7 +1602,7 @@ fn emit_pattern<'ctx, 'a>(
     }
     if kind == PAT_PATH {
         let sym = pat_sym_of(sess.5, pat);
-        let idx = variant_index_of(sess, pat_key, sym, span)?;
+        let idx = variant_index_of(sess, sym, span)?;
         let cont = new_block(sess, ctx.0, "pat");
         let tag_ptr = struct_gep(sess, pat_key, scrut_ptr, 0, "", span)?;
         let tag = load_i64(sess, tag_ptr)?;
@@ -1628,7 +1617,7 @@ fn emit_pattern<'ctx, 'a>(
     }
     if kind == PAT_VARIANT {
         let sym = pat_sym_of(sess.5, pat);
-        let idx = variant_index_of(sess, pat_key, sym, span)?;
+        let idx = variant_index_of(sess, sym, span)?;
         let cont = new_block(sess, ctx.0, "pat");
         let tag_ptr = struct_gep(sess, pat_key, scrut_ptr, 0, "", span)?;
         let tag = load_i64(sess, tag_ptr)?;
@@ -1818,7 +1807,7 @@ fn emit_index<'ctx, 'a>(
     let err_key = result_arg_key(sess, key, 1);
     let out = declare_local(sess, key, "idx", span)?;
     sess.2.position_at_end(err_block);
-    let oob_tag = variant_tag_of(sess, err_key, sess.12.name(SEED_NAME_INDEX_OOB), span)?;
+    let oob_tag = BUILTIN_INDEX_ERROR_INDEX_OOB;
     let f0 = variant_payload_key(sess, err_key, oob_tag, 0, span)?;
     let f1 = variant_payload_key(sess, err_key, oob_tag, 1, span)?;
     let e0 = declare_local(sess, f0, "iob_idx", span)?;

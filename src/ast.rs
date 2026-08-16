@@ -551,6 +551,14 @@ pub fn sym_set_prim_kind(nodes: &mut [i64], sym: i64, kind: i64) -> bool {
     node_set_f(nodes, sym, kind)
 }
 
+pub fn sym_variant_tag_of(nodes: &[i64], sym: i64) -> i64 {
+    node_f(nodes, sym)
+}
+
+pub fn sym_set_variant_tag(nodes: &mut [i64], sym: i64, tag: i64) -> bool {
+    node_set_f(nodes, sym, tag)
+}
+
 pub fn ty_key_of(nodes: &[i64], id: i64) -> i64 {
     node_d(nodes, id)
 }
@@ -840,11 +848,13 @@ pub struct CheckContext<'a> {
     pub seeds: &'a Seeds,
 }
 
-// Declaration-order indices of the seeded Result/Option enums.
+// Declaration-order indices of the seeded Result/Option/DivError/IndexError enums.
 pub const BUILTIN_RESULT_OK: i64 = 0;
 pub const BUILTIN_RESULT_ERR: i64 = 1;
 pub const BUILTIN_OPTION_SOME: i64 = 0;
 pub const BUILTIN_OPTION_NONE: i64 = 1;
+pub const BUILTIN_DIV_ERROR_DIV_BY_ZERO: i64 = 0;
+pub const BUILTIN_INDEX_ERROR_INDEX_OOB: i64 = 0;
 pub const EXIT_DIAG_VARIANT_INDEX: i64 = 2;
 
 pub fn alloc_tyinfo(nodes: &mut Vec<i64>, key: i64, kind: i64, sym: i64, args: i64, elem: i64, len: i64) -> i64 {

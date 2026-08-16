@@ -116,12 +116,7 @@ type Ctx<'a> = (
     &'a mut Vec<i64>,
     &'a mut Vec<Vec<i64>>,
     &'a mut Vec<Diag>,
-
     &'a mut Vec<(i64, Vec<i64>)>,
-    i64, // the interned "Err" variant name id of the seeded Result enum
-    i64, // the interned "Ok" variant name id of the seeded Result enum
-    // Secondary explanatory notes, each tied to the error it explains by
-    // that error's index in the errors vec at push time.
     &'a mut Vec<Note>,
 );
 
@@ -477,14 +472,6 @@ fn fill_container_if_mut_arg(f: &mut F, b: &mut B, ctx: &mut Ctx, arg: i64) {
     }
 }
 
-// The arm that stands for the error variant of an extraction match, read
-// from attached facts only (Single-Fact Rule): the pattern's resolved
-// variant symbol (`pat_sym_of`) is compared against the scrutinee enum's
-// error-variant symbol looked up in the typechecker's variant-fact table.
-// A binding arm is the error arm exactly when it is the second arm of a
-// 2-arm match whose first arm matches the Ok variant — exhaustiveness then
-// forces the binding to cover Err.  A bare binding with no Ok arm covers
-// both variants and proves nothing, so it is not the error arm.
 fn arm_is_result_err(ctx: &mut Ctx, scrut_key: i64, pat: i64, arms: i64, idx: i64) -> bool {
     if node_tag(ctx.1, pat) != NODE_PAT {
         return false;
@@ -492,11 +479,13 @@ fn arm_is_result_err(ctx: &mut Ctx, scrut_key: i64, pat: i64, arms: i64, idx: i6
     if ty_kind_of(ctx.1, scrut_key) != TYD_ENUM {
         return false;
     }
+    if sym_prim_kind(ctx.1, tyinfo_sym_of(ctx.1, scrut_key)) != PRIM_RESULT {
+        return false;
+    }
     let kind = node_a(ctx.1, pat);
     if kind == PAT_VARIANT {
         let pat_sym = pat_sym_of(ctx.1, pat);
-        let err_sym = find_varfact(ctx.1, scrut_key, ctx.5);
-        pat_sym != NONE && pat_sym == err_sym
+        pat_sym != NONE && sym_variant_tag_of(ctx.1, pat_sym) == BUILTIN_RESULT_ERR
     } else if kind == PAT_BIND {
         if idx != 1 || list_len(ctx.2, arms) != 2 {
             return false;
@@ -505,9 +494,8 @@ fn arm_is_result_err(ctx: &mut Ctx, scrut_key: i64, pat: i64, arms: i64, idx: i6
         if node_tag(ctx.1, first_pat) != NODE_PAT || node_a(ctx.1, first_pat) != PAT_VARIANT {
             return false;
         }
-        let ok_sym = find_varfact(ctx.1, scrut_key, ctx.6);
         let first_sym = pat_sym_of(ctx.1, first_pat);
-        first_sym != NONE && first_sym == ok_sym
+        first_sym != NONE && sym_variant_tag_of(ctx.1, first_sym) == BUILTIN_RESULT_OK
     } else {
         false
     }
@@ -2060,8 +2048,6 @@ pub fn borrow_check(
     ext_mods: &[(i64, i64)],
 ) -> bool {
     let before = check.errors.len();
-    let err_id = check.seeds.name(SEED_NAME_ERR);
-    let ok_id = check.seeds.name(SEED_NAME_OK);
 
     let mut summaries: Vec<(i64, Vec<i64>)> = Vec::new();
     let mut scratch: Vec<Diag> = Vec::new();
@@ -2099,7 +2085,7 @@ pub fn borrow_check(
                             Vec::new(),
                         );
                         let mut b: B = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), NONE, NONE, NONE, NONE, Vec::new(), Vec::new());
-                        let mut ctx: Ctx = (names, nodes, lists, &mut scratch, &mut summaries, err_id, ok_id, &mut scratch_notes);
+                        let mut ctx: Ctx = (names, nodes, lists, &mut scratch, &mut summaries, &mut scratch_notes);
                         if build_fn(&mut f, &mut b, &mut ctx, *fn_node) {
                             compute_summary(&f, &mut ctx, 0, *fn_node)
                         } else {
@@ -2204,10 +2190,8 @@ fn check_fn(
         Vec::new(),
         Vec::new(),
     );
-    let err_id = check.seeds.name(SEED_NAME_ERR);
-    let ok_id = check.seeds.name(SEED_NAME_OK);
     let mut b: B = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), NONE, NONE, NONE, NONE, Vec::new(), Vec::new());
-    let mut ctx: Ctx = (names, nodes, lists, check.errors, summaries, err_id, ok_id, check.notes);
+    let mut ctx: Ctx = (names, nodes, lists, check.errors, summaries, check.notes);
     if !build_fn(&mut f, &mut b, &mut ctx, fn_node) {
         return;
     }
@@ -2595,7 +2579,7 @@ fn apply_assign(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool,
             if bind_span.0 != NO_FILE {
                 push_note_for_last(
                     ctx.3,
-                    ctx.7,
+                    ctx.5,
                     "consume the existing value before assigning its replacement",
                     bind_span.0,
                     bind_span.1,
@@ -3459,7 +3443,7 @@ fn explain_join(f: &F, ctx: &mut Ctx, exit_states: &[Vec<i64>], join_block: i64,
             if st == ST_MOVED || st == ST_PARTIAL {
                 push_note_for_last(
                     ctx.3,
-                    ctx.7,
+                    ctx.5,
                     &format!("'{}' is consumed by the end of this path", name),
                     span.0,
                     span.1,
@@ -3469,7 +3453,7 @@ fn explain_join(f: &F, ctx: &mut Ctx, exit_states: &[Vec<i64>], join_block: i64,
             } else if st == ST_LIVE {
                 push_note_for_last(
                     ctx.3,
-                    ctx.7,
+                    ctx.5,
                     &format!("'{}' is still live at the end of this path", name),
                     span.0,
                     span.1,
@@ -3494,7 +3478,7 @@ fn explain_unconsumed(f: &F, ctx: &mut Ctx, binding: i64, name: &str, ty_key: i6
     let rendered = render_type_key(ctx.0, ctx.1, ctx.2, ty_key);
     push_note_for_last(
         ctx.3,
-        ctx.7,
+        ctx.5,
         &format!("'{}' is bound here with linear type '{}'", name, rendered),
         bind_span.0,
         bind_span.1,
@@ -3625,7 +3609,7 @@ fn report(
                         let name = dotted_name_of(f, ctx, binding, row.2);
                         push_note_for_last(
                             ctx.3,
-                            ctx.7,
+                            ctx.5,
                             &format!("'{}' was moved here", name),
                             moved_at.0,
                             moved_at.1,
@@ -3680,7 +3664,7 @@ fn report(
                 if bind_span.0 != NO_FILE {
                     push_note_for_last(
                         ctx.3,
-                        ctx.7,
+                        ctx.5,
                         "extract every linear element through the container's native extraction operation before freeing it",
                         bind_span.0,
                         bind_span.1,

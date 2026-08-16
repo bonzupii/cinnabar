@@ -726,6 +726,7 @@ fn attach_variant_facts(nodes: &mut Vec<i64>, lists: &[Vec<i64>]) {
                         let vsym = variant_sym_of(nodes, variant);
                         if vsym != NONE {
                             alloc_varfact(nodes, key, node_a(nodes, variant), vsym, v);
+                            sym_set_variant_tag(nodes, vsym, v);
                         }
                         v += 1;
                     }
