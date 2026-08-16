@@ -11,8 +11,21 @@ import { HIGHLIGHT_ICONS } from "@/content/highlights";
 import { SAMPLES } from "@/content/samples";
 import { ICON } from "@/lib/constants";
 import { readPageContent } from "@/lib/page-content";
-import { readRepoFixture } from "@/lib/repo-docs";
 import { BADGES, REPO_URL, STATUS_BADGE } from "@/lib/site";
+
+const HERO_SOURCE = `pub mod Memory
+  pub nat type Block
+  pub nat fun release(block: Block) impure Unit
+end
+
+use Memory.release
+
+fun use_block(flag: Bool, block: Memory.Block) impure I64
+  if flag
+    release(block)
+  end
+  return 0
+end`;
 
 export const og = {
   eyebrow: "Systems language",
@@ -22,10 +35,7 @@ export const og = {
 };
 
 export default async function Home() {
-  const [content, fixture] = await Promise.all([
-    readPageContent("(home)"),
-    readRepoFixture("explainLeak"),
-  ]);
+  const content = await readPageContent("(home)");
 
   return (
     <>
@@ -49,9 +59,9 @@ export default async function Home() {
           <div className="min-w-0">
             <div className="mb-4 flex items-center justify-between gap-4">
               <Eyebrow>Real compiler front end</Eyebrow>
-              <span className="text-label font-mono text-[11px]">tests/fixtures/explain_leak.cnb</span>
+              <span className="text-label font-mono text-[11px]">live ownership check</span>
             </div>
-            <PlaygroundEditor mode="embedded" initialSource={fixture} />
+            <PlaygroundEditor mode="embedded" initialSource={HERO_SOURCE} />
             <p className="text-secondary mt-4 text-[13px] leading-[1.65]">{content.block("hero-proof")}</p>
           </div>
         </div>

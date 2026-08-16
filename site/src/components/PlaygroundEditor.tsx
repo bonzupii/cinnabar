@@ -1,7 +1,7 @@
 "use client";
 
 import CodeMirror from "@uiw/react-codemirror";
-import type { EditorView } from "@codemirror/view";
+import { EditorView } from "@codemirror/view";
 import { useEffect, useRef, useState } from "react";
 import PlaygroundDiagnostics from "@/components/PlaygroundDiagnostics";
 import Window from "@/components/Window";
@@ -30,13 +30,12 @@ import { checkSource, preloadChecker } from "@/lib/cinnabar-wasm-client";
 const ENTRY_PATH = "playground.cnb";
 
 /*
- * No `EditorView.lineWrapping`: `PlaygroundLineNumbers` renders one row per
- * logical line, and a wrapped line spans more than one visual row inside
- * CodeMirror without widening its own gutter row to match. A long line
- * scrolls horizontally instead, which `Window`'s other code blocks already
- * do (`overflow-x-auto` in `WindowBody`).
+ * Full mode does not wrap because `PlaygroundLineNumbers` renders one row per
+ * logical line. Embedded mode omits that custom gutter and wraps long lines,
+ * which keeps the homepage demo on one scroll axis at narrow widths.
  */
 const EXTENSIONS = [cinnabarHighlighting, cinnabarLineHover, cinnabarTokenHover, cinnabarHoverTooltip];
+const EMBEDDED_EXTENSIONS = [...EXTENSIONS, EditorView.lineWrapping];
 
 // A stable reference, so CodeMirror never mistakes a new render for a
 // reconfiguration request the way it would with an inline object literal.
@@ -97,8 +96,6 @@ export default function PlaygroundEditor(props: PlaygroundEditorProps = {}) {
   const embedded = props.mode === "embedded";
   const initialSource = embedded ? props.initialSource : PLAYGROUND_SAMPLES[0].code;
   const [source, setSource] = useState(initialSource);
-  const [editorView, setEditorView] = useState<EditorView | null>(null);
-  const [editorScrollTop, setEditorScrollTop] = useState(0);
   const [report, setReport] = useState<PlaygroundReport | null>(null);
   const latestRequest = useRef(0);
   const viewRef = useRef<EditorView | null>(null);
@@ -135,15 +132,6 @@ export default function PlaygroundEditor(props: PlaygroundEditorProps = {}) {
   useEffect(() => {
     preloadChecker();
   }, []);
-
-  useEffect(() => {
-    if (!embedded || !editorView) return;
-    const scroller = editorView.scrollDOM;
-    const updateGutter = () => setEditorScrollTop(scroller.scrollTop);
-    updateGutter();
-    scroller.addEventListener("scroll", updateGutter, { passive: true });
-    return () => scroller.removeEventListener("scroll", updateGutter);
-  }, [editorView, embedded]);
 
   useEffect(() => {
     const requestId = (latestRequest.current += 1);
@@ -212,28 +200,23 @@ export default function PlaygroundEditor(props: PlaygroundEditorProps = {}) {
       */}
       <Window path={ENTRY_PATH} title="Cinnabar source">
         <PlaygroundDiagnostics report={report} source={source} />
-        <div className={`bg-code-ground flex ${embedded ? "h-48 overflow-hidden" : ""}`}>
-          <div className={embedded ? "h-48 flex-none overflow-hidden" : "contents"}>
-            <div
-              style={embedded ? { transform: `translateY(-${editorScrollTop}px)` } : undefined}
-            >
-              <PlaygroundLineNumbers lineCount={lineCount} onHoverLine={onHoverLine} />
-            </div>
-          </div>
+        <div className={`bg-code-ground flex ${embedded ? "max-h-112 overflow-hidden" : ""}`}>
+          {!embedded ? (
+            <PlaygroundLineNumbers lineCount={lineCount} onHoverLine={onHoverLine} />
+          ) : null}
           <CodeMirror
             key={loadKey}
             className="min-w-0 flex-1"
             value={source}
             onChange={setSource}
             theme={cinnabarEditorTheme}
-            extensions={EXTENSIONS}
-            height={embedded ? "12rem" : undefined}
+            extensions={embedded ? EMBEDDED_EXTENSIONS : EXTENSIONS}
+            maxHeight={embedded ? "28rem" : undefined}
             minHeight={embedded ? undefined : "24rem"}
             aria-label={embedded ? "Editable Cinnabar source" : "Cinnabar source"}
             basicSetup={BASIC_SETUP}
             onCreateEditor={(view) => {
               viewRef.current = view;
-              setEditorView(view);
               view.contentDOM.setAttribute(
                 "aria-label",
                 embedded ? "Editable Cinnabar source" : "Cinnabar source",

@@ -10,7 +10,7 @@ a garbage collector, or a switch that weakens a safety rule.
 
 <!-- @hero-proof -->
 
-Edit the rejected fixture above. Each change runs through the browser build of
+Edit the rejected program above. Each change runs through the browser build of
 the real lexer, parser, resolver, typechecker, and borrow checker. Linking and
 execution remain native-toolchain jobs.
 
