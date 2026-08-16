@@ -9,6 +9,19 @@ test("the homepage embeds the real checker without nested source scrolling", asy
   await expect(editor).toContainText("fun use_block");
 
   const terminal = page.locator("figure").filter({ hasText: "playground.cnb" }).first();
+  const dividerPositions = await terminal.locator("[data-diagnostic-divider]").evaluateAll((elements) =>
+    elements.map((element) => element.getBoundingClientRect().x),
+  );
+  expect(new Set(dividerPositions.map((position) => Math.round(position * 10))).size).toBe(1);
+
+  const sourcePosition = await terminal.locator("[data-diagnostic-source]").evaluate((element) =>
+    element.getBoundingClientRect().x,
+  );
+  const caretPosition = await terminal.locator("[data-diagnostic-caret]").evaluate((element) =>
+    element.getBoundingClientRect().x,
+  );
+  expect(Math.abs(sourcePosition - caretPosition)).toBeLessThan(0.1);
+
   const terminalBox = await terminal.boundingBox();
   expect(terminalBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(720);
 

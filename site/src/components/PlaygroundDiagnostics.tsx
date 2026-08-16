@@ -22,46 +22,75 @@ import { TOKEN_STYLE, tokenizeCinnabar } from "@/lib/cinnabar-syntax";
  * file it's reporting on rather than beside it in a second window.
  */
 
-function SourceExcerpt({ source, diagnostic }: { source: string; diagnostic: PlaygroundDiagnostic }) {
+function DiagnosticDetails({ source, diagnostic }: { source: string; diagnostic: PlaygroundDiagnostic }) {
   const span = diagnostic.source;
-  if (!span) return null;
-  const located = locateSpan(source, span.start, span.end);
-  const gutterLabel = `${located.line}`.padStart(3, " ");
-  const caretWidth = Math.max(located.length, 1);
+  const located = span ? locateSpan(source, span.start, span.end) : null;
+  const gutterWidth = Math.max(`${located?.line ?? ""}`.length, 3);
 
   return (
-    <>
-      <span className="block">
-        <span className="text-term-output">{"    ╭─[ "}</span>
-        <span className="text-term-flag">
-          {span.path}:{located.line}:{located.column}
-        </span>
-        <span className="text-term-output">{" ]"}</span>
-      </span>
-      <span className="text-term-output block">{"    │"}</span>
-      <span className="block">
-        <span className="text-term-output">{` ${gutterLabel} │ `}</span>
-        {tokenizeCinnabar(located.lineText).map((token, position) =>
-          token.kind === "text" ? (
-            <span key={position}>{token.value}</span>
-          ) : (
-            <span
-              key={position}
-              className={token.kind === "keyword" ? "text-term-command" : TOKEN_STYLE[token.kind]}
-            >
-              {token.value}
+    <div
+      className="mt-1 grid w-max"
+      style={{ gridTemplateColumns: `${gutterWidth}ch 2ch max-content` }}
+    >
+      {span && located ? (
+        <>
+          <span aria-hidden="true" />
+          <span data-diagnostic-divider className="text-term-output">╭─</span>
+          <span>
+            <span className="text-term-output">[ </span>
+            <span className="text-term-flag">
+              {span.path}:{located.line}:{located.column}
             </span>
-          ),
-        )}
-      </span>
-      <span className="block">
-        <span className="text-term-output">{"     │ "}</span>
-        <span className="text-term-error">
-          {" ".repeat(located.columnOffset)}
-          {"^".repeat(caretWidth)}
-        </span>
-      </span>
-    </>
+            <span className="text-term-output"> ]</span>
+          </span>
+
+          <span aria-hidden="true" />
+          <span data-diagnostic-divider className="text-term-output">│</span>
+          <span aria-hidden="true" />
+
+          <span className="text-term-output pr-[1ch] text-right">{located.line}</span>
+          <span data-diagnostic-divider className="text-term-output">│</span>
+          <span data-diagnostic-source style={{ paddingLeft: "1ch" }}>
+            {tokenizeCinnabar(located.lineText).map((token, position) =>
+              token.kind === "text" ? (
+                <span key={position}>{token.value}</span>
+              ) : (
+                <span
+                  key={position}
+                  className={token.kind === "keyword" ? "text-term-command" : TOKEN_STYLE[token.kind]}
+                >
+                  {token.value}
+                </span>
+              ),
+            )}
+          </span>
+
+          <span aria-hidden="true" />
+          <span data-diagnostic-divider className="text-term-output">│</span>
+          <span data-diagnostic-caret className="text-term-error" style={{ paddingLeft: "1ch" }}>
+            {" ".repeat(located.columnOffset)}
+            {"^".repeat(Math.max(located.length, 1))}
+          </span>
+        </>
+      ) : null}
+
+      {diagnostic.explanations.map((explanation, index) => {
+        const explanationSpan = explanation.source;
+        const connector = index === diagnostic.explanations.length - 1 ? "╰─" : "├─";
+        return (
+          <span key={index} className="contents">
+            <span aria-hidden="true" />
+            <span data-diagnostic-divider className="text-term-output mt-1">{connector}</span>
+            <span className="text-term-output mt-1" style={{ paddingLeft: "1ch" }}>
+              {explanation.message}
+              {explanationSpan
+                ? ` (${explanationSpan.path}:${locateSpan(source, explanationSpan.start, explanationSpan.end).line})`
+                : ""}
+            </span>
+          </span>
+        );
+      })}
+    </div>
   );
 }
 
@@ -72,17 +101,7 @@ function DiagnosticBlock({ diagnostic, source }: { diagnostic: PlaygroundDiagnos
         <span className="text-term-command font-semibold">Error</span>
         <span className="text-term-command font-semibold">: {diagnostic.message}</span>
       </span>
-      <SourceExcerpt source={source} diagnostic={diagnostic} />
-      {diagnostic.explanations.map((explanation, index) => {
-        const span = explanation.source;
-        return (
-          <span key={index} className="text-term-output mt-1 block pl-4">
-            {"↳ "}
-            {explanation.message}
-            {span ? ` (${span.path}:${locateSpan(source, span.start, span.end).line})` : ""}
-          </span>
-        );
-      })}
+      <DiagnosticDetails source={source} diagnostic={diagnostic} />
     </div>
   );
 }
