@@ -24,14 +24,14 @@ export const og = {
   eyebrow: "Getting started",
   title: "Build the compiler.",
   description:
-    "LLVM 21 via a Nix flake, a static musl libc, the language server, the Docker path for Windows, and the repository's verification gate.",
+    "LLVM 21 via a Nix flake, a static musl libc, the language server, the WSL2 path for Windows, and the repository's verification gate.",
   alt: "Cinnabar social card — the getting-started guide.",
 };
 
 export const metadata: Metadata = {
   title: "Install",
   description:
-    "Build the Cinnabar compiler with the project's Nix flake, run it from Docker on Windows, attach VS Code to the container, and verify a change against the repository's gate.",
+    "Build the Cinnabar compiler with the project's Nix flake, run the same toolchain under WSL2 on Windows, wire up VS Code, and verify a change against the repository's gate.",
   alternates: { canonical: "/install/" },
   ...ogImageMetadata("/install/", og),
 };
@@ -176,12 +176,35 @@ export default async function InstallPage() {
         </Step>
 
         {/*
+          The default Windows path, and the shorter of the two by a wide margin:
+          there is no service to configure, select or retarget, so the whole
+          Compose apparatus below has no counterpart here.
+        */}
+        <Step
+          title="Windows — WSL2"
+          note="The default on Windows"
+          icon={StaticLinkIcon}
+        >
+          <Prose>{content.block("wsl")}</Prose>
+          <ShellBlock
+            lines={[
+              "sh <(curl -fsSL https://releases.nixos.org/nix/nix-2.35.1/install) --no-daemon",
+              `git clone ${REPO_URL}.git ~/dev/cinnabar`,
+              "cd ~/dev/cinnabar && nix develop --command ./pre_commit_check.sh",
+            ]}
+            cwd="~"
+            title="In the distro — never under /mnt/c"
+            className="mt-7 max-w-190"
+          />
+        </Step>
+
+        {/*
           Expanded from three sentences and a link. CONTAINER_DEVELOPMENT.md is
           the source for every command here — a Windows contributor should be
           able to reach a running gate without leaving the page.
         */}
         <Step
-          title="Docker Desktop and Windows worktrees"
+          title="Windows fallback — Docker Desktop"
           note="One reusable Compose service"
           icon={StaticLinkIcon}
         >
@@ -281,7 +304,7 @@ export default async function InstallPage() {
           server: attaching to the container, the rust-analyzer wrapper and the
           Cinnabar extension are things a reader has to do in order.
         */}
-        <Step title="VS Code" note="Attached to the container" icon={LspIcon}>
+        <Step title="VS Code" note="WSL remote or attached container" icon={LspIcon}>
           <Prose>{content.block("vscode-attach")}</Prose>
 
           <div className="mt-9 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-start *:min-w-0">
@@ -308,11 +331,12 @@ export default async function InstallPage() {
             <Prose>{content.block("vscode-extension")}</Prose>
             <ShellBlock
               lines={[
+                "nix develop --command ./container/install-vscode-extension.sh",
                 `${COMPOSE} exec dev nix develop --command ./container/install-vscode-extension.sh`,
                 `docker exec dev sh -c 'readlink /proc/$(pgrep -f "cinnabar[-]lsp --stdio" | head -1)/exe'`,
               ]}
               cwd="~/src/cinnabar"
-              title="Install the extension, then check the server is not stale"
+              title="Install it — WSL2, then the container, then check the server is not stale"
             />
           </div>
         </Step>

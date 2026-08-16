@@ -200,11 +200,15 @@ cargo build --release
 
 Outside of `nix develop`, `cargo build`/`cargo clippy` will fail unless you have a matching LLVM 21 toolchain and `clang` on `PATH`. `build.rs` self-provisions musl from upstream for static builds (via `curl`/`wget`, `tar`, `make`, and `sha256sum`), so no host musl package is required; `MUSL_LIBC_A` remains available as a manual override. See [`build.rs`](build.rs) and [`flake.nix`](flake.nix) for the exact discovery logic and paths.
 
-### Docker Desktop and Windows worktrees
+### Windows contributors
 
-Windows contributors can run the same Nix environment in one reusable Docker Compose service. Its named Nix and Cargo caches survive branch changes, while every worktree receives an isolated Rust `target` volume. The setup also includes the linked-worktree Git mounts needed by Nix and a rust-analyzer wrapper that runs inside `nix develop`.
+Run the same flake under WSL2, with the checkout on the distro's own filesystem. This is the default and needs no Docker: `flake.nix` supplies the toolchain, which is also how CI runs the gate — on a plain `ubuntu-latest` runner with no container anywhere.
 
-See [`CONTAINER_DEVELOPMENT.md`](CONTAINER_DEVELOPMENT.md) for setup, VS Code attachment, worktree switching, and verification commands. Native Linux development remains Nix-first and does not require Docker.
+Keeping the checkout under `/mnt/c` is the one thing to avoid. A Windows-hosted checkout reaches Linux over a 9p bridge, and that bridge costs roughly 30–50× on the small-file operations Cargo's fingerprint pass, Semgrep's walk, and rust-analyzer's watcher perform constantly; `git status` on this repository measures ~1.1 s across it against ~0.005 s on ext4.
+
+Where WSL2 is unavailable, a reusable Docker Compose service runs the same environment instead. Its named Nix and Cargo caches survive branch changes, every worktree receives an isolated Rust `target` volume, and it carries the linked-worktree Git mounts Nix needs — mounts that exist only to repair the `C:/…` `gitdir:` pointer Windows Git writes, which is not a problem WSL2 has.
+
+See [`CONTAINER_DEVELOPMENT.md`](CONTAINER_DEVELOPMENT.md) for both paths, VS Code setup, worktree switching, and verification commands. Native Linux development remains Nix-first and does not require Docker.
 
 ## Using the compiler
 

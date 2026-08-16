@@ -26,11 +26,27 @@ overwrite: if any of the three exists, it writes none of them.
 
 Or compile a single file straight through the pipeline:
 
+<!-- @wsl -->
+
+Windows contributors run the same flake under WSL2, with the checkout on the
+distro's own filesystem. This is the default and needs no Docker: `flake.nix`
+supplies the toolchain either way, and it is the shape CI runs the gate in — a
+plain `ubuntu-latest` runner, no container anywhere.
+
+Keeping the checkout under `/mnt/c` is the one thing to avoid. A Windows-hosted
+checkout reaches Linux over a 9p bridge, and that bridge costs roughly 30–50× on
+the small-file operations Cargo's fingerprint pass, Semgrep's walk and
+rust-analyzer's watcher perform constantly. Git worktrees need no special
+handling: `git worktree add` works directly, because the `gitdir:` pointer
+problem the container workflow solves exists only when Windows Git writes a
+`C:/...` path Linux cannot follow.
+
 <!-- @docker -->
 
-Windows contributors can run the same Nix environment in one Docker Compose
-service, without installing Nix or LLVM on Windows. Native Linux development is
-Nix-first and needs none of this.
+Where WSL2 is unavailable or unwanted, the same Nix environment runs in one
+Docker Compose service instead, without installing Nix or LLVM on Windows. It
+pays the 9p cost described above. Native Linux development is Nix-first and
+needs none of this.
 
 The Compose project has a single disposable `dev` service. Retargeting it
 recreates the container, because Docker cannot change a running container's bind
@@ -101,11 +117,16 @@ Point any LSP client at the binary for `.cnb` files. In Neovim:
 
 <!-- @vscode-attach -->
 
-Start the selected service, then run **Dev Containers: Attach to Running
-Container…**, choose the `dev` container in the `cinnabar` stack, and open
-`/workspace`. An attached terminal starts there but is not an interactive Nix
-shell — run `nix develop`, or prefix individual commands with
-`nix develop --command`.
+Under WSL2, open the checkout with the **WSL** extension rather than Dev
+Containers — `code --remote wsl+<distro> ~/dev/cinnabar`. The extension host then
+runs inside the distro and the checked-in workspace settings apply unmodified.
+
+Under the container, start the selected service, then run **Dev Containers:
+Attach to Running Container…**, choose the `dev` container in the `cinnabar`
+stack, and open `/workspace`.
+
+Either way the terminal that opens is not an interactive Nix shell — run
+`nix develop`, or prefix individual commands with `nix develop --command`.
 
 <!-- @vscode-config -->
 
@@ -136,17 +157,24 @@ come from the same `rustc` that builds the crate — a mismatch is what produces
 
 <!-- @vscode-extension -->
 
-`editors/vscode` is not on the Marketplace, so an attached-container
-configuration cannot pull it by identifier. Package and install it into the
-container once; it lands in the `cinnabar-vscode-server` volume alongside the
-server, so it survives service recreation and worktree switches. Re-run the
-helper after changing the extension, then reload the window.
+`editors/vscode` is not on the Marketplace, so no editor configuration can pull
+it by identifier — it has to be built from the checkout and installed into
+whichever VS Code Server you are running. The helper does that in either
+environment; it needs a server and a `node`, not a container. Under the
+container the extension lands in the `cinnabar-vscode-server` volume, so it
+survives service recreation and worktree switches. Re-run it after changing the
+extension, then reload the window.
 
-`cinnabar.server.mode` stays `docker-compose` and means "use the repository's
-development server", not "shell out to Docker". An editor on the Windows host
-runs the server through `docker compose exec`; an editor attached to the
-container runs `/workspace/target/debug/cinnabar-lsp` directly, because the
-service mounts no Docker socket and ships no `docker` CLI.
+`cinnabar.server.mode` ships as `path`, with `cinnabar.server.path` set to
+`container/bin/cinnabar-lsp-nix`. A relative value resolves against the
+repository root, so the setting is portable across checkouts. Compose mode
+remains selectable but cannot be the default: it requires
+`container/local/<cache-key>/worktree.env`, which is generated and ignored, so a
+fresh clone does not have it. Selected explicitly, it means "use the
+repository's development server", not "shell out to Docker" — an editor on the
+Windows host runs the server through `docker compose exec`, while one attached
+to the container runs the binary directly, because the service mounts no Docker
+socket and ships no `docker` CLI.
 
 The launcher prefers `container/bin/cinnabar-lsp-nix`, which rebuilds the server
 and then execs it: Cargo replaces the binary on rebuild, but a running server
