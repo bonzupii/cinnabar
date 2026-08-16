@@ -26,6 +26,9 @@ ENV PATH=/usr/lib/llvm-21/bin:$PATH
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock build.rs ./
+# `src/docs.rs` embeds the manifesto with `include_str!`, so it is a build
+# input and not documentation here: without it the crate does not compile.
+COPY MANIFESTO.md ./
 COPY src ./src
 COPY crates ./crates
 COPY tests ./tests
@@ -33,8 +36,12 @@ RUN cargo build --release --bin cinnabar
 
 FROM docker.io/library/debian:bookworm-slim AS runtime
 
-# `llc` and `clang` are not developer conveniences here: they are stages of
-# a Cinnabar build, invoked by the compiler itself to assemble and link.
+# `opt`, `llc` and `clang` are not developer conveniences here: they are
+# stages of a Cinnabar build, invoked by the compiler itself to optimize,
+# assemble and link. `llvm-21` installs all three under /usr/lib/llvm-21/bin,
+# which is not on the runtime PATH, so each is linked into /usr/local/bin.
+# Omitting `opt` does not fail the build: the compiler still emits IR, and
+# only `--run` (and the playground's execute path) discovers it is missing.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates gnupg wget \
  && wget -qO /usr/share/keyrings/llvm.asc https://apt.llvm.org/llvm-snapshot.gpg.key \
@@ -43,6 +50,7 @@ RUN apt-get update \
  && apt-get update \
  && apt-get install -y --no-install-recommends llvm-21 clang-21 nodejs \
  && rm -rf /var/lib/apt/lists/* \
+ && ln -s /usr/lib/llvm-21/bin/opt /usr/local/bin/opt \
  && ln -s /usr/lib/llvm-21/bin/llc /usr/local/bin/llc \
  && ln -s /usr/bin/clang-21 /usr/local/bin/clang
 
