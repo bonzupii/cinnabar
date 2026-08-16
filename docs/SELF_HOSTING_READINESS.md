@@ -429,9 +429,15 @@ today's Rust implementation, roughly ordered by how many things depend on it:
    no Cinnabar-side equivalent yet; the pragmatic answer is shipping those archives beside the binary
    and opening them via `File` plus a way to locate the running executable (`/proc/self/exe`, i.e. one
    more `readlinkat`-shaped native), not a compile-time embedding story.
-6. **Not a gap**: HTTP. `cinnabar burn`/`playground` are already hand-rolled over raw sockets, and
-   `Net`'s BSD-socket surface plus a string/formatting surface would carry them as-is. JSON is the
-   same story — a JSON encoder/decoder is pure computation over byte slices, entirely writable in
+6. **Socket receive.** `cinnabar burn`/`playground` are hand-rolled over raw sockets, and `Net` has
+   no way to read from one. It declares `socket`/`bind`/`listen`/`accept`/`send`/`close` and no
+   receive of any kind; `Socket` is its own `nat type` rather than a file handle, so `File.read` does
+   not reach one either. `tests/fixtures/http_server.cnb` shows the cost directly — it accepts a
+   connection and sends a fixed response, never reading the request. A server that cannot read a
+   request cannot route, parse headers, or answer conditionally on input, so the socket surface does
+   not carry `burn`/`playground` as it stands. This is one native in the same runtime-layer shape as
+   `send`, not a design question.
+7. **Not a gap**: JSON. An encoder/decoder is pure computation over byte slices, entirely writable in
    Cinnabar today, no native surface needed.
 
 ### 3.3 The hard part: codegen's dependency on LLVM's C++ API
@@ -470,8 +476,10 @@ whether the ones after it ever happen:
 1. ~~Run the real `nix develop` gate to confirm the codegen fixes~~ — done in §1d: the whole five-round
    effort is now proven correct against real LLVM 21, not just believed correct.
 2. ~~Add the `Process` native surface~~ — started in §1e (`spawn`/`wait`); piped stdout/stderr capture
-   (`pipe2`/`dup2`) is the natural next slice. Add the `File` extensions (§3.2.2) — both are useful to
-   ordinary Cinnabar programs immediately, not just to a future self-hosted compiler.
+   (`pipe2`/`dup2`) is the natural next slice. Add the `File` extensions (§3.2.2) and socket receive
+   (§3.2.6) — all are useful to ordinary Cinnabar programs immediately, not just to a future
+   self-hosted compiler, and receive is the one that decides whether the existing socket surface can
+   serve a request at all.
 3. Add a string-formatting surface (§3.2.3) — same argument, broadly useful on its own.
 4. Start the non-tail-recursion rewrites (§3.1) stage by stage, starting with the smallest/most
    self-contained (the parser is more tractable than `emitter.rs`), each one a real, independently
