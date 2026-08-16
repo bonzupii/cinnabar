@@ -404,7 +404,7 @@ fn parse_module(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &m
         }
     }
     let end = expect_end(pos, names, nodes, errors)?;
-    Some(alloc_item(nodes, ITEM_MODULE, file, start, end, is_pub, &[name, children, NONE]))
+    Some(alloc_item(nodes, ITEM_MODULE, file, start, end, is_pub, &[name, children]))
 }
 
 fn parse_use(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, is_pub: i64) -> Option<i64> {
@@ -557,7 +557,7 @@ fn parse_fun_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: 
     let fn_id = parse_fun_body_or_sig(pos, names, nodes, lists, errors, body_required)?;
     let end = node_end(nodes, fn_id);
     let kind = if is_native == 1 { ITEM_NATIVE_FUN } else { ITEM_FUN };
-    Some(alloc_item(nodes, kind, file, start, end, is_pub, &[fn_id, NONE, NONE]))
+    Some(alloc_item(nodes, kind, file, start, end, is_pub, &[fn_id]))
 }
 
 fn parse_const(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, is_pub: i64) -> Option<i64> {
@@ -585,7 +585,7 @@ fn parse_native_type(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, list
     let name = expect_word(pos, nodes, errors)?;
     let type_params = parse_type_params(pos, names, nodes, lists, errors)?;
     let end = node_end(nodes, *pos - 1);
-    Some(alloc_item(nodes, ITEM_NATIVE_TYPE, file, start, end, is_pub, &[name, type_params, NONE]))
+    Some(alloc_item(nodes, ITEM_NATIVE_TYPE, file, start, end, is_pub, &[name, type_params]))
 }
 
 fn parse_fun_body_or_sig(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, body_required: i64) -> Option<i64> {

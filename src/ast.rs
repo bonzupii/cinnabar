@@ -704,6 +704,25 @@ pub const NAT_RUNTIME_ARGS: i64 = 35;
 pub const NAT_PROCESS_SPAWN: i64 = 37;
 pub const NAT_PROCESS_WAIT: i64 = 38;
 
+// Native ownership modes, attached per native function by the resolver;
+// typecheck and borrow read them via `sym_native_mode`.
+
+pub const NAT_MODE_NONE: i64 = 0;
+pub const NAT_MODE_VIEW: i64 = 1;
+pub const NAT_MODE_EXTRACT: i64 = 2;
+pub const NAT_MODE_TRANSFER: i64 = 3;
+pub const NAT_MODE_CREATE: i64 = 4;
+pub const NAT_MODE_CONSUME: i64 = 5;
+pub const NAT_MODE_MUTATE: i64 = 6;
+pub const NAT_MODE_BORROW: i64 = 7;
+pub const NAT_MODE_EFFECT: i64 = 8;
+
+// Native-type layout kinds, declared per type and lowered from by codegen.
+
+pub const NATIVE_LAYOUT_SCALAR: i64 = 1;
+pub const NATIVE_LAYOUT_PAIR: i64 = 2;
+pub const NATIVE_LAYOUT_TRIPLE: i64 = 3;
+
 /// The source spelling of a binary operator opcode.  Every stage that names
 /// an operator in a diagnostic reads it from here, so a message from the
 /// typechecker and one from codegen cannot disagree about what `BIN_SHL` is
@@ -772,6 +791,16 @@ pub fn tyinfo_is_linear(nodes: &[i64], key: i64) -> i64 {
         NONE
     } else {
         node_get(nodes, row, NODE_FILE)
+    }
+}
+
+/// The resolved type symbol of a canonical type descriptor, or NONE.
+pub fn tyinfo_sym_of(nodes: &[i64], key: i64) -> i64 {
+    let row = find_tyinfo(nodes, key);
+    if row == NONE {
+        NONE
+    } else {
+        node_c(nodes, row)
     }
 }
 
@@ -1087,19 +1116,32 @@ pub fn alloc_localfact(nodes: &mut Vec<i64>, source: i64, name: i64, key: i64, i
     )
 }
 
-// Tail-safety-fact rows.  (tag=NODE_CALLFACT, a=call expr id, b=tail-safe
-// flag, c=frame-local root name id or NONE).  The typechecker computes, for
-// every call, whether any argument carries a reference rooted in the
-// current function's frame — which is what would make LLVM's `tail` marker
-// a false promise that the callee never touches the caller's frame — and
-// attaches the result so codegen marks a call `tail` only when it is safe
-// (Single-Fact Rule).  Slot `c` names the offending frame-local binding for
-// the self-recursion rejection diagnostic; it is NONE when the call is
-// tail-safe.
+// Call-fact rows: a=call expr id, b=tail-safe flag, c=frame-local root
+// name id or NONE, d=extraction container binding name id or NONE.  One
+// row per call, shared by the tail-safety and extraction writers.
 
 pub const NODE_CALLFACT: i64 = 21;
 
+pub fn callfact_row_of(nodes: &[i64], call: i64) -> i64 {
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_CALLFACT && node_a(nodes, idx) == call {
+            return idx;
+        }
+        idx += 1;
+    }
+    NONE
+}
+
+// Find-or-allocate: the row is per call, and both fact writers (tail
+// safety and extraction) target the same row, whichever runs first.
 pub fn alloc_callfact(nodes: &mut Vec<i64>, call: i64, tail_safe: i64, root_name: i64) -> i64 {
+    let existing = callfact_row_of(nodes, call);
+    if existing != NONE {
+        node_set_b(nodes, existing, tail_safe);
+        node_set_c(nodes, existing, root_name);
+        return existing;
+    }
     alloc_node(
         nodes,
         &[NODE_CALLFACT, NO_FILE, NO_FILE, NO_FILE, call, tail_safe, root_name, NONE, NONE, NONE],
@@ -1107,37 +1149,126 @@ pub fn alloc_callfact(nodes: &mut Vec<i64>, call: i64, tail_safe: i64, root_name
 }
 
 pub fn callfact_tail_safe_of(nodes: &[i64], call: i64) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_CALLFACT && node_a(nodes, idx) == call {
-            return node_b(nodes, idx);
-        }
-        idx += 1;
+    let row = callfact_row_of(nodes, call);
+    if row == NONE {
+        0
+    } else {
+        node_b(nodes, row)
     }
-    0
 }
 
 pub fn callfact_root_name_of(nodes: &[i64], call: i64) -> i64 {
+    let row = callfact_row_of(nodes, call);
+    if row == NONE {
+        NONE
+    } else {
+        node_c(nodes, row)
+    }
+}
+
+// The container binding of an extract-mode call, attached by the
+// typechecker; NONE for every other call.
+pub fn callfact_extraction_of(nodes: &[i64], call: i64) -> i64 {
+    let row = callfact_row_of(nodes, call);
+    if row == NONE {
+        NONE
+    } else {
+        node_d(nodes, row)
+    }
+}
+
+// Pattern-binding-fact rows: a=pattern node, b=match scrutinee expr.
+
+pub const NODE_PATFACT: i64 = 22;
+
+pub fn alloc_patfact(nodes: &mut Vec<i64>, pat: i64, scrutinee: i64) -> i64 {
+    alloc_node(nodes, &[NODE_PATFACT, NO_FILE, NO_FILE, NO_FILE, pat, scrutinee, NONE, NONE, NONE, NONE])
+}
+
+// Native-registry fact rows: a=sym, b=declared mode, c=derived mode.
+
+pub const NODE_NATFACT: i64 = 23;
+
+pub fn alloc_natfact(nodes: &mut Vec<i64>, sym: i64, declared: i64) -> i64 {
+    alloc_node(nodes, &[NODE_NATFACT, NO_FILE, NO_FILE, NO_FILE, sym, declared, NAT_MODE_NONE, NONE, NONE, NONE])
+}
+
+pub fn natfact_of(nodes: &[i64], sym: i64) -> i64 {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_CALLFACT && node_a(nodes, idx) == call {
-            return node_c(nodes, idx);
+        if node_tag(nodes, idx) == NODE_NATFACT && node_a(nodes, idx) == sym {
+            return idx;
         }
         idx += 1;
     }
     NONE
 }
 
-// Pattern-binding-fact rows.  (tag=NODE_PATFACT, a=pattern node, b=match
-// scrutinee expr id).  The typechecker attaches one per binding pattern
-// (PAT_BIND and the rest binder of PAT_ARRAY) so the tail-safety trace can
-// resolve a match-arm binding's origin to the scrutinee it destructures
-// without re-walking the arm list (Single-Fact Rule).
+pub fn natfact_declared_mode_of(nodes: &[i64], sym: i64) -> i64 {
+    let row = natfact_of(nodes, sym);
+    if row == NONE {
+        NAT_MODE_NONE
+    } else {
+        node_b(nodes, row)
+    }
+}
 
-pub const NODE_PATFACT: i64 = 22;
+pub fn natfact_set_derived_mode(nodes: &mut [i64], sym: i64, mode: i64) -> bool {
+    let row = natfact_of(nodes, sym);
+    if row == NONE {
+        false
+    } else {
+        node_set_c(nodes, row, mode)
+    }
+}
 
-pub fn alloc_patfact(nodes: &mut Vec<i64>, pat: i64, scrutinee: i64) -> i64 {
-    alloc_node(nodes, &[NODE_PATFACT, NO_FILE, NO_FILE, NO_FILE, pat, scrutinee, NONE, NONE, NONE, NONE])
+// The ownership mode a native function was classified into at resolution;
+// NAT_MODE_NONE when the symbol has no registry row (it was already
+// rejected) or classification never ran.
+pub fn sym_native_mode(nodes: &[i64], sym: i64) -> i64 {
+    let row = natfact_of(nodes, sym);
+    if row == NONE {
+        NAT_MODE_NONE
+    } else {
+        node_c(nodes, row)
+    }
+}
+
+// Native-type-registry rows: a=sym, b=container role (0/1), c=layout kind.
+
+pub const NODE_NATTYPE: i64 = 24;
+
+pub fn alloc_nattype(nodes: &mut Vec<i64>, sym: i64, role: i64, layout: i64) -> i64 {
+    alloc_node(nodes, &[NODE_NATTYPE, NO_FILE, NO_FILE, NO_FILE, sym, role, layout, NONE, NONE, NONE])
+}
+
+pub fn nattype_of(nodes: &[i64], sym: i64) -> i64 {
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_NATTYPE && node_a(nodes, idx) == sym {
+            return idx;
+        }
+        idx += 1;
+    }
+    NONE
+}
+
+pub fn nattype_is_container(nodes: &[i64], sym: i64) -> i64 {
+    let row = nattype_of(nodes, sym);
+    if row == NONE {
+        0
+    } else {
+        node_b(nodes, row)
+    }
+}
+
+pub fn nattype_layout_of(nodes: &[i64], sym: i64) -> i64 {
+    let row = nattype_of(nodes, sym);
+    if row == NONE {
+        NONE
+    } else {
+        node_c(nodes, row)
+    }
 }
 
 pub fn patfact_scrutinee_of(nodes: &[i64], pat: i64) -> i64 {

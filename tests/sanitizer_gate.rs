@@ -105,7 +105,8 @@ impl Drop for TempDirGuard {
     }
 }
 
-/// Builds `fixture` through the instrumented link mode.
+/// Builds `fixture` through the instrumented link mode, linking against
+/// the default libc every fixture shares.
 fn build_instrumented(cinnabar: &str, fixture: &Path, out: &Path) -> Result<(), String> {
     let output = Command::new(cinnabar)
         .arg(fixture)
@@ -302,7 +303,6 @@ fn every_selected_fixture_is_clean_under_memcheck() {
         }
     }
     let guard = TempDirGuard(dir.clone());
-
     let mut checked = 0usize;
     let mut idx = 0usize;
     while idx < EXPECT_OK.len() {

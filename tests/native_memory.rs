@@ -19,12 +19,11 @@
 //! 1. `Memory.write_u8` stores exactly `i8` to the byte it computed, and
 //!    `Memory.read_u8` loads exactly `i8` from it. A wider access is the
 //!    reported "overreads the allocation by 7 bytes" defect.
-//! 2. Every native-handle constructor zero-fills the handle across its
-//!    whole lowered layout before storing any field into it. Handles are
-//!    moved and returned *by value* (`deallocate` takes a `Block` as
-//!    `{ ptr, i64, i64 }`), so a field a constructor skipped is read as
-//!    uninitialized stack at the first move — the shape of the reported
-//!    "`deallocate` frees a garbage pointer" defect.
+//! 2. Every native-handle constructor lowers its handle to the layout kind
+//!    the registry declares (scalar `i64`, pair `{ ptr, i64 }`, triple
+//!    `{ ptr, i64, i64 }`) and writes exactly that layout's slots. A
+//!    handle is moved by value, so a skipped slot is uninitialized stack
+//!    at the first move.
 //! 3. `Memory.deallocate` frees the pointer held in the handle's data
 //!    field, not some other field.
 //! 4. `Terminal.read_line` reports a failed buffer growth instead of
@@ -158,67 +157,72 @@ fn load_from(body: &str, src: &str) -> String {
     String::new()
 }
 
-fn line_index(body: &str, needle: &str) -> Option<usize> {
-    for (idx, line) in body.lines().enumerate() {
-        if line.contains(needle) {
-            return Some(idx);
+/// The lowered layout of each native handle kind.
+const SCALAR_HANDLE_TY: &str = "i64";
+const PAIR_HANDLE_TY: &str = "{ ptr, i64 }";
+const TRIPLE_HANDLE_TY: &str = "{ ptr, i64, i64 }";
+
+/// Finds the handle local a constructor allocates and asserts its lowered type.
+fn handle_alloc_of(body: &str, what: &str, name: &str, ty: &str) -> String {
+    let alloc = format!("alloca {}", ty);
+    for line in body.lines() {
+        if line.contains(&alloc) && line.contains(name) {
+            if let Some((lhs, _rhs)) = line.split_once(" = ") {
+                return lhs.trim().to_string();
+            }
         }
     }
-    None
+    assert!(
+        false,
+        "{} does not allocate its `{}` handle as {}:\n{}",
+        what,
+        name,
+        ty,
+        body
+    );
+    String::new()
 }
 
-/// Asserts that the native handle a constructor builds is zero-filled
-/// across its whole lowered layout before any field is stored into it.
-///
-/// The check is ordering-sensitive on purpose: a zero-fill emitted *after*
-/// the field stores would erase them, and a zero-fill of a narrower type
-/// than the handle would leave the tail uninitialized, so both the
-/// aggregate type and its position relative to the first field access are
-/// asserted.
-fn assert_handle_zero_filled(body: &str, what: &str) {
-    let fill = format!("store {} zeroinitializer, ptr ", HANDLE_TY);
-    let fill_line = match line_index(body, &fill) {
-        Some(idx) => idx,
-        None => {
-            assert!(
-                false,
-                "{} does not zero-fill the native handle across its whole layout \
-                 (no `store {} zeroinitializer`); a field it never writes is read \
-                 as uninitialized stack when the handle is moved by value",
-                what, HANDLE_TY
-            );
-            return;
+/// Asserts a constructor stores through exactly `gep_count` slots of the
+/// handle (0 for a scalar handle: one direct store).
+fn assert_slots_written(body: &str, handle: &str, what: &str, gep_count: usize) {
+    if gep_count == 0 {
+        let store = format!(", ptr {},", handle);
+        for line in body.lines() {
+            if line.starts_with("store ") && line.contains(&store) {
+                return;
+            }
         }
-    };
-    let slot = match body.lines().nth(fill_line) {
-        Some(line) => match line.rsplit_once(", ptr ") {
-            Some((_lhs, rest)) => match rest.split_once(',') {
-                Some((name, _align)) => name.to_string(),
-                None => rest.to_string(),
-            },
-            None => String::new(),
-        },
-        None => String::new(),
-    };
-    assert!(!slot.is_empty(), "{}: cannot read the zero-filled handle slot", what);
-    let field_access = format!("getelementptr inbounds nuw {}, ptr {},", HANDLE_TY, slot);
-    match line_index(body, &field_access) {
-        Some(idx) => assert!(
-            idx > fill_line,
-            "{} stores into handle {} at line {} before zero-filling it at line {}; \
-             the zero-fill would erase the field",
+        assert!(
+            false,
+            "{} does not store its scalar handle {}:\n{}",
             what,
-            slot,
-            idx,
-            fill_line
-        ),
-        None => {}
+            handle,
+            body
+        );
+        return;
     }
+    let gep = format!("ptr {},", handle);
+    let mut count = 0usize;
+    for line in body.lines() {
+        if line.contains("getelementptr") && line.contains(&gep) {
+            count += 1;
+        }
+    }
+    assert!(
+        count == gep_count,
+        "{} writes {} slot(s) of handle {} (expected {}):\n{}",
+        what,
+        count,
+        handle,
+        gep_count,
+        body
+    );
 }
 
 /// The lowered layout every native handle shares (`native_llvm` in
 /// `src/codegen/types.rs`): data pointer, length, capacity.
-const HANDLE_TY: &str = "{ ptr, i64, i64 }";
+
 
 #[test]
 fn memory_natives_access_exactly_one_byte() {
@@ -266,8 +270,8 @@ fn memory_natives_access_exactly_one_byte() {
 }
 
 #[test]
-fn native_handle_constructors_initialize_every_field() {
-    let dir = temp_dir("handle_init");
+fn native_handle_constructors_write_their_declared_layout() {
+    let dir = temp_dir("handle_layout");
     match std::fs::create_dir_all(&dir) {
         Ok(()) => {}
         Err(err) => {
@@ -277,29 +281,45 @@ fn native_handle_constructors_initialize_every_field() {
     }
     let guard = TempDirGuard(dir.clone());
 
-    // `Memory.allocate` uses only the data and length fields of the shared
-    // handle layout, `Collections.string_from_slice` likewise; both left
-    // the capacity field uninitialized before Milestone 3.
+    // Pair handles (data pointer + length): both slots written, no capacity
+    // slot left over from the old uniform triple envelope.
     let mem_ir = emit_ir(&dir, "mem_byte_access");
-    assert_handle_zero_filled(&function_body(&mem_ir, "@Memory_allocate"), "Memory.allocate");
-
-    let vec_ir = emit_ir(&dir, "vec_pop_drain");
-    assert_handle_zero_filled(
-        &function_body(&vec_ir, "@Collections_vec_new"),
-        "Collections.vec_new",
-    );
-
-    let map_ir = emit_ir(&dir, "hash_map_remove_drain");
-    assert_handle_zero_filled(
-        &function_body(&map_ir, "@Collections_hash_map_new"),
-        "Collections.hash_map_new",
-    );
+    let mem_body = function_body(&mem_ir, "@Memory_allocate");
+    let block = handle_alloc_of(&mem_body, "Memory.allocate", "block", PAIR_HANDLE_TY);
+    assert_slots_written(&mem_body, &block, "Memory.allocate", 2);
 
     let str_ir = emit_ir(&dir, "utf8_validation");
-    assert_handle_zero_filled(
-        &function_body(&str_ir, "@Collections_string_from_slice"),
-        "Collections.string_from_slice",
-    );
+    let str_body = function_body(&str_ir, "@Collections_string_from_slice");
+    let string = handle_alloc_of(&str_body, "Collections.string_from_slice", "str", PAIR_HANDLE_TY);
+    assert_slots_written(&str_body, &string, "Collections.string_from_slice", 2);
+
+    // Triple handles (data pointer + length + capacity): all three written.
+    let vec_ir = emit_ir(&dir, "vec_pop_drain");
+    let vec_body = function_body(&vec_ir, "@Collections_vec_new");
+    let vec = handle_alloc_of(&vec_body, "Collections.vec_new", "vec", TRIPLE_HANDLE_TY);
+    assert_slots_written(&vec_body, &vec, "Collections.vec_new", 3);
+
+    let map_ir = emit_ir(&dir, "hash_map_remove_drain");
+    let map_body = function_body(&map_ir, "@Collections_hash_map_new");
+    let map = handle_alloc_of(&map_body, "Collections.hash_map_new", "map", TRIPLE_HANDLE_TY);
+    assert_slots_written(&map_body, &map, "Collections.hash_map_new", 3);
+
+    // Scalar handles: the bare descriptor integer, one direct store, no
+    // struct envelope at all.
+    let file_ir = emit_ir(&dir, "file_roundtrip");
+    let file_body = function_body(&file_ir, "@File_open");
+    let file = handle_alloc_of(&file_body, "File.open", "file", SCALAR_HANDLE_TY);
+    assert_slots_written(&file_body, &file, "File.open", 0);
+
+    let net_ir = emit_ir(&dir, "net_primitives");
+    let net_body = function_body(&net_ir, "@Net_socket");
+    let sock = handle_alloc_of(&net_body, "Net.socket", "sock", SCALAR_HANDLE_TY);
+    assert_slots_written(&net_body, &sock, "Net.socket", 0);
+
+    let proc_ir = emit_ir(&dir, "process_spawn_wait");
+    let proc_body = function_body(&proc_ir, "@Process_spawn");
+    let child = handle_alloc_of(&proc_body, "Process.spawn", "child", SCALAR_HANDLE_TY);
+    assert_slots_written(&proc_body, &child, "Process.spawn", 0);
 
     drop(guard);
 }
@@ -469,7 +489,7 @@ fn handle_field(body: &str, index: u32) -> String {
             Some(pair) => pair,
             None => continue,
         };
-        if value.starts_with(&format!("getelementptr inbounds nuw {}, ptr", HANDLE_TY)) && value.ends_with(&suffix) {
+        if value.starts_with(&format!("getelementptr inbounds nuw {}, ptr", PAIR_HANDLE_TY)) && value.ends_with(&suffix) {
             return name.to_string();
         }
     }

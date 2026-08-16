@@ -132,8 +132,6 @@ const KEYWORDS: &[&str] = &[
     "impl", "try", "rest",
 ];
 
-const BAIT_PREFIXES: &[&str] = &["Block", "Vec", "String", "HashMap", "Socket", "Fd"];
-
 #[derive(Clone, Copy)]
 struct Rng(u64);
 
@@ -278,19 +276,6 @@ fn unique_snake(rng: &mut Rng, used: &mut Vec<String>) -> String {
     }
     used.push(name.clone());
     name
-}
-
-// Custom native handles sometimes wear bait prefixes matching the builtin
-// native surfaces.  If linearity or lowering were keyed on those names, the
-// suffixed names would behave differently from purely random ones and the
-// negative corpus would catch it.
-fn unique_handle(rng: &mut Rng, used: &mut Vec<String>) -> String {
-    let idx = rng.below(BAIT_PREFIXES.len() as u64) as usize;
-    let prefix = match BAIT_PREFIXES.get(idx) {
-        Some(p) => *p,
-        None => "",
-    };
-    unique_pascal(rng, used, prefix)
 }
 
 // ---- arithmetic semantics shared by helper functions and the generator ----
@@ -2467,14 +2452,11 @@ fn exercise_declarations(g: &mut Gen) {
     }
 }
 
+// The linearity probes use the registered `Memory` surface: an invented
+// `nat fun` would be rejected as an unknown native, not probed.  Only
+// the binding names stay random.
 fn generate_negative(rng: &mut Rng, shape: usize) -> (String, &'static str) {
     let mut used: Vec<String> = vec!["main".to_string()];
-    let m = unique_pascal(rng, &mut used, "");
-    let err_ty = unique_pascal(rng, &mut used, "");
-    let fault = unique_pascal(rng, &mut used, "");
-    let handle = unique_handle(rng, &mut used);
-    let make = unique_snake(rng, &mut used);
-    let destroy = unique_snake(rng, &mut used);
     let h1 = unique_snake(rng, &mut used);
     let h2 = unique_snake(rng, &mut used);
     let mut src = String::new();
@@ -2483,53 +2465,49 @@ fn generate_negative(rng: &mut Rng, shape: usize) -> (String, &'static str) {
         src.push('\n');
     };
     push(&format!("#!| fuzzer-generated linearity probe (shape {}) |#", shape));
-    push(&format!("pub mod {}", m));
-    push(&format!("  pub type {}", err_ty));
-    push(&format!("    pub {}", fault));
+    push("pub mod Memory");
+    push("  pub nat type Block");
+    push("  pub type Error");
+    push("    pub AllocationFailed(Usize)");
     push("  end");
-    push("");
-    push(&format!("  pub nat type {}", handle));
-    push(&format!(
-        "  pub nat fun {}() impure Result({}, {})",
-        make, handle, err_ty
-    ));
+    push("  pub nat fun allocate(size: Usize) impure Result(Block, Error)");
     if shape != 0 {
-        push(&format!("  pub nat fun {}(h: {}) impure Unit", destroy, handle));
+        push("  pub nat fun deallocate(block: Block) impure Unit");
     }
     push("end");
     push("");
-    push(&format!("use {}.{}", m, make));
+    push("use Memory.allocate");
     if shape != 0 {
-        push(&format!("use {}.{}", m, destroy));
+        push("use Memory.deallocate");
     }
     push("");
     push("pub fun main() impure I64");
-    push(&format!("  val {} = match {}()", h1, make));
+    push(&format!("  val {} = match allocate(8)", h1));
     push("    Ok(value) => value");
-    push(&format!("    Err({}.{}) => return 0", m, fault));
+    push("    Err(error) => return 0");
     push("  end");
     let want: &'static str;
     if shape == 0 {
         want = "must be consumed";
     } else if shape == 1 {
-        push(&format!("  {}({})", destroy, h1));
-        push(&format!("  {}({})", destroy, h1));
+        push(&format!("  deallocate({})", h1));
+        push(&format!("  deallocate({})", h1));
         want = "use of moved value";
     } else if shape == 2 {
-        push(&format!("  val {} = match {}()", h2, make));
+        push(&format!("  val {} = match allocate(8)", h2));
         push("    Ok(value) => value");
-        push(&format!("    Err({}.{}) => return 0", m, fault));
+        push("    Err(error) => return 0");
         push("  end");
-        push(&format!("  {}({})", destroy, h1));
+        push(&format!("  deallocate({})", h1));
         want = "must be consumed";
     } else {
-        push(&format!("  val {} = match {}()", h2, make));
+        push(&format!("  val {} = match allocate(8)", h2));
         push("    Ok(value) => value");
-        push(&format!("    Err({}.{}) => return 0", m, fault));
+        push("    Err(error) => return 0");
         push("  end");
-        push(&format!("  {}({})", destroy, h1));
-        push(&format!("  {}({})", destroy, h1));
-        push(&format!("  {}({})", destroy, h2));
+        push(&format!("  deallocate({})", h1));
+        push(&format!("  deallocate({})", h1));
+        push(&format!("  deallocate({})", h2));
         want = "use of moved value";
     }
     push("  return 0");

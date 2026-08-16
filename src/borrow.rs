@@ -274,19 +274,13 @@ fn is_linear_key(ctx: &mut Ctx, key: i64) -> i64 {
     }
 }
 
-fn key_args_of_key(nodes: &[i64], key: i64) -> i64 {
-    let row = find_tyinfo(nodes, key);
-    if row == NONE {
-        NONE
-    } else {
-        node_d(nodes, row)
-    }
-}
-
-// A native type holding type arguments is a container: it carries element
-// types (Vec(T), HashMap(K, V)); a plain handle (Block, String) has none.
+// A native type whose registry row declares the container role.
 fn is_container_key(nodes: &[i64], key: i64) -> bool {
-    ty_kind_of(nodes, key) == TYD_NATIVE && key_args_of_key(nodes, key) != NONE
+    if ty_kind_of(nodes, key) != TYD_NATIVE {
+        return false;
+    }
+    let sym = tyinfo_sym_of(nodes, key);
+    sym != NONE && nattype_is_container(nodes, sym) == 1
 }
 
 // A container holds linear elements when its typechecker-attached flag says
@@ -297,28 +291,25 @@ fn container_has_linear_elem(ctx: &mut Ctx, key: i64) -> bool {
     is_container_key(ctx.1, key) && tyinfo_has_linear_elems(ctx.1, key) == 1
 }
 
-// The native opcode attached to `expr`'s monomorphic call instance, or
-// NONE for non-native calls.  The callee path is deliberately ignored here:
-// resolution and typechecking already attached the symbol and instance, so
-// borrow checking consumes that fact instead of resolving the path again.
-fn native_op_of(ctx: &mut Ctx, expr: i64) -> i64 {
+// The resolver-attached ownership mode of `expr`'s callee, or
+// NAT_MODE_NONE for a non-native call.
+fn native_mode_of(ctx: &mut Ctx, expr: i64) -> i64 {
     let inst = expr_sym_of(ctx.1, expr);
     if node_tag(ctx.1, inst) != NODE_INST {
-        return NONE;
+        return NAT_MODE_NONE;
     }
     let fn_slot = inst_fn_of(ctx.1, inst);
     if node_tag(ctx.1, fn_slot) != NODE_SYM || node_a(ctx.1, fn_slot) != SYM_NATIVE_FUN {
-        return NONE;
+        return NAT_MODE_NONE;
     }
-    sym_native_op(ctx.1, fn_slot)
+    sym_native_mode(ctx.1, fn_slot)
 }
 
 fn call_is_create(ctx: &mut Ctx, expr: i64) -> bool {
     if node_tag(ctx.1, expr) != NODE_EXPR || node_a(ctx.1, expr) != EXPR_CALL {
         return false;
     }
-    let op = native_op_of(ctx, expr);
-    op == NAT_VEC_NEW || op == NAT_HASH_MAP_NEW
+    native_mode_of(ctx, expr) == NAT_MODE_CREATE
 }
 
 // A literal `true` loop condition can never fall through: the loop's only
@@ -856,10 +847,13 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         if has_init == 1 && create_provenance(ctx, b, init) == 1 {
             b.9.push(binding);
         }
-        if has_init == 1 && node_a(ctx.1, init) == EXPR_CALL && node_c(ctx.1, init) != NONE {
-            let container = lookup_name(b, node_c(ctx.1, init));
-            if container >= 0 {
-                b.8.push((binding, container));
+        if has_init == 1 && node_a(ctx.1, init) == EXPR_CALL {
+            let container_name = callfact_extraction_of(ctx.1, init);
+            if container_name != NONE {
+                let container = lookup_name(b, container_name);
+                if container >= 0 {
+                    b.8.push((binding, container));
+                }
             }
         }
         // A container binding is empty only when its value has empty
@@ -1741,7 +1735,7 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
     let inst = expr_sym_of(ctx.1, expr);
     let args = node_d(ctx.1, expr);
     let argc = list_len(ctx.2, args);
-    let op = native_op_of(ctx, expr);
+    let call_mode = native_mode_of(ctx, expr);
     if node_tag(ctx.1, inst) != NODE_INST {
         let method = trait_method_of(ctx, expr);
         if method == NONE {
@@ -1763,7 +1757,7 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
             let mode = param_mode_of(ctx.1, pty);
             let mut arg_prod: Vec<i64> = Vec::new();
             expr_effects(f, b, ctx, arg, mode, ret, &mut arg_prod);
-            if mode == MODE_MUT && op != NAT_VEC_POP && op != NAT_HASH_MAP_REMOVE {
+            if mode == MODE_MUT && call_mode != NAT_MODE_EXTRACT {
                 fill_container_if_mut_arg(f, b, ctx, arg);
             }
             arg_prods.push(arg_prod);
@@ -1792,7 +1786,7 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
         };
         let mut arg_prod: Vec<i64> = Vec::new();
         expr_effects(f, b, ctx, arg, mode, ret, &mut arg_prod);
-        if mode == MODE_MUT && op != NAT_VEC_POP && op != NAT_HASH_MAP_REMOVE {
+        if mode == MODE_MUT && call_mode != NAT_MODE_EXTRACT {
             fill_container_if_mut_arg(f, b, ctx, arg);
         }
         arg_prods.push(arg_prod);
@@ -1800,7 +1794,7 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
     }
     let ret_key = inst_ret_of(ctx.1, inst);
     if is_ref_key(ctx.1, ret_key) {
-        if op == NAT_SLICE_VIEW {
+        if call_mode == NAT_MODE_VIEW {
             prod.clear();
             if let Some(first_prod) = arg_prods.first() {
                 append_prod_unique(prod, first_prod);
@@ -1811,29 +1805,34 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
     } else {
         prod.clear();
     }
-    if op == NAT_VEC_FREE || op == NAT_HASH_MAP_FREE {
+    if call_mode == NAT_MODE_CONSUME {
         let free_arg = list_first(ctx.2, args);
         let container = container_binding_of(b, ctx, free_arg);
-        if container >= 0 {
-            emit_op(f, OP_CONT_FREE, container, NONE, (0, 0, 0), expr_span(ctx.1, expr));
-        } else if container_has_linear_elem(ctx, expr_ty_of(ctx.1, free_arg)) && create_provenance(ctx, b, free_arg) != 1 {
-            // The freed value isn't a named binding (e.g. `vec_free(make_full_vec())`,
-            // freeing a call result directly) — the drain check above is keyed by
-            // binding and has nothing to key off of here. `create_provenance` still
-            // clears an anonymous value that's directly and provably fresh (a native
-            // create call, or a match on one) the same way it does for a `let`
-            // binding; anything else unresolvable starts MayContain, symmetric with
-            // a by-value container *parameter* (see the OP_CONT_MAY emitted for one
-            // above) — there's no binding to attach a deferred OP_CONT_FREE to and
-            // no later point where one could become resolvable, so the answer has
-            // to be immediate.
-            push_error(
-                ctx.3,
-                "cannot free container holding linear elements: drain the container (pop all elements) before freeing",
-                node_file(ctx.1, expr),
-                node_start(ctx.1, expr),
-                node_end(ctx.1, expr),
-            );
+        // Only a container holding linear elements carries a drain
+        // obligation; consuming a plain handle (or a container of
+        // scalars) is an ordinary consume with nothing to drain.
+        if free_arg != NONE && container_has_linear_elem(ctx, expr_ty_of(ctx.1, free_arg)) {
+            if container >= 0 {
+                emit_op(f, OP_CONT_FREE, container, NONE, (0, 0, 0), expr_span(ctx.1, expr));
+            } else if create_provenance(ctx, b, free_arg) != 1 {
+                // The freed value isn't a named binding (e.g. `vec_free(make_full_vec())`,
+                // freeing a call result directly) — the drain check above is keyed by
+                // binding and has nothing to key off of here. `create_provenance` still
+                // clears an anonymous value that's directly and provably fresh (a native
+                // create call, or a match on one) the same way it does for a `let`
+                // binding; anything else unresolvable starts MayContain, symmetric with
+                // a by-value container *parameter* (see the OP_CONT_MAY emitted for one
+                // above) — there's no binding to attach a deferred OP_CONT_FREE to and
+                // no later point where one could become resolvable, so the answer has
+                // to be immediate.
+                push_error(
+                    ctx.3,
+                    "cannot free container holding linear elements: drain the container (pop all elements) before freeing",
+                    node_file(ctx.1, expr),
+                    node_start(ctx.1, expr),
+                    node_end(ctx.1, expr),
+                );
+            }
         }
     }
     cur(b)
@@ -1885,8 +1884,13 @@ fn match_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod:
     let scrut_root = path_root_binding_of(ctx, b, scrutinee);
     let scrut_key = expr_ty_of(ctx.1, scrutinee);
     let known_empty = create_provenance(ctx, b, scrutinee);
-    let extr_container = if node_a(ctx.1, scrutinee) == EXPR_CALL && node_c(ctx.1, scrutinee) != NONE {
-        lookup_name(b, node_c(ctx.1, scrutinee))
+    let extr_container = if node_a(ctx.1, scrutinee) == EXPR_CALL {
+        let container_name = callfact_extraction_of(ctx.1, scrutinee);
+        if container_name != NONE {
+            lookup_name(b, container_name)
+        } else {
+            NONE
+        }
     } else if scrut_root != NONE {
         extraction_container_of_binding(&b.8, scrut_root)
     } else {
@@ -3733,12 +3737,12 @@ pub mod Memory
   end
   pub nat fun allocate(size: Usize) impure Result(Block, Error)
   pub nat fun deallocate(block: Block) impure Unit
-  pub nat fun touch(block: &Block) impure Unit
+  pub nat fun read_u8(block: &Block, offset: Usize) impure Result(U8, Error)
 end
 
 use Memory.allocate
 use Memory.deallocate
-use Memory.touch
+use Memory.read_u8
 
 pub type Holder
   pub block: Memory.Block
@@ -3752,7 +3756,10 @@ pub fun main() impure I64
   end
   var holder = Holder(block: block, tag: 7)
   deallocate(holder.block)
-  touch(&holder.block)
+  match read_u8(&holder.block, 0)
+    Ok(byte) => Unit
+    Err(error) => return 1
+  end
   return 0
 end
 "#;
@@ -3775,12 +3782,12 @@ pub mod Memory
   end
   pub nat fun allocate(size: Usize) impure Result(Block, Error)
   pub nat fun deallocate(block: Block) impure Unit
-  pub nat fun touch(block: &Block) impure Unit
+  pub nat fun read_u8(block: &Block, offset: Usize) impure Result(U8, Error)
 end
 
 use Memory.allocate
 use Memory.deallocate
-use Memory.touch
+use Memory.read_u8
 
 pub type Holder
   pub block: Memory.Block
@@ -3799,7 +3806,10 @@ pub fun main() impure I64
   end
   val holder = Holder(block: block, tag: 7)
   consume(holder)
-  touch(&holder.block)
+  match read_u8(&holder.block, 0)
+    Ok(byte) => Unit
+    Err(error) => return 1
+  end
   return 0
 end
 "#;
@@ -3819,12 +3829,12 @@ pub mod Memory
   end
   pub nat fun allocate(size: Usize) impure Result(Block, Error)
   pub nat fun deallocate(block: Block) impure Unit
-  pub nat fun touch(block: &Block) impure Unit
+  pub nat fun read_u8(block: &Block, offset: Usize) impure Result(U8, Error)
 end
 
 use Memory.allocate
 use Memory.deallocate
-use Memory.touch
+use Memory.read_u8
 
 pub type Holder
   pub block: Memory.Block
@@ -3837,13 +3847,16 @@ pub fun main() impure I64
     Err(error) => return 1
   end
   var holder = Holder(block: block, tag: 7)
-  touch(&holder.block)
+  match read_u8(&holder.block, 0)
+    Ok(byte) => Unit
+    Err(error) => Unit
+  end
   deallocate(holder.block)
   return 0
 end
 "#;
         let errors = errors_for(source);
-        assert!(errors.is_empty());
+        assert!(errors.is_empty(), "{:?}", errors);
     }
 
     // Pins the fix to the returned-borrow obligation: it used to apply only

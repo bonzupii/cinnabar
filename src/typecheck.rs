@@ -1022,7 +1022,10 @@ fn attach_fieldkey_facts(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) {
             let sym = node_c(nodes, idx);
             if sym != NONE {
                 let decl = sym_decl(nodes, sym);
-                if decl != NONE && node_tag(nodes, decl) == NODE_ITEM && node_a(nodes, decl) == ITEM_STRUCT {
+                if decl != NONE
+                    && node_tag(nodes, decl) == NODE_ITEM
+                    && node_a(nodes, decl) == ITEM_STRUCT
+                {
                     let fields = node_e(nodes, decl);
                     let count = list_len(lists, fields);
                     let from = declared_param_keys(nodes, lists, decl);
@@ -1525,10 +1528,8 @@ fn check_fn_sigs_item(state: &mut State, item: i64) {
         check_fn_sigs(state, node_d(state.1, item));
     } else if kind == ITEM_TRAIT {
         // Trait method signatures are canon'd here (with write) so the
-        // borrow checker reads their parameter and return keys from the
-        // attached type rows instead of re-deriving modes from raw
-        // NODE_TY tags (Single-Fact Rule).  The methods have no bodies, so
-        // only their signatures are visited.
+        // borrow checker reads their keys from the attached type rows.
+        // The methods have no bodies, so only their signatures are visited.
         let methods = node_e(state.1, item);
         let count = list_len(state.2, methods);
         let mut idx = 0i64;
@@ -1603,12 +1604,9 @@ fn check_fn(state: &mut State, fn_node: i64, self_key: i64, is_main: i64) {
     state.17 = saved_ret_ty_node;
 }
 
-// The exit-status enum contract (MANIFESTO): 2 or 3 variants shaped
-// (Success, Failure, Optional Diagnostic(Int)) — the first two carry no
-// payload, and the optional third carries exactly one integer-scalar
-// payload used as the process exit code.  Any other enum returned from
-// `main` is a compile error; codegen derives the exit code only from
-// this shape.
+// The exit-status enum shape: 2 or 3 variants (Success, Failure, and an
+// optional integer-scalar Diagnostic) whose third variant's payload is the
+// process exit code.  Any other enum returned from `main` is an error.
 fn check_exit_status_enum(state: &mut State, esym: i64, ret_ty: i64) {
     let decl = sym_decl(state.1, esym);
     if decl == NONE || node_tag(state.1, decl) != NODE_ITEM || node_a(state.1, decl) != ITEM_ENUM {
@@ -3756,19 +3754,19 @@ fn check_call(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64
     result
 }
 
-// The container binding of an extraction call (NAT_VEC_POP or
-// NAT_HASH_MAP_REMOVE), attached to the call's type-argument slot (node_c)
-// so the borrow checker reads the binding without re-walking the argument
-// list (Single-Fact Rule).  For every other call the slot is cleared to
-// NONE: the parser's type-argument list is dead once the call is checked,
-// and borrow treats a non-NONE slot as an attached binding.
+// The container binding of an extract-mode call, written to the call's
+// dedicated fact row (`NODE_CALLFACT`, slot d) so the borrow checker
+// reads the binding without re-walking the argument list (Single-Fact
+// Rule).  The parse tree is never mutated: `EXPR_CALL` slots keep what
+// the parser wrote.  The mode comes from the resolver's registry row, not
+// from a NAT_* opcode.
 fn attach_extraction_binding(state: &mut State, expr: i64, sym: i64) {
-    let op = if sym != NONE && node_tag(state.1, sym) == NODE_SYM && sym_kind(state.1, sym) == SYM_NATIVE_FUN {
-        sym_native_op(state.1, sym)
+    let mode = if sym != NONE && node_tag(state.1, sym) == NODE_SYM && sym_kind(state.1, sym) == SYM_NATIVE_FUN {
+        sym_native_mode(state.1, sym)
     } else {
-        NAT_NONE
+        NAT_MODE_NONE
     };
-    if op == NAT_VEC_POP || op == NAT_HASH_MAP_REMOVE {
+    if mode == NAT_MODE_EXTRACT {
         let first = list_first(state.2, node_d(state.1, expr));
         let mut container_name = NONE;
         if first != NONE && node_tag(state.1, first) == NODE_EXPR {
@@ -3785,9 +3783,15 @@ fn attach_extraction_binding(state: &mut State, expr: i64, sym: i64) {
                 container_name = list_first(state.2, node_b(state.1, cur));
             }
         }
-        node_set_c(state.1, expr, container_name);
-    } else {
-        node_set_c(state.1, expr, NONE);
+        if container_name != NONE {
+            let row = callfact_row_of(state.1, expr);
+            let row = if row == NONE {
+                alloc_callfact(state.1, expr, 0, NONE)
+            } else {
+                row
+            };
+            node_set_d(state.1, row, container_name);
+        }
     }
 }
 
@@ -3869,11 +3873,8 @@ fn check_direct_call(state: &mut State, expr: i64, expected: i64, sym: i64, ret:
         }
         idx += 1;
     }
-    if kind == SYM_NATIVE_FUN {
-        let op = sym_native_op(state.1, sym);
-        if op == NAT_VEC_PUSH || op == NAT_HASH_MAP_INSERT {
-            check_container_resolvability(state, expr, param_keys);
-        }
+    if kind == SYM_NATIVE_FUN && sym_native_mode(state.1, sym) == NAT_MODE_MUTATE {
+        check_container_resolvability(state, expr, param_keys);
     }
     if !inferred_ok {
         let mut t_idx = 0i64;
@@ -3902,35 +3903,34 @@ fn check_direct_call(state: &mut State, expr: i64, expected: i64, sym: i64, ret:
     result
 }
 
-// The Resolvability Rule (MANIFESTO): a native container type C(T) may hold
-// linear elements only if its native surface provides a by-value extraction
-// function.  At every insertion call (vec_push, hash_map_insert) the element
-// key is the container's last type argument; if it is linear, the container's
-// type symbol must carry the extraction flag the resolver attached.
+// A native container type C(T) may hold linear elements only if its native
+// surface provides a by-value extraction function.  On every mutate-mode
+// call, each container-typed argument's element key is checked against the
+// extraction flag the resolver attached.
 fn check_container_resolvability(state: &mut State, expr: i64, param_keys: i64) {
     let count = list_len(state.2, param_keys);
     let mut idx = 0i64;
     while idx < count {
         let key = deref_key(state.1, list_get(state.2, param_keys, idx));
         if key_kind(state.1, key) == TYD_NATIVE {
-            let args = key_args(state.1, key);
-            if args != NONE {
-                // Any linear type argument is a linear obligation living
-                // inside the container: for HashMap(K, V) both the key and
-                // the value count, not just the value.
-                let acount = list_len(state.2, args);
-                let mut ai = 0i64;
-                let mut has_linear = 0;
-                let mut seen: Vec<i64> = Vec::new();
-                while ai < acount {
-                    if linear_of(state.1, state.2, list_get(state.2, args, ai), &mut seen) == 1 {
-                        has_linear = 1;
+            let cty_sym = key_sym_of(state.1, key);
+            if cty_sym != NONE && nattype_is_container(state.1, cty_sym) == 1 {
+                let args = key_args(state.1, key);
+                if args != NONE {
+                    // Any linear type argument is a linear obligation
+                    // living inside the container: for HashMap(K, V) both
+                    // the key and the value count, not just the value.
+                    let acount = list_len(state.2, args);
+                    let mut ai = 0i64;
+                    let mut has_linear = 0;
+                    let mut seen: Vec<i64> = Vec::new();
+                    while ai < acount {
+                        if linear_of(state.1, state.2, list_get(state.2, args, ai), &mut seen) == 1 {
+                            has_linear = 1;
+                        }
+                        ai += 1;
                     }
-                    ai += 1;
-                }
-                if has_linear == 1 {
-                    let cty_sym = key_sym_of(state.1, key);
-                    if cty_sym == NONE || node_f(state.1, cty_sym) == NONE {
+                    if has_linear == 1 && node_f(state.1, cty_sym) == NONE {
                         push_error(
                             state.3,
                             "cannot store linear element in container: its native API provides no by-value extraction operation",

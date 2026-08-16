@@ -374,12 +374,14 @@ fn opt_flags(level: &str) -> (String, String) {
 }
 
 fn link(obj_path: &Path, out: &Path, mode: LinkMode, platform: &str) -> Result<(), CodegenError> {
-    match mode {
-        LinkMode::Dynamic => link_dynamic(obj_path, out, platform),
-        LinkMode::StaticMusl => link_static_musl(obj_path, out),
-        LinkMode::WindowsMinGW => link_windows_mingw(obj_path, out),
-        LinkMode::Instrumented => link_instrumented(obj_path, out),
-    }
+    let args = match mode {
+        LinkMode::Dynamic => link_dynamic(obj_path, out, platform)?,
+        LinkMode::StaticMusl => link_static_musl(obj_path, out)?,
+        LinkMode::WindowsMinGW => link_windows_mingw(obj_path, out)?,
+        LinkMode::Instrumented => link_instrumented(obj_path, out)?,
+    };
+    let refs: Vec<&str> = args.iter().map(|arg| arg.as_str()).collect();
+    run_tool("clang", &refs)
 }
 
 // The emitted module defines `main`, which is what musl's `crt1.o` calls in
@@ -393,11 +395,16 @@ fn link(obj_path: &Path, out: &Path, mode: LinkMode, platform: &str) -> Result<(
 // PIE, so leaving it off fails the link rather than producing a different
 // binary — and the point of this mode is that it is the *same* object,
 // linked differently.
-fn link_instrumented(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
-    run_tool("clang", &["-no-pie", "-o", &out.to_string_lossy(), &obj_path.to_string_lossy()])
+fn link_instrumented(obj_path: &Path, out: &Path) -> Result<Vec<String>, CodegenError> {
+    Ok(vec![
+        "-no-pie".to_string(),
+        "-o".to_string(),
+        out.to_string_lossy().to_string(),
+        obj_path.to_string_lossy().to_string(),
+    ])
 }
 
-fn link_dynamic(obj_path: &Path, out: &Path, platform: &str) -> Result<(), CodegenError> {
+fn link_dynamic(obj_path: &Path, out: &Path, platform: &str) -> Result<Vec<String>, CodegenError> {
     let triple = match platform {
         "host" => None,
         "linux" => Some("x86_64-unknown-linux-gnu"),
@@ -408,32 +415,34 @@ fn link_dynamic(obj_path: &Path, out: &Path, platform: &str) -> Result<(), Codeg
     };
     let out_text = out.to_string_lossy();
     let obj_text = obj_path.to_string_lossy();
-    let mut args: Vec<&str> = Vec::new();
-    if let Some(value) = triple { args.push("-target"); args.push(value); }
+    let mut args: Vec<String> = Vec::new();
+    if let Some(value) = triple {
+        args.push("-target".to_string());
+        args.push(value.to_string());
+    }
     let is_darwin = platform == "darwin" || (platform == "host" && cfg!(target_os = "macos"));
-    if !is_darwin { args.push("-no-pie"); }
-    args.push("-o");
-    args.push(&out_text);
-    args.push(&obj_text);
-    run_tool("clang", &args)
+    if !is_darwin {
+        args.push("-no-pie".to_string());
+    }
+    args.push("-o".to_string());
+    args.push(out_text.to_string());
+    args.push(obj_text.to_string());
+    Ok(args)
 }
 
-fn link_windows_mingw(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
-    run_tool(
-        "clang",
-        &[
-            "-target",
-            "x86_64-w64-windows-gnu",
-            "-o",
-            &out.to_string_lossy(),
-            &obj_path.to_string_lossy(),
-            "-lws2_32",
-        ],
-    )
+fn link_windows_mingw(obj_path: &Path, out: &Path) -> Result<Vec<String>, CodegenError> {
+    Ok(vec![
+        "-target".to_string(),
+        "x86_64-w64-windows-gnu".to_string(),
+        "-o".to_string(),
+        out.to_string_lossy().to_string(),
+        obj_path.to_string_lossy().to_string(),
+        "-lws2_32".to_string(),
+    ])
 }
 
 #[cfg(all(feature = "static-musl", target_os = "linux"))]
-fn link_static_musl(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
+fn link_static_musl(obj_path: &Path, out: &Path) -> Result<Vec<String>, CodegenError> {
     let libc_path = temp_path(out, "libc.a");
     let crt1_path = temp_path(out, "crt1.o");
     let crti_path = temp_path(out, "crti.o");
@@ -442,25 +451,22 @@ fn link_static_musl(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
     write_bytes(&crt1_path, MUSL_CRT1_O)?;
     write_bytes(&crti_path, MUSL_CRTI_O)?;
     write_bytes(&crtn_path, MUSL_CRTN_O)?;
-    run_tool(
-        "clang",
-        &[
-            "-static",
-            "-nostdlib",
-            "-no-pie",
-            "-o",
-            &out.to_string_lossy(),
-            &crt1_path.to_string_lossy(),
-            &crti_path.to_string_lossy(),
-            &obj_path.to_string_lossy(),
-            &libc_path.to_string_lossy(),
-            &crtn_path.to_string_lossy(),
-        ],
-    )
+    Ok(vec![
+        "-static".to_string(),
+        "-nostdlib".to_string(),
+        "-no-pie".to_string(),
+        "-o".to_string(),
+        out.to_string_lossy().to_string(),
+        crt1_path.to_string_lossy().to_string(),
+        crti_path.to_string_lossy().to_string(),
+        obj_path.to_string_lossy().to_string(),
+        libc_path.to_string_lossy().to_string(),
+        crtn_path.to_string_lossy().to_string(),
+    ])
 }
 
 #[cfg(not(all(feature = "static-musl", target_os = "linux")))]
-fn link_static_musl(obj_path: &Path, out: &Path) -> Result<(), CodegenError> {
+fn link_static_musl(obj_path: &Path, out: &Path) -> Result<Vec<String>, CodegenError> {
     let details = format!(
         "cannot statically link '{}' to '{}': this compiler was built without the static-musl feature",
         obj_path.display(),

@@ -93,7 +93,7 @@ fn build_type<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64, span: (i64, i64, i6
         return Ok(ty);
     }
     if kind == TYD_NATIVE {
-        return native_llvm(env.0);
+        return native_llvm(env.0, nattype_layout_of(env.3, sym), span);
     }
     if kind == TYD_REF || kind == TYD_REF_MUT {
         if key_kind_of(env.3, elem) == TYD_SLICE {
@@ -155,10 +155,21 @@ fn slice_llvm<'ctx>(context: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, Codeg
     Ok(slice_view_ty(context))
 }
 
-fn native_llvm<'ctx>(context: &'ctx Context) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+// A native handle lowers to its registry-declared layout kind
+// (`nattype_layout_of`): scalar i64, pair { ptr, i64 }, triple { ptr, i64, i64 }.
+fn native_llvm<'ctx>(context: &'ctx Context, layout: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     let ptr = context.ptr_type(inkwell::AddressSpace::from(0u16));
     let i64_ty = context.i64_type();
-    Ok(context.struct_type(&[ptr.into(), i64_ty.into(), i64_ty.into()], false).into())
+    if layout == NATIVE_LAYOUT_SCALAR {
+        return Ok(i64_ty.into());
+    }
+    if layout == NATIVE_LAYOUT_PAIR {
+        return Ok(context.struct_type(&[ptr.into(), i64_ty.into()], false).into());
+    }
+    if layout == NATIVE_LAYOUT_TRIPLE {
+        return Ok(context.struct_type(&[ptr.into(), i64_ty.into(), i64_ty.into()], false).into());
+    }
+    Err(builder_error(span.0, span.1, span.2, "native type has no declared layout kind"))
 }
 
 /// The (field name id, substituted field key) pairs of a struct item at the

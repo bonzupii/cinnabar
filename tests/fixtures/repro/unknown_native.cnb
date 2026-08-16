@@ -1,0 +1,15 @@
+#! A native function outside the registry is a resolution error naming the
+#! function: `unknown native function 'Widget.touch'`.  The signature uses
+#! only builtins, so this rejection is the only one this program can
+#! produce.
+
+pub mod Widget
+  pub nat fun touch() impure Unit
+end
+
+use Widget.touch
+
+pub fun main() impure I64
+  touch()
+  return 0
+end

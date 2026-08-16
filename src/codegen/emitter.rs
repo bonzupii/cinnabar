@@ -1132,8 +1132,8 @@ fn emit_path<'ctx, 'a>(
             cur_key = em_key_elem(sess, cur_key);
         }
         let row = struct_field_fact_row(sess, cur_key, field, span)?;
-        let fld_idx = fieldkey_idx_of(sess.5, row);
         let fkey = fieldkey_key_of(sess.5, row);
+        let fld_idx = fieldkey_idx_of(sess.5, row);
         ptr = struct_gep(sess, cur_key, ptr, fld_idx as u32, "", span)?;
         cur_key = fkey;
         idx += 1;
@@ -1506,8 +1506,8 @@ fn emit_struct_lit<'ctx, 'a>(
         while idx < count {
             let name = list_get(sess.6, names, idx);
             let row = struct_field_fact_row(sess, key, name, span)?;
-            let fld_idx = fieldkey_idx_of(sess.5, row);
             let fkey = fieldkey_key_of(sess.5, row);
+            let fld_idx = fieldkey_idx_of(sess.5, row);
             let fptr = struct_gep(sess, key, ptr, fld_idx as u32, "", span)?;
             let vptr = emit_expr(sess, ctx, list_get(sess.6, values, idx))?;
             copy_value(sess, fkey, fptr, vptr, span)?;
@@ -2455,145 +2455,115 @@ fn dispatch_native<'ctx>(
     span: (i64, i64, i64),
 ) -> Result<PointerValue<'ctx>, CodegenError> {
     let out = declare_local(sess, ret_key, "ret", span)?;
-    let op = sym_native_op(sess.5, sym);
-    if op == NAT_INT_FROM {
-        native_int_from(sess, locals, ret_key, out, span)?;
-        return Ok(out);
+    // Verb -> handler dispatch; a verb with no arm here is a compiler bug.
+    match sym_native_op(sess.5, sym) {
+        NAT_INT_FROM => {
+            native_int_from(sess, locals, ret_key, out, span)?;
+            Ok(out)
+        }
+        NAT_SLICE_LEN => {
+            native_slice_len(sess, locals, out, span)?;
+            Ok(out)
+        }
+        NAT_MEM_ALLOCATE => native_allocate(sess, f, locals, ret_key, out, span),
+        NAT_MEM_DEALLOCATE => {
+            native_deallocate(sess, locals, ret_key, out, span)?;
+            Ok(out)
+        }
+        NAT_MEM_WRITE_U8 => {
+            native_write_u8(sess, f, locals, ret_key, out, span)?;
+            Ok(out)
+        }
+        NAT_MEM_READ_U8 => {
+            native_read_u8(sess, f, locals, ret_key, out, span)?;
+            Ok(out)
+        }
+        NAT_VEC_NEW => {
+            native_vec_new(sess, ret_key, out, span)?;
+            Ok(out)
+        }
+        NAT_VEC_PUSH => native_vec_push(sess, f, locals, params_list, ret_key, out, span),
+        NAT_SLICE_VIEW => {
+            native_slice_view(sess, locals, out, span)?;
+            Ok(out)
+        }
+        NAT_VEC_FREE => {
+            native_vec_free(sess, locals, ret_key, out, span)?;
+            Ok(out)
+        }
+        NAT_VEC_POP => native_vec_pop(sess, f, locals, ret_key, out, span),
+        NAT_STRING_FROM_SLICE => native_string_from_slice(sess, f, locals, ret_key, out, span),
+        NAT_STRING_LEN => {
+            native_string_len(sess, locals, out, span)?;
+            Ok(out)
+        }
+        NAT_STRING_FREE => {
+            native_string_free(sess, locals, ret_key, out, span)?;
+            Ok(out)
+        }
+        NAT_HASH_MAP_NEW => {
+            native_hash_map_new(sess, ret_key, out, span)?;
+            Ok(out)
+        }
+        NAT_HASH_MAP_INSERT => native_hash_map_insert(sess, f, locals, params_list, ret_key, out, span),
+        NAT_HASH_MAP_GET => native_hash_map_get(sess, f, locals, params_list, ret_key, out, span),
+        NAT_HASH_MAP_FREE => {
+            native_hash_map_free(sess, locals, ret_key, out, span)?;
+            Ok(out)
+        }
+        NAT_HASH_MAP_REMOVE => native_hash_map_remove(sess, f, locals, params_list, ret_key, out, span),
+        NAT_FILE_OPEN => native_file_open(sess, f, locals, ret_key, out, span),
+        NAT_FILE_READ => native_file_transfer(sess, f, locals, false, ret_key, out, span),
+        NAT_FILE_WRITE => native_file_transfer(sess, f, locals, true, ret_key, out, span),
+        NAT_FILE_CLOSE => {
+            native_file_close(sess, locals, ret_key, out, span)?;
+            Ok(out)
+        }
+        NAT_TERM_READ_LINE => native_read_line(sess, f, ret_key, out, span),
+        NAT_RUNTIME_ARGS => {
+            native_runtime_args(sess, f, ret_key, out, span)?;
+            Ok(out)
+        }
+        NAT_SELF_CHECK => {
+            native_self_check(sess, ret_key, out, span)?;
+            Ok(out)
+        }
+        NAT_TERM_PRINT => {
+            native_print(sess, locals, ret_key, out, false, false, span)?;
+            Ok(out)
+        }
+        NAT_TERM_PRINT_LINE => {
+            native_print(sess, locals, ret_key, out, false, true, span)?;
+            Ok(out)
+        }
+        NAT_TERM_EPRINT => {
+            native_print(sess, locals, ret_key, out, true, false, span)?;
+            Ok(out)
+        }
+        NAT_NET_SOCKET => native_net_socket(sess, f, ret_key, out, span),
+        NAT_NET_BIND => {
+            native_net_bind(sess, f, locals, ret_key, out, span)?;
+            Ok(out)
+        }
+        NAT_NET_LISTEN => {
+            native_net_listen(sess, f, locals, ret_key, out, span)?;
+            Ok(out)
+        }
+        NAT_NET_ACCEPT => native_net_accept(sess, f, locals, ret_key, out, span),
+        NAT_NET_SEND => native_net_send(sess, f, locals, ret_key, out, span),
+        NAT_NET_CLOSE => {
+            native_net_close(sess, locals, ret_key, out, span)?;
+            Ok(out)
+        }
+        NAT_PROCESS_SPAWN => native_process_spawn(sess, f, locals, ret_key, out, span),
+        NAT_PROCESS_WAIT => native_process_wait(sess, f, locals, ret_key, out, span),
+        other => Err(builder_error(
+            span.0,
+            span.1,
+            span.2,
+            &format!("internal: native verb {} has no codegen handler", other),
+        )),
     }
-    if op == NAT_SLICE_LEN {
-        native_slice_len(sess, locals, out, span)?;
-        return Ok(out);
-    }
-    if op == NAT_MEM_ALLOCATE {
-        return native_allocate(sess, f, locals, ret_key, out, span);
-    }
-    if op == NAT_MEM_DEALLOCATE {
-        native_deallocate(sess, locals, ret_key, out, span)?;
-        return Ok(out);
-    }
-    if op == NAT_MEM_WRITE_U8 {
-        native_write_u8(sess, f, locals, ret_key, out, span)?;
-        return Ok(out);
-    }
-    if op == NAT_MEM_READ_U8 {
-        native_read_u8(sess, f, locals, ret_key, out, span)?;
-        return Ok(out);
-    }
-    if op == NAT_VEC_NEW {
-        native_vec_new(sess, ret_key, out, span)?;
-        return Ok(out);
-    }
-    if op == NAT_VEC_PUSH {
-        return native_vec_push(sess, f, locals, params_list, ret_key, out, span);
-    }
-    if op == NAT_SLICE_VIEW {
-        native_slice_view(sess, locals, out, span)?;
-        return Ok(out);
-    }
-    if op == NAT_VEC_FREE {
-        native_vec_free(sess, locals, ret_key, out, span)?;
-        return Ok(out);
-    }
-    if op == NAT_VEC_POP {
-        return native_vec_pop(sess, f, locals, ret_key, out, span);
-    }
-    if op == NAT_STRING_FROM_SLICE {
-        return native_string_from_slice(sess, f, locals, ret_key, out, span);
-    }
-    if op == NAT_STRING_LEN {
-        native_string_len(sess, locals, out, span)?;
-        return Ok(out);
-    }
-    if op == NAT_STRING_FREE {
-        native_string_free(sess, locals, ret_key, out, span)?;
-        return Ok(out);
-    }
-    if op == NAT_HASH_MAP_NEW {
-        native_hash_map_new(sess, ret_key, out, span)?;
-        return Ok(out);
-    }
-    if op == NAT_HASH_MAP_INSERT {
-        return native_hash_map_insert(sess, f, locals, params_list, ret_key, out, span);
-    }
-    if op == NAT_HASH_MAP_GET {
-        return native_hash_map_get(sess, f, locals, params_list, ret_key, out, span);
-    }
-    if op == NAT_HASH_MAP_FREE {
-        native_hash_map_free(sess, locals, ret_key, out, span)?;
-        return Ok(out);
-    }
-    if op == NAT_HASH_MAP_REMOVE {
-        return native_hash_map_remove(sess, f, locals, params_list, ret_key, out, span);
-    }
-    if op == NAT_FILE_OPEN {
-        return native_file_open(sess, f, locals, ret_key, out, span);
-    }
-    if op == NAT_FILE_READ {
-        return native_file_transfer(sess, f, locals, false, ret_key, out, span);
-    }
-    if op == NAT_FILE_WRITE {
-        return native_file_transfer(sess, f, locals, true, ret_key, out, span);
-    }
-    if op == NAT_FILE_CLOSE {
-        native_file_close(sess, locals, ret_key, out, span)?;
-        return Ok(out);
-    }
-    if op == NAT_TERM_READ_LINE {
-        return native_read_line(sess, f, ret_key, out, span);
-    }
-    if op == NAT_RUNTIME_ARGS {
-        native_runtime_args(sess, f, ret_key, out, span)?;
-        return Ok(out);
-    }
-    if op == NAT_SELF_CHECK {
-        native_self_check(sess, ret_key, out, span)?;
-        return Ok(out);
-    }
-    if op == NAT_TERM_PRINT {
-        native_print(sess, locals, ret_key, out, false, false, span)?;
-        return Ok(out);
-    }
-    if op == NAT_TERM_PRINT_LINE {
-        native_print(sess, locals, ret_key, out, false, true, span)?;
-        return Ok(out);
-    }
-    if op == NAT_TERM_EPRINT {
-        native_print(sess, locals, ret_key, out, true, false, span)?;
-        return Ok(out);
-    }
-    if op == NAT_NET_SOCKET {
-        return native_net_socket(sess, f, ret_key, out, span);
-    }
-    if op == NAT_NET_BIND {
-        native_net_bind(sess, f, locals, ret_key, out, span)?;
-        return Ok(out);
-    }
-    if op == NAT_NET_LISTEN {
-        native_net_listen(sess, f, locals, ret_key, out, span)?;
-        return Ok(out);
-    }
-    if op == NAT_NET_ACCEPT {
-        return native_net_accept(sess, f, locals, ret_key, out, span);
-    }
-    if op == NAT_NET_SEND {
-        return native_net_send(sess, f, locals, ret_key, out, span);
-    }
-    if op == NAT_NET_CLOSE {
-        native_net_close(sess, locals, ret_key, out, span)?;
-        return Ok(out);
-    }
-    if op == NAT_PROCESS_SPAWN {
-        return native_process_spawn(sess, f, locals, ret_key, out, span);
-    }
-    if op == NAT_PROCESS_WAIT {
-        return native_process_wait(sess, f, locals, ret_key, out, span);
-    }
-    Err(builder_error(
-        span.0,
-        span.1,
-        span.2,
-        &format!("internal: native opcode {} has no codegen implementation", op),
-    ))
 }
 
 fn native_int_from<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
@@ -2668,10 +2638,6 @@ fn native_allocate<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     sess.2.position_at_end(ok_block);
     let block_key = result_arg_key(sess, ret_key, 0);
     let block_val = declare_local(sess, block_key, "block", span)?;
-    // `Block` uses only the data and length fields of the shared handle
-    // layout; the rest is zeroed so moving the block by value never reads
-    // uninitialized stack.
-    init_native_handle(sess, block_key, block_val, span)?;
     let bd = struct_gep(sess, block_key, block_val, 0, "", span)?;
     store_key(sess, bd, data.into())?;
     let bl = struct_gep(sess, block_key, block_val, 1, "", span)?;
@@ -2784,43 +2750,27 @@ fn native_read_u8<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>
     Ok(())
 }
 
-// The LLVM struct a native handle key lowers to.  Every native handle
-// shares one layout (`native_llvm`), so this is the single place the
-// emitter recovers it as a struct rather than assuming a field count.
-fn handle_struct_of<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, span: (i64, i64, i64)) -> Result<inkwell::types::StructType<'ctx>, CodegenError> {
-    let ty = llvm_of(sess, key, span)?;
-    match ty {
-        BasicTypeEnum::StructType(st) => Ok(st),
-        BasicTypeEnum::ArrayType(other) => Err(builder_error(span.0, span.1, span.2, &format!("native handle key {} lowered to non-struct type {:?}", key, other))),
-        BasicTypeEnum::FloatType(other) => Err(builder_error(span.0, span.1, span.2, &format!("native handle key {} lowered to non-struct type {:?}", key, other))),
-        BasicTypeEnum::IntType(other) => Err(builder_error(span.0, span.1, span.2, &format!("native handle key {} lowered to non-struct type {:?}", key, other))),
-        BasicTypeEnum::PointerType(other) => Err(builder_error(span.0, span.1, span.2, &format!("native handle key {} lowered to non-struct type {:?}", key, other))),
-        BasicTypeEnum::VectorType(other) => Err(builder_error(span.0, span.1, span.2, &format!("native handle key {} lowered to non-struct type {:?}", key, other))),
-        BasicTypeEnum::ScalableVectorType(other) => Err(builder_error(span.0, span.1, span.2, &format!("native handle key {} lowered to non-struct type {:?}", key, other))),
-    }
-}
-// Zero-fills a native handle across its whole lowered layout before any
-// field is stored into it.
-//
-// A native handle is moved, passed, and returned *by value*: `deallocate`
-// receives a `Block` as `{ ptr, i64, i64 }`, so the caller loads every byte
-// of the layout whether or not that particular native surface uses every
-// field.  A constructor that writes only the fields its own surface cares
-// about therefore leaves the rest as whatever was on the stack, and that
-// garbage is read at the first move.  Zeroing from the layout itself — one
-// aggregate store of `StructType::const_zero()`, not a hand-counted run of
-// per-field stores — makes it impossible for a constructor to miss a field
-// when the handle layout grows.
-fn init_native_handle<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, ptr: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
-    let zero = handle_struct_of(sess, key, span)?.const_zero();
-    store_key(sess, ptr, zero.into())?;
+// Writes a fresh growable-container handle's three declared slots — data
+// pointer (null), length (0), capacity (0) — one store each.  This is what
+// `vec_new` and `hash_map_new` both mean, and it is deliberately the two
+// explicit stores rather than a whole-layout zero store: a constructor must
+// name every slot its layout declares so that a slot added to the layout
+// later is a compile-time "which constructor forgets to write it" question,
+// not a silently-zeroed field nobody realized existed.
+fn init_container_slots<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, ptr: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
+    let d = struct_gep(sess, key, ptr, 0, "", span)?;
+    store_key(sess, d, ptr_ty(sess).const_null().into())?;
+    let l = struct_gep(sess, key, ptr, 1, "", span)?;
+    store_key(sess, l, sess.0.i64_type().const_zero().into())?;
+    let c = struct_gep(sess, key, ptr, 2, "", span)?;
+    store_key(sess, c, sess.0.i64_type().const_zero().into())?;
     Ok(())
 }
 
 fn native_vec_new<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let vec_key = result_arg_key(sess, ret_key, 0);
     let vec_val = declare_local(sess, vec_key, "vec", span)?;
-    init_native_handle(sess, vec_key, vec_val, span)?;
+    init_container_slots(sess, vec_key, vec_val, span)?;
     let ok_result = build_result_ok(sess, ret_key, vec_key, vec_val, span)?;
     copy_to_out(sess, ret_key, out, ok_result, span)?;
     Ok(())
@@ -3559,7 +3509,7 @@ fn rehash_into<'ctx>(
 fn native_hash_map_new<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let map_key = result_arg_key(sess, ret_key, 0);
     let map_val = declare_local(sess, map_key, "map", span)?;
-    init_native_handle(sess, map_key, map_val, span)?;
+    init_container_slots(sess, map_key, map_val, span)?;
     let ok_result = build_result_ok(sess, ret_key, map_key, map_val, span)?;
     copy_to_out(sess, ret_key, out, ok_result, span)?;
     Ok(())
@@ -4069,10 +4019,10 @@ fn native_file_open<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     let join = libc_result_branch(sess, f, ret_key, out, raw, span)?;
     let handle_key = result_arg_key(sess, ret_key, 0);
     let handle = declare_local(sess, handle_key, "file", span)?;
-    init_native_handle(sess, handle_key, handle, span)?;
-    let fd_slot = struct_gep(sess, handle_key, handle, 1, "", span)?;
+    // `File.Handle` is a scalar handle: it is the descriptor integer, not a
+    // struct wrapping one.
     let raw64 = sess.2.build_int_s_extend(raw, sess.0.i64_type(), "").map_err(builder_fail)?;
-    store_key(sess, fd_slot, raw64.into())?;
+    store_key(sess, handle, raw64.into())?;
     let ok_result = build_result_ok(sess, ret_key, handle_key, handle, span)?;
     copy_to_out(sess, ret_key, out, ok_result, span)?;
     sess.2.build_unconditional_branch(join).map_err(builder_fail)?;
@@ -4104,9 +4054,8 @@ fn native_file_transfer<'ctx>(
 ) -> Result<PointerValue<'ctx>, CodegenError> {
     let p0 = get_local(locals, 0, span)?;
     let p1 = get_local(locals, 1, span)?;
-    let handle_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let handle = load_ptr(sess, p0)?;
-    let fd = net_fd_of_handle(sess, handle_key, handle, span)?;
+    let fd = net_fd_of_handle(sess, handle)?;
     let data = slice_data(sess, p1)?;
     let len = slice_len_of(sess, p1)?;
     let fd32 = sess.2.build_int_truncate(fd, sess.0.i32_type(), "").map_err(builder_fail)?;
@@ -4153,8 +4102,7 @@ fn native_file_transfer<'ctx>(
 // can report are about flushing that the program can no longer act on.
 fn native_file_close<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let p0 = get_local(locals, 0, span)?;
-    let handle_key = get_local_key(locals, 0, span)?;
-    let fd = net_fd_of_handle(sess, handle_key, p0, span)?;
+    let fd = net_fd_of_handle(sess, p0)?;
     let fd32 = sess.2.build_int_truncate(fd, sess.0.i32_type(), "").map_err(builder_fail)?;
     sess.2.build_call(extern_close(sess), &[into_meta(fd32.into())], "").map_err(builder_fail)?;
     build_unit_value_into(sess, ret_key, out, span)?;
@@ -4309,7 +4257,6 @@ fn native_runtime_args<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<
     let text = load_ptr(sess, slot_ptr)?;
     let length = emit_strlen(sess, f, text, span)?;
     let entry = offset_elem_ptr(sess, elem_key, table, i, span)?;
-    init_native_handle(sess, elem_key, entry, span)?;
     let entry_data = struct_gep(sess, elem_key, entry, 0, "", span)?;
     store_key(sess, entry_data, text.into())?;
     let entry_len = struct_gep(sess, elem_key, entry, 1, "", span)?;
@@ -4528,7 +4475,6 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
 
     sess.2.position_at_end(line_valid);
     let line = declare_local(sess, str_key, "line", span)?;
-    init_native_handle(sess, str_key, line, span)?;
     let line_data = struct_gep(sess, str_key, line, 0, "", span)?;
     store_key(sess, line_data, final_buf.into())?;
     let line_len = struct_gep(sess, str_key, line, 1, "", span)?;
@@ -4570,9 +4516,12 @@ fn emit_payload_error<'ctx>(
     copy_to_out(sess, ret_key, out, result, span)
 }
 
-fn net_fd_of_handle<'ctx>(sess: &mut Session<'ctx, '_, '_>, sock_key: i64, handle: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
-    let fd_slot = struct_gep(sess, sock_key, handle, 1, "", span)?;
-    load_i64(sess, fd_slot)
+// Reads the descriptor out of a scalar-layout handle (`File.Handle` or
+// `Net.Socket`).  A scalar handle *is* its integer — there is no struct to
+// GEP through — so this is the plain load the layout declares, not a field
+// read from a shared envelope.
+fn net_fd_of_handle<'ctx>(sess: &mut Session<'ctx, '_, '_>, handle: PointerValue<'ctx>) -> Result<IntValue<'ctx>, CodegenError> {
+    load_i64(sess, handle)
 }
 
 fn net_errno<'ctx>(sess: &mut Session<'ctx, '_, '_>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
@@ -4651,12 +4600,8 @@ fn build_sockaddr_in<'ctx>(sess: &mut Session<'ctx, '_, '_>, port: IntValue<'ctx
 fn build_net_sock_ok<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: PointerValue<'ctx>, fd: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let sock_key = result_arg_key(sess, ret_key, 0);
     let sock_val = declare_local(sess, sock_key, "sock", span)?;
-    let d = struct_gep(sess, sock_key, sock_val, 0, "", span)?;
-    store_key(sess, d, ptr_ty(sess).const_null().into())?;
-    let l = struct_gep(sess, sock_key, sock_val, 1, "", span)?;
-    store_key(sess, l, fd.into())?;
-    let c = struct_gep(sess, sock_key, sock_val, 2, "", span)?;
-    store_key(sess, c, sess.0.i64_type().const_zero().into())?;
+    // `Net.Socket` is a scalar handle: it is the descriptor integer.
+    store_key(sess, sock_val, fd.into())?;
     let ok_result = build_result_ok(sess, ret_key, sock_key, sock_val, span)?;
     copy_to_out(sess, ret_key, out, ok_result, span)
 }
@@ -4713,9 +4658,8 @@ fn native_net_socket<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'c
 fn native_net_bind<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let p0 = get_local(locals, 0, span)?;
     let p1 = get_local(locals, 1, span)?;
-    let sock_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let handle = load_ptr(sess, p0)?;
-    let fd = net_fd_of_handle(sess, sock_key, handle, span)?;
+    let fd = net_fd_of_handle(sess, handle)?;
     let port = load_i64(sess, p1)?;
     let sa = build_sockaddr_in(sess, port, span)?;
     let addr_len = sess.0.i32_type().const_int(16, false);
@@ -4740,9 +4684,8 @@ fn native_net_bind<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
 fn native_net_listen<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let p0 = get_local(locals, 0, span)?;
     let p1 = get_local(locals, 1, span)?;
-    let sock_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let handle = load_ptr(sess, p0)?;
-    let fd = net_fd_of_handle(sess, sock_key, handle, span)?;
+    let fd = net_fd_of_handle(sess, handle)?;
     let backlog = load_i64(sess, p1)?;
     let backlog32 = sess.2.build_int_truncate(backlog, sess.0.i32_type(), "").map_err(builder_fail)?;
     let fd_arg = socket_argument(sess, fd)?;
@@ -4765,9 +4708,8 @@ fn native_net_listen<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'c
 
 fn native_net_accept<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
     let p0 = get_local(locals, 0, span)?;
-    let sock_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let handle = load_ptr(sess, p0)?;
-    let fd = net_fd_of_handle(sess, sock_key, handle, span)?;
+    let fd = net_fd_of_handle(sess, handle)?;
     let null_ptr = ptr_ty(sess).const_null();
     let fd_arg = socket_argument(sess, fd)?;
     let call = sess.2.build_call(extern_accept(sess), &[fd_arg, into_meta(null_ptr.into()), into_meta(null_ptr.into())], "").map_err(builder_fail)?;
@@ -4782,9 +4724,8 @@ fn native_net_accept<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'c
 fn native_net_send<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
     let p0 = get_local(locals, 0, span)?;
     let p1 = get_local(locals, 1, span)?;
-    let sock_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let handle = load_ptr(sess, p0)?;
-    let fd = net_fd_of_handle(sess, sock_key, handle, span)?;
+    let fd = net_fd_of_handle(sess, handle)?;
     let data = slice_data(sess, p1)?;
     let len = slice_len_of(sess, p1)?;
     let flags = sess.0.i32_type().const_zero();
@@ -4804,8 +4745,7 @@ fn native_net_send<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
 
 fn native_net_close<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let p0 = get_local(locals, 0, span)?;
-    let sock_key = get_local_key(locals, 0, span)?;
-    let fd = net_fd_of_handle(sess, sock_key, p0, span)?;
+    let fd = net_fd_of_handle(sess, p0)?;
     if runtime_platform(sess, span)? == RuntimePlatform::Windows {
         sess.2.build_call(extern_closesocket(sess), &[into_meta(fd.into())], "").map_err(builder_fail)?;
     } else {
@@ -5063,10 +5003,9 @@ fn native_process_spawn<'ctx>(
     sess.2.position_at_end(parent_ok);
     let child_key = result_arg_key(sess, ret_key, 0);
     let child_val = declare_local(sess, child_key, "child", span)?;
-    init_native_handle(sess, child_key, child_val, span)?;
-    let pid_slot = struct_gep(sess, child_key, child_val, 1, "", span)?;
+    // `Process.Child` is a scalar handle: it is the child's pid.
     let pid64 = sess.2.build_int_s_extend(fork_res, sess.0.i64_type(), "").map_err(builder_fail)?;
-    store_key(sess, pid_slot, pid64.into())?;
+    store_key(sess, child_val, pid64.into())?;
     let ok_result = build_result_ok(sess, ret_key, child_key, child_val, span)?;
     copy_to_out(sess, ret_key, out, ok_result, span)?;
     sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
@@ -5094,9 +5033,7 @@ fn native_process_wait<'ctx>(
         ));
     }
     let p0 = get_local(locals, 0, span)?;
-    let child_key = get_local_key(locals, 0, span)?;
-    let pid_slot = struct_gep(sess, child_key, p0, 1, "", span)?;
-    let pid = load_i64(sess, pid_slot)?;
+    let pid = load_i64(sess, p0)?;
     let status_slot = alloca_raw(sess, sess.0.i32_type().into(), "status", span)?;
     let pid32 = sess.2.build_int_truncate(pid, sess.0.i32_type(), "").map_err(builder_fail)?;
     let wait_call = sess.2.build_call(extern_waitpid(sess), &[into_meta(pid32.into()), into_meta(status_slot.into()), into_meta(sess.0.i32_type().const_zero().into())], "").map_err(builder_fail)?;
@@ -5362,10 +5299,6 @@ fn native_string_from_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionV
     sess.2.build_memcpy(raw, 1, data, 1, len).map_err(builder_fail)?;
     let str_key = result_arg_key(sess, ret_key, 0);
     let str_val = declare_local(sess, str_key, "str", span)?;
-    // `String` uses only the data and length fields of the shared handle
-    // layout; the rest is zeroed so moving the string by value never reads
-    // uninitialized stack.
-    init_native_handle(sess, str_key, str_val, span)?;
     let sd = struct_gep(sess, str_key, str_val, 0, "", span)?;
     store_key(sess, sd, raw.into())?;
     let sl = struct_gep(sess, str_key, str_val, 1, "", span)?;
