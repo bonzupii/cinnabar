@@ -3897,7 +3897,7 @@ fn check_container_resolvability(state: &mut State, expr: i64, param_keys: i64) 
                         }
                         ai += 1;
                     }
-                    if has_linear == 1 && node_f(state.1, cty_sym) == NONE {
+                    if has_linear == 1 && node_f(state.1, sym_decl(state.1, cty_sym)) == NONE {
                         push_error(
                             state.3,
                             "cannot store linear element in container: its native API provides no by-value extraction operation",
@@ -4056,7 +4056,14 @@ fn check_int_from(state: &mut State, expr: i64, expected: i64, sym: i64, ret: i6
 fn builtin_type_of_scope(nodes: &[i64], scope: i64) -> i64 {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_SYM && node_a(nodes, idx) == SYM_TYPE && node_e(nodes, idx) == scope {
+        // A declared native type's slot e is its container role (0/1), not
+        // a scope; only a seeded builtin type (decl == NONE) keeps its
+        // sub-scope there.
+        if node_tag(nodes, idx) == NODE_SYM
+            && node_a(nodes, idx) == SYM_TYPE
+            && sym_decl(nodes, idx) == NONE
+            && node_e(nodes, idx) == scope
+        {
             return idx;
         }
         idx += 1;

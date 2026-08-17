@@ -68,10 +68,6 @@ type State<'a> = (
 /// calls by name, and trait methods are reached by dispatch rather than by a
 /// resolved path. Attributing their references here — and treating this as
 /// permanently reached — keeps everything they mention alive.
-///
-/// That is deliberately conservative. Rejecting a program that is actually
-/// correct is far worse than missing one dead impl, so the analysis errs
-/// toward keeping things.
 const ROOT_OWNER: i64 = -2;
 
 /// Resolves names, and separately reports which items nothing reaches.
@@ -446,7 +442,18 @@ fn sym_home_of(nodes: &[i64], sym: i64) -> i64 {
 }
 
 fn sym_sub_of(nodes: &[i64], sym: i64) -> i64 {
-    node_e(nodes, sym)
+    // Slot e is a child scope only for namespace kinds and for seeded
+    // builtin types (no declaration item), whose `.from` surface lives
+    // there. A declared native type's slot e holds its container role
+    // (0/1); role 0 must not be read as the root scope.
+    let kind = sym_kind_of(nodes, sym);
+    let is_namespace = kind == SYM_MODULE || kind == SYM_STRUCT || kind == SYM_ENUM || kind == SYM_TRAIT;
+    let is_seeded_builtin = kind == SYM_TYPE && sym_decl_of(nodes, sym) == NONE;
+    if is_namespace || is_seeded_builtin {
+        node_e(nodes, sym)
+    } else {
+        NONE
+    }
 }
 
 fn sym_is_pub(nodes: &[i64], sym: i64) -> i64 {
@@ -756,7 +763,6 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
                 );
             } else {
                 sym_set_native_op(state.1, sym, native_fun_verb(row));
-                alloc_natfact(state.1, sym, native_fun_mode(row));
             }
         } else if full == intern(state.0, "main") {
             node_set_f(state.1, sym, SYM_FUN_MAIN);
@@ -774,27 +780,22 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
         insert_decl(state, scope, name, sym, NS_TYPE, 2, (file, start, end));
         item_set_sym(state.1, item, sym);
         let sub = alloc_scope(state.4, state.5, state.6, state.7, scope, prefix, 1);
-        node_set_e(state.1, sym, sub);
         state.8.push((item, sub));
         enter_type_params(state.1, state.2, state.4, sub, node_e(state.1, item));
-        // Attaches the container role and layout kind from the registry
-        // table; an unknown native type is a resolution error.
-        let declared_layout = node_f(state.1, item);
-        if declared_layout != NONE {
-            alloc_nattype(state.1, sym, 0, declared_layout);
+        // An unknown native type is a resolution error; a known one stores
+        // its container role and layout kind on its own symbol row.
+        let trow = native_type_row_of(state.0, full);
+        if trow == usize::MAX {
+            push_error(
+                state.3,
+                &format!("unknown native type '{}'", name_text(state.0, full)),
+                file,
+                start,
+                end,
+            );
         } else {
-            let trow = native_type_row_of(state.0, full);
-            if trow == usize::MAX {
-                push_error(
-                    state.3,
-                    &format!("unknown native type '{}'", name_text(state.0, full)),
-                    file,
-                    start,
-                    end,
-                );
-            } else {
-                alloc_nattype(state.1, sym, native_type_role(trow), native_type_layout(trow));
-            }
+            sym_set_native_role(state.1, sym, native_type_role(trow));
+            sym_set_native_layout(state.1, sym, native_type_layout(trow));
         }
     } else if kind == ITEM_USE {
         let segs = node_d(state.1, item);
@@ -1060,7 +1061,7 @@ fn seed_int_from(state: &mut State, scope: i64, name: i64) {
     }
     let from = alloc_sym(state.1, SYM_NATIVE_FUN, method, NONE, scope, NONE);
     sym_set_native_op(state.1, from, native_fun_verb(row));
-    alloc_natfact(state.1, from, native_fun_mode(row));
+    sym_set_native_mode(state.1, from, native_fun_mode(row));
     push_entry(state.4, scope, from_name, from, NS_VALUE, NONE);
 }
 
@@ -1148,15 +1149,15 @@ const NATIVE_VERB_MODES: &[(i64, &[i64])] = &[
     (NAT_TERM_EPRINT, &[NAT_MODE_BORROW, NAT_MODE_EFFECT]),
     (NAT_TERM_READ_LINE, &[NAT_MODE_CREATE]),
     (NAT_FILE_OPEN, &[NAT_MODE_CREATE]),
-    (NAT_FILE_READ, &[NAT_MODE_BORROW]),
-    (NAT_FILE_WRITE, &[NAT_MODE_BORROW]),
+    (NAT_FILE_READ, &[NAT_MODE_BORROW, NAT_MODE_TRANSFER]),
+    (NAT_FILE_WRITE, &[NAT_MODE_BORROW, NAT_MODE_TRANSFER]),
     (NAT_FILE_CLOSE, &[NAT_MODE_CONSUME]),
     (NAT_RUNTIME_ARGS, &[NAT_MODE_EFFECT]),
     (NAT_NET_SOCKET, &[NAT_MODE_CREATE]),
     (NAT_NET_BIND, &[NAT_MODE_BORROW]),
     (NAT_NET_LISTEN, &[NAT_MODE_BORROW]),
     (NAT_NET_ACCEPT, &[NAT_MODE_CREATE]),
-    (NAT_NET_SEND, &[NAT_MODE_BORROW]),
+    (NAT_NET_SEND, &[NAT_MODE_BORROW, NAT_MODE_TRANSFER]),
     (NAT_NET_CLOSE, &[NAT_MODE_CONSUME]),
     (NAT_PROCESS_SPAWN, &[NAT_MODE_CREATE]),
     (NAT_PROCESS_WAIT, &[NAT_MODE_CONSUME]),
@@ -1262,7 +1263,7 @@ fn classify_native_modes(state: &mut State) {
                 // Seeded surface (the int `.from` methods): there is no
                 // declared signature to classify, so the table's declared
                 // mode is the mode.
-                derived = natfact_declared_mode_of(state.1, idx);
+                derived = sym_native_mode(state.1, idx);
                 span = (NONE, NONE, NONE);
             } else {
                 span = (node_file(state.1, decl), node_start(state.1, decl), node_end(state.1, decl));
@@ -1272,6 +1273,7 @@ fn classify_native_modes(state: &mut State) {
                 } else {
                     native_mode_of_signature(state.1, state.2, fn_node)
                 };
+                sym_set_native_mode(state.1, idx, derived);
             }
             let verb = sym_native_op(state.1, idx);
             if derived != NAT_MODE_NONE && verb != NAT_NONE && !verb_supports_mode(verb, derived) && span.0 != NONE {
@@ -1286,9 +1288,7 @@ fn classify_native_modes(state: &mut State) {
                     span.1,
                     span.2,
                 );
-            } else if derived != NAT_MODE_NONE {
-                natfact_set_derived_mode(state.1, idx, derived);
-            } else if span.0 != NONE {
+            } else if derived == NAT_MODE_NONE && span.0 != NONE {
                 push_error(
                     state.3,
                     &format!(
@@ -1624,7 +1624,8 @@ fn link_extraction_surfaces(state: &mut State) {
                 if first != NONE {
                     let cty_sym = container_type_sym(state.1, node_b(state.1, first));
                     if cty_sym != NONE {
-                        node_set_f(state.1, cty_sym, idx);
+                        let cty_decl = sym_decl_of(state.1, cty_sym);
+                        node_set_f(state.1, cty_decl, idx);
                     }
                 }
             }
@@ -1637,15 +1638,10 @@ fn link_extraction_surfaces(state: &mut State) {
 // reference layers so `&mut Vec(T)` resolves to the Vec type symbol.
 fn container_type_sym(nodes: &[i64], ty_node: i64) -> i64 {
     let mut node = ty_node;
-    let mut guard = 0i64;
     loop {
         let kind = node_a(nodes, node);
         if kind == TY_REF || kind == TY_REF_MUT {
             node = node_b(nodes, node);
-            guard += 1;
-            if guard > 4 {
-                return NONE;
-            }
             continue;
         }
         break;

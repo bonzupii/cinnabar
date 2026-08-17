@@ -404,28 +404,6 @@ fn row_detail(names: &[String], nodes: &[i64], lists: &[Vec<i64>], id: i64, tag:
             ],
         );
     }
-    if tag == NODE_NATFACT {
-        return row(
-            "natfact",
-            "",
-            vec![
-                keyed("sym", DetailValue::Node(node_a(nodes, id))),
-                renamed("declared_mode", "declared-mode", DetailValue::Int(node_b(nodes, id))),
-                renamed("derived_mode", "derived-mode", DetailValue::Int(node_c(nodes, id))),
-            ],
-        );
-    }
-    if tag == NODE_NATTYPE {
-        return row(
-            "nattype",
-            "",
-            vec![
-                keyed("sym", DetailValue::Node(node_a(nodes, id))),
-                keyed("container", DetailValue::Int(node_b(nodes, id))),
-                keyed("layout", DetailValue::Int(node_c(nodes, id))),
-            ],
-        );
-    }
     row("", "", Vec::new())
 }
 
@@ -596,10 +574,6 @@ fn tag_name(tag: i64) -> &'static str {
         "TRAIT"
     } else if tag == NODE_FIELDKEY {
         "FIELDKEY"
-    } else if tag == NODE_NATFACT {
-        "NATFACT"
-    } else if tag == NODE_NATTYPE {
-        "NATTYPE"
     } else {
         "?TAG"
     }

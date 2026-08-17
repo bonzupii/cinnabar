@@ -99,7 +99,16 @@ fun run(path: &[U8], want_exit: I64, fail_base: I64) impure I64
   vec_free(argv)
 
   if code != want_exit
-    return fail_base + 5
+    #! Surface the concrete exit code `wait` decoded when it is non-zero,
+    #! so a failed `execve` (127) is distinguishable from a wrong status
+    #! decode. A zero code on a mismatch is a signaled child, which the
+    #! encoded status word collapses to zero; report that as the ordinary
+    #! mismatch marker rather than as a spurious success.
+    if code == 0
+      return fail_base + 5
+    else
+      return code
+    end
   end
   return 0
 end

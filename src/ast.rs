@@ -1241,90 +1241,36 @@ pub fn alloc_patfact(nodes: &mut Vec<i64>, pat: i64, scrutinee: i64) -> i64 {
     alloc_node(nodes, &[NODE_PATFACT, NO_FILE, NO_FILE, NO_FILE, pat, scrutinee, NONE, NONE, NONE, NONE])
 }
 
-// Native-registry fact rows: a=sym, b=declared mode, c=derived mode.
-
-pub const NODE_NATFACT: i64 = 23;
-
-pub fn alloc_natfact(nodes: &mut Vec<i64>, sym: i64, declared: i64) -> i64 {
-    alloc_node(nodes, &[NODE_NATFACT, NO_FILE, NO_FILE, NO_FILE, sym, declared, NAT_MODE_NONE, NONE, NONE, NONE])
-}
-
-pub fn natfact_of(nodes: &[i64], sym: i64) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_NATFACT && node_a(nodes, idx) == sym {
-            return idx;
-        }
-        idx += 1;
-    }
-    NONE
-}
-
-pub fn natfact_declared_mode_of(nodes: &[i64], sym: i64) -> i64 {
-    let row = natfact_of(nodes, sym);
-    if row == NONE {
-        NAT_MODE_NONE
-    } else {
-        node_b(nodes, row)
-    }
-}
-
-pub fn natfact_set_derived_mode(nodes: &mut [i64], sym: i64, mode: i64) -> bool {
-    let row = natfact_of(nodes, sym);
-    if row == NONE {
-        false
-    } else {
-        node_set_c(nodes, row, mode)
-    }
-}
-
 // The ownership mode a native function was classified into at resolution;
-// NAT_MODE_NONE when the symbol has no registry row (it was already
-// rejected) or classification never ran.
+// stored in slot e of the SYM_NATIVE_FUN symbol row so it reads in constant
+// time. NAT_MODE_NONE when the symbol has no registry row or classification
+// never ran.
 pub fn sym_native_mode(nodes: &[i64], sym: i64) -> i64 {
-    let row = natfact_of(nodes, sym);
-    if row == NONE {
-        NAT_MODE_NONE
-    } else {
-        node_c(nodes, row)
-    }
+    node_e(nodes, sym)
 }
 
-// Native-type-registry rows: a=sym, b=container role (0/1), c=layout kind.
-
-pub const NODE_NATTYPE: i64 = 24;
-
-pub fn alloc_nattype(nodes: &mut Vec<i64>, sym: i64, role: i64, layout: i64) -> i64 {
-    alloc_node(nodes, &[NODE_NATTYPE, NO_FILE, NO_FILE, NO_FILE, sym, role, layout, NONE, NONE, NONE])
+pub fn sym_set_native_mode(nodes: &mut [i64], sym: i64, mode: i64) -> bool {
+    node_set_e(nodes, sym, mode)
 }
 
-pub fn nattype_of(nodes: &[i64], sym: i64) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_NATTYPE && node_a(nodes, idx) == sym {
-            return idx;
-        }
-        idx += 1;
-    }
-    NONE
-}
-
+// The container role (0 or 1) of a native type, stored in slot e of its
+// SYM_TYPE symbol row.
 pub fn nattype_is_container(nodes: &[i64], sym: i64) -> i64 {
-    let row = nattype_of(nodes, sym);
-    if row == NONE {
-        0
-    } else {
-        node_b(nodes, row)
-    }
+    node_e(nodes, sym)
 }
 
+pub fn sym_set_native_role(nodes: &mut [i64], sym: i64, role: i64) -> bool {
+    node_set_e(nodes, sym, role)
+}
+
+// The layout kind (NATIVE_LAYOUT_*) of a native type, stored in slot f of
+// its SYM_TYPE symbol row.
 pub fn nattype_layout_of(nodes: &[i64], sym: i64) -> i64 {
-    let row = nattype_of(nodes, sym);
-    if row == NONE {
-        NONE
-    } else {
-        node_c(nodes, row)
-    }
+    node_f(nodes, sym)
+}
+
+pub fn sym_set_native_layout(nodes: &mut [i64], sym: i64, layout: i64) -> bool {
+    node_set_f(nodes, sym, layout)
 }
 
 pub fn patfact_scrutinee_of(nodes: &[i64], pat: i64) -> i64 {
