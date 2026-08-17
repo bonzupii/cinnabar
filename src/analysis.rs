@@ -25,10 +25,12 @@
 
 use crate::ast::*;
 use crate::inspect::sym_kind_name;
+use crate::target::Target;
 use crate::typecheck::render_type_key;
 use crate::{borrow, module_loader, resolver, typecheck};
 
 pub struct Analysis {
+    pub target: Target,
     pub names: Vec<String>,
     pub nodes: Vec<i64>,
     pub lists: Vec<Vec<i64>>,
@@ -60,7 +62,7 @@ const KEYWORDS: &[&str] = &[
 /// Run the front-end over `entry_path` (with unsaved-buffer overlay) and
 /// keep everything a query needs.  Never fails: whatever stage stopped the
 /// pipeline leaves its diagnostics in `errors`.
-pub fn analyze(entry_path: &str, overlay: &[(String, String)]) -> Analysis {
+pub fn analyze(entry_path: &str, overlay: &[(String, String)], target: &Target) -> Analysis {
     let mut names: Vec<String> = Vec::new();
     let mut nodes: Vec<i64> = Vec::new();
     let mut lists: Vec<Vec<i64>> = Vec::new();
@@ -72,6 +74,7 @@ pub fn analyze(entry_path: &str, overlay: &[(String, String)]) -> Analysis {
         Some(program) => program,
         None => {
             return Analysis {
+                target: *target,
                 names,
                 nodes,
                 lists,
@@ -115,6 +118,7 @@ pub fn analyze(entry_path: &str, overlay: &[(String, String)]) -> Analysis {
         errors.append(&mut deferred);
     }
     Analysis {
+        target: *target,
         names,
         nodes,
         lists,

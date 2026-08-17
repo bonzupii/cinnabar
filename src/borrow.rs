@@ -3699,7 +3699,7 @@ mod tests {
     // toolchain `cargo test`'s fixture-linked suites need.
     fn errors_for(source: &str) -> Vec<String> {
         let overlay = [("scratch.cnb".to_string(), source.to_string())];
-        let result = crate::analysis::analyze("scratch.cnb", &overlay);
+        let result = crate::analysis::analyze("scratch.cnb", &overlay, &crate::target::Target::host());
         result.errors.iter().map(|d| d.0.clone()).collect()
     }
 

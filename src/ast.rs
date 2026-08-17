@@ -575,7 +575,8 @@ pub fn ty_set_sym(nodes: &mut [i64], id: i64, sym: i64) -> bool {
     node_set_e(nodes, id, sym)
 }
 
-// Type-descriptor rows.  (tag=NODE_TYINFO, a=key, b=kind, c=sym, d=args list, e=element key, f=len/bound/sub-kind).
+// Type-descriptor rows. (tag=NODE_TYINFO, a=key, b=kind, c=sym, d=args
+// list, e=element key, f=len/bound/sub-kind).
 // Native rows carry the has_linear_elements flag (0/1) in the start slot,
 // attached by the typechecker's linearity pass into a slot the canonical-key
 // lookup never compares.
@@ -791,7 +792,13 @@ pub const SEED_SYM_INDEX_ERROR: usize = 4;
 // SEED_SYM_I8..SEED_SYM_BOOL follow BUILTIN order.
 pub const SEED_SYM_I8: usize = 5;
 pub const SEED_SYM_BOOL: usize = SEED_SYM_I8 + BUILTIN_BOOL as usize;
-pub const SEED_SYM_COUNT: usize = SEED_SYM_BOOL + 1;
+pub const SEED_SYM_OK: usize = SEED_SYM_BOOL + 1;
+pub const SEED_SYM_ERR: usize = SEED_SYM_OK + 1;
+pub const SEED_SYM_SOME: usize = SEED_SYM_ERR + 1;
+pub const SEED_SYM_NONE: usize = SEED_SYM_SOME + 1;
+pub const SEED_SYM_DIV_BY_ZERO: usize = SEED_SYM_NONE + 1;
+pub const SEED_SYM_INDEX_OOB: usize = SEED_SYM_DIV_BY_ZERO + 1;
+pub const SEED_SYM_COUNT: usize = SEED_SYM_INDEX_OOB + 1;
 
 /// Fixed slots the resolver fills; later stages read instead of re-deriving.
 #[derive(Clone, Copy)]
@@ -841,7 +848,7 @@ impl Seeds {
     }
 }
 
-/// Diagnostics and seeds shared by the typechecker and borrow checker.
+/// Diagnostics and resolver-seeded identities shared by frontend passes.
 pub struct CheckContext<'a> {
     pub errors: &'a mut Vec<Diag>,
     pub notes: &'a mut Vec<Note>,
@@ -1047,40 +1054,6 @@ pub fn find_trait_call(nodes: &[i64], expr: i64) -> i64 {
     NONE
 }
 
-// Variant-fact rows.  (tag=NODE_VARFACT, a=enum key, b=variant name id,
-// c=variant symbol, d=declared-order tag).  The tag is assigned by the
-// typechecker from the enum's declared variant order, once, and read by
-// codegen instead of re-searching the enum's variant list (Single-Fact
-// Rule).
-
-pub const NODE_VARFACT: i64 = 16;
-
-pub fn alloc_varfact(nodes: &mut Vec<i64>, key: i64, name: i64, sym: i64, tag: i64) -> i64 {
-    alloc_node(nodes, &[NODE_VARFACT, NO_FILE, NO_FILE, NO_FILE, key, name, sym, tag, NONE, NONE])
-}
-
-pub fn find_varfact(nodes: &[i64], key: i64, name: i64) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_VARFACT && node_a(nodes, idx) == key && node_b(nodes, idx) == name {
-            return node_c(nodes, idx);
-        }
-        idx += 1;
-    }
-    NONE
-}
-
-// The declared-order tag of `name` in the enum at `key`, or NONE.
-pub fn varfact_index_of(nodes: &[i64], key: i64, name: i64) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_VARFACT && node_a(nodes, idx) == key && node_b(nodes, idx) == name {
-            return node_d(nodes, idx);
-        }
-        idx += 1;
-    }
-    NONE
-}
 
 // Struct-field-fact rows.  (tag=NODE_FIELDKEY, a=struct key, b=field name
 // id, c=substituted field key, d=declared-order index).  One row per

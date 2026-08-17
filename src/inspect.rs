@@ -392,17 +392,6 @@ fn row_detail(names: &[String], nodes: &[i64], lists: &[Vec<i64>], id: i64, tag:
             ],
         );
     }
-    if tag == NODE_VARFACT {
-        return row(
-            "varfact",
-            "",
-            vec![
-                renamed("enum_key", "enum-key", DetailValue::Int(node_a(nodes, id))),
-                keyed("variant", DetailValue::Name(name_text(names, node_b(nodes, id)))),
-                keyed("tag", DetailValue::Int(node_d(nodes, id))),
-            ],
-        );
-    }
     if tag == NODE_FIELDKEY {
         return row(
             "fieldkey",
@@ -605,8 +594,6 @@ fn tag_name(tag: i64) -> &'static str {
         "DOC"
     } else if tag == NODE_TRAIT {
         "TRAIT"
-    } else if tag == NODE_VARFACT {
-        "VARFACT"
     } else if tag == NODE_FIELDKEY {
         "FIELDKEY"
     } else if tag == NODE_NATFACT {

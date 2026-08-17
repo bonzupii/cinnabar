@@ -36,6 +36,7 @@ use cinnabar::ast::{
 };
 use cinnabar::format::format_source;
 use cinnabar::project;
+use cinnabar::target::Target;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde_json::{json, Value};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -50,6 +51,7 @@ struct AnalysisResult {
 }
 
 struct ServerState {
+    target: Target,
     // Open documents as (file-system path, buffer text): the module
     // loader's overlay, so unsaved edits are analyzed like saved files.
     docs: Vec<(String, String)>,
@@ -114,6 +116,14 @@ fn main() -> Result<(), String> {
     let init_params = connection
         .initialize(capabilities)
         .map_err(|err| format!("initialize failed: {}", err))?;
+    let requested_target = init_params
+        .get("initializationOptions")
+        .and_then(|options| options.get("target"))
+        .and_then(Value::as_str);
+    let target = match requested_target.and_then(|text| Target::parse(text).ok()) {
+        Some(value) => value,
+        None => Target::host(),
+    };
     let client = init_params
         .get("clientInfo")
         .and_then(|info| info.get("name"))
@@ -123,6 +133,7 @@ fn main() -> Result<(), String> {
     log_message(&connection, &format!("cinnabar-lsp ready for {}", client))?;
     let (analysis_tx, analysis_rx) = channel();
     let mut state = ServerState {
+        target,
         docs: Vec::new(),
         published: Vec::new(),
         roots: Vec::new(),
@@ -464,7 +475,7 @@ fn completions_with_stub(state: &ServerState, path: &str, offset: i64) -> Option
     }
     doc.1.insert_str(at, COMPLETION_STUB);
     let entry = entry_of_doc(state, path);
-    let analysis = analyze(&entry, &docs);
+    let analysis = analyze(&entry, &docs, &state.target);
     let file = file_id_of(&analysis, path);
     if file == NONE_ID {
         return None;
@@ -1372,10 +1383,11 @@ fn start_due_analyses(state: &mut ServerState) {
         let path = selected.0;
         let generation = selected.1;
         let docs = state.docs.clone();
+        let target = state.target;
         let tx = state.analysis_tx.clone();
         state.running_path = Some(path.clone());
         std::thread::spawn(move || {
-            let analysis = analyze(&path, &docs);
+            let analysis = analyze(&path, &docs, &target);
             tx.send(AnalysisResult { path, generation, analysis }).is_ok()
         });
     }
@@ -1701,7 +1713,7 @@ fn path_to_uri(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{path_to_uri, start_due_analyses, uri_to_path, AnalysisResult, ServerState};
+    use super::{path_to_uri, start_due_analyses, uri_to_path, AnalysisResult, ServerState, Target};
     use std::sync::mpsc::channel;
     use std::time::Instant;
 
@@ -1710,6 +1722,7 @@ mod tests {
         let (analysis_tx, analysis_rx) = channel::<AnalysisResult>();
         let now = Instant::now();
         let mut state = ServerState {
+            target: Target::host(),
             docs: Vec::new(),
             published: Vec::new(),
             roots: Vec::new(),

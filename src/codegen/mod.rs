@@ -27,10 +27,12 @@ use crate::ast::Seeds;
 use crate::codegen::emitter::{emit_program, InstFns, Session};
 use crate::codegen::error::*;
 use crate::codegen::types::{EnumInfos, KeyTypes, PayloadStructs};
+use crate::target::{Target, TargetLink};
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::targets::{
-    CodeModel, InitializationConfig, RelocMode, Target, TargetData, TargetMachine, TargetTriple,
+    CodeModel, InitializationConfig, RelocMode, Target as LlvmTarget, TargetData, TargetMachine,
+    TargetTriple,
 };
 use inkwell::OptimizationLevel;
 use std::fs;
@@ -76,15 +78,15 @@ pub enum LinkMode {
 
 /// Where a linked build goes and how it is produced.
 ///
-/// These three travel together — the output path, the optimization level it
-/// is assembled at, and the mode it is linked in — and naming them as one
-/// value keeps a call site from silently pairing an instrumented link with
-/// the path a shipped binary was meant to occupy.
+/// These travel together — the output path, the optimization level it is
+/// assembled at, and the descriptor of the platform it targets — and
+/// naming them as one value keeps a call site from silently pairing a
+/// cross target with the path a shipped binary was meant to occupy.
 pub struct BuildTarget<'a> {
     pub out: &'a Path,
     pub opt_level: &'a str,
-    pub mode: LinkMode,
-    pub platform: &'a str,
+    pub target: &'a Target,
+    pub instrumented: bool,
 }
 
 pub fn compile_and_link(
@@ -96,13 +98,13 @@ pub fn compile_and_link(
     entry_span: (i64, i64, i64),
     seeds: &Seeds,
 ) -> Result<(), CodegenError> {
-    let ir_text = emit_to_ir(names, nodes, lists, impls_list, entry_span, target.platform, seeds)?;
+    let ir_text = emit_to_ir(names, nodes, lists, impls_list, entry_span, target.target, seeds)?;
     let temp_root = make_temp_root()?;
     let ir_path = temp_path(target.out, "ll");
     let obj_path = temp_path(target.out, "o");
     let compiled = write_text(&ir_path, &ir_text)
         .and_then(|()| assemble(&ir_path, &obj_path, target.opt_level))
-        .and_then(|()| link(&obj_path, target.out, target.mode, target.platform));
+        .and_then(|()| link(&obj_path, target.out, target.target, target.instrumented));
     finish_temp(&temp_root, compiled)
 }
 
@@ -115,10 +117,10 @@ pub fn compile_to_ir(
     lists: &mut Vec<Vec<i64>>,
     impls_list: i64,
     entry_span: (i64, i64, i64),
-    platform: &str,
+    target: &Target,
     seeds: &Seeds,
 ) -> Result<String, CodegenError> {
-    emit_to_ir(names, nodes, lists, impls_list, entry_span, platform, seeds)
+    emit_to_ir(names, nodes, lists, impls_list, entry_span, target, seeds)
 }
 
 /// Emit, optimize, and assemble the program to a relocatable object file at
@@ -133,7 +135,7 @@ pub fn compile_to_object(
     entry_span: (i64, i64, i64),
     seeds: &Seeds,
 ) -> Result<(), CodegenError> {
-    let ir_text = emit_to_ir(names, nodes, lists, impls_list, entry_span, target.platform, seeds)?;
+    let ir_text = emit_to_ir(names, nodes, lists, impls_list, entry_span, target.target, seeds)?;
     let temp_root = make_temp_root()?;
     let ir_path = temp_path(target.out, "ll");
     let obj_path = temp_path(target.out, "o");
@@ -200,13 +202,13 @@ fn emit_to_ir(
     lists: &mut Vec<Vec<i64>>,
     impls_list: i64,
     entry_span: (i64, i64, i64),
-    platform: &str,
+    target: &Target,
     seeds: &Seeds,
 ) -> Result<String, CodegenError> {
     let context = Context::create();
     let module = context.create_module("cinnabar");
     let builder = context.create_builder();
-    let (target_data, triple) = target_for(platform)?;
+    let (target_data, triple) = target_for(target)?;
     module.set_triple(&triple);
     let layout = target_data.get_data_layout();
     module.set_data_layout(&layout);
@@ -228,6 +230,7 @@ fn emit_to_ir(
         inst_fns,
         impls_list,
         *seeds,
+        *target,
     );
     emit_program(&mut sess, entry_span)?;
     verify_module(&module)?;
@@ -235,10 +238,10 @@ fn emit_to_ir(
 }
 
 pub(crate) fn host_target() -> Result<(TargetData, TargetTriple), CodegenError> {
-    Target::initialize_native(&InitializationConfig::default())
+    LlvmTarget::initialize_native(&InitializationConfig::default())
         .map_err(|message| tool_error("llvm", None, &message))?;
     let triple = TargetMachine::get_default_triple();
-    let target = Target::from_triple(&triple)
+    let target = LlvmTarget::from_triple(&triple)
         .map_err(|message| tool_error("llvm", None, &message.to_string()))?;
     let cpu = TargetMachine::get_host_cpu_name().to_string();
     let features = TargetMachine::get_host_cpu_features().to_string();
@@ -256,22 +259,18 @@ pub(crate) fn host_target() -> Result<(TargetData, TargetTriple), CodegenError> 
     Ok((target_data, triple))
 }
 
-fn target_for(platform: &str) -> Result<(TargetData, TargetTriple), CodegenError> {
-    if platform == "host" {
+fn target_for(target: &Target) -> Result<(TargetData, TargetTriple), CodegenError> {
+    // The host build uses the native LLVM machine with host CPU features;
+    // any other target uses the descriptor's own triple with generic CPU.
+    if target.is_host() {
         return host_target();
     }
-    let triple_text = match platform {
-        "linux" => "x86_64-unknown-linux-gnu",
-        "darwin" => darwin_triple(),
-        "bsd" => "x86_64-unknown-freebsd",
-        "windows" => "x86_64-w64-windows-gnu",
-        value => return Err(tool_error("llvm", None, &format!("unknown target platform '{}'", value))),
-    };
-    Target::initialize_all(&InitializationConfig::default());
-    let triple = TargetTriple::create(triple_text);
-    let target = Target::from_triple(&triple)
+    let triple_text = target.triple();
+    LlvmTarget::initialize_all(&InitializationConfig::default());
+    let triple = TargetTriple::create(&triple_text);
+    let llvm_target = LlvmTarget::from_triple(&triple)
         .map_err(|message| tool_error("llvm", None, &message.to_string()))?;
-    let machine = target
+    let machine = llvm_target
         .create_target_machine(
             &triple,
             "generic",
@@ -282,14 +281,6 @@ fn target_for(platform: &str) -> Result<(TargetData, TargetTriple), CodegenError
         )
         .ok_or_else(|| tool_error("llvm", None, "failed to create the requested target machine"))?;
     Ok((machine.get_target_data(), triple))
-}
-
-fn darwin_triple() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
-        "aarch64-apple-darwin"
-    } else {
-        "x86_64-apple-darwin"
-    }
 }
 
 fn verify_module(module: &Module) -> Result<(), CodegenError> {
@@ -355,11 +346,23 @@ fn opt_flags(level: &str) -> (String, String) {
     }
 }
 
-fn link(obj_path: &Path, out: &Path, mode: LinkMode, platform: &str) -> Result<(), CodegenError> {
+fn link(obj_path: &Path, out: &Path, target: &Target, instrumented: bool) -> Result<(), CodegenError> {
+    // The sanitizer-instrumented link is a codegen-only override layered on
+    // top of whatever target the build carries; it is never a target a user
+    // names. Every other mode comes from the descriptor's own link field.
+    let mode = if instrumented {
+        LinkMode::Instrumented
+    } else {
+        match target.link {
+            TargetLink::Dynamic => LinkMode::Dynamic,
+            TargetLink::StaticMusl => LinkMode::StaticMusl,
+            TargetLink::WindowsMinGW => LinkMode::WindowsMinGW,
+        }
+    };
     let args = match mode {
-        LinkMode::Dynamic => link_dynamic(obj_path, out, platform)?,
+        LinkMode::Dynamic => link_dynamic(obj_path, out, target)?,
         LinkMode::StaticMusl => link_static_musl(obj_path, out)?,
-        LinkMode::WindowsMinGW => link_windows_mingw(obj_path, out)?,
+        LinkMode::WindowsMinGW => link_windows_mingw(obj_path, out, target)?,
         LinkMode::Instrumented => link_instrumented(obj_path, out)?,
     };
     let refs: Vec<&str> = args.iter().map(|arg| arg.as_str()).collect();
@@ -386,24 +389,17 @@ fn link_instrumented(obj_path: &Path, out: &Path) -> Result<Vec<String>, Codegen
     ])
 }
 
-fn link_dynamic(obj_path: &Path, out: &Path, platform: &str) -> Result<Vec<String>, CodegenError> {
-    let triple = match platform {
-        "host" => None,
-        "linux" => Some("x86_64-unknown-linux-gnu"),
-        "darwin" => Some(darwin_triple()),
-        "bsd" => Some("x86_64-unknown-freebsd"),
-        "windows" => Some("x86_64-w64-windows-gnu"),
-        value => return Err(tool_error("clang", None, &format!("unknown target platform '{}'", value))),
-    };
+fn link_dynamic(obj_path: &Path, out: &Path, target: &Target) -> Result<Vec<String>, CodegenError> {
     let out_text = out.to_string_lossy();
     let obj_text = obj_path.to_string_lossy();
     let mut args: Vec<String> = Vec::new();
-    if let Some(value) = triple {
+    // A host build links with the host toolchain's default target; a cross
+    // build names its triple explicitly.
+    if !target.is_host() {
         args.push("-target".to_string());
-        args.push(value.to_string());
+        args.push(target.triple());
     }
-    let is_darwin = platform == "darwin" || (platform == "host" && cfg!(target_os = "macos"));
-    if !is_darwin {
+    if target.abi().supports_non_pie {
         args.push("-no-pie".to_string());
     }
     args.push("-o".to_string());
@@ -412,10 +408,10 @@ fn link_dynamic(obj_path: &Path, out: &Path, platform: &str) -> Result<Vec<Strin
     Ok(args)
 }
 
-fn link_windows_mingw(obj_path: &Path, out: &Path) -> Result<Vec<String>, CodegenError> {
+fn link_windows_mingw(obj_path: &Path, out: &Path, target: &Target) -> Result<Vec<String>, CodegenError> {
     Ok(vec![
         "-target".to_string(),
-        "x86_64-w64-windows-gnu".to_string(),
+        target.triple(),
         "-o".to_string(),
         out.to_string_lossy().to_string(),
         obj_path.to_string_lossy().to_string(),

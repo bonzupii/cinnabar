@@ -10,7 +10,7 @@
 //!
 //! This is the stage that computes what the rest of the compiler consumes,
 //! which is why it is the largest file in the tree. Enum variant tags
-//! (`NODE_VARFACT`), struct field offsets (`NODE_FIELDKEY`), trait dispatch
+//! (variant symbol tags), struct field offsets (`NODE_FIELDKEY`), trait dispatch
 //! targets (`NODE_TRAIT`), and one `NODE_INST` per instantiated generic are
 //! all established here. So is linearity: every type key is marked linear
 //! or not — a native handle by declaration, an aggregate if any member is,
@@ -709,11 +709,10 @@ fn is_option_key(nodes: &[i64], key: i64) -> bool {
     key_kind(nodes, key) == TYD_ENUM && sym_prim_kind(nodes, key_sym(nodes, key)) == PRIM_OPTION
 }
 
-fn attach_variant_facts(nodes: &mut Vec<i64>, lists: &[Vec<i64>]) {
+fn attach_variant_facts(nodes: &mut [i64], lists: &[Vec<i64>]) {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
         if node_tag(nodes, idx) == NODE_TYINFO && node_b(nodes, idx) == TYD_ENUM {
-            let key = node_a(nodes, idx);
             let sym = node_c(nodes, idx);
             if sym != NONE {
                 let decl = sym_decl(nodes, sym);
@@ -725,7 +724,6 @@ fn attach_variant_facts(nodes: &mut Vec<i64>, lists: &[Vec<i64>]) {
                         let variant = list_get(lists, variants, v);
                         let vsym = variant_sym_of(nodes, variant);
                         if vsym != NONE {
-                            alloc_varfact(nodes, key, node_a(nodes, variant), vsym, v);
                             sym_set_variant_tag(nodes, vsym, v);
                         }
                         v += 1;
@@ -4799,7 +4797,7 @@ mod tests {
     // toolchain `cargo test`'s fixture-linked suites need.
     fn errors_for(source: &str) -> Vec<String> {
         let overlay = [("scratch.cnb".to_string(), source.to_string())];
-        let result = crate::analysis::analyze("scratch.cnb", &overlay);
+        let result = crate::analysis::analyze("scratch.cnb", &overlay, &crate::target::Target::host());
         result.errors.iter().map(|d| d.0.clone()).collect()
     }
 

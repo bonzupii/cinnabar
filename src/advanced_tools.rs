@@ -35,20 +35,22 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+// The host's name as `arch-os`, derived from the structured target
+// descriptor so the driver and the tooling never assemble a platform from
+// separate `std::env` constants.
 pub fn host_target() -> String {
-    format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
-}
-
-pub fn validate_target(requested: &str) -> Result<(), String> {
-    let host = host_target();
-    if requested == "host" || requested == host || requested == "linux" || requested == "darwin" || requested == "bsd" || requested == "windows" {
-        Ok(())
-    } else {
-        Err(format!(
-            "unknown target '{}'; choose host, linux, darwin, bsd, or windows (host is {})",
-            requested, host
-        ))
-    }
+    let host = crate::target::Target::host();
+    let arch = match host.arch {
+        crate::target::TargetArch::X86_64 => "x86_64",
+        crate::target::TargetArch::AArch64 => "aarch64",
+    };
+    let os = match host.os {
+        crate::target::TargetOs::Linux => "linux",
+        crate::target::TargetOs::Darwin => "darwin",
+        crate::target::TargetOs::Bsd => "bsd",
+        crate::target::TargetOs::Windows => "windows",
+    };
+    format!("{}-{}", arch, os)
 }
 
 fn run_capture(program: &str, args: &[&str]) -> Result<String, String> {

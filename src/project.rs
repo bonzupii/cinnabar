@@ -119,7 +119,7 @@ pub fn load_manifest(path: &Path) -> Result<ProjectManifest, ManifestError> {
         .map(|resolved| comparable_path(&resolved))
         .map_err(|resolve_error| format!("cannot resolve project root '{}': {}", root_source.display(), resolve_error))?;
     let manifest_path = path.to_string_lossy().to_string();
-    let analyzed = analysis::analyze(&manifest_path, &[]);
+    let analyzed = analysis::analyze(&manifest_path, &[], &crate::target::Target::host());
     if !analyzed.errors.is_empty() {
         return Err(ManifestError::from_front_end(&analyzed));
     }

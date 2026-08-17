@@ -838,6 +838,7 @@ fn enter_type_params(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], scopes: &mut 
 fn collect_variants(state: &mut State, hoist_scope: i64, sub: i64, enum_full: i64, item: i64) {
     let variants = node_e(state.1, item);
     let count = list_len(state.2, variants);
+    let prim = prim_kind_of(state.0, enum_full);
     let mut idx = 0i64;
     while idx < count {
         let variant = list_get(state.2, variants, idx);
@@ -849,7 +850,46 @@ fn collect_variants(state: &mut State, hoist_scope: i64, sub: i64, enum_full: i6
         variant_set_sym(state.1, variant, sym);
         push_entry(state.4, sub, var_name, sym, NS_VALUE, NONE);
         insert_hoisted(state, hoist_scope, var_name, sym, variant);
+        if let Some(slot) = seed_variant_slot(prim, idx) {
+            state.13.set_sym(slot, sym);
+        }
         idx += 1;
+    }
+}
+
+// The seeded symbol slot for a builtin primitive enum's variant at
+// declaration index `idx`, or none when the enum is not a builtin primitive.
+fn seed_variant_slot(prim: i64, idx: i64) -> Option<usize> {
+    if prim == PRIM_RESULT {
+        if idx == 0 {
+            Some(SEED_SYM_OK)
+        } else if idx == 1 {
+            Some(SEED_SYM_ERR)
+        } else {
+            None
+        }
+    } else if prim == PRIM_OPTION {
+        if idx == 0 {
+            Some(SEED_SYM_SOME)
+        } else if idx == 1 {
+            Some(SEED_SYM_NONE)
+        } else {
+            None
+        }
+    } else if prim == PRIM_DIV_ERROR {
+        if idx == 0 {
+            Some(SEED_SYM_DIV_BY_ZERO)
+        } else {
+            None
+        }
+    } else if prim == PRIM_INDEX_ERROR {
+        if idx == 0 {
+            Some(SEED_SYM_INDEX_OOB)
+        } else {
+            None
+        }
+    } else {
+        None
     }
 }
 
@@ -2620,7 +2660,7 @@ mod tests {
     // toolchain `cargo test`'s fixture-linked suites need.
     fn errors_for(source: &str) -> Vec<String> {
         let overlay = [("scratch.cnb".to_string(), source.to_string())];
-        let result = crate::analysis::analyze("scratch.cnb", &overlay);
+        let result = crate::analysis::analyze("scratch.cnb", &overlay, &crate::target::Target::host());
         result.errors.iter().map(|d| d.0.clone()).collect()
     }
 
@@ -2632,7 +2672,8 @@ mod tests {
         let mut errors: Vec<Diag> = Vec::new();
         let mut notes: Vec<Note> = Vec::new();
         let mut deferred: Vec<Diag> = Vec::new();
-        let overlay = [("scratch.cnb".to_string(), "pub fun main() I32\n  return 0\nend\n".to_string())];
+        let source = "pub fun main() I32\n  return 0\nend\n";
+        let overlay = [("scratch.cnb".to_string(), source.to_string())];
         let (loaded, files) = crate::module_loader::load_with_overlay(
             &mut names,
             &mut nodes,
@@ -2667,7 +2708,7 @@ mod tests {
         }
         let mut sidx = 0usize;
         while sidx < SEED_SYM_COUNT {
-            assert_ne!(seeds.sym(sidx), NONE, "seed sym slot {} left empty", sidx);
+            assert_ne!(seeds.sym(sidx), NONE, "seed symbol slot {} left empty", sidx);
             sidx += 1;
         }
     }
@@ -2966,7 +3007,7 @@ end
             "tests/fixtures/repro/head.cnb",
         ];
         for path in paths {
-            let result = crate::analysis::analyze(path, &[]);
+            let result = crate::analysis::analyze(path, &[], &crate::target::Target::host());
             let errors: Vec<String> = result.errors.iter().map(|d| d.0.clone()).collect();
             assert!(errors.is_empty(), "{}: {:?}", path, errors);
         }
@@ -3164,7 +3205,7 @@ pub fun main() impure I64
 end
 "#;
         let overlay = [("scratch.cnb".to_string(), source.to_string())];
-        let result = crate::analysis::analyze("scratch.cnb", &overlay);
+        let result = crate::analysis::analyze("scratch.cnb", &overlay, &crate::target::Target::host());
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         // Exactly one extraction binding: the vec_pop call's call-fact row.
         let mut call = NONE;

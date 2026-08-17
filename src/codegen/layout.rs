@@ -5,8 +5,8 @@
 //! a real build uses: the canonical type keys are lowered through
 //! `types::llvm_type` and measured with LLVM's target data for the host
 //! machine. Field keys reuse `struct_field_keys` (the lowering's own
-//! substitution path) and enum variant tags are read from the typechecker's
-//! `NODE_VARFACT` rows.
+//! substitution path) and enum variant tags are read from variant symbol
+//! rows attached by the typechecker.
 //!
 //! `measure_all` lowers each candidate key and returns a `Vec<TypeLayout>`
 //! plus the target triple. `render_layouts` formats that vector as aligned
@@ -407,12 +407,14 @@ fn measure_enum(
     while idx < count {
         let variant = list_get(env.4, variants_list, idx);
         let vname = node_a(env.3, variant);
-        // The declared-order tag is the typechecker's attached fact; NONE
-        // means the fact row was never created (an unreferenced builtin
-        // instantiation), in which case the variant list's declared order
-        // is the same single fact read from the tree it was derived from.
-        let fact_tag = varfact_index_of(env.3, key, vname);
-        let tag = if fact_tag == NONE { idx } else { fact_tag };
+        let variant_sym = variant_sym_of(env.3, variant);
+        if variant_sym == NONE {
+            return Err(builder_error(span.0, span.1, span.2, &format!("enum key {} has a variant without a resolved symbol", key)));
+        }
+        let tag = sym_variant_tag_of(env.3, variant_sym);
+        if tag == NONE {
+            return Err(builder_error(span.0, span.1, span.2, &format!("enum key {} has a variant without an attached tag", key)));
+        }
         let payload_ty = payload_struct_of(env, key, idx, span)?;
         let payload_size = env.1.get_abi_size(&payload_ty);
         variants.push(VariantLayout { name: vname, tag, payload_size });
