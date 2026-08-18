@@ -3,9 +3,9 @@
 //! `check` runs exactly the front end the language server runs —
 //! `cinnabar::analysis::analyze`, through `lex -> parse -> resolve ->
 //! typecheck -> borrow_check` — over a single in-memory source and never
-//! anything past it. There is no second pipeline here: the Single-Fact Rule
-//! this crate borrows from `cinnabar`'s own `analysis.rs` means a playground
-//! answer can never disagree with what a real build or the LSP would say.
+//! anything past it. There is no second pipeline here: it runs the same
+//! `analysis.rs` front end a real build runs, so a playground answer can
+//! never disagree with what a real build or the LSP would say.
 //!
 //! The `cinnabar` dependency below is pinned to `default-features = false`,
 //! which drops its `codegen` feature and, with it, `inkwell`/LLVM — the one
@@ -14,7 +14,7 @@
 //! it's given; it can only report what the front end established about it.
 
 use cinnabar::analysis;
-use cinnabar::ast::NO_FILE;
+use cinnabar::ast::{diag_kind_name, NO_FILE};
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::wasm_bindgen;
 
@@ -115,8 +115,9 @@ fn diagnostics_json(result: &analysis::Analysis) -> Vec<Value> {
         }
         diagnostics.push(json!({
             "severity": "error",
-            "message": error.0,
-            "source": source_json(&result.files, error.1, error.2, error.3),
+            "category": diag_kind_name(&error.kind),
+            "message": error.message,
+            "source": source_json(&result.files, error.file, error.start, error.end),
             "explanations": explanations,
         }));
         error_idx += 1;

@@ -3,13 +3,20 @@
 # ambiguous and must be rejected by the ambiguity rule — the compiler must
 # never guess which parameter the returned reference came from.
 
-fun choose_ref(a: &I64, b: &I64) &I64
-  if a < b
+fun choose_ref(a: &[I64], b: &[I64], pick_a: Bool) &[I64]
+  if pick_a
     return a
   end
   return b
 end
 
 pub fun main() I64
-  return 0
+  val x = [1, 2]
+  val y = [3, 4]
+  val r = choose_ref(&x, &y, true)
+  val used = match r
+    [] => 0
+    [first, rest @ ..] => first
+  end
+  return used
 end

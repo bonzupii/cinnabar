@@ -2892,8 +2892,8 @@ fn native_print<'ctx>(
     newline: bool,
     span: (i64, i64, i64),
 ) -> Result<(), CodegenError> {
-    // `write` directly, not through libc's wrapper: Milestone 4 puts the
-    // kernel entry point in the emitted IR for the Terminal surface, so
+    // `write` is emitted directly, not through libc's wrapper: the kernel
+    // entry point sits in the emitted IR for the Terminal surface, so
     // nothing sits between the Cinnabar declaration and the system call.
     let (data, len) = byte_view_of(sess, locals, span)?;
     let fd = sess.0.i64_type().const_int(if stderr { 2 } else { 1 }, false);
@@ -4067,8 +4067,7 @@ fn capture_command_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, wrapper: Functio
 // `argv` entries are C strings, and a Cinnabar `String` carries an explicit
 // length instead of a terminator, so the length has to be measured once at
 // the boundary. This is emitted rather than calling libc's `strlen` because
-// the argument surface, like the rest of Milestone 4, does not route
-// through libc.
+// the argument surface does not route through libc.
 fn emit_strlen<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, text: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
     let i64_ty = sess.0.i64_type();
     let cursor = alloca_raw(sess, i64_ty.into(), "len", span)?;
@@ -4961,6 +4960,13 @@ fn native_process_wait<'ctx>(
     Ok(out)
 }
 
+// The Win32 `CloseHandle` entry point: takes a HANDLE pointer and returns
+// a 32-bit success flag, so a kernel object is released when its handle is
+// consumed.
+fn extern_close_handle<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
+    extern_fn(sess, "CloseHandle", sess.0.i32_type().fn_type(&[ptr_ty(sess).into()], false))
+}
+
 // Reads `GetLastError()` as a sign-extended i64, for Windows error paths.
 fn windows_last_error<'ctx>(sess: &mut Session<'ctx, '_, '_>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
     let error_fn = extern_fn(sess, "GetLastError", sess.0.i32_type().fn_type(&[], false));
@@ -5083,6 +5089,7 @@ fn native_process_wait_windows<'ctx>(
     let p0 = get_local(locals, 0, span)?;
     let handle = load_i64(sess, p0)?;
     let handle_ptr = sess.2.build_int_to_ptr(handle, ptr_ty(sess), "").map_err(builder_fail)?;
+    let close_process = extern_close_handle(sess);
     let wait = extern_fn(sess, "WaitForSingleObject", sess.0.i32_type().fn_type(&[ptr_ty(sess).into(), sess.0.i32_type().into()], false));
     let wait_call = sess.2.build_call(wait, &[into_meta(handle_ptr.into()), into_meta(sess.0.i32_type().const_int(0xFFFFFFFF, false).into())], "").map_err(builder_fail)?;
     let wait_raw = match wait_call.try_as_basic_value() {
@@ -5099,6 +5106,7 @@ fn native_process_wait_windows<'ctx>(
     sess.2.position_at_end(wait_fail_block);
     let err_code = windows_last_error(sess, span)?;
     system_fault_result(sess, ret_key, out, err_code, span)?;
+    sess.2.build_call(close_process, &[into_meta(handle_ptr.into())], "").map_err(builder_fail)?;
     sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
     sess.2.position_at_end(wait_ok_block);
     let code_slot = alloca_raw(sess, sess.0.i32_type().into(), "exit_code", span)?;
@@ -5117,10 +5125,12 @@ fn native_process_wait_windows<'ctx>(
     sess.2.position_at_end(code_fail_block);
     let err_code2 = windows_last_error(sess, span)?;
     system_fault_result(sess, ret_key, out, err_code2, span)?;
+    sess.2.build_call(close_process, &[into_meta(handle_ptr.into())], "").map_err(builder_fail)?;
     sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
     sess.2.position_at_end(code_ok_block);
     let code = sess.2.build_load(sess.0.i32_type(), code_slot, "").map_err(builder_fail)?.into_int_value();
     let code64 = sess.2.build_int_z_extend(code, sess.0.i64_type(), "").map_err(builder_fail)?;
+    sess.2.build_call(close_process, &[into_meta(handle_ptr.into())], "").map_err(builder_fail)?;
     let code_key = result_arg_key(sess, ret_key, 0);
     let code_val = declare_local(sess, code_key, "code", span)?;
     store_key(sess, code_val, code64.into())?;
@@ -5799,6 +5809,11 @@ fn native_process_spawn_windows<'ctx>(
     sess.2.position_at_end(create_ok);
     let handle_slot = byte_offset(sess, pi, zero)?;
     let handle = load_i64(sess, handle_slot)?;
+    let thread_slot = byte_offset(sess, pi, i64_ty.const_int(8, false))?;
+    let thread_handle = load_i64(sess, thread_slot)?;
+    let thread_ptr = sess.2.build_int_to_ptr(thread_handle, ptr_ty(sess), "").map_err(builder_fail)?;
+    let close_thread = extern_close_handle(sess);
+    sess.2.build_call(close_thread, &[into_meta(thread_ptr.into())], "").map_err(builder_fail)?;
     let child_key = result_arg_key(sess, ret_key, 0);
     let child_val = declare_local(sess, child_key, "child", span)?;
     store_key(sess, child_val, handle.into())?;

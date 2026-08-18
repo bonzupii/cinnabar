@@ -798,11 +798,12 @@ fn main() -> ExitCode {
         errors: &mut errors,
         notes: &mut notes,
         deferred: &mut deferred,
+        target: &target,
     };
     if !resolver::resolve(&mut names, &mut nodes, &mut lists, resolver_diagnostics, root, &ext_mods, &mut seeds) {
         return report_diagnostics(json_out, &errors, &notes, &files);
     }
-    let mut check = CheckContext { errors: &mut errors, notes: &mut notes, seeds: &seeds };
+    let mut check = CheckContext { errors: &mut errors, notes: &mut notes, seeds: &seeds, target: &target };
     let (ok, impls_list) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut check, root, &ext_mods);
     if !ok {
         return report_diagnostics(json_out, &errors, &notes, &files);
@@ -898,12 +899,13 @@ fn main() -> ExitCode {
         // user's program to point at, so it travels as a source-less
         // diagnostic — through the same reporter, and into the same
         // envelope, as every other one.
-        let unsupported: Diag = (
-            "--static requires a Linux compiler built with the static-musl feature".to_string(),
-            NO_FILE,
-            0,
-            0,
-        );
+        let unsupported = Diag {
+            message: "--static requires a Linux compiler built with the static-musl feature".to_string(),
+            file: NO_FILE,
+            start: 0,
+            end: 0,
+            kind: DiagKind::Internal,
+        };
         return report_diagnostics(json_out, &[unsupported], &[], &files);
     }
     target.link = target.link_mode(args.static_link);
@@ -948,12 +950,13 @@ fn report_diagnostics(emit_json: bool, errors: &[Diag], notes: &[Note], files: &
 /// consumer needs no second shape for failures below the front end.
 fn report_codegen_error(emit_json: bool, codegen_err: &codegen::error::CodegenError, files: &[(String, String)]) -> ExitCode {
     if emit_json {
-        let diag: Diag = (
-            codegen_error_message(codegen_err),
-            codegen_err.span.0,
-            codegen_err.span.1,
-            codegen_err.span.2,
-        );
+        let diag = Diag {
+            message: codegen_error_message(codegen_err),
+            file: codegen_err.span.0,
+            start: codegen_err.span.1,
+            end: codegen_err.span.2,
+            kind: DiagKind::Internal,
+        };
         return finish_with_diagnostics_json(&[diag], &[], files);
     }
     finish_with_codegen_error(codegen_err, files)
@@ -1484,18 +1487,18 @@ fn render_diag(
     notes: &[Note],
     diag_idx: i64,
 ) -> Result<(), String> {
-    if diag.1 == NO_FILE {
-        return render_source_less(&diag.0);
+    if diag.file == NO_FILE {
+        return render_source_less(&diag.message);
     }
-    let path = match file_path_of(files, diag.1) {
+    let path = match file_path_of(files, diag.file) {
         Some(path) => path,
         None => {
-            return render_source_less(&format!("{} (unknown source file {})", diag.0, diag.1));
+            return render_source_less(&format!("{} (unknown source file {})", diag.message, diag.file));
         }
     };
-    let span = diag.2 as usize..diag.3 as usize;
+    let span = diag.start as usize..diag.end as usize;
     let mut report = Report::build(ReportKind::Error, (path.clone(), span.clone()))
-        .with_message(&diag.0)
+        .with_message(&diag.message)
         .with_label(Label::new((path, span)).with_message("here").with_color(Color::Red));
     let mut note_idx = 0usize;
     while note_idx < notes.len() {
@@ -1519,7 +1522,7 @@ fn render_diag(
     report
         .finish()
         .print(&mut *cache)
-        .map_err(|render_err| format!("cannot render '{}': {}", diag.0, render_err))
+        .map_err(|render_err| format!("cannot render '{}': {}", diag.message, render_err))
 }
 
 fn render_codegen_error(codegen_err: &codegen::error::CodegenError, files: &[(String, String)]) -> Result<(), String> {

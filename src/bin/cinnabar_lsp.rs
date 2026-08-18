@@ -648,8 +648,8 @@ fn on_code_lens(state: &ServerState, params: &Value) -> Value {
 fn explanation_json(analysis: &Analysis, diag_idx: i64, focus_note: usize) -> Value {
     let diagnostic = match analysis.errors.get(diag_idx as usize) {
         Some(error) => json!({
-            "message": error.0,
-            "location": location_json(analysis, error.1, error.2, error.3)
+            "message": error.message,
+            "location": location_json(analysis, error.file, error.start, error.end)
         }),
         None => Value::Null,
     };
@@ -1514,8 +1514,8 @@ fn forward_source_less_diagnostics(
             Some(diag) => diag,
             None => break,
         };
-        if diag.1 == NO_FILE && !current.contains(&diag.0) {
-            current.push(diag.0.clone());
+        if diag.file == NO_FILE && !current.contains(&diag.message) {
+            current.push(diag.message.clone());
         }
         idx += 1;
     }
@@ -1571,7 +1571,7 @@ fn file_diagnostics(analysis: &Analysis, file: i64) -> Vec<Value> {
             Some(diag) => diag,
             None => break,
         };
-        if diag.1 == file {
+        if diag.file == file {
             let mut related: Vec<Value> = Vec::new();
             let mut note_idx = 0usize;
             while note_idx < analysis.notes.len() {
@@ -1589,10 +1589,10 @@ fn file_diagnostics(analysis: &Analysis, file: i64) -> Vec<Value> {
                 note_idx += 1;
             }
             let mut diag_json = json!({
-                "range": range_json(analysis, file, diag.2, diag.3),
+                "range": range_json(analysis, file, diag.start, diag.end),
                 "severity": severity_error(),
                 "source": "cinnabar",
-                "message": diag.0
+                "message": diag.message
             });
             if !related.is_empty()
                 && let Some(object) = diag_json.as_object_mut()

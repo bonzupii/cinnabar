@@ -46,6 +46,31 @@ pub enum TargetLink {
     WindowsMinGW,
 }
 
+/// The native subsystems a declared verb can belong to. The resolver maps
+/// each native verb to one of these and checks it against the target before
+/// the surface is allowed to typecheck.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeSubsystem {
+    Core,
+    Memory,
+    File,
+    Network,
+    Process,
+}
+
+impl NativeSubsystem {
+    /// The capability name a diagnostic reports when a target rejects it.
+    pub fn name(self) -> &'static str {
+        match self {
+            NativeSubsystem::Core => "core operations",
+            NativeSubsystem::Memory => "memory allocation",
+            NativeSubsystem::File => "file access",
+            NativeSubsystem::Network => "networking",
+            NativeSubsystem::Process => "process management",
+        }
+    }
+}
+
 /// The complete description of one compilation target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Target {
@@ -190,6 +215,27 @@ impl Target {
     /// The typed ABI table for this target's operating system.
     pub fn abi(&self) -> Abi {
         self.os.abi()
+    }
+
+    /// The pointer width in bits of this target's architecture, the width
+    /// `Isize`/`Usize` scalar literals are range-checked against.
+    pub fn pointer_width_bits(&self) -> u32 {
+        match self.arch {
+            TargetArch::X86_64 => 64,
+            TargetArch::AArch64 => 64,
+        }
+    }
+
+    /// Whether a native subsystem is available on this target. Core,
+    /// memory, and process operations are implemented uniformly across
+    /// every supported operating system; the file and network surfaces
+    /// require the target's ABI row to name an entry point.
+    pub fn supports_subsystem(&self, subsystem: NativeSubsystem) -> bool {
+        match subsystem {
+            NativeSubsystem::Core | NativeSubsystem::Memory | NativeSubsystem::Process => true,
+            NativeSubsystem::File => !self.abi().file_open.is_empty(),
+            NativeSubsystem::Network => !self.abi().socket_create.is_empty(),
+        }
     }
 }
 

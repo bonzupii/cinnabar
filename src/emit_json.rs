@@ -22,7 +22,7 @@
 //!   null `path`.
 
 use crate::analysis::offset_to_position;
-use crate::ast::{note_kind_name, Diag, Note, NO_FILE};
+use crate::ast::{diag_kind_name, note_kind_name, Diag, Note, NO_FILE};
 use serde_json::{json, Value};
 
 /// The parse-only arena, as `--dump-ast --emit-json` emits it.
@@ -92,8 +92,9 @@ pub fn diagnostics_report(errors: &[Diag], notes: &[Note], files: &[(String, Str
         };
         diagnostics.push(json!({
             "severity": "error",
-            "message": error.0,
-            "source": source_json(files, error.1, error.2, error.3),
+            "category": diag_kind_name(&error.kind),
+            "message": error.message,
+            "source": source_json(files, error.file, error.start, error.end),
             "explanations": explanations_of(error_idx as i64, notes, files)
         }));
         error_idx += 1;

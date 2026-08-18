@@ -336,7 +336,10 @@ pub struct ManifestError {
 impl ManifestError {
     /// A failure with no Cinnabar source behind it.
     pub fn source_less(message: String) -> ManifestError {
-        ManifestError { diagnostics: vec![(message, NO_FILE, 0, 0)], files: Vec::new() }
+        ManifestError {
+            diagnostics: vec![Diag { message, file: NO_FILE, start: 0, end: 0, kind: DiagKind::Internal }],
+            files: Vec::new(),
+        }
     }
 
     /// Everything the front end reported about the manifest, unchanged.
@@ -347,7 +350,7 @@ impl ManifestError {
     /// The first message, for callers that want text rather than a report.
     pub fn message(&self) -> String {
         match self.diagnostics.first() {
-            Some(diagnostic) => diagnostic.0.clone(),
+            Some(diagnostic) => diagnostic.message.clone(),
             None => "manifest failed without a diagnostic".to_string(),
         }
     }
@@ -375,7 +378,7 @@ fn manifest_item_error(analyzed: &analysis::Analysis, item: i64, message: &str) 
 
 fn manifest_span_error(analyzed: &analysis::Analysis, span: (i64, i64, i64), message: &str) -> ManifestError {
     ManifestError {
-        diagnostics: vec![(message.to_string(), span.0, span.1, span.2)],
+        diagnostics: vec![Diag { message: message.to_string(), file: span.0, start: span.1, end: span.2, kind: DiagKind::Resolve }],
         files: analyzed.files.clone(),
     }
 }
@@ -982,29 +985,29 @@ mod tests {
             }
         };
         assert!(
-            diagnostic.0.contains(message),
+            diagnostic.message.contains(message),
             "rejected with '{}', want something containing '{}'",
-            diagnostic.0,
+            diagnostic.message,
             message
         );
         assert!(
-            diagnostic.1 != NO_FILE,
+            diagnostic.file != NO_FILE,
             "'{}' carries no source file, but it is about the manifest's own text",
-            diagnostic.0
+            diagnostic.message
         );
-        let source = match failure.files.get(diagnostic.1 as usize) {
+        let source = match failure.files.get(diagnostic.file as usize) {
             Some(value) => value,
             None => {
-                assert!(false, "'{}' names file {} which is not in the file table", diagnostic.0, diagnostic.1);
+                assert!(false, "'{}' names file {} which is not in the file table", diagnostic.message, diagnostic.file);
                 return;
             }
         };
         assert!(
-            diagnostic.2 >= 0 && diagnostic.3 >= diagnostic.2 && diagnostic.3 as usize <= source.1.len(),
+            diagnostic.start >= 0 && diagnostic.end >= diagnostic.start && diagnostic.end as usize <= source.1.len(),
             "'{}' spans {}..{} of a {}-byte manifest",
-            diagnostic.0,
-            diagnostic.2,
-            diagnostic.3,
+            diagnostic.message,
+            diagnostic.start,
+            diagnostic.end,
             source.1.len()
         );
     }

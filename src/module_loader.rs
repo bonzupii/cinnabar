@@ -171,7 +171,7 @@ fn read_source(path: &str, overlay: &[(String, String)], errors: &mut Vec<Diag>)
     match std::fs::read_to_string(path) {
         Ok(text) => Some(text),
         Err(cause) => {
-            errors.push((format!("cannot read input file '{}': {}", path, cause), NO_FILE, 0, 0));
+            push_internal(errors, &format!("cannot read input file '{}': {}", path, cause));
             None
         }
     }

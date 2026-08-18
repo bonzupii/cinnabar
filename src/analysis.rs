@@ -95,7 +95,7 @@ pub fn analyze(entry_path: &str, overlay: &[(String, String)], target: &Target) 
         &mut names,
         &mut nodes,
         &mut lists,
-        resolver::Diagnostics { errors: &mut errors, notes: &mut notes, deferred: &mut deferred },
+        resolver::Diagnostics { errors: &mut errors, notes: &mut notes, deferred: &mut deferred, target },
         root,
         &ext_mods,
         &mut seeds,
@@ -103,7 +103,7 @@ pub fn analyze(entry_path: &str, overlay: &[(String, String)], target: &Target) 
     let mut typechecked = false;
     let mut impls_list = NONE;
     if resolved {
-        let mut check = CheckContext { errors: &mut errors, notes: &mut notes, seeds: &seeds };
+        let mut check = CheckContext { errors: &mut errors, notes: &mut notes, seeds: &seeds, target };
         let (ok, impls) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut check, root, &ext_mods);
         impls_list = impls;
         typechecked = true;
@@ -1669,38 +1669,12 @@ pub fn inlay_hints(analysis: &Analysis, file: i64) -> Vec<(i64, String)> {
 // ---------------------------------------------------------------------------
 
 /// One mechanically-generated fix: a title and the `(file, start, end,
-/// replacement)` edits it applies. Every fix here is derived from a
-/// diagnostic's own message *text* and span -- there is no `DiagKind` to
-/// switch on (see the module doc on `Analysis.errors`), only the message
-/// the compiler already chose to write. A diagnostic whose text this layer
-/// does not recognize produces no fix; that is a real answer ("no
-/// mechanical fix exists"), not a gap to paper over with a guess.
+/// replacement)` edits it applies. Every fix is derived from the structured
+/// `DiagKind` a diagnostic carries; a kind with no mechanical fix produces
+/// none rather than guessing from rendered prose.
 pub struct CodeFix {
     pub title: String,
     pub edits: Vec<(i64, i64, i64, String)>,
-}
-
-fn strip_prefix_quoted<'a>(message: &'a str, prefix: &str) -> Option<&'a str> {
-    message.strip_prefix(prefix)?.strip_suffix('\'')
-}
-
-fn parse_casing_message(message: &str) -> Option<(String, String)> {
-    let rest = message.strip_prefix('\'')?;
-    let (name, tail) = rest.split_once("' violates casing rule: expected ")?;
-    Some((name.to_string(), tail.to_string()))
-}
-
-fn strip_access_message(message: &str) -> Option<String> {
-    const PREFIXES: [&str; 4] =
-        ["cannot access trait '", "cannot access type '", "cannot access '", "cannot call '"];
-    for prefix in PREFIXES {
-        if let Some(rest) = message.strip_prefix(prefix)
-            && let Some(name) = rest.strip_suffix("' here")
-        {
-            return Some(name.to_string());
-        }
-    }
-    None
 }
 
 fn capitalize(word: &str) -> String {
@@ -1744,11 +1718,12 @@ fn split_words(name: &str) -> Vec<String> {
     words
 }
 
-fn casing_fix_name(current: &str, rule: &str) -> Option<String> {
-    let words = split_words(current);
+fn casing_fix_name(names: &[String], name: i64, expected: i64) -> Option<String> {
+    let words = split_words(&name_text(names, name));
     if words.is_empty() {
         return None;
     }
+    let rule = casing_rule_name(expected);
     if rule == "snake_case" {
         Some(words.iter().map(|w| w.to_lowercase()).collect::<Vec<_>>().join("_"))
     } else if rule == "PascalCase" {
@@ -1777,8 +1752,7 @@ fn delete_span_with_newline(analysis: &Analysis, file: i64, start: i64, end: i64
 // The declaring `NODE_ITEM` a use site's symbol resolves to, if any -- only
 // item-kind declarations carry an `is_pub` flag (a bare method's `NODE_FN`
 // row does not), so a private *method* offers no "make public" fix here.
-fn add_pub_fix(analysis: &Analysis, file: i64, offset: i64) -> Option<(i64, i64, i64, String)> {
-    let sym = sym_at(analysis, file, offset);
+fn add_pub_fix(analysis: &Analysis, sym: i64) -> Option<(i64, i64, i64, String)> {
     if sym == NONE {
         return None;
     }
@@ -1794,44 +1768,55 @@ fn add_pub_fix(analysis: &Analysis, file: i64, offset: i64) -> Option<(i64, i64,
     Some((decl_file, start, start, "pub ".to_string()))
 }
 
+// The short name an import item binds (its alias, or the last path
+// segment), the same name `check_unused` reports.
+fn import_name_of(analysis: &Analysis, item: i64) -> String {
+    let alias = node_e(&analysis.nodes, item);
+    let name = if alias != NONE { alias } else { list_last(&analysis.lists, node_d(&analysis.nodes, item)) };
+    name_text(&analysis.names, name)
+}
+
 /// Fixes for diagnostics in `file` overlapping `[range_start, range_end)`,
-/// recognized purely by message text: "remove unused import", "remove
-/// unused declaration", "fix casing" (built on `rename_edits`, so it shares
-/// its all-or-nothing guarantee), and "make public" (declarations only, not
-/// methods).
+/// derived from each diagnostic's `DiagKind`: remove an unused import,
+/// remove an unused declaration, fix casing (built on `rename_edits`, so it
+/// shares its all-or-nothing guarantee), and make an item public
+/// (declarations only, not methods).
 pub fn code_actions(analysis: &Analysis, file: i64, range_start: i64, range_end: i64) -> Vec<CodeFix> {
     let mut out: Vec<CodeFix> = Vec::new();
-    for (message, diag_file, start, end) in &analysis.errors {
-        if *diag_file != file || *end < range_start || *start > range_end {
+    for diag in &analysis.errors {
+        if diag.file != file || diag.end < range_start || diag.start > range_end {
             continue;
         }
-        if let Some(name) = strip_prefix_quoted(message, "unused import '") {
+        if let DiagKind::UnusedImport(item) = &diag.kind {
             out.push(CodeFix {
-                title: format!("Remove unused import '{}'", name),
-                edits: vec![delete_span_with_newline(analysis, file, *start, *end)],
+                title: format!("Remove unused import '{}'", import_name_of(analysis, *item)),
+                edits: vec![delete_span_with_newline(analysis, file, diag.start, diag.end)],
             });
             continue;
         }
-        if message.starts_with("unused ")
-            && let Some(name) = message.split("'").nth(1)
-        {
+        if let DiagKind::UnusedDeclaration(sym) = &diag.kind {
+            let name = short_name_of_sym(analysis, *sym).unwrap_or_default();
             out.push(CodeFix {
                 title: format!("Remove unused declaration '{}'", name),
-                edits: vec![delete_span_with_newline(analysis, file, *start, *end)],
+                edits: vec![delete_span_with_newline(analysis, file, diag.start, diag.end)],
             });
             continue;
         }
-        if let Some((name, rule)) = parse_casing_message(message) {
-            if let Some(fixed) = casing_fix_name(&name, &rule)
-                && let Some(edits) = rename_edits(analysis, file, *start, &fixed)
+        if let DiagKind::CasingViolation { name, expected } = &diag.kind {
+            if let Some(fixed) = casing_fix_name(&analysis.names, *name, *expected)
+                && let Some(edits) = rename_edits(analysis, file, diag.start, &fixed)
             {
-                out.push(CodeFix { title: format!("Rename '{}' to '{}'", name, fixed), edits });
+                out.push(CodeFix {
+                    title: format!("Rename '{}' to '{}'", name_text(&analysis.names, *name), fixed),
+                    edits,
+                });
             }
             continue;
         }
-        if let Some(name) = strip_access_message(message)
-            && let Some(edit) = add_pub_fix(analysis, file, *start)
+        if let DiagKind::PrivateAccess { sym } = &diag.kind
+            && let Some(edit) = add_pub_fix(analysis, *sym)
         {
+            let name = short_name_of_sym(analysis, *sym).unwrap_or_default();
             out.push(CodeFix { title: format!("Make '{}' public", name), edits: vec![edit] });
         }
     }

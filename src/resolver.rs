@@ -33,6 +33,7 @@
 //!   resolves to a plausible neighbour.
 use crate::ast::*;
 use crate::suggest;
+use crate::target::{NativeSubsystem, Target};
 
 pub const NS_TYPE: i64 = 0;
 pub const NS_VALUE: i64 = 1;
@@ -60,6 +61,9 @@ type State<'a> = (
     &'a mut Vec<(i64, i64)>,
     // Seeded builtin names and symbols, filled during resolution.
     &'a mut Seeds,
+    // The platform a build is for, so resolution can reject an operation a
+    // target does not support before code generation begins.
+    &'a Target,
 );
 
 /// The owner of references that belong to no nameable item.
@@ -88,6 +92,7 @@ pub struct Diagnostics<'a> {
     pub notes: &'a mut Vec<Note>,
     /// Reported by the caller once the later stages have run, not here.
     pub deferred: &'a mut Vec<Diag>,
+    pub target: &'a Target,
 }
 
 pub fn resolve(
@@ -99,7 +104,7 @@ pub fn resolve(
     ext_mods: &[(i64, i64)],
     seeds: &mut Seeds,
 ) -> bool {
-    let Diagnostics { errors, notes, deferred } = diagnostics;
+    let Diagnostics { errors, notes, deferred, target } = diagnostics;
     let mut scopes: Vec<Vec<i64>> = Vec::new();
     let mut parents: Vec<i64> = Vec::new();
     let mut pubs: Vec<i64> = Vec::new();
@@ -125,6 +130,7 @@ pub fn resolve(
         &mut owners,
         &mut edges,
         seeds,
+        target,
     );
     seed_builtins(&mut state, root_scope, root);
 
@@ -601,14 +607,14 @@ fn casing_ok(names: &[String], name: i64, casing: i64) -> i64 {
 
 fn report_casing(names: &[String], name: i64, casing: i64, errors: &mut Vec<Diag>, file: i64, start: i64, end: i64) {
     if casing_ok(names, name, casing) == 0 {
-        let rule = if casing == 1 {
-            "snake_case"
-        } else if casing == 2 {
-            "PascalCase"
-        } else {
-            "SCREAMING_SNAKE_CASE"
-        };
-        push_error(errors, &format!("'{}' violates casing rule: expected {}", name_text(names, name), rule), file, start, end);
+        push_error_kind(
+            errors,
+            &format!("'{}' violates casing rule: expected {}", name_text(names, name), casing_rule_name(casing)),
+            file,
+            start,
+            end,
+            DiagKind::CasingViolation { name, expected: casing },
+        );
     }
 }
 
@@ -1247,6 +1253,36 @@ fn verb_supports_mode(verb: i64, mode: i64) -> bool {
     false
 }
 
+// The native subsystem a verb belongs to, so the resolver can check the
+// declared surface against the target's capabilities before typechecking.
+fn native_subsystem_of(verb: i64) -> NativeSubsystem {
+    if verb == NAT_MEM_ALLOCATE
+        || verb == NAT_MEM_DEALLOCATE
+        || verb == NAT_MEM_WRITE_U8
+        || verb == NAT_MEM_READ_U8
+    {
+        NativeSubsystem::Memory
+    } else if verb == NAT_FILE_OPEN
+        || verb == NAT_FILE_READ
+        || verb == NAT_FILE_WRITE
+        || verb == NAT_FILE_CLOSE
+    {
+        NativeSubsystem::File
+    } else if verb == NAT_NET_SOCKET
+        || verb == NAT_NET_BIND
+        || verb == NAT_NET_LISTEN
+        || verb == NAT_NET_ACCEPT
+        || verb == NAT_NET_SEND
+        || verb == NAT_NET_CLOSE
+    {
+        NativeSubsystem::Network
+    } else if verb == NAT_PROCESS_SPAWN || verb == NAT_PROCESS_WAIT {
+        NativeSubsystem::Process
+    } else {
+        NativeSubsystem::Core
+    }
+}
+
 // Derives an ownership mode from a native function's signature and
 // attaches it to the symbol's natfact row; typecheck and borrow read it.
 // A signature matching no predicate, or a mode its verb does not support,
@@ -1276,6 +1312,24 @@ fn classify_native_modes(state: &mut State) {
                 sym_set_native_mode(state.1, idx, derived);
             }
             let verb = sym_native_op(state.1, idx);
+            if verb != NAT_NONE && span.0 != NONE {
+                let subsystem = native_subsystem_of(verb);
+                if !state.14.supports_subsystem(subsystem) {
+                    push_error_kind(
+                        state.3,
+                        &format!(
+                            "native operation '{}' requires {}, which target '{}' does not support",
+                            name_text(state.0, sym_name_of(state.1, idx)),
+                            subsystem.name(),
+                            state.14.os.name()
+                        ),
+                        span.0,
+                        span.1,
+                        span.2,
+                        DiagKind::Resolve,
+                    );
+                }
+            }
             if derived != NAT_MODE_NONE && verb != NAT_NONE && !verb_supports_mode(verb, derived) && span.0 != NONE {
                 push_error(
                     state.3,
@@ -1737,7 +1791,7 @@ fn resolve_import(state: &mut State, scope: i64, item: i64) {
 
 fn finish_import(state: &mut State, scope: i64, item: i64, sym: i64, target_ns: i64, span: (i64, i64, i64)) {
     if !is_visible(state.5, state.6, state.1, scope, sym) {
-        push_error(state.3, &format!("cannot import private item '{}'", name_text(state.0, sym_name_of(state.1, sym))), span.0, span.1, span.2);
+        push_error_kind(state.3, &format!("cannot import private item '{}'", name_text(state.0, sym_name_of(state.1, sym))), span.0, span.1, span.2, DiagKind::PrivateAccess { sym });
         return;
     }
     let segs = node_d(state.1, item);
@@ -2000,12 +2054,13 @@ fn report_unreachable(state: &mut State, list: i64, reached: &[i64], deferred: &
             node_d(state.1, item)
         };
         let text = format!("unused {} '{}'", label, name_text(state.0, name));
-        push_error(
+        push_error_kind(
             deferred,
             &text,
             node_file(state.1, item),
             node_start(state.1, item),
             node_end(state.1, item),
+            DiagKind::UnusedDeclaration(sym),
         );
     }
 }
@@ -2179,7 +2234,7 @@ fn resolve_param_bound(state: &mut State, scope: i64, param: i64) {
         return;
     }
     if !is_visible(state.5, state.6, state.1, scope, sym) {
-        push_error(state.3, &format!("cannot access trait '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, param), node_start(state.1, param), node_end(state.1, param));
+        push_error_kind(state.3, &format!("cannot access trait '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, param), node_start(state.1, param), node_end(state.1, param), DiagKind::PrivateAccess { sym });
         return;
     }
     node_set_c(state.1, param, sym);
@@ -2203,7 +2258,7 @@ fn resolve_impl(state: &mut State, scope: i64, item: i64) {
         push_error(state.3, "'impl' target is not a trait", node_file(state.1, item), node_start(state.1, item), node_end(state.1, item));
     } else {
         if !is_visible(state.5, state.6, state.1, scope, trait_sym) {
-            push_error(state.3, &format!("cannot access trait '{}' here", name_text(state.0, sym_name_of(state.1, trait_sym))), node_file(state.1, item), node_start(state.1, item), node_end(state.1, item));
+            push_error_kind(state.3, &format!("cannot access trait '{}' here", name_text(state.0, sym_name_of(state.1, trait_sym))), node_file(state.1, item), node_start(state.1, item), node_end(state.1, item), DiagKind::PrivateAccess { sym: trait_sym });
         }
         item_set_sym(state.1, item, trait_sym);
     }
@@ -2341,7 +2396,7 @@ fn resolve_expr_path(state: &mut State, scope: i64, expr: i64) {
         return;
     }
     if !is_visible(state.5, state.6, state.1, scope, sym) {
-        push_error(state.3, &format!("cannot access '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
+        push_error_kind(state.3, &format!("cannot access '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr), DiagKind::PrivateAccess { sym });
         return;
     }
     expr_set_sym(state.1, expr, sym);
@@ -2363,7 +2418,7 @@ fn walk_call(state: &mut State, scope: i64, expr: i64) {
                 return;
             }
             if !is_visible(state.5, state.6, state.1, scope, sym) {
-                push_error(state.3, &format!("cannot call '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
+                push_error_kind(state.3, &format!("cannot call '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr), DiagKind::PrivateAccess { sym });
             } else {
                 expr_set_sym(state.1, callee, sym);
             }
@@ -2394,7 +2449,7 @@ fn walk_struct_lit(state: &mut State, scope: i64, expr: i64) {
         return;
     }
     if !is_visible(state.5, state.6, state.1, scope, sym) {
-        push_error(state.3, &format!("cannot access type '{}' here", name_text(state.0, sym_name_of(state.1, sym))), file, start, end);
+        push_error_kind(state.3, &format!("cannot access type '{}' here", name_text(state.0, sym_name_of(state.1, sym))), file, start, end, DiagKind::PrivateAccess { sym });
         return;
     }
     expr_set_sym(state.1, expr, sym);
@@ -2442,7 +2497,7 @@ fn resolve_pat_path(state: &mut State, scope: i64, pat: i64) {
         return;
     }
     if !is_visible(state.5, state.6, state.1, scope, sym) {
-        push_error(state.3, &format!("cannot access '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, pat), node_start(state.1, pat), node_end(state.1, pat));
+        push_error_kind(state.3, &format!("cannot access '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, pat), node_start(state.1, pat), node_end(state.1, pat), DiagKind::PrivateAccess { sym });
         return;
     }
     pat_set_sym(state.1, pat, sym);
@@ -2491,7 +2546,7 @@ fn resolve_type_name(state: &mut State, scope: i64, ty: i64, name: i64) {
     // `ExitCode` as unused.
     record_dependency(state, sym);
     if !is_visible(state.5, state.6, state.1, scope, sym) {
-        push_error(state.3, &format!("cannot access type '{}' here", name_text(state.0, name)), node_file(state.1, ty), node_start(state.1, ty), node_end(state.1, ty));
+        push_error_kind(state.3, &format!("cannot access type '{}' here", name_text(state.0, name)), node_file(state.1, ty), node_start(state.1, ty), node_end(state.1, ty), DiagKind::PrivateAccess { sym });
         return;
     }
     ty_set_sym(state.1, ty, sym);
@@ -2511,7 +2566,7 @@ fn resolve_type_path(state: &mut State, scope: i64, ty: i64) {
         return;
     }
     if !is_visible(state.5, state.6, state.1, scope, sym) {
-        push_error(state.3, &format!("cannot access type '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, ty), node_start(state.1, ty), node_end(state.1, ty));
+        push_error_kind(state.3, &format!("cannot access type '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, ty), node_start(state.1, ty), node_end(state.1, ty), DiagKind::PrivateAccess { sym });
         return;
     }
     ty_set_sym(state.1, ty, sym);
@@ -2562,12 +2617,13 @@ fn check_unused(names: &[String], nodes: &[i64], lists: &[Vec<i64>], deferred: &
     let segs = node_d(nodes, item);
     let alias = node_e(nodes, item);
     let name = if alias != NONE { alias } else { list_last(lists, segs) };
-    push_error(
+    push_error_kind(
         deferred,
         &format!("unused import '{}'", name_text(names, name)),
         node_file(nodes, item),
         node_start(nodes, item),
         node_end(nodes, item),
+        DiagKind::UnusedImport(item),
     );
 }
 
@@ -2657,7 +2713,7 @@ mod tests {
     fn errors_for(source: &str) -> Vec<String> {
         let overlay = [("scratch.cnb".to_string(), source.to_string())];
         let result = crate::analysis::analyze("scratch.cnb", &overlay, &crate::target::Target::host());
-        result.errors.iter().map(|d| d.0.clone()).collect()
+        result.errors.iter().map(|d| d.message.clone()).collect()
     }
 
     #[test]
@@ -2691,7 +2747,7 @@ mod tests {
             &mut names,
             &mut nodes,
             &mut lists,
-            Diagnostics { errors: &mut errors, notes: &mut notes, deferred: &mut deferred },
+            Diagnostics { errors: &mut errors, notes: &mut notes, deferred: &mut deferred, target: &crate::target::Target::host() },
             root,
             &ext_mods,
             &mut seeds,
@@ -3004,7 +3060,7 @@ end
         ];
         for path in paths {
             let result = crate::analysis::analyze(path, &[], &crate::target::Target::host());
-            let errors: Vec<String> = result.errors.iter().map(|d| d.0.clone()).collect();
+            let errors: Vec<String> = result.errors.iter().map(|d| d.message.clone()).collect();
             assert!(errors.is_empty(), "{}: {:?}", path, errors);
         }
     }

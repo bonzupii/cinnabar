@@ -177,7 +177,7 @@ fn expect(nodes: &[i64], names: &[String], pos: &mut i64, text: &str, errors: &m
         let file = node_file(nodes, *pos);
         let start = node_start(nodes, *pos);
         let end = node_end(nodes, *pos);
-        push_error(errors, &format!("expected '{}'", text), file, start, end);
+        push_syntax(errors, &format!("expected '{}'", text), file, start, end);
         false
     }
 }
@@ -311,7 +311,7 @@ fn parse_native_item(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, list
         let file = node_file(nodes, *pos);
         let start = node_start(nodes, *pos);
         let end = node_end(nodes, *pos);
-        push_error(errors, "native modifier is only allowed on fun and type", file, start, end);
+        push_syntax(errors, "native modifier is only allowed on fun and type", file, start, end);
         if is_name(nodes, names, *pos, "mod") || is_name(nodes, names, *pos, "trait") || is_name(nodes, names, *pos, "impl") {
             *pos += 1;
             if node_tag(nodes, *pos) == NODE_TOKEN && node_a(nodes, *pos) == TOK_IDENT {
@@ -377,7 +377,7 @@ fn parse_item_body(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists:
         parse_const(pos, names, nodes, lists, errors, is_pub)
     } else {
         let end = node_end(nodes, *pos);
-        push_error(errors, "expected an item declaration", file, start, end);
+        push_syntax(errors, "expected an item declaration", file, start, end);
         None
     }
 }
@@ -456,7 +456,7 @@ fn parse_type_decl(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists:
     }
     let end = expect_end(pos, names, nodes, errors)?;
     if list_len(lists, fields) > 0 && list_len(lists, variants) > 0 {
-        push_error(errors, "type cannot mix struct fields and enum variants", file, start, end);
+        push_syntax(errors, "type cannot mix struct fields and enum variants", file, start, end);
         return None;
     }
     if list_len(lists, variants) > 0 {
@@ -706,7 +706,7 @@ fn expect_word(pos: &mut i64, nodes: &mut [i64], errors: &mut Vec<Diag>) -> Opti
         let file = node_file(nodes, *pos);
         let start = node_start(nodes, *pos);
         let end = node_end(nodes, *pos);
-        push_error(errors, "expected a name", file, start, end);
+        push_syntax(errors, "expected a name", file, start, end);
         None
     }
 }
@@ -740,7 +740,7 @@ fn parse_type(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut
         parse_named_type(pos, names, nodes, lists, errors)
     } else {
         let end = node_end(nodes, *pos);
-        push_error(errors, "expected a type", file, start, end);
+        push_syntax(errors, "expected a type", file, start, end);
         None
     }
 }
@@ -780,7 +780,7 @@ fn parse_array_len(pos: &mut i64, nodes: &mut [i64], errors: &mut Vec<Diag>) -> 
         let file = node_file(nodes, *pos);
         let start = node_start(nodes, *pos);
         let end = node_end(nodes, *pos);
-        push_error(errors, "expected an array length", file, start, end);
+        push_syntax(errors, "expected an array length", file, start, end);
         None
     }
 }
@@ -845,7 +845,7 @@ fn parse_stmt(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut
         let end = node_end(nodes, *pos);
         let next = *pos + 1;
         if is_name(nodes, names, next, "val") || is_name(nodes, names, next, "var") {
-            push_error(errors, "'pub' modifier is not allowed on local variables", file, start, end);
+            push_syntax(errors, "'pub' modifier is not allowed on local variables", file, start, end);
             return None;
         }
         parse_expr_or_assign(pos, names, nodes, lists, errors)
@@ -1133,7 +1133,7 @@ fn parse_primary(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &
         parse_name_chain(pos, names, nodes, lists, errors)
     } else {
         let end = node_end(nodes, *pos);
-        push_error(errors, "expected an expression", file, start, end);
+        push_syntax(errors, "expected an expression", file, start, end);
         None
     }
 }
@@ -1311,7 +1311,7 @@ fn parse_pattern(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &
         let file = node_file(nodes, *pos);
         let start = node_start(nodes, *pos);
         let end = node_end(nodes, *pos);
-        push_error(errors, "expected a pattern", file, start, end);
+        push_syntax(errors, "expected a pattern", file, start, end);
         None
     }
 }
@@ -1366,7 +1366,7 @@ fn parse_array_pattern(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, li
                 let file = node_file(nodes, *pos);
                 let start = node_start(nodes, *pos);
                 let end = node_end(nodes, *pos);
-                push_error(errors, "rest pattern must bind a name", file, start, end);
+                push_syntax(errors, "rest pattern must bind a name", file, start, end);
                 return None;
             }
             *pos += 1;

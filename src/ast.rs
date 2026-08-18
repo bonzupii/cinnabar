@@ -25,9 +25,9 @@
 //!
 //! **Invariants:**
 //! - A fact with nowhere of its own to live goes in an otherwise-unused
-//!   payload slot of the row it describes, never in a new side table. That
-//!   is what keeps the Single-Fact Rule cheap enough to actually follow as
-//!   the language grows.
+//!   payload slot of the row it describes, never in a new side table; a
+//!   fact is recorded once by the stage that owns it and read, not
+//!   recomputed, by every later stage.
 //! - `NO_FILE` marks a genuinely source-less fact. Every other span is the
 //!   real origin of the thing it describes, carried unmodified from lexing
 //!   through codegen; no stage may substitute a placeholder.
@@ -35,7 +35,92 @@
 //!   binding site, a path's last move, a branch exit — never one invented
 //!   to have something to point at.
 
-pub type Diag = (String, i64, i64, i64);
+/// The structured category of a diagnostic, decided by the pass that
+/// detected the violation. Specific variants carry the arena fact a
+/// consumer needs (the offending symbol, the mis-cased name, the casing
+/// rule); the general variants name the pipeline stage whose rule was
+/// broken. A tool branches on this value, never on the rendered message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DiagKind {
+    /// An import no name in the file reached; the import's `NODE_ITEM`.
+    UnusedImport(i64),
+    /// A declared item nothing reachable from `main` needs; its symbol id.
+    UnusedDeclaration(i64),
+    /// A name that breaks the casing law; the interned name id and the
+    /// expected casing code (1 = snake_case, 2 = PascalCase,
+    /// 3 = SCREAMING_SNAKE_CASE).
+    CasingViolation { name: i64, expected: i64 },
+    /// Use of a private item from outside its module; the target symbol id.
+    PrivateAccess { sym: i64 },
+    /// A public item nothing consumes; its symbol id.
+    UnnecessaryPub { sym: i64 },
+    /// A public struct field nothing consumes; the field node index.
+    UnnecessaryFieldPub { field: i64 },
+    /// A lexer or parser rejection.
+    Syntax,
+    /// A name-resolution rejection (unknown names, duplicate symbols,
+    /// unresolved imports).
+    Resolve,
+    /// A type mismatch or other typecheck rejection.
+    TypeError,
+    /// A borrow or linear-ownership rejection.
+    Linear,
+    /// A source-less compiler failure.
+    Internal,
+}
+
+/// One diagnostic: the rendered message, the exact source span of the
+/// offending fact, and the structured kind a tool consumes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Diag {
+    pub message: String,
+    pub file: i64,
+    pub start: i64,
+    pub end: i64,
+    pub kind: DiagKind,
+}
+
+/// The symbolic name of a diagnostic kind, for the JSON envelope and the
+/// tooling that reads it. Compared by variant discriminant so the payload
+/// slots are never destructured-and-dropped here.
+pub fn diag_kind_name(kind: &DiagKind) -> &'static str {
+    use std::mem::discriminant;
+    if discriminant(kind) == discriminant(&DiagKind::UnusedImport(0)) {
+        "unused_import"
+    } else if discriminant(kind) == discriminant(&DiagKind::UnusedDeclaration(0)) {
+        "unused_declaration"
+    } else if discriminant(kind) == discriminant(&DiagKind::CasingViolation { name: 0, expected: 0 }) {
+        "casing_violation"
+    } else if discriminant(kind) == discriminant(&DiagKind::PrivateAccess { sym: 0 }) {
+        "private_access"
+    } else if discriminant(kind) == discriminant(&DiagKind::UnnecessaryPub { sym: 0 }) {
+        "unnecessary_pub"
+    } else if discriminant(kind) == discriminant(&DiagKind::UnnecessaryFieldPub { field: 0 }) {
+        "unnecessary_field_pub"
+    } else if discriminant(kind) == discriminant(&DiagKind::Syntax) {
+        "syntax"
+    } else if discriminant(kind) == discriminant(&DiagKind::Resolve) {
+        "resolve"
+    } else if discriminant(kind) == discriminant(&DiagKind::TypeError) {
+        "type_error"
+    } else if discriminant(kind) == discriminant(&DiagKind::Linear) {
+        "linear"
+    } else {
+        "internal"
+    }
+}
+
+/// The rule name a casing code stands for, so the diagnostic message and
+/// the casing code action share one mapping.
+pub fn casing_rule_name(casing: i64) -> &'static str {
+    if casing == 1 {
+        "snake_case"
+    } else if casing == 2 {
+        "PascalCase"
+    } else {
+        "SCREAMING_SNAKE_CASE"
+    }
+}
 
 // (diagnostic index, message, file, start, end, kind)
 pub type Note = (i64, String, i64, i64, i64, i64);
@@ -848,11 +933,15 @@ impl Seeds {
     }
 }
 
-/// Diagnostics and resolver-seeded identities shared by frontend passes.
+use crate::target::Target;
+
+/// Diagnostics, resolver-seeded identities, and the build target shared by
+/// frontend passes.
 pub struct CheckContext<'a> {
     pub errors: &'a mut Vec<Diag>,
     pub notes: &'a mut Vec<Note>,
     pub seeds: &'a Seeds,
+    pub target: &'a Target,
 }
 
 // Declaration-order indices of the seeded Result/Option/DivError/IndexError enums.
@@ -1019,7 +1108,7 @@ pub fn find_const_value(nodes: &[i64], sym: i64) -> i64 {
 // c=trait symbol, d=method name id, e=method fn node).  The method fn node
 // is attached by the typechecker at dispatch-row creation so the borrow
 // checker reads the signature directly instead of re-searching the trait's
-// method list (Single-Fact Rule).
+// method list.
 
 pub const NODE_TRAIT: i64 = 15;
 
@@ -1060,7 +1149,7 @@ pub fn find_trait_call(nodes: &[i64], expr: i64) -> i64 {
 // (canonical struct key, field) pair, filled by the typechecker from the
 // declared field types and the key's own type arguments; the borrow
 // checker and codegen read these rows instead of re-walking ITEM_STRUCT
-// lists and re-running generic substitution (Single-Fact Rule).
+// lists and re-running generic substitution.
 
 pub const NODE_FIELDKEY: i64 = 17;
 
@@ -1829,12 +1918,28 @@ pub fn list_get(lists: &[Vec<i64>], id: i64, idx: i64) -> i64 {
     }
 }
 
-pub fn push_internal(errors: &mut Vec<Diag>, message: &str) {
-    errors.push((message.to_string(), NO_FILE, 0, 0));
+pub fn push_error_kind(errors: &mut Vec<Diag>, message: &str, file: i64, start: i64, end: i64, kind: DiagKind) {
+    errors.push(Diag { message: message.to_string(), file, start, end, kind });
 }
 
 pub fn push_error(errors: &mut Vec<Diag>, message: &str, file: i64, start: i64, end: i64) {
-    errors.push((message.to_string(), file, start, end));
+    push_error_kind(errors, message, file, start, end, DiagKind::Resolve);
+}
+
+pub fn push_syntax(errors: &mut Vec<Diag>, message: &str, file: i64, start: i64, end: i64) {
+    push_error_kind(errors, message, file, start, end, DiagKind::Syntax);
+}
+
+pub fn push_type_error(errors: &mut Vec<Diag>, message: &str, file: i64, start: i64, end: i64) {
+    push_error_kind(errors, message, file, start, end, DiagKind::TypeError);
+}
+
+pub fn push_linear(errors: &mut Vec<Diag>, message: &str, file: i64, start: i64, end: i64) {
+    push_error_kind(errors, message, file, start, end, DiagKind::Linear);
+}
+
+pub fn push_internal(errors: &mut Vec<Diag>, message: &str) {
+    push_error_kind(errors, message, NO_FILE, 0, 0, DiagKind::Internal);
 }
 
 #[cfg(test)]

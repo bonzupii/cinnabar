@@ -280,8 +280,7 @@ fn is_container_key(nodes: &[i64], key: i64) -> bool {
 
 // A container holds linear elements when its typechecker-attached flag says
 // so; the flag covers every type argument (HashMap(K, V): the key counts
-// too).  Read here instead of re-deriving linearity over the argument list
-// (Single-Fact Rule).
+// too).  Read here instead of re-deriving linearity over the argument list.
 fn container_has_linear_elem(ctx: &mut Ctx, key: i64) -> bool {
     is_container_key(ctx.1, key) && tyinfo_has_linear_elems(ctx.1, key) == 1
 }
@@ -1192,15 +1191,15 @@ fn check_pending_conflict(f: &mut F, b: &mut B, ctx: &mut Ctx, binding: i64, mod
                 let row = binding_at(f, binding);
                 let name = format!("{}{}", name_text(ctx.0, row.0), index_suffix(ctx, new_key));
                 if mode == MODE_VALUE {
-                    push_error(ctx.3, &format!("cannot move '{}' while it is borrowed in the same expression", name), span.0, span.1, span.2);
+                    push_linear(ctx.3, &format!("cannot move '{}' while it is borrowed in the same expression", name), span.0, span.1, span.2);
                 } else if mode == MODE_MUT {
                     if loan.1 == L_SHARED {
-                        push_error(ctx.3, &format!("cannot mutably borrow '{}' while it is shared-borrowed in the same expression", name), span.0, span.1, span.2);
+                        push_linear(ctx.3, &format!("cannot mutably borrow '{}' while it is shared-borrowed in the same expression", name), span.0, span.1, span.2);
                     } else {
-                        push_error(ctx.3, &format!("cannot mutably borrow '{}' twice in the same expression", name), span.0, span.1, span.2);
+                        push_linear(ctx.3, &format!("cannot mutably borrow '{}' twice in the same expression", name), span.0, span.1, span.2);
                     }
                 } else {
-                    push_error(ctx.3, &format!("cannot borrow '{}' while it is mutably borrowed in the same expression", name), span.0, span.1, span.2);
+                    push_linear(ctx.3, &format!("cannot borrow '{}' while it is mutably borrowed in the same expression", name), span.0, span.1, span.2);
                 }
             }
         }
@@ -1373,7 +1372,7 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
             };
             if rroot < 0 {
                 let text = dotted_seg_name(ctx, row.0, segs, count);
-                push_error(ctx.3, &format!("cannot consume linear value '{}' through a mutable reference to an untracked temporary; bind the referent to a local first", text), span.0, span.1, span.2);
+                push_linear(ctx.3, &format!("cannot consume linear value '{}' through a mutable reference to an untracked temporary; bind the referent to a local first", text), span.0, span.1, span.2);
                 return;
             }
             let elem_key = ty_elem_of(ctx.1, row.1);
@@ -1383,7 +1382,7 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
             // guarding on it adds no new failure mode for valid programs.
             if rkey == NONE || rpath == NONE || rpath == rroot {
                 let text = dotted_seg_name(ctx, row.0, segs, count);
-                push_error(ctx.3, &format!("cannot consume the whole value '{}' through a mutable reference; move the referent into a local and consume that instead", text), span.0, span.1, span.2);
+                push_linear(ctx.3, &format!("cannot consume the whole value '{}' through a mutable reference; move the referent into a local and consume that instead", text), span.0, span.1, span.2);
                 return;
             }
             let target = if owner != NONE { owner } else { binding };
@@ -1392,7 +1391,7 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
             return;
         } else if through_shared {
             let text = dotted_seg_name(ctx, row.0, segs, count);
-            push_error(ctx.3, &format!("cannot copy linear value '{}' out of a shared reference", text), span.0, span.1, span.2);
+            push_linear(ctx.3, &format!("cannot copy linear value '{}' out of a shared reference", text), span.0, span.1, span.2);
             return;
         }
     }
@@ -1406,7 +1405,7 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
 
 // The typechecker attached one fact row per (canonical struct key, field
 // name) carrying the substituted field key; no ITEM_STRUCT re-walk and no
-// re-run of generic substitution here (Single-Fact Rule).
+// re-run of generic substitution here.
 fn field_key_of(ctx: &mut Ctx, key: i64, field: i64) -> i64 {
     let row = find_fieldkey(ctx.1, key, field);
     if row == NONE {
@@ -1665,7 +1664,7 @@ fn trait_method_of(ctx: &mut Ctx, expr: i64) -> i64 {
 
 // The typechecker attached the canonical key to every parameter type node
 // (trait method signatures included), so the mode reads the key's kind
-// instead of re-deriving it from raw NODE_TY tags (Single-Fact Rule).
+// instead of re-deriving it from raw NODE_TY tags.
 fn param_mode_of(nodes: &[i64], ty_node: i64) -> i64 {
     let kind = ty_kind_of(nodes, ty_key_of(nodes, ty_node));
     if kind == TYD_REF {
@@ -1813,7 +1812,7 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
                 // above) — there's no binding to attach a deferred OP_CONT_FREE to and
                 // no later point where one could become resolvable, so the answer has
                 // to be immediate.
-                push_error(
+                push_linear(
                     ctx.3,
                     "cannot free container holding linear elements: drain the container (pop all elements) before freeing",
                     node_file(ctx.1, expr),
@@ -2528,9 +2527,9 @@ fn apply_move(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool, c
     if report {
         let name = dotted_name_of(f, ctx, binding, path);
         if st == ST_MOVED {
-            push_error(ctx.3, &format!("use of moved value '{}'", name), span.0, span.1, span.2);
+            push_linear(ctx.3, &format!("use of moved value '{}'", name), span.0, span.1, span.2);
         } else if st == ST_PARTIAL {
-            push_error(ctx.3, &format!("cannot move out of partially moved value '{}'", name), span.0, span.1, span.2);
+            push_linear(ctx.3, &format!("cannot move out of partially moved value '{}'", name), span.0, span.1, span.2);
         }
     }
     if st == ST_UNBOUND || st == ST_MOVED || st == ST_PARTIAL {
@@ -2572,7 +2571,7 @@ fn apply_assign(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool,
     };
     if report {
         if eff == ST_LIVE {
-            push_error(ctx.3, &format!("linear value '{}' is reassigned without being consumed", name), span.0, span.1, span.2);
+            push_linear(ctx.3, &format!("linear value '{}' is reassigned without being consumed", name), span.0, span.1, span.2);
             let row = binding_at(f, binding);
             explain_unconsumed(f, ctx, binding, &name, row.1);
             let bind_span = bind_span_of(f, binding);
@@ -2588,7 +2587,7 @@ fn apply_assign(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool,
                 );
             }
         } else if eff == ST_PARTIAL {
-            push_error(ctx.3, &format!("cannot reassign partially moved value '{}'", name), span.0, span.1, span.2);
+            push_linear(ctx.3, &format!("cannot reassign partially moved value '{}'", name), span.0, span.1, span.2);
             let row = binding_at(f, binding);
             explain_unconsumed(f, ctx, binding, &name, row.1);
         }
@@ -2598,7 +2597,7 @@ fn apply_assign(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool,
     }
     if !is_root_path(f, target) && state_at(state, root) == ST_MOVED {
         if report {
-            push_error(ctx.3, &format!("use of moved value '{}'", name), span.0, span.1, span.2);
+            push_linear(ctx.3, &format!("use of moved value '{}'", name), span.0, span.1, span.2);
         }
         return;
     }
@@ -2647,7 +2646,7 @@ fn borrow_after_move_check(f: &F, state: &[i64], binding: i64, path: i64, ctx: &
         return;
     }
     let name = dotted_name_of(f, ctx, binding, path);
-    push_error(ctx.3, &format!("use of moved value '{}'", name), span.0, span.1, span.2);
+    push_linear(ctx.3, &format!("use of moved value '{}'", name), span.0, span.1, span.2);
 }
 
 fn apply_block_linear(f: &F, block: i64, state: &mut [i64], report: bool, ctx: &mut Ctx) {
@@ -3054,13 +3053,13 @@ fn exit_check(f: &F, ctx: &mut Ctx, op: i64, state: &[i64]) {
         if brow.2 == 1 {
             let st = state_at(state, root);
             if st == ST_LIVE {
-                push_error(ctx.3, &format!("linear value '{}' must be consumed {}", name, exit_where(kind)), row.6, row.7, row.8);
+                push_linear(ctx.3, &format!("linear value '{}' must be consumed {}", name, exit_where(kind)), row.6, row.7, row.8);
                 explain_unconsumed(f, ctx, bidx, &name, brow.1);
             } else if st == ST_PARTIAL {
                 let live = first_live_subnode(f, state, root);
                 if live != NONE {
                     let field_name = dotted_name_of(f, ctx, bidx, live);
-                    push_error(ctx.3, &format!("partially moved value '{}' cannot be left behind {}: field '{}' is not fully consumed", name, exit_where(kind), field_name), row.6, row.7, row.8);
+                    push_linear(ctx.3, &format!("partially moved value '{}' cannot be left behind {}: field '{}' is not fully consumed", name, exit_where(kind), field_name), row.6, row.7, row.8);
                     explain_unconsumed(f, ctx, bidx, &name, brow.1);
                 }
             }
@@ -3068,7 +3067,7 @@ fn exit_check(f: &F, ctx: &mut Ctx, op: i64, state: &[i64]) {
             let not_live = first_not_live_subnode(f, state, root);
             if not_live != NONE {
                 let field_name = dotted_name_of(f, ctx, bidx, not_live);
-                push_error(ctx.3, &format!("linear field '{}' consumed through a &mut parameter is not restored {}", field_name, exit_where(kind)), row.6, row.7, row.8);
+                push_linear(ctx.3, &format!("linear field '{}' consumed through a &mut parameter is not restored {}", field_name, exit_where(kind)), row.6, row.7, row.8);
             }
         }
         bidx += 1;
@@ -3186,7 +3185,7 @@ fn conflicts_at(f: &F, ctx: &mut Ctx, op: i64, origins: &[Vec<i64>], live_after:
                         } else {
                             format!("cannot borrow '{}' while it is mutably borrowed", name)
                         };
-                        push_error(ctx.3, &message, row.6, row.7, row.8);
+                        push_linear(ctx.3, &message, row.6, row.7, row.8);
                     }
                 }
                 oi += 1;
@@ -3256,16 +3255,16 @@ fn ret_ref_check(f: &F, ctx: &mut Ctx, op: i64, origins: &[Vec<i64>]) -> Option<
     trace_origin(f, origins, &prod, &mut sources, &mut local, &mut visited);
     let row = op_at(f, op);
     if local {
-        push_error(ctx.3, "returned borrow does not outlive the function", row.6, row.7, row.8);
+        push_linear(ctx.3, "returned borrow does not outlive the function", row.6, row.7, row.8);
         return None;
     }
     if sources.is_empty() {
-        push_error(ctx.3, "returned borrow has no traceable origin: it does not derive from any input reference parameter", row.6, row.7, row.8);
+        push_linear(ctx.3, "returned borrow has no traceable origin: it does not derive from any input reference parameter", row.6, row.7, row.8);
         return None;
     }
     if sources.len() > 1 {
         let names = binding_names(ctx, f, &sources);
-        push_error(
+        push_linear(
             ctx.3,
             &format!("ambiguous returned borrow: it derives from more than one input reference parameter ({})", names),
             row.6,
@@ -3552,7 +3551,7 @@ fn report(
                     bidx += 1;
                 }
                 let span = block_span_at(f, pair.0);
-                push_error(
+                push_linear(
                     ctx.3,
                     &format!("linear value '{}' is consumed on some paths but not on all paths", name),
                     span.0,
@@ -3650,7 +3649,7 @@ fn report(
             } else if kind == OP_CONT_FREE
                 && cont_get(&cont, binding) == C_MAY
             {
-                push_error(
+                push_linear(
                     ctx.3,
                     "cannot free container holding linear elements: drain the container (pop all elements) before freeing",
                     row.6,
@@ -3680,7 +3679,7 @@ fn report(
     if !fn_ret_errored && fn_ret_sources.len() > 1 {
         let fn_span = block_span_at(f, 0);
         let names = binding_names(ctx, f, &fn_ret_sources);
-        push_error(
+        push_linear(
             ctx.3,
             &format!("ambiguous returned borrow: function returns a reference deriving from more than one input reference parameter ({})", names),
             fn_span.0,
@@ -3700,7 +3699,7 @@ mod tests {
     fn errors_for(source: &str) -> Vec<String> {
         let overlay = [("scratch.cnb".to_string(), source.to_string())];
         let result = crate::analysis::analyze("scratch.cnb", &overlay, &crate::target::Target::host());
-        result.errors.iter().map(|d| d.0.clone()).collect()
+        result.errors.iter().map(|d| d.message.clone()).collect()
     }
 
     // Pins the fix to `walk_field_chain`: a field-chain borrow (`&s.b`) used

@@ -43,7 +43,7 @@ fn spec_analyzes_clean() {
     let analysis = analyze(&fixture("spec.cnb"), &[], &Target::host());
     assert!(analysis.resolved);
     assert!(analysis.typechecked);
-    let rendered: Vec<String> = analysis.errors.iter().map(|diag| diag.0.clone()).collect();
+    let rendered: Vec<String> = analysis.errors.iter().map(|diag| diag.message.clone()).collect();
     assert!(analysis.errors.is_empty(), "unexpected errors: {:?}", rendered);
 }
 
@@ -276,7 +276,7 @@ fn signature_help_tracks_the_active_argument() {
 #[test]
 fn borrow_notes_explain_inconsistent_paths() {
     let analysis = analyze(&fixture("explain_leak.cnb"), &[], &Target::host());
-    let rendered: Vec<String> = analysis.errors.iter().map(|diag| diag.0.clone()).collect();
+    let rendered: Vec<String> = analysis.errors.iter().map(|diag| diag.message.clone()).collect();
     assert!(
         rendered.iter().any(|message| message.contains("consumed on some paths")),
         "expected a path-inconsistency error, got: {:?}",
