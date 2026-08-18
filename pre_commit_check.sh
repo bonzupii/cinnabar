@@ -143,6 +143,4 @@ expect_failure "Rejecting an ambiguous unresolved name" cargo run --quiet -- tes
 rm -f tests/fixtures/spec tests/fixtures/constructor_parse tests/fixtures/pub_use tests/fixtures/multi_file/main
 
 echo ""
-echo -e "${GREEN}=================================================="
-echo "====== All pre-commit checks passed cleanly ======"
-echo -e "==================================================${NC}"
+echo "====== All checks passed, code is ready for review. ======"

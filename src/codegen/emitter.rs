@@ -499,29 +499,9 @@ fn list_to_vec_of(sess: &Session, id: i64) -> Vec<i64> {
     list_to_vec(sess.6, id)
 }
 
-fn declared_param_keys_of_item(sess: &Session, item: i64) -> Vec<i64> {
-    let is_native = node_a(sess.5, item) == ITEM_NATIVE_TYPE;
-    let params = if is_native {
-        node_e(sess.5, item)
-    } else {
-        node_f(sess.5, item)
-    };
-    let count = list_len(sess.6, params);
-    let mut keys: Vec<i64> = Vec::new();
-    let mut idx = 0i64;
-    while idx < count {
-        let param = list_get(sess.6, params, idx);
-        if node_tag(sess.5, param) == NODE_TY && node_a(sess.5, param) == TY_PARAM {
-            keys.push(ty_key_of(sess.5, param));
-        }
-        idx += 1;
-    }
-    keys
-}
-
 // The attached fact row for `name` on the canonical struct key, filled by
 // the typechecker; no ITEM_STRUCT re-walk and no re-run of generic
-// substitution here (Single-Fact Rule).  Callers read the index and key
+// substitution here.  Callers read the index and key
 // slots they consume.
 fn struct_field_fact_row(sess: &Session, struct_key: i64, name: i64, span: (i64, i64, i64)) -> Result<i64, CodegenError> {
     let row = find_fieldkey(sess.5, struct_key, name);
@@ -616,23 +596,13 @@ fn variant_payload_count(sess: &Session, enum_key: i64, variant_idx: i64) -> i64
 }
 
 fn variant_payload_key(sess: &mut Session, enum_key: i64, variant_idx: i64, field_idx: i64, span: (i64, i64, i64)) -> Result<i64, CodegenError> {
-    let enum_sym = em_key_sym(sess, enum_key);
-    if enum_sym == NONE {
-        return Err(builder_error(span.0, span.1, span.2, "internal: enum key without a symbol"));
+    // The precomputed NODE_PAYLOADKEY fact for (enum key, variant, field);
+    // no ITEM_ENUM re-walk and no generic substitution happens here.
+    let row = find_payloadkey(sess.5, enum_key, variant_idx, field_idx);
+    if row == NONE {
+        return Err(builder_error(span.0, span.1, span.2, "internal: variant payload key fact not found"));
     }
-    let item = em_sym_decl(sess, enum_sym);
-    let variants = node_e(sess.5, item);
-    let variant = list_get(sess.6, variants, variant_idx);
-    if variant == NONE {
-        return Err(builder_error(span.0, span.1, span.2, "internal: variant index out of range"));
-    }
-    let payload_decl = node_b(sess.5, variant);
-    let declared = ty_key_of(sess.5, list_get(sess.6, payload_decl, field_idx));
-    let from = declared_param_keys_of_item(sess, item);
-    let to = list_to_vec_of(sess, key_args_of(sess, enum_key));
-    let nodes = &mut sess.5;
-    let lists = &mut sess.6;
-    Ok(subst_key(nodes, lists, declared, &from, &to))
+    Ok(payloadkey_key_of(sess.5, row))
 }
 
 fn enum_payload_ptr<'ctx>(sess: &mut Session<'ctx, '_, '_>, ptr: PointerValue<'ctx>, enum_key: i64, variant_idx: i64, span: (i64, i64, i64)) -> Result<(PointerValue<'ctx>, BasicTypeEnum<'ctx>), CodegenError> {
@@ -3131,18 +3101,12 @@ fn emit_key_eq<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, k
         return sess.2.build_int_compare(IntPredicate::EQ, va, vb, "").map_err(builder_fail);
     }
     if kind == TYD_STRUCT {
-        let item = em_sym_decl(sess, em_key_sym(sess, key));
-        let args = key_args_of(sess, key);
-        let fields = {
-            let nodes = &mut sess.5;
-            let lists = &mut sess.6;
-            struct_field_keys(nodes, lists, item, args)
-        };
+        let rows = fieldkey_rows_of(sess.5, key);
         let mut acc = sess.0.bool_type().const_all_ones();
         let mut idx = 0usize;
-        while idx < fields.len() {
-            let fkey = match fields.get(idx) {
-                Some(pair) => pair.1,
+        while idx < rows.len() {
+            let fkey = match rows.get(idx) {
+                Some(row) => row.1,
                 None => break,
             };
             let fa = struct_gep(sess, key, a, idx as u32, "", span)?;
@@ -3286,17 +3250,11 @@ fn emit_key_hash_into<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'
         return Ok(());
     }
     if kind == TYD_STRUCT {
-        let item = em_sym_decl(sess, em_key_sym(sess, key));
-        let args = key_args_of(sess, key);
-        let fields = {
-            let nodes = &mut sess.5;
-            let lists = &mut sess.6;
-            struct_field_keys(nodes, lists, item, args)
-        };
+        let rows = fieldkey_rows_of(sess.5, key);
         let mut idx = 0usize;
-        while idx < fields.len() {
-            let fkey = match fields.get(idx) {
-                Some(pair) => pair.1,
+        while idx < rows.len() {
+            let fkey = match rows.get(idx) {
+                Some(row) => row.1,
                 None => break,
             };
             let fptr = struct_gep(sess, key, ptr, idx as u32, "", span)?;

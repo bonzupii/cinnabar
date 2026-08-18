@@ -4,9 +4,9 @@
 //! typechecker canonicalized. All numbers come from the exact same lowering
 //! a real build uses: the canonical type keys are lowered through
 //! `types::llvm_type` and measured with LLVM's target data for the host
-//! machine. Field keys reuse `struct_field_keys` (the lowering's own
-//! substitution path) and enum variant tags are read from variant symbol
-//! rows attached by the typechecker.
+//! machine. Field keys are read from the typechecker's precomputed
+//! NODE_FIELDKEY fact rows, and enum variant tags are read from variant
+//! symbol rows attached by the typechecker.
 //!
 //! `measure_all` lowers each candidate key and returns a `Vec<TypeLayout>`
 //! plus the target triple. `render_layouts` formats that vector as aligned
@@ -23,7 +23,7 @@ use crate::ast::*;
 use crate::codegen::error::*;
 use crate::codegen::host_target;
 use crate::codegen::types::{
-    llvm_type, payload_struct_of, struct_field_keys, EnumInfos, KeyTypes, PayloadStructs, TyEnv,
+    llvm_type, payload_struct_of, EnumInfos, KeyTypes, PayloadStructs, TyEnv,
 };
 use crate::emit_json::LAYOUT_FORMAT;
 use crate::typecheck::render_type_key;
@@ -307,11 +307,7 @@ fn measure_struct(
     align: u32,
     span: (i64, i64, i64),
 ) -> Result<TypeLayout, CodegenError> {
-    let row = find_tyinfo(env.3, key);
-    let sym = node_c(env.3, row);
-    let item = node_c(env.3, sym);
-    let args = node_d(env.3, row);
-    let field_keys = struct_field_keys(env.3, env.4, item, args);
+    let rows = fieldkey_rows_of(env.3, key);
     let struct_ty = match ty {
         BasicTypeEnum::StructType(st) => st,
         BasicTypeEnum::ArrayType(other) => {
@@ -335,9 +331,13 @@ fn measure_struct(
     };
     let mut fields: Vec<FieldLayout> = Vec::new();
     let mut idx = 0usize;
-    while idx < field_keys.len() {
-        let (fname, fkey) = match field_keys.get(idx) {
-            Some(pair) => *pair,
+    while idx < rows.len() {
+        let fname = match rows.get(idx) {
+            Some(row) => row.0,
+            None => break,
+        };
+        let fkey = match rows.get(idx) {
+            Some(row) => row.1,
             None => break,
         };
         let offset = match env.1.offset_of_element(&struct_ty, idx as u32) {

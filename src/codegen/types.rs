@@ -77,19 +77,16 @@ fn build_type<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64, span: (i64, i64, i6
     let row = row_of(env.3, key, span)?;
     let kind = node_b(env.3, row);
     let sym = node_c(env.3, row);
-    let args = node_d(env.3, row);
     let elem = node_e(env.3, row);
     let len = node_f(env.3, row);
     if kind == TYD_BUILTIN {
         return builtin_llvm(env.0, node_f(env.3, row), span);
     }
     if kind == TYD_STRUCT {
-        let item = node_c(env.3, sym);
-        return struct_llvm(env, item, args, span);
+        return struct_llvm(env, key, span);
     }
     if kind == TYD_ENUM {
-        let item = node_c(env.3, sym);
-        let ty = enum_llvm(env, key, item, args, span)?;
+        let ty = enum_llvm(env, key, span)?;
         return Ok(ty);
     }
     if kind == TYD_NATIVE {
@@ -172,51 +169,28 @@ fn native_llvm<'ctx>(context: &'ctx Context, layout: i64, span: (i64, i64, i64))
     Err(builder_error(span.0, span.1, span.2, "native type has no declared layout kind"))
 }
 
-/// The (field name id, substituted field key) pairs of a struct item at the
-/// given type arguments, in declared order.  This is the single place struct
-/// field keys are derived during lowering: `struct_llvm` builds the LLVM
-/// struct from it, and the layout printer reads it for field naming.
-pub fn struct_field_keys(
-    nodes: &mut Vec<i64>,
-    lists: &mut Vec<Vec<i64>>,
-    item: i64,
-    args: i64,
-) -> Vec<(i64, i64)> {
-    let from = declared_param_keys(nodes, lists, item);
-    let to = list_to_vec(lists, args);
-    let fields = node_e(nodes, item);
-    let count = list_len(lists, fields);
-    let mut out: Vec<(i64, i64)> = Vec::new();
-    let mut idx = 0i64;
-    while idx < count {
-        let field = list_get(lists, fields, idx);
-        let name = node_a(nodes, field);
-        let declared = ty_key_of(nodes, node_b(nodes, field));
-        let concrete = subst_key(nodes, lists, declared, &from, &to);
-        out.push((name, concrete));
-        idx += 1;
-    }
-    out
-}
-
-fn struct_llvm<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, item: i64, args: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
-    let fields = struct_field_keys(env.3, env.4, item, args);
+// The LLVM struct of a canonical struct key, built from the precomputed
+// NODE_FIELDKEY facts the typechecker attached to the key: one field type
+// per row, in declared order.  No ITEM_STRUCT re-walk and no generic
+// substitution happens here.
+fn struct_llvm<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+    let rows = fieldkey_rows_of(env.3, key);
     let mut field_tys: Vec<BasicTypeEnum<'ctx>> = Vec::new();
     let mut idx = 0usize;
-    while idx < fields.len() {
-        let concrete = match fields.get(idx) {
-            Some(pair) => pair.1,
+    while idx < rows.len() {
+        let fkey = match rows.get(idx) {
+            Some(row) => row.1,
             None => break,
         };
-        let ty = llvm_type(env, concrete, span)?;
+        let ty = llvm_type(env, fkey, span)?;
         field_tys.push(ty);
         idx += 1;
     }
     Ok(env.0.struct_type(&field_tys, false).into())
 }
 
-fn enum_llvm<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64, item: i64, args: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
-    let (size, align, count) = enum_payload_bounds(env, item, args, span)?;
+fn enum_llvm<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+    let (size, align, count) = enum_payload_bounds(env, key, span)?;
     let padded = round_up(size, align);
     let ty = if padded == 0 {
         env.0.struct_type(&[env.0.i64_type().into()], false).into()
@@ -246,39 +220,49 @@ fn push_enum_info(enum_infos: &mut EnumInfos, key: i64, size: i64, align: i64, c
     enum_infos.push((key, size, align, count));
 }
 
-fn enum_payload_bounds<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, item: i64, args: i64, span: (i64, i64, i64)) -> Result<(i64, i64, i64), CodegenError> {
-    let from = declared_param_keys(env.3, env.4, item);
-    let to = list_to_vec(env.4, args);
-    let variants = node_e(env.3, item);
-    let count = list_len(env.4, variants);
+fn enum_payload_bounds<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64, span: (i64, i64, i64)) -> Result<(i64, i64, i64), CodegenError> {
+    // Payload bounds come from NODE_PAYLOADKEY rows (contiguous per variant
+    // in attach order); the total variant count is the declared variant list
+    // length, which payload rows alone cannot express for unit variants.
+    let row = row_of(env.3, key, span)?;
+    let sym = node_c(env.3, row);
+    let decl = node_c(env.3, sym);
+    if decl == NONE || node_tag(env.3, decl) != NODE_ITEM || node_a(env.3, decl) != ITEM_ENUM {
+        return Err(builder_error(span.0, span.1, span.2, "internal: enum key has no declaration"));
+    }
+    let count = list_len(env.4, node_e(env.3, decl));
+    let rows = payloadkey_rows_of(env.3, key);
     let mut max_size = 0i64;
     let mut max_align = 1i64;
-    let mut idx = 0i64;
-    while idx < count {
-        let variant = list_get(env.4, variants, idx);
-        let payload_decl = node_b(env.3, variant);
-        let pcount = list_len(env.4, payload_decl);
-        if pcount > 0 {
-            let mut field_tys: Vec<BasicTypeEnum<'ctx>> = Vec::new();
-            let mut pidx = 0i64;
-            while pidx < pcount {
-                let declared = ty_key_of(env.3, list_get(env.4, payload_decl, pidx));
-                let concrete = subst_key(env.3, env.4, declared, &from, &to);
-                let ty = llvm_type(env, concrete, span)?;
-                field_tys.push(ty);
-                pidx += 1;
+    let mut idx = 0usize;
+    while idx < rows.len() {
+        let variant = match rows.get(idx) {
+            Some(row) => row.0,
+            None => break,
+        };
+        let mut field_tys: Vec<BasicTypeEnum<'ctx>> = Vec::new();
+        let mut j = idx;
+        while j < rows.len() {
+            let row = match rows.get(j) {
+                Some(row) => row,
+                None => break,
+            };
+            if row.0 != variant {
+                break;
             }
-            let payload_ty = env.0.struct_type(&field_tys, false);
-            let size = env.1.get_abi_size(&payload_ty) as i64;
-            let align = env.1.get_abi_alignment(&payload_ty) as i64;
-            if size > max_size {
-                max_size = size;
-            }
-            if align > max_align {
-                max_align = align;
-            }
+            field_tys.push(llvm_type(env, row.1, span)?);
+            j += 1;
         }
-        idx += 1;
+        let payload_ty = env.0.struct_type(&field_tys, false);
+        let size = env.1.get_abi_size(&payload_ty) as i64;
+        let align = env.1.get_abi_alignment(&payload_ty) as i64;
+        if size > max_size {
+            max_size = size;
+        }
+        if align > max_align {
+            max_align = align;
+        }
+        idx = j;
     }
     Ok((max_size, max_align, count))
 }
@@ -296,26 +280,22 @@ pub fn payload_struct_of<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, enum_key: i64, var
         }
         idx += 1;
     }
-    let row = row_of(env.3, enum_key, span)?;
-    let sym = node_c(env.3, row);
-    let args = node_d(env.3, row);
-    let item = node_c(env.3, sym);
-    let from = declared_param_keys(env.3, env.4, item);
-    let to = list_to_vec(env.4, args);
-    let variants = node_e(env.3, item);
-    let variant = list_get(env.4, variants, variant_idx);
-    let payload_decl = node_b(env.3, variant);
-    let pcount = list_len(env.4, payload_decl);
+    // The variant payload struct comes from NODE_PAYLOADKEY rows; a variant
+    // with no rows is a unit variant and lowers to an empty struct.
+    let rows = payloadkey_rows_of(env.3, enum_key);
     let mut field_tys: Vec<BasicTypeEnum<'ctx>> = Vec::new();
-    let mut pidx = 0i64;
-    while pidx < pcount {
-        let declared = ty_key_of(env.3, list_get(env.4, payload_decl, pidx));
-        let concrete = subst_key(env.3, env.4, declared, &from, &to);
-        let ty = llvm_type(env, concrete, span)?;
-        field_tys.push(ty);
-        pidx += 1;
+    let mut idx = 0usize;
+    while idx < rows.len() {
+        let row = match rows.get(idx) {
+            Some(row) => row,
+            None => break,
+        };
+        if row.0 == variant_idx {
+            field_tys.push(llvm_type(env, row.1, span)?);
+        }
+        idx += 1;
     }
-    let ty = if pcount == 0 {
+    let ty = if field_tys.is_empty() {
         env.0.struct_type(&[], false).into()
     } else {
         env.0.struct_type(&field_tys, false).into()
@@ -324,49 +304,3 @@ pub fn payload_struct_of<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, enum_key: i64, var
     Ok(ty)
 }
 
-fn declared_param_keys(nodes: &[i64], lists: &[Vec<i64>], item: i64) -> Vec<i64> {
-    let params = if node_a(nodes, item) == ITEM_NATIVE_TYPE {
-        node_e(nodes, item)
-    } else {
-        node_f(nodes, item)
-    };
-    let mut keys: Vec<i64> = Vec::new();
-    let count = list_len(lists, params);
-    let mut idx = 0i64;
-    while idx < count {
-        let param = list_get(lists, params, idx);
-        if node_tag(nodes, param) == NODE_TY && node_a(nodes, param) == TY_PARAM {
-            keys.push(ty_key_of(nodes, param));
-        }
-        idx += 1;
-    }
-    keys
-}
-
-fn list_to_vec(lists: &[Vec<i64>], id: i64) -> Vec<i64> {
-    let mut out: Vec<i64> = Vec::new();
-    let count = list_len(lists, id);
-    let mut idx = 0i64;
-    while idx < count {
-        out.push(list_get(lists, id, idx));
-        idx += 1;
-    }
-    out
-}
-
-fn list_len(lists: &[Vec<i64>], id: i64) -> i64 {
-    match lists.get(id as usize) {
-        Some(items) => items.len() as i64,
-        None => 0,
-    }
-}
-
-fn list_get(lists: &[Vec<i64>], id: i64, idx: i64) -> i64 {
-    match lists.get(id as usize) {
-        Some(items) => match items.get(idx as usize) {
-            Some(value) => *value,
-            None => NONE,
-        },
-        None => NONE,
-    }
-}

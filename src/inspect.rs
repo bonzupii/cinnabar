@@ -404,6 +404,18 @@ fn row_detail(names: &[String], nodes: &[i64], lists: &[Vec<i64>], id: i64, tag:
             ],
         );
     }
+    if tag == NODE_PAYLOADKEY {
+        return row(
+            "payloadkey",
+            "",
+            vec![
+                renamed("enum_key", "enum-key", DetailValue::Int(node_a(nodes, id))),
+                renamed("variant_index", "variant-idx", DetailValue::Int(node_b(nodes, id))),
+                renamed("payload_key", "payload-key", DetailValue::Int(payloadkey_key_of(nodes, id))),
+                renamed("field_index", "field-idx", DetailValue::Int(payloadkey_idx_of(nodes, id))),
+            ],
+        );
+    }
     row("", "", Vec::new())
 }
 
@@ -574,6 +586,8 @@ fn tag_name(tag: i64) -> &'static str {
         "TRAIT"
     } else if tag == NODE_FIELDKEY {
         "FIELDKEY"
+    } else if tag == NODE_PAYLOADKEY {
+        "PAYLOADKEY"
     } else {
         "?TAG"
     }

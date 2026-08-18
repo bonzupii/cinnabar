@@ -123,6 +123,12 @@ pub fn typecheck(
         idx += 1;
     }
 
+    // Linearity is settled now, before any signature, constant, or
+    // expression checking: every descriptor that exists already carries its
+    // flag, and every descriptor created later carries it from creation, so
+    // `tyinfo_is_linear` is a constant-time read for the whole check.
+    attach_linearity(state.1, state.2);
+
     check_fn_sigs_list(&mut state, root);
     idx = 0;
     while idx < ext_mods.len() {
@@ -227,7 +233,7 @@ fn builtin_key_of_sym(nodes: &[i64], sym: i64) -> i64 {
     NONE
 }
 
-fn seed_builtins(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], seeds: &Seeds) {
+fn seed_builtins(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, seeds: &Seeds) {
     let mut sub = 0i64;
     while sub <= BUILTIN_USIZE {
         seed_builtin(nodes, lists, seeds.sym(SEED_SYM_I8 + sub as usize), sub);
@@ -236,7 +242,7 @@ fn seed_builtins(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], seeds: &Seeds) {
     seed_builtin(nodes, lists, seeds.sym(SEED_SYM_BOOL), BUILTIN_BOOL);
 }
 
-fn seed_builtin(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], sym: i64, sub: i64) {
+fn seed_builtin(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, sym: i64, sub: i64) {
     if sym != NONE {
         canon_tyinfo(nodes, lists, TYD_BUILTIN, sym, NONE, NONE, sub);
     }
@@ -415,11 +421,11 @@ fn fresh_var(vars: &mut Vec<(i64, i64)>, origins: &mut Vec<(i64, i64, i64)>, exp
     var
 }
 
-fn param_decl_key(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], owner: i64, name: i64, bound: i64) -> i64 {
+fn param_decl_key(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, owner: i64, name: i64, bound: i64) -> i64 {
     canon_tyinfo(nodes, lists, TYD_PARAM, name, NONE, owner, bound)
 }
 
-fn bind_type_params(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], env: &mut [Vec<i64>], owner: i64, params: i64) {
+fn bind_type_params(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, env: &mut [Vec<i64>], owner: i64, params: i64) {
     let count = list_len(lists, params);
     let mut idx = 0i64;
     while idx < count {
@@ -462,7 +468,7 @@ fn declared_param_keys(nodes: &[i64], lists: &[Vec<i64>], item: i64) -> Vec<i64>
     keys
 }
 
-fn named_key(names: &[String], nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], errors: &mut Vec<Diag>, sym: i64, span: (i64, i64, i64)) -> i64 {
+fn named_key(names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>, sym: i64, span: (i64, i64, i64)) -> i64 {
     let (file, start, end) = span;
     let kind = sym_kind(nodes, sym);
     if kind == SYM_TYPE {
@@ -485,7 +491,7 @@ fn named_key(names: &[String], nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], err
     canon_tyinfo(nodes, lists, kind_of, sym, NONE, NONE, NONE)
 }
 
-fn unknown_key(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>]) -> i64 {
+fn unknown_key(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) -> i64 {
     canon_tyinfo(nodes, lists, TYD_UNKNOWN, NONE, NONE, NONE, NONE)
 }
 
@@ -736,23 +742,22 @@ fn attach_variant_facts(nodes: &mut [i64], lists: &[Vec<i64>]) {
 }
 
 fn attach_linearity(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) {
+    // Settles flags for descriptors created before all declarations were
+    // collected, and recomputes native has-linear-elements flags now that
+    // type arguments resolve.
     let mut seen: Vec<i64> = Vec::new();
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
         if node_tag(nodes, idx) == NODE_TYINFO {
             seen.clear();
-            linear_of(nodes, lists, node_a(nodes, idx), &mut seen);
-            // A native container holds linear elements when any of its type
-            // arguments is linear (HashMap(K, V): the key counts too).  The
-            // flag is attached per canonical key so the borrow checker reads
-            // one integer instead of re-deriving linearity (Single-Fact).
+            linear_flag_of(nodes, lists, node_a(nodes, idx), &mut seen);
             if node_b(nodes, idx) == TYD_NATIVE {
                 let args = node_d(nodes, idx);
                 let count = list_len(lists, args);
                 let mut has = 0;
                 let mut ai = 0i64;
                 while ai < count {
-                    if linear_of(nodes, lists, list_get(lists, args, ai), &mut seen) == 1 {
+                    if linear_flag_of(nodes, lists, list_get(lists, args, ai), &mut seen) == 1 {
                         has = 1;
                     }
                     ai += 1;
@@ -780,89 +785,9 @@ fn has_value(list: &[i64], value: i64) -> bool {
     false
 }
 
-fn linear_of(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, key: i64, seen: &mut Vec<i64>) -> i64 {
-    if key < 0 {
-        return 0;
-    }
-    let row = find_tyinfo(nodes, key);
-    if row == NONE {
-        return 0;
-    }
-    let stored = node_get(nodes, row, NODE_FILE);
-    if stored == 0 || stored == 1 {
-        return stored;
-    }
-    if has_value(seen, key) {
-        return 0;
-    }
-    seen.push(key);
-    let kind = node_b(nodes, row);
-    let flag = if kind == TYD_NATIVE {
-        1
-    } else if kind == TYD_ARRAY {
-        linear_of(nodes, lists, node_e(nodes, row), seen)
-    } else if kind == TYD_STRUCT || kind == TYD_ENUM {
-        linear_members_of(nodes, lists, node_c(nodes, row), key, seen)
-    } else if kind == TYD_PARAM {
-        // Type parameters carry no linearity bound in the grammar, so the
-        // only sound default is to treat them as linear (MANIFESTO): a
-        // generic body must consume its type-parameter values exactly once.
-        1
-    } else {
-        0
-    };
-    node_set(nodes, row, NODE_FILE, flag);
-    flag
-}
-
-fn linear_members_of(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, sym: i64, key: i64, seen: &mut Vec<i64>) -> i64 {
-    if sym == NONE {
-        return 0;
-    }
-    let decl = sym_decl(nodes, sym);
-    if decl == NONE || node_tag(nodes, decl) != NODE_ITEM {
-        return 0;
-    }
-    let kind = node_a(nodes, decl);
-    let row = find_tyinfo(nodes, key);
-    let args = if row == NONE { NONE } else { node_d(nodes, row) };
-    if kind == ITEM_STRUCT {
-        let fields = node_e(nodes, decl);
-        let count = list_len(lists, fields);
-        let mut idx = 0i64;
-        while idx < count {
-            let fty_node = node_b(nodes, list_get(lists, fields, idx));
-            let fty = subst_declared_key(nodes, lists, decl, args, ty_key_of(nodes, fty_node));
-            if linear_of(nodes, lists, fty, seen) == 1 {
-                return 1;
-            }
-            idx += 1;
-        }
-    } else if kind == ITEM_ENUM {
-        let variants = node_e(nodes, decl);
-        let count = list_len(lists, variants);
-        let mut idx = 0i64;
-        while idx < count {
-            let payload = node_b(nodes, list_get(lists, variants, idx));
-            let pcount = list_len(lists, payload);
-            let mut pidx = 0i64;
-            while pidx < pcount {
-                let pty_node = list_get(lists, payload, pidx);
-                let pty = subst_declared_key(nodes, lists, decl, args, ty_key_of(nodes, pty_node));
-                if linear_of(nodes, lists, pty, seen) == 1 {
-                    return 1;
-                }
-                pidx += 1;
-            }
-            idx += 1;
-        }
-    }
-    0
-}
-
 // Whether a canonical type key's value can carry a reference anywhere in its
 // structure, not only when the key itself is bare `&T`/`&mut T`/`&[T]`. The
-// borrow checker's returned-borrow obligation (Manifesto principle 5) must
+// borrow checker's returned-borrow obligation must
 // apply to a function returning `Result(&T, E)` or a struct with a reference
 // field the same way it applies to a bare `&T` return; gating on the key's
 // own bare kind let a dangling reference escape wrapped in either shape.
@@ -976,36 +901,23 @@ fn subst_declared_key(
     subst_key(nodes, lists, declared, &from, &to)
 }
 
-// One fact row per (canonical struct key, field name): the substituted
-// field key and its declared-order index, computed here from the declared
-// field types and the key's own type arguments.  The borrow checker and
-// codegen read these rows instead of re-walking ITEM_STRUCT lists and
-// re-running generic substitution (Single-Fact Rule).
+// One fact row per (canonical struct key, field name) and per (canonical
+// enum key, variant, payload field): the substituted member key and its
+// declared-order index, computed from the declared member types and the
+// key's own type arguments.  Descriptor creation in `canon_tyinfo` already
+// recorded these rows; this sweep re-verifies every struct and enum
+// descriptor in the arena so no key reaches codegen without its member
+// facts, whatever order canonicalization happened in.
 fn attach_fieldkey_facts(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_TYINFO && node_b(nodes, idx) == TYD_STRUCT {
-            let key = node_a(nodes, idx);
-            let sym = node_c(nodes, idx);
-            if sym != NONE {
-                let decl = sym_decl(nodes, sym);
-                if decl != NONE
-                    && node_tag(nodes, decl) == NODE_ITEM
-                    && node_a(nodes, decl) == ITEM_STRUCT
-                {
-                    let fields = node_e(nodes, decl);
-                    let count = list_len(lists, fields);
-                    let from = declared_param_keys(nodes, lists, decl);
-                    let to = list_to_vec(lists, key_args(nodes, key));
-                    let mut f = 0i64;
-                    while f < count {
-                        let field = list_get(lists, fields, f);
-                        let declared = ty_key_of(nodes, node_b(nodes, field));
-                        let fkey = subst_key(nodes, lists, declared, &from, &to);
-                        alloc_fieldkey(nodes, key, node_a(nodes, field), fkey, f);
-                        f += 1;
-                    }
-                }
+        if node_tag(nodes, idx) == NODE_TYINFO {
+            let kind = node_b(nodes, idx);
+            if kind == TYD_STRUCT || kind == TYD_ENUM {
+                let key = node_a(nodes, idx);
+                let sym = node_c(nodes, idx);
+                let args = node_d(nodes, idx);
+                attach_member_facts(nodes, lists, key, kind, sym, args);
             }
         }
         idx += 1;
@@ -1015,7 +927,6 @@ fn attach_fieldkey_facts(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) {
 fn attach_type_facts(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) {
     attach_variant_facts(nodes, lists);
     attach_fieldkey_facts(nodes, lists);
-    attach_linearity(nodes, lists);
 }
 
 fn unify_key(nodes: &[i64], lists: &[Vec<i64>], vars: &mut Vec<(i64, i64)>, a: i64, b: i64) -> bool {
@@ -3232,14 +3143,6 @@ fn check_array(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
     key
 }
 
-fn key_is_linear_now(state: &mut State, key: i64) -> bool {
-    if key == NONE {
-        return false;
-    }
-    let mut seen: Vec<i64> = Vec::new();
-    linear_of(state.1, state.2, key, &mut seen) == 1
-}
-
 fn index_result_key(state: &mut State, payload: i64) -> i64 {
     let err_sym = state.12;
     if err_sym == NONE {
@@ -3288,7 +3191,7 @@ fn check_index(state: &mut State, expr: i64, borrow: i64, expected: i64, ret: i6
         push_error(state.3, "cannot index a value that is not an array or slice", file, start, end);
         return recover_ty(state, expr, expected);
     };
-    if elem_key != NONE && borrow == 0 && key_is_linear_now(state, elem_key) {
+    if elem_key != NONE && borrow == 0 && tyinfo_is_linear(state.1, elem_key) == 1 {
         push_error(state.3, "cannot move linear element out of array by index: borrow with & or &mut instead", file, start, end);
     }
     let payload = if borrow == 1 {
@@ -3890,9 +3793,8 @@ fn check_container_resolvability(state: &mut State, expr: i64, param_keys: i64) 
                     let acount = list_len(state.2, args);
                     let mut ai = 0i64;
                     let mut has_linear = 0;
-                    let mut seen: Vec<i64> = Vec::new();
                     while ai < acount {
-                        if linear_of(state.1, state.2, list_get(state.2, args, ai), &mut seen) == 1 {
+                        if tyinfo_is_linear(state.1, list_get(state.2, args, ai)) == 1 {
                             has_linear = 1;
                         }
                         ai += 1;
@@ -3948,7 +3850,7 @@ fn fn_node_of(nodes: &[i64], decl: i64) -> i64 {
     }
 }
 
-fn fn_declared_param_keys(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], fn_node: i64) -> Vec<i64> {
+fn fn_declared_param_keys(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, fn_node: i64) -> Vec<i64> {
     let tparams = node_b(nodes, fn_node);
     let count = list_len(lists, tparams);
     let mut keys: Vec<i64> = Vec::new();
@@ -4530,7 +4432,7 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64, scrutinee: i64) -> i64
     s_key
 }
 
-fn rest_type_of(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], s_key: i64, inner: i64) -> i64 {
+fn rest_type_of(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, s_key: i64, inner: i64) -> i64 {
     let is_mut = key_kind(nodes, s_key) == TYD_REF_MUT;
     let rest = canon_tyinfo(nodes, lists, TYD_SLICE, NONE, NONE, key_elem(nodes, inner), NONE);
     let kind_of = if is_mut { TYD_REF_MUT } else { TYD_REF };

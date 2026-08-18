@@ -1307,6 +1307,171 @@ pub fn fieldkey_idx_of(nodes: &[i64], row: i64) -> i64 {
     node_d(nodes, row)
 }
 
+// Variant-payload-fact rows.  (tag=NODE_PAYLOADKEY, a=enum key, b=variant
+// declaration index, c=substituted payload type key, d=payload field
+// index).  One row per (enum key, variant, payload field) triple, filled
+// by the typechecker from declared payload types and the key's own type
+// arguments; the emitter reads these rows instead of re-walking
+// ITEM_ENUM lists and re-running generic substitution.
+
+pub const NODE_PAYLOADKEY: i64 = 25;
+
+pub fn alloc_payloadkey(nodes: &mut Vec<i64>, enum_key: i64, variant: i64, pkey: i64, field: i64) -> i64 {
+    alloc_node(nodes, &[NODE_PAYLOADKEY, NO_FILE, NO_FILE, NO_FILE, enum_key, variant, pkey, field, NONE, NONE])
+}
+
+pub fn find_payloadkey(nodes: &[i64], enum_key: i64, variant: i64, field: i64) -> i64 {
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_PAYLOADKEY && node_a(nodes, idx) == enum_key && node_b(nodes, idx) == variant && node_d(nodes, idx) == field {
+            return idx;
+        }
+        idx += 1;
+    }
+    NONE
+}
+
+pub fn payloadkey_key_of(nodes: &[i64], row: i64) -> i64 {
+    node_c(nodes, row)
+}
+
+pub fn payloadkey_idx_of(nodes: &[i64], row: i64) -> i64 {
+    node_d(nodes, row)
+}
+
+// Every (field name, substituted field key, declared-order index) fact row
+// attached to a canonical struct key, in declared field order (the attach
+// order is the declaration order).
+pub fn fieldkey_rows_of(nodes: &[i64], key: i64) -> Vec<(i64, i64, i64)> {
+    let mut rows: Vec<(i64, i64, i64)> = Vec::new();
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_FIELDKEY && node_a(nodes, idx) == key {
+            rows.push((node_b(nodes, idx), node_c(nodes, idx), node_d(nodes, idx)));
+        }
+        idx += 1;
+    }
+    rows
+}
+
+// Every (variant index, substituted payload key, field index) fact row
+// attached to a canonical enum key, in declared order.
+pub fn payloadkey_rows_of(nodes: &[i64], key: i64) -> Vec<(i64, i64, i64)> {
+    let mut rows: Vec<(i64, i64, i64)> = Vec::new();
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_PAYLOADKEY && node_a(nodes, idx) == key {
+            rows.push((node_b(nodes, idx), node_c(nodes, idx), node_d(nodes, idx)));
+        }
+        idx += 1;
+    }
+    rows
+}
+
+// The declared type-parameter keys of a struct or enum item, in order.
+fn declared_ty_param_keys(nodes: &[i64], lists: &[Vec<i64>], decl: i64) -> Vec<i64> {
+    let params = node_f(nodes, decl);
+    let mut keys: Vec<i64> = Vec::new();
+    let count = list_len(lists, params);
+    let mut idx = 0i64;
+    while idx < count {
+        let param = list_get(lists, params, idx);
+        if node_tag(nodes, param) == NODE_TY && node_a(nodes, param) == TY_PARAM {
+            keys.push(ty_key_of(nodes, param));
+        }
+        idx += 1;
+    }
+    keys
+}
+
+fn list_to_key_vec(lists: &[Vec<i64>], id: i64) -> Vec<i64> {
+    let mut keys: Vec<i64> = Vec::new();
+    let count = list_len(lists, id);
+    let mut idx = 0i64;
+    while idx < count {
+        keys.push(list_get(lists, id, idx));
+        idx += 1;
+    }
+    keys
+}
+
+// The member-type facts of a canonical struct or enum descriptor: one
+// NODE_FIELDKEY row per declared field and one NODE_PAYLOADKEY row per
+// declared payload field, each carrying the declared type substituted with
+// the descriptor's own type arguments.  Idempotent: rows that already
+// exist for a key are left untouched, so both descriptor creation in
+// `canon_tyinfo` and the typechecker's post-resolution sweep may call it.
+// Kinds other than struct/enum and symbols without a matching declaration
+// do nothing.
+pub fn attach_member_facts(
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    key: i64,
+    kind: i64,
+    sym: i64,
+    args: i64,
+) {
+    if sym == NONE {
+        return;
+    }
+    let decl = node_c(nodes, sym);
+    if decl == NONE || node_tag(nodes, decl) != NODE_ITEM {
+        return;
+    }
+    let decl_kind = node_a(nodes, decl);
+    if kind == TYD_STRUCT && decl_kind == ITEM_STRUCT {
+        let from = declared_ty_param_keys(nodes, lists, decl);
+        let to = list_to_key_vec(lists, args);
+        let fields = node_e(nodes, decl);
+        let count = list_len(lists, fields);
+        let mut f = 0i64;
+        while f < count {
+            let field = list_get(lists, fields, f);
+            let name = node_a(nodes, field);
+            let declared = ty_key_of(nodes, node_b(nodes, field));
+            let row = find_fieldkey(nodes, key, name);
+            if row != NONE {
+                // Refill a row allocated before the member key resolved.
+                if declared != NONE && fieldkey_key_of(nodes, row) == NONE {
+                    let fkey = subst_key(nodes, lists, declared, &from, &to);
+                    node_set_c(nodes, row, fkey);
+                }
+            } else if declared != NONE {
+                // Unresolved member keys are skipped; a later sweep attaches them.
+                let fkey = subst_key(nodes, lists, declared, &from, &to);
+                alloc_fieldkey(nodes, key, name, fkey, f);
+            }
+            f += 1;
+        }
+    } else if kind == TYD_ENUM && decl_kind == ITEM_ENUM {
+        let from = declared_ty_param_keys(nodes, lists, decl);
+        let to = list_to_key_vec(lists, args);
+        let variants = node_e(nodes, decl);
+        let vcount = list_len(lists, variants);
+        let mut v = 0i64;
+        while v < vcount {
+            let payload = node_b(nodes, list_get(lists, variants, v));
+            let pcount = list_len(lists, payload);
+            let mut p = 0i64;
+            while p < pcount {
+                let declared = ty_key_of(nodes, list_get(lists, payload, p));
+                let row = find_payloadkey(nodes, key, v, p);
+                if row != NONE {
+                    if declared != NONE && payloadkey_key_of(nodes, row) == NONE {
+                        let pkey = subst_key(nodes, lists, declared, &from, &to);
+                        node_set_c(nodes, row, pkey);
+                    }
+                } else if declared != NONE {
+                    let pkey = subst_key(nodes, lists, declared, &from, &to);
+                    alloc_payloadkey(nodes, key, v, pkey, p);
+                }
+                p += 1;
+            }
+            v += 1;
+        }
+    }
+}
+
 fn list_eq(lists: &[Vec<i64>], a: i64, b: i64) -> bool {
     let na = list_len(lists, a);
     let nb = list_len(lists, b);
@@ -1340,13 +1505,34 @@ pub fn find_tyinfo_by(nodes: &[i64], lists: &[Vec<i64>], kind: i64, sym: i64, ar
     NONE
 }
 
-pub fn canon_tyinfo(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], kind: i64, sym: i64, args: i64, elem: i64, len: i64) -> i64 {
+pub fn canon_tyinfo(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, kind: i64, sym: i64, args: i64, elem: i64, len: i64) -> i64 {
     let existing = find_tyinfo_by(nodes, lists, kind, sym, args, elem, len);
     if existing != NONE {
         return node_a(nodes, existing);
     }
     let key = nodes.len() as i64 / NODE_STRIDE;
     alloc_tyinfo(nodes, key, kind, sym, args, elem, len);
+    // Facts and the linearity flag are attached at creation when members are
+    // resolved; a forward-referenced descriptor defers both to the
+    // typechecker's settle pass.
+    attach_member_facts(nodes, lists, key, kind, sym, args);
+    let mut seen: Vec<i64> = Vec::new();
+    let flag = linear_flag_of(nodes, lists, key, &mut seen);
+    if flag != 2 {
+        node_set(nodes, key, NODE_FILE, flag);
+    }
+    if kind == TYD_NATIVE {
+        let mut has = 0;
+        let count = list_len(lists, args);
+        let mut ai = 0i64;
+        while ai < count {
+            if linear_flag_of(nodes, lists, list_get(lists, args, ai), &mut seen) == 1 {
+                has = 1;
+            }
+            ai += 1;
+        }
+        node_set(nodes, key, NODE_START, has);
+    }
     key
 }
 
@@ -1410,6 +1596,149 @@ pub fn subst_key(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, key: i64, from
         return key;
     }
     canon_tyinfo(nodes, lists, kind, sym, new_args, new_elem, len)
+}
+
+fn has_value(list: &[i64], value: i64) -> bool {
+    let mut idx = 0usize;
+    while idx < list.len() {
+        match list.get(idx) {
+            Some(cell) => {
+                if *cell == value {
+                    return true;
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    false
+}
+
+// A declared member key substituted with the descriptor's type arguments;
+// `declared` passes through unchanged when the declaration is generic-free.
+// The member walk reports 2 when a member key is unresolved, deferring
+// memoization.
+fn member_key_of(
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    decl: i64,
+    args: i64,
+    declared: i64,
+) -> i64 {
+    if declared == NONE || node_tag(nodes, decl) != NODE_ITEM {
+        return declared;
+    }
+    let from = declared_ty_param_keys(nodes, lists, decl);
+    if from.is_empty() {
+        return declared;
+    }
+    let to = list_to_key_vec(lists, args);
+    subst_key(nodes, lists, declared, &from, &to)
+}
+
+fn linear_members_flag_of(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, sym: i64, args: i64, seen: &mut Vec<i64>) -> i64 {
+    if sym == NONE {
+        return 0;
+    }
+    let decl = node_c(nodes, sym);
+    if decl == NONE || node_tag(nodes, decl) != NODE_ITEM {
+        return 0;
+    }
+    let kind = node_a(nodes, decl);
+    if kind == ITEM_STRUCT {
+        let fields = node_e(nodes, decl);
+        let count = list_len(lists, fields);
+        let mut idx = 0i64;
+        while idx < count {
+            let declared = ty_key_of(nodes, node_b(nodes, list_get(lists, fields, idx)));
+            if declared == NONE {
+                return 2;
+            }
+            let fty = member_key_of(nodes, lists, decl, args, declared);
+            let lin = linear_flag_of(nodes, lists, fty, seen);
+            if lin == 2 {
+                return 2;
+            }
+            if lin == 1 {
+                return 1;
+            }
+            idx += 1;
+        }
+    } else if kind == ITEM_ENUM {
+        let variants = node_e(nodes, decl);
+        let count = list_len(lists, variants);
+        let mut idx = 0i64;
+        while idx < count {
+            let payload = node_b(nodes, list_get(lists, variants, idx));
+            let pcount = list_len(lists, payload);
+            let mut pidx = 0i64;
+            while pidx < pcount {
+                let declared = ty_key_of(nodes, list_get(lists, payload, pidx));
+                if declared == NONE {
+                    return 2;
+                }
+                let pty = member_key_of(nodes, lists, decl, args, declared);
+                let lin = linear_flag_of(nodes, lists, pty, seen);
+                if lin == 2 {
+                    return 2;
+                }
+                if lin == 1 {
+                    return 1;
+                }
+                pidx += 1;
+            }
+            idx += 1;
+        }
+    }
+    0
+}
+
+// The linearity flag (0 or 1) of a canonical type key, memoized in the
+// descriptor's own slot so every later read is a single O(1) access.  A
+// key currently being expanded is not linear, which terminates recursive
+// and composite types deterministically; native handles and type
+// parameters are linear, arrays inherit their element, and struct/enum
+// descriptors inherit any linear member.  Returns 2 without memoizing
+// when a forward-referenced member key is not resolved yet, so the
+// typechecker's settle pass computes the flag once every declaration is
+// collected; `canon_tyinfo` computes it for every descriptor whose members
+// are already resolved.
+pub fn linear_flag_of(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, key: i64, seen: &mut Vec<i64>) -> i64 {
+    if key < 0 {
+        return 0;
+    }
+    let row = find_tyinfo(nodes, key);
+    if row == NONE {
+        return 0;
+    }
+    let stored = node_get(nodes, row, NODE_FILE);
+    if stored == 0 || stored == 1 {
+        return stored;
+    }
+    if has_value(seen, key) {
+        return 0;
+    }
+    seen.push(key);
+    let kind = node_b(nodes, row);
+    let sym = node_c(nodes, row);
+    let args = node_d(nodes, row);
+    let flag = if kind == TYD_NATIVE {
+        1
+    } else if kind == TYD_ARRAY {
+        linear_flag_of(nodes, lists, node_e(nodes, row), seen)
+    } else if kind == TYD_STRUCT || kind == TYD_ENUM {
+        linear_members_flag_of(nodes, lists, sym, args, seen)
+    } else if kind == TYD_PARAM {
+        1
+    } else {
+        0
+    };
+    // 2 means a member key is unresolved; leave the flag unmarked.
+    if flag == 2 {
+        return 2;
+    }
+    node_set(nodes, row, NODE_FILE, flag);
+    flag
 }
 
 pub fn expr_diverges(nodes: &[i64], lists: &[Vec<i64>], expr: i64) -> i64 {
