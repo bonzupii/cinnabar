@@ -1809,6 +1809,7 @@ fn tail_walk_expr(state: &mut State, fn_node: i64, expr: i64, tail: i64) {
     }
     let kind = node_a(state.1, expr);
     if kind == EXPR_CALL {
+        callfact_set_tail(state.1, expr, tail);
         let inst = expr_sym_of(state.1, expr);
         let fn_slot = inst_fn_of(state.1, inst);
         let is_self = node_tag(state.1, fn_slot) == NODE_FN && fn_slot == fn_node;

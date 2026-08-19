@@ -179,8 +179,8 @@ fn parse_args() -> Option<CliArgs> {
                 .short('O')
                 .long("opt-level")
                 .value_name("LEVEL")
-                .value_parser(clap::builder::PossibleValuesParser::new(["0", "1", "2", "3", "s", "z"]))
-                .help("Optimization level: 0, 1, 2, 3, s, z (default 2)"),
+                .value_parser(clap::builder::PossibleValuesParser::new(["0", "1", "2", "3"]))
+                .help("Optimization level: 0, 1, 2, 3 (default 2)"),
         )
         .arg(
             Arg::new("emit_llvm")

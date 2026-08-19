@@ -1262,8 +1262,9 @@ pub fn alloc_localfact(nodes: &mut Vec<i64>, source: i64, name: i64, key: i64, i
 }
 
 // Call-fact rows: a=call expr id, b=tail-safe flag, c=frame-local root
-// name id or NONE, d=extraction container binding name id or NONE.  One
-// row per call, shared by the tail-safety and extraction writers.
+// name id or NONE, d=extraction container binding name id or NONE,
+// e=tail-position flag.  One row per call, shared by the tail-safety,
+// tail-position, and extraction writers.
 
 pub const NODE_CALLFACT: i64 = 21;
 
@@ -1320,6 +1321,25 @@ pub fn callfact_extraction_of(nodes: &[i64], call: i64) -> i64 {
     } else {
         node_d(nodes, row)
     }
+}
+
+pub fn callfact_tail_of(nodes: &[i64], call: i64) -> i64 {
+    let row = callfact_row_of(nodes, call);
+    if row == NONE {
+        0
+    } else {
+        node_e(nodes, row)
+    }
+}
+
+pub fn callfact_set_tail(nodes: &mut Vec<i64>, call: i64, tail: i64) {
+    let row = callfact_row_of(nodes, call);
+    let row = if row == NONE {
+        alloc_callfact(nodes, call, 0, NONE)
+    } else {
+        row
+    };
+    node_set_e(nodes, row, tail);
 }
 
 // Pattern-binding-fact rows: a=pattern node, b=match scrutinee expr.

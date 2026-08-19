@@ -20,7 +20,7 @@ The language's defining feature is **Austral-style linear typing**: resource-own
 - **No dereference operator.** There is no `*` or `->`. References are accessed through field access, method calls, and pattern matching; the compiler manages indirection internally.
 - **Errors only, never warnings.** There is no lint severity, no `#[allow]`. A program either compiles cleanly or is rejected with a real diagnostic.
 - **No panics reachable from user code.** Division, modulo, and dynamic indexing return `Result` instead of trapping. Constant-provable zero-division and out-of-range constant indices are compile-time errors instead.
-- **O(1) call-stack recursion.** Every self-recursive call must be in strict tail position (a compile-time-enforced rule); LLVM tail-call elimination turns it into a jump, so there is no runtime stack guard and no stack-overflow crash.
+- **O(1) call-stack recursion.** Every self-recursive call must be in strict tail position (a compile-time-enforced rule); codegen lowers certified self-recursive calls to loop jumps, so there is no runtime stack guard and no stack-overflow crash at any optimization level.
 - **Explicit everything.** `val`/`var` (immutable/mutable), `pub` (visibility), `impure` (side effects/effect purity), `try` (Result/Option propagation), and casing itself (`snake_case`/`PascalCase`/`SCREAMING_SNAKE_CASE`) are all compiler-enforced grammar, not convention.
 - **Static, freestanding binaries.** The compiler links every program statically against a staged musl libc — no dynamic linker dependency in the output binary.
 

@@ -1,43 +1,23 @@
 //! Lowering of the typed arena to LLVM IR.
 //!
-//! `emit_program` locates `main` through the `SYM_FUN_MAIN` tag the
-//! resolver attached, then monomorphizes and emits every reachable function
-//! (`get_or_emit_fn`), lowering expressions, statements, and match arms to
-//! inkwell builder calls. The user's `main` — which may return a scalar
-//! exit code or an exit-status enum — is wrapped in a real C
-//! `int main(void)`.
-//!
-//! It also implements the native surface: heap memory through `malloc` and
-//! `free`, BSD sockets through real libc entry points (`socket`, `bind`,
-//! `listen`, `accept`, `send`, `close` — networking is a first-class native
-//! surface here, not a userland abstraction), and the `Vec`, `String`, and
-//! `HashMap` intrinsics with `errno`-based error mapping via
-//! `__errno_location`. Which operation a call is dispatches on the `NAT_*`
-//! opcode assigned during resolution.
-//!
-//! Self-tail-recursive calls are marked `tail` at emission time. Tailness
-//! propagates only through the value expression of a tail-positioned match
-//! arm — never through an argument subexpression or a match scrutinee — and
-//! that marking is what lets LLVM's `-O2` deliver the language's
-//! O(1)-call-stack recursion guarantee with no runtime stack check anywhere
-//! in the emitted binary. A call is marked `tail` only when the typechecker's
-//! attached tail-safety fact (`NODE_CALLFACT`) says no argument carries a
-//! reference into the current frame; a reference into the caller's own frame
-//! would make the `tail` marker a false promise and the IR undefined at
-//! `-O2`.
+//! `emit_program` locates `main` by the resolver's `SYM_FUN_MAIN` tag,
+//! monomorphizes every reachable function through `get_or_emit_fn`, and
+//! lowers expressions, statements, and match arms to inkwell builder
+//! calls; the native surface dispatches on `NAT_*` opcodes. Self-tail-
+//! recursive calls jump to the function's `body_header` block with the
+//! parameter slots overwritten; other calls emit `call` instructions, with
+//! the `tail` marker on the calls the typechecker's `NODE_CALLFACT` fact
+//! declares safe.
 //!
 //! **Invariants:**
-//! - `tail` is asserted only where the typechecker's attached tail-safety
-//!   fact says it is safe -- never re-derived here from an argument's type.
-//! - Nothing is re-derived here. Types come from the typechecker's
-//!   canonical keys, symbols from the resolver, variant tags from variant
-//!   symbol rows, field offsets from `NODE_FIELDKEY`. Codegen never
-//!   re-resolves a name or re-infers a type.
-//! - No semantic decision reads a string name. Native dispatch is by
-//!   `NAT_*` opcode and `main` is found by tag, so renaming a function in
-//!   Cinnabar source cannot change how it lowers.
-//! - Every size, offset, and slot count is derived from the declared type,
-//!   never hardcoded to the shapes the current fixtures happen to contain.
+//! - Loop jumps and `tail` markers are emitted only where `NODE_CALLFACT`
+//!   reports the call tail-safe, never derived from an argument's type.
+//! - Types, symbols, variant tags, and field offsets are read from earlier
+//!   stages' attached rows; nothing is re-resolved or re-inferred here.
+//! - The only `unsafe` FFI calls are `offset_array_elem_ptr` and
+//!   `offset_buffer_elem_ptr` (`byte_elem_ptr` is the `i8` buffer form);
+//!   struct fields are reached through `build_struct_gep`, never a
+//!   raw pointer cast.
 //! - A failure is a typed `CodegenError` carrying a real span, never a
 //!   panic.
 
@@ -88,7 +68,10 @@ pub type FnCtx<'ctx, 'a> = (
     &'a [i64],
     &'a [i64],
     i64,
-    bool,
+    BasicBlockId<'ctx>,
+    Vec<PointerValue<'ctx>>,
+    i64,
+    i64,
 );
 
 pub type MatchCont<'ctx> = (i64, PointerValue<'ctx>, BasicBlockId<'ctx>);
@@ -646,10 +629,23 @@ fn slice_len_of<'ctx>(sess: &mut Session<'ctx, '_, '_>, view_ptr: PointerValue<'
     load_i64(sess, lp)
 }
 
-fn offset_elem_ptr<'ctx>(sess: &mut Session<'ctx, '_, '_>, elem_key: i64, base: PointerValue<'ctx>, idx: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
-    let elem_ty = llvm_of(sess, elem_key, span)?;
+// Two-tier addressing: `offset_array_elem_ptr` GEPs `[0, idx]` against
+// `[N x T]`; `offset_buffer_elem_ptr` GEPs `[idx]` against `T` (`byte_elem_ptr`
+// is the `i8` form).  Precondition: `base` is an allocation of the named
+// type and `idx` is within its bounds.
+fn offset_array_elem_ptr<'ctx>(sess: &mut Session<'ctx, '_, '_>, array_ty: BasicTypeEnum<'ctx>, base: PointerValue<'ctx>, idx: IntValue<'ctx>) -> Result<PointerValue<'ctx>, CodegenError> {
+    let zero = sess.0.i64_type().const_zero();
+    let gep = unsafe { sess.2.build_gep(array_ty, base, &[zero, idx], "") }.map_err(builder_fail)?;
+    Ok(gep)
+}
+
+fn offset_buffer_elem_ptr<'ctx>(sess: &mut Session<'ctx, '_, '_>, elem_ty: BasicTypeEnum<'ctx>, base: PointerValue<'ctx>, idx: IntValue<'ctx>) -> Result<PointerValue<'ctx>, CodegenError> {
     let gep = unsafe { sess.2.build_gep(elem_ty, base, &[idx], "") }.map_err(builder_fail)?;
     Ok(gep)
+}
+
+fn byte_elem_ptr<'ctx>(sess: &mut Session<'ctx, '_, '_>, base: PointerValue<'ctx>, idx: IntValue<'ctx>) -> Result<PointerValue<'ctx>, CodegenError> {
+    offset_buffer_elem_ptr(sess, sess.0.i8_type().into(), base, idx)
 }
 
 fn block_terminated<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> bool {
@@ -728,7 +724,7 @@ fn emit_stmt<'ctx, 'a>(
     }
     let expr = node_b(sess.5, stmt);
     let ptr = emit_expr(sess, ctx, expr)?;
-    Ok((ptr, false))
+    Ok((ptr, block_terminated(sess)))
 }
 
 fn emit_loop_branch<'ctx, 'a>(
@@ -851,10 +847,7 @@ fn emit_while<'ctx, 'a>(
     sess.2.position_at_end(body_block);
     ctx.2.push((exit_block, cond_block));
     let key = sub_key(sess, ctx.3, ctx.4, stmt_ty_of(sess.5, stmt));
-    let saved_tail = ctx.6;
-    ctx.6 = false;
     emit_stmt_list(sess, ctx, body, key, span)?;
-    ctx.6 = saved_tail;
     ctx.2.pop();
     if !block_terminated(sess) {
         sess.2.build_unconditional_branch(cond_block).map_err(builder_fail)?;
@@ -882,8 +875,6 @@ fn emit_if<'ctx, 'a>(
     sess.2.build_conditional_branch(cv, then_block, else_block).map_err(builder_fail)?;
     sess.2.position_at_end(then_block);
     let key = sub_key(sess, ctx.3, ctx.4, stmt_ty_of(sess.5, stmt));
-    let saved_tail = ctx.6;
-    ctx.6 = false;
     emit_stmt_list(sess, ctx, then_list, key, span)?;
     if !block_terminated(sess) {
         sess.2.build_unconditional_branch(merge_block).map_err(builder_fail)?;
@@ -897,7 +888,6 @@ fn emit_if<'ctx, 'a>(
     } else {
         sess.2.build_unconditional_branch(merge_block).map_err(builder_fail)?;
     }
-    ctx.6 = saved_tail;
     sess.2.position_at_end(merge_block);
     let slot = alloca_typed(sess, key, "if", span)?;
     Ok((slot, false))
@@ -916,12 +906,11 @@ fn emit_return<'ctx, 'a>(
         build_unit_value_into(sess, ret_key, slot, span)?;
         slot
     } else {
-        let saved_tail = ctx.6;
-        ctx.6 = true;
-        let expr_ptr = emit_expr(sess, ctx, value);
-        ctx.6 = saved_tail;
-        expr_ptr?
+        emit_expr(sess, ctx, value)?
     };
+    if block_terminated(sess) {
+        return Ok((ptr, true));
+    }
     let loaded = load_key(sess, ret_key, ptr, span)?;
     sess.2.build_return(Some(&loaded)).map_err(builder_fail)?;
     Ok((ptr, true))
@@ -936,15 +925,10 @@ fn emit_expr<'ctx, 'a>(
     if kind == EXPR_CALL {
         return emit_call(sess, ctx, expr);
     }
-    let saved_tail = ctx.6;
     if kind == EXPR_MATCH {
-        // A match in tail position forwards its non-diverging arm values
-        // to the tail, so tailness propagates into the arm bodies;
-        // emit_match clears it around the scrutinee and pattern work.
         emit_match(sess, ctx, expr)
     } else {
-        ctx.6 = false;
-        let r = if kind == EXPR_LIT {
+        if kind == EXPR_LIT {
             emit_lit(sess, ctx, expr)
         } else if kind == EXPR_PATH {
             emit_path(sess, ctx, expr)
@@ -969,9 +953,7 @@ fn emit_expr<'ctx, 'a>(
                 node_end(sess.5, expr),
                 "internal: unknown expression kind",
             ))
-        };
-        ctx.6 = saved_tail;
-        r
+        }
     }
 }
 
@@ -1435,7 +1417,8 @@ fn emit_array<'ctx, 'a>(
     let elem_key = em_key_elem(sess, key);
     let mut idx = 0i64;
     while idx < count {
-        let eptr = offset_elem_ptr(sess, elem_key, ptr, sess.0.i64_type().const_int(idx as u64, false), span)?;
+        let array_ty = llvm_of(sess, key, span)?;
+        let eptr = offset_array_elem_ptr(sess, array_ty, ptr, sess.0.i64_type().const_int(idx as u64, false))?;
         let vptr = emit_expr(sess, ctx, list_get(sess.6, elems, idx))?;
         copy_value(sess, elem_key, eptr, vptr, span)?;
         idx += 1;
@@ -1502,10 +1485,7 @@ fn emit_match<'ctx, 'a>(
     let span = (node_file(sess.5, expr), node_start(sess.5, expr), node_end(sess.5, expr));
     let result_alloca = declare_local(sess, result_key, "match", span)?;
     let s_key = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, scrutinee));
-    let saved_tail = ctx.6;
-    ctx.6 = false;
     let scrut_ptr = emit_expr(sess, ctx, scrutinee)?;
-    ctx.6 = saved_tail;
     let merge = new_block(sess, ctx.0, "match_merge");
     let continuation: MatchCont<'ctx> = (result_key, result_alloca, merge);
     let mut arm_blocks: Vec<BasicBlockId<'ctx>> = Vec::new();
@@ -1665,9 +1645,15 @@ fn emit_pattern<'ctx, 'a>(
     } else {
         scrut_ptr
     };
+    let elem_ty = llvm_of(sess, elem_key, span)?;
+    let inner_ty = llvm_of(sess, inner_key, span)?;
     let mut i = 0i64;
     while i < fixed {
-        let eptr = offset_elem_ptr(sess, elem_key, data, sess.0.i64_type().const_int(i as u64, false), span)?;
+        let eptr = if inner_kind == TYD_SLICE {
+            offset_buffer_elem_ptr(sess, elem_ty, data, sess.0.i64_type().const_int(i as u64, false))?
+        } else {
+            offset_array_elem_ptr(sess, inner_ty, data, sess.0.i64_type().const_int(i as u64, false))?
+        };
         let subpat = list_get(sess.6, elems, i);
         let sub_scrut: MatchScrut<'ctx> = (elem_key, eptr, fail_block);
         emit_pattern(sess, ctx, subpat, sub_scrut, NONE, continuation)?;
@@ -1677,7 +1663,11 @@ fn emit_pattern<'ctx, 'a>(
         let rest_key = sub_key(sess, ctx.3, ctx.4, pat_rest_key_of(sess.5, pat));
         let rptr = declare_local(sess, rest_key, "rest", span)?;
         let rdata = slice_gep(sess, rptr, 0, "")?;
-        let rest_base = offset_elem_ptr(sess, elem_key, data, sess.0.i64_type().const_int(fixed as u64, false), span)?;
+        let rest_base = if inner_kind == TYD_SLICE {
+            offset_buffer_elem_ptr(sess, elem_ty, data, sess.0.i64_type().const_int(fixed as u64, false))?
+        } else {
+            offset_array_elem_ptr(sess, inner_ty, data, sess.0.i64_type().const_int(fixed as u64, false))?
+        };
         store_key(sess, rdata, rest_base.into())?;
         let rlen = slice_gep(sess, rptr, 1, "")?;
         let sub = sess.2.build_int_sub(len_val, sess.0.i64_type().const_int(fixed as u64, false), "").map_err(builder_fail)?;
@@ -1789,7 +1779,13 @@ fn emit_index<'ctx, 'a>(
     // infallible.  Reading the attached fact keeps codegen from re-deriving
     // a decision the typechecker already made.
     if node_d(sess.5, expr) != INDEX_FALLIBLE {
-        let eptr = offset_elem_ptr(sess, elem_key, data_ptr, idx_val, span)?;
+        let base_ty = llvm_of(sess, base_key, span)?;
+        let elem_ty = llvm_of(sess, elem_key, span)?;
+        let eptr = if base_kind == TYD_ARRAY {
+            offset_array_elem_ptr(sess, base_ty, data_ptr, idx_val)?
+        } else {
+            offset_buffer_elem_ptr(sess, elem_ty, data_ptr, idx_val)?
+        };
         return Ok(eptr);
     }
     let is_oob = sess.2.build_int_compare(IntPredicate::UGE, idx_val, len_val, "").map_err(builder_fail)?;
@@ -1813,7 +1809,13 @@ fn emit_index<'ctx, 'a>(
     build_enum_value_into(sess, key, BUILTIN_RESULT_ERR, &[(err_key, oob_val)], out, span)?;
     sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
     sess.2.position_at_end(ok_block);
-    let eptr = offset_elem_ptr(sess, elem_key, data_ptr, idx_val, span)?;
+    let base_ty = llvm_of(sess, base_key, span)?;
+    let elem_ty = llvm_of(sess, elem_key, span)?;
+    let eptr = if base_kind == TYD_ARRAY {
+        offset_array_elem_ptr(sess, base_ty, data_ptr, idx_val)?
+    } else {
+        offset_buffer_elem_ptr(sess, elem_ty, data_ptr, idx_val)?
+    };
     let payload_kind = em_key_kind(sess, payload_key);
     if payload_kind == TYD_REF || payload_kind == TYD_REF_MUT {
         let ref_slot = declare_local(sess, payload_key, "idx_ref", span)?;
@@ -1854,26 +1856,24 @@ fn emit_call<'ctx, 'a>(
     if node_tag(sess.5, fn_slot) == NODE_SYM {
         return emit_native_call(sess, ctx, expr, inst, fn_slot);
     }
-    let is_tail = ctx.6;
     let args_list = inst_args_of(sess.5, inst);
     let mono = inst_mono_of(sess.5, inst);
     let params_list = inst_params_of(sess.5, inst);
     let ret_key = sub_key(sess, ctx.3, ctx.4, inst_ret_of(sess.5, inst));
+    if fn_slot == ctx.8 && mono == ctx.9 {
+        if callfact_tail_of(sess.5, expr) == 1 && callfact_tail_safe_of(sess.5, expr) == 1 {
+            return emit_self_tail_call(sess, ctx, expr, ret_key, span);
+        }
+        return Err(builder_error(span.0, span.1, span.2, "internal: self-recursive call without frontend tail certification"));
+    }
     let caller_block = sess.2.get_insert_block();
     let fn_val = get_or_emit_fn(sess, fn_slot, args_list, mono, params_list, ret_key)?;
     match caller_block {
         Some(block) => sess.2.position_at_end(block),
         None => return Err(builder_error(span.0, span.1, span.2, "internal: no insertion block")),
     }
-    let saved_tail = ctx.6;
-    ctx.6 = false;
-    let arg_vals = emit_call_args(sess, ctx, expr, params_list, false);
-    ctx.6 = saved_tail;
-    let arg_vals = arg_vals?;
+    let arg_vals = emit_call_args(sess, ctx, expr, params_list, false)?;
     let call = sess.2.build_call(fn_val, &arg_vals, "").map_err(builder_fail)?;
-    if is_tail && callfact_tail_safe_of(sess.5, expr) == 1 {
-        call.set_tail_call(true);
-    }
     let out = declare_local(sess, ret_key, "call", span)?;
     let ret_val = match call.try_as_basic_value() {
         ValueKind::Basic(bv) => bv,
@@ -1890,13 +1890,61 @@ fn emit_call<'ctx, 'a>(
     Ok(out)
 }
 
+// A self-tail call becomes a loop jump: every argument is evaluated into
+// a value first, so a permutation like `f(b, a)` reads the original
+// parameter slots; then each parameter slot is overwritten and control
+// branches to `body_header`. The returned slot is never used -- the
+// current block is terminated.
+fn emit_self_tail_call<'ctx, 'a>(
+    sess: &mut Session<'ctx, '_, '_>,
+    ctx: &mut FnCtx<'ctx, 'a>,
+    expr: i64,
+    ret_key: i64,
+    span: (i64, i64, i64),
+) -> Result<PointerValue<'ctx>, CodegenError> {
+    let arg_exprs = node_d(sess.5, expr);
+    let count = list_len(sess.6, arg_exprs);
+    let mut staged: Vec<BasicValueEnum<'ctx>> = Vec::new();
+    let mut idx = 0i64;
+    while idx < count {
+        let arg = list_get(sess.6, arg_exprs, idx);
+        let akey = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, arg));
+        let ptr = emit_expr(sess, ctx, arg)?;
+        let value = load_key(sess, akey, ptr, span)?;
+        staged.push(value);
+        idx += 1;
+    }
+    let mut idx = 0i64;
+    while idx < count {
+        let slot = match ctx.7.get(idx as usize) {
+            Some(slot) => *slot,
+            None => {
+                return Err(builder_error(
+                    span.0,
+                    span.1,
+                    span.2,
+                    "internal: self-tail call has more arguments than parameters",
+                ));
+            }
+        };
+        let value = match staged.get(idx as usize) {
+            Some(value) => *value,
+            None => break,
+        };
+        store_key(sess, slot, value)?;
+        idx += 1;
+    }
+    let out = declare_local(sess, ret_key, "tail", span)?;
+    sess.2.build_unconditional_branch(ctx.6).map_err(builder_fail)?;
+    Ok(out)
+}
+
 fn emit_deferred_trait_call<'ctx, 'a>(
     sess: &mut Session<'ctx, '_, '_>,
     ctx: &mut FnCtx<'ctx, 'a>,
     expr: i64,
     trow: i64,
 ) -> Result<PointerValue<'ctx>, CodegenError> {
-    let is_tail = ctx.6;
     let trait_sym = trait_call_trait(sess.5, trow);
     let method_name = trait_call_method(sess.5, trow);
     let arg_exprs = node_d(sess.5, expr);
@@ -1953,21 +2001,20 @@ fn emit_deferred_trait_call<'ctx, 'a>(
     }
     let result = ty_key_of(sess.5, node_d(sess.5, fn_node));
     let mono = canon_tyinfo(sess.5, sess.6, TYD_MONO, fn_node, NONE, NONE, NONE);
+    if fn_node == ctx.8 && mono == ctx.9 {
+        if callfact_tail_of(sess.5, expr) == 1 && callfact_tail_safe_of(sess.5, expr) == 1 {
+            return emit_self_tail_call(sess, ctx, expr, result, span);
+        }
+        return Err(builder_error(span.0, span.1, span.2, "internal: self-recursive trait call without frontend tail certification"));
+    }
     let caller_block = sess.2.get_insert_block();
     let fn_val = get_or_emit_fn(sess, fn_node, NONE, mono, param_keys, result)?;
     match caller_block {
         Some(block) => sess.2.position_at_end(block),
         None => return Err(builder_error(span.0, span.1, span.2, "internal: no insertion block")),
     }
-    let saved_tail = ctx.6;
-    ctx.6 = false;
-    let arg_vals = emit_call_args(sess, ctx, expr, param_keys, false);
-    ctx.6 = saved_tail;
-    let arg_vals = arg_vals?;
+    let arg_vals = emit_call_args(sess, ctx, expr, param_keys, false)?;
     let call = sess.2.build_call(fn_val, &arg_vals, "").map_err(builder_fail)?;
-    if is_tail && callfact_tail_safe_of(sess.5, expr) == 1 {
-        call.set_tail_call(true);
-    }
     let out = declare_local(sess, result, "call", span)?;
     let ret_val = match call.try_as_basic_value() {
         ValueKind::Basic(bv) => bv,
@@ -2058,12 +2105,16 @@ fn get_or_emit_fn<'ctx>(
     let to = list_to_vec_of(sess, args_list);
     let param_decls = node_c(sess.5, fn_slot);
     let body = node_f(sess.5, fn_slot);
+    // The `entry` block stores the incoming arguments into the parameter
+    // slots once; the `body_header` block is the jump target of self-tail
+    // calls, which overwrite the same slots before branching back.
     let entry = sess.0.append_basic_block(fn_val, "entry");
     sess.2.position_at_end(entry);
     let mut body_locals: Locals<'ctx> = Vec::new();
     let fn_loops: LoopTargets<'ctx> = Vec::new();
     let param_values = fn_val.get_params();
     let pcount = list_len(sess.6, params_list);
+    let mut param_slots: Vec<PointerValue<'ctx>> = Vec::new();
     let mut idx = 0i64;
     while idx < pcount {
         let pkey = list_get(sess.6, params_list, idx);
@@ -2075,9 +2126,13 @@ fn get_or_emit_fn<'ctx>(
         };
         store_key(sess, ptr, pval)?;
         bind_local(&mut body_locals, pname, pkey, ptr);
+        param_slots.push(ptr);
         idx += 1;
     }
-    let mut ctx: FnCtx<'ctx, '_> = (fn_val, body_locals, fn_loops, from.as_slice(), to.as_slice(), ret_key, false);
+    let body_header = sess.0.append_basic_block(fn_val, "body_header");
+    sess.2.build_unconditional_branch(body_header).map_err(builder_fail)?;
+    sess.2.position_at_end(body_header);
+    let mut ctx: FnCtx<'ctx, '_> = (fn_val, body_locals, fn_loops, from.as_slice(), to.as_slice(), ret_key, body_header, param_slots, fn_slot, mono);
     let body_result = emit_stmt_list(sess, &mut ctx, body, ret_key, span);
     if let Err(err) = body_result {
         return Err(with_fn_span(err, fn_slot, sess));
@@ -2259,7 +2314,6 @@ fn emit_native_call<'ctx, 'a>(
     sym: i64,
 ) -> Result<PointerValue<'ctx>, CodegenError> {
     let span = (node_file(sess.5, expr), node_start(sess.5, expr), node_end(sess.5, expr));
-    let is_tail = ctx.6;
     let params_list = inst_params_of(sess.5, inst);
     let ret_key = sub_key(sess, ctx.3, ctx.4, inst_ret_of(sess.5, inst));
     let mono = inst_mono_of(sess.5, inst);
@@ -2280,15 +2334,8 @@ fn emit_native_call<'ctx, 'a>(
             fn_val
         }
     };
-    let saved_tail = ctx.6;
-    ctx.6 = false;
-    let arg_vals = emit_call_args(sess, ctx, expr, params_list, false);
-    ctx.6 = saved_tail;
-    let arg_vals = arg_vals?;
+    let arg_vals = emit_call_args(sess, ctx, expr, params_list, false)?;
     let call = sess.2.build_call(native_val, &arg_vals, "").map_err(builder_fail)?;
-    if is_tail && callfact_tail_safe_of(sess.5, expr) == 1 {
-        call.set_tail_call(true);
-    }
     let out = declare_local(sess, ret_key, "call", span)?;
     let ret_val = match call.try_as_basic_value() {
         ValueKind::Basic(bv) => bv,
@@ -2363,13 +2410,6 @@ fn is_null_ptr<'ctx>(sess: &mut Session<'ctx, '_, '_>, ptr: PointerValue<'ctx>) 
     let i = sess.2.build_ptr_to_int(ptr, sess.0.i64_type(), "").map_err(builder_fail)?;
     let zero = sess.0.i64_type().const_zero();
     sess.2.build_int_compare(IntPredicate::EQ, i, zero, "").map_err(builder_fail)
-}
-
-fn byte_offset<'ctx>(sess: &mut Session<'ctx, '_, '_>, base: PointerValue<'ctx>, offset: IntValue<'ctx>) -> Result<PointerValue<'ctx>, CodegenError> {
-    let i8_ty = sess.0.i8_type();
-    let cast = sess.2.build_pointer_cast(base, ptr_ty(sess), "").map_err(builder_fail)?;
-    let gep = unsafe { sess.2.build_gep(i8_ty, cast, &[offset], "") }.map_err(builder_fail)?;
-    Ok(gep)
 }
 
 fn copy_to_out<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, out: PointerValue<'ctx>, src: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
@@ -2631,7 +2671,7 @@ fn native_write_u8<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     copy_to_out(sess, ret_key, out, err_result, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
     sess.2.position_at_end(ok_block);
-    let target = byte_offset(sess, data, offset)?;
+    let target = byte_elem_ptr(sess, data, offset)?;
     store_key(sess, target, value.into())?;
     let unit_key = result_arg_key(sess, ret_key, 0);
     let unit_val = build_unit_value(sess, unit_key, span)?;
@@ -2671,7 +2711,7 @@ fn native_read_u8<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>
     copy_to_out(sess, ret_key, out, err_result, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
     sess.2.position_at_end(ok_block);
-    let target = byte_offset(sess, data, offset)?;
+    let target = byte_elem_ptr(sess, data, offset)?;
     let byte = load_i8(sess, target)?;
     let u8_key = result_arg_key(sess, ret_key, 0);
     let u8_val = declare_local(sess, u8_key, "byte", span)?;
@@ -2755,7 +2795,8 @@ fn native_vec_push<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     sess.2.position_at_end(store_block);
     let data2 = load_ptr(sess, dptr)?;
     let len2 = load_i64(sess, lptr)?;
-    let target = offset_elem_ptr(sess, t_key, data2, len2, span)?;
+    let elem_ty = llvm_of(sess, t_key, span)?;
+    let target = offset_buffer_elem_ptr(sess, elem_ty, data2, len2)?;
     copy_value(sess, t_key, target, p1, span)?;
     let one = sess.0.i64_type().const_int(1, false);
     let len3 = sess.2.build_int_add(len2, one, "").map_err(builder_fail)?;
@@ -2836,7 +2877,8 @@ fn native_vec_pop<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>
     let data = load_ptr(sess, dptr)?;
     let one = sess.0.i64_type().const_int(1, false);
     let pop_idx = sess.2.build_int_sub(len, one, "").map_err(builder_fail)?;
-    let elem_ptr = offset_elem_ptr(sess, t_key, data, pop_idx, span)?;
+    let elem_ty = llvm_of(sess, t_key, span)?;
+    let elem_ptr = offset_buffer_elem_ptr(sess, elem_ty, data, pop_idx)?;
     let elem_val = declare_local(sess, t_key, "popped", span)?;
     copy_value(sess, t_key, elem_val, elem_ptr, span)?;
     store_key(sess, lptr, pop_idx.into())?;
@@ -2883,6 +2925,23 @@ fn byte_view_of<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>, s
     Ok((data, len))
 }
 
+// A private constant global holding the single byte 0x0A, shared by every
+// newline-terminated print.
+fn newline_global<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> PointerValue<'ctx> {
+    let name = ".cnb.newline";
+    match sess.1.get_global(name) {
+        Some(existing) => existing.as_pointer_value(),
+        None => {
+            let byte = sess.0.i8_type().const_int(10, false);
+            let created = sess.1.add_global(sess.0.i8_type(), Some(AddressSpace::from(0u16)), name);
+            created.set_initializer(&byte);
+            created.set_constant(true);
+            created.set_linkage(inkwell::module::Linkage::Private);
+            created.as_pointer_value()
+        }
+    }
+}
+
 fn native_print<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     locals: &Locals<'ctx>,
@@ -2899,44 +2958,45 @@ fn native_print<'ctx>(
     let fd = sess.0.i64_type().const_int(if stderr { 2 } else { 1 }, false);
     write_all(sess, fd, data, len, span)?;
     if newline {
-        let nl_slot = alloca_raw(sess, sess.0.i8_type().into(), "nl", span)?;
-        let nl = sess.0.i8_type().const_int(10, false);
-        sess.2.build_store(nl_slot, nl).map_err(builder_fail)?;
+        let nl = newline_global(sess);
         let one = sess.0.i64_type().const_int(1, false);
-        write_all(sess, fd, nl_slot, one, span)?;
+        write_all(sess, fd, nl, one, span)?;
     }
     build_unit_value_into(sess, ret_key, out, span)?;
     Ok(())
 }
 
-// Writes exactly `len` bytes, looping until they are all gone.
-//
-// A single `write` is allowed to transfer fewer bytes than asked — that is
-// the documented contract, not an error condition — so issuing one and
-// walking away silently truncates output on a pipe or a slow terminal. The
-// libc wrapper does not loop either; the loop has to be here.
-//
-// The loop also ends on a non-positive result, which covers both an error
-// (negative errno) and a zero-byte write. `Terminal.print` returns `Unit`
-// and so has nowhere to report a failure: this is the surface the reference
-// specification declares, and giving it an error channel would change the
-// language surface rather than implement it. Stopping rather than spinning
-// is the honest behaviour available here — an infinite loop on a closed
-// stdout would be worse than a short write.
-fn write_all<'ctx>(
-    sess: &mut Session<'ctx, '_, '_>,
-    fd: IntValue<'ctx>,
-    data: PointerValue<'ctx>,
-    len: IntValue<'ctx>,
-    span: (i64, i64, i64),
-) -> Result<(), CodegenError> {
-    let function = match sess.2.get_insert_block().and_then(|block| block.get_parent()) {
-        Some(found) => found,
-        None => return Err(builder_error(span.0, span.1, span.2, "internal: write outside a function body")),
-    };
+// The out-of-line `write_all` runtime helper, emitted once per module with
+// private linkage; retries a partial `write` with the cursor advanced, and
+// retries unchanged on `EINTR`.
+fn get_or_emit_write_all<'ctx>(sess: &mut Session<'ctx, '_, '_>, span: (i64, i64, i64)) -> Result<FunctionValue<'ctx>, CodegenError> {
+    let name = ".cnb.write_all";
+    if let Some(existing) = sess.1.get_function(name) {
+        return Ok(existing);
+    }
+    let sig = sess.0.void_type().fn_type(
+        &[sess.0.i64_type().into(), ptr_ty(sess).into(), sess.0.i64_type().into()],
+        false,
+    );
+    let function = sess.1.add_function(name, sig, Some(inkwell::module::Linkage::Private));
+    let caller_block = sess.2.get_insert_block();
+    let entry = sess.0.append_basic_block(function, "entry");
+    sess.2.position_at_end(entry);
     let i64_ty = sess.0.i64_type();
     let done_slot = alloca_raw(sess, i64_ty.into(), "written", span)?;
     store_key(sess, done_slot, i64_ty.const_zero().into())?;
+    let fd = match function.get_nth_param(0) {
+        Some(value) => value.into_int_value(),
+        None => return Err(builder_error(span.0, span.1, span.2, "internal: write_all helper missing fd parameter")),
+    };
+    let data = match function.get_nth_param(1) {
+        Some(value) => value.into_pointer_value(),
+        None => return Err(builder_error(span.0, span.1, span.2, "internal: write_all helper missing data parameter")),
+    };
+    let len = match function.get_nth_param(2) {
+        Some(value) => value.into_int_value(),
+        None => return Err(builder_error(span.0, span.1, span.2, "internal: write_all helper missing len parameter")),
+    };
     let cond = new_block(sess, function, "write_cond");
     let body = new_block(sess, function, "write_body");
     let after = new_block(sess, function, "write_done");
@@ -2946,7 +3006,7 @@ fn write_all<'ctx>(
     let more = sess.2.build_int_compare(IntPredicate::ULT, done, len, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(more, body, after).map_err(builder_fail)?;
     sess.2.position_at_end(body);
-    let cursor = byte_offset(sess, data, done)?;
+    let cursor = byte_elem_ptr(sess, data, done)?;
     let remaining = sess.2.build_int_sub(len, done, "").map_err(builder_fail)?;
     let fd32 = sess.2.build_int_truncate(fd, sess.0.i32_type(), "").map_err(builder_fail)?;
     let call = sess.2.build_call(extern_write(sess), &[into_meta(fd32.into()), into_meta(cursor.into()), into_meta(remaining.into())], "").map_err(builder_fail)?;
@@ -2970,6 +3030,26 @@ fn write_all<'ctx>(
     store_key(sess, done_slot, next.into())?;
     sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
     sess.2.position_at_end(after);
+    sess.2.build_return(None).map_err(builder_fail)?;
+    if let Some(block) = caller_block {
+        sess.2.position_at_end(block);
+    }
+    Ok(function)
+}
+
+// Dispatches the full write through the shared `.cnb.write_all` helper.
+fn write_all<'ctx>(
+    sess: &mut Session<'ctx, '_, '_>,
+    fd: IntValue<'ctx>,
+    data: PointerValue<'ctx>,
+    len: IntValue<'ctx>,
+    span: (i64, i64, i64),
+) -> Result<(), CodegenError> {
+    if sess.2.get_insert_block().is_none() {
+        return Err(builder_error(span.0, span.1, span.2, "internal: write outside a function body"));
+    }
+    let helper = get_or_emit_write_all(sess, span)?;
+    sess.2.build_call(helper, &[into_meta(fd.into()), into_meta(data.into()), into_meta(len.into())], "").map_err(builder_fail)?;
     Ok(())
 }
 
@@ -3025,14 +3105,14 @@ fn slot_gep<'ctx>(sess: &mut Session<'ctx, '_, '_>, slot_ty: BasicTypeEnum<'ctx>
     sess.2.build_struct_gep(slot_ty, slot_ptr, index, "").map_err(builder_fail)
 }
 
-// The slot a probe step lands on: `(hash + step) & (capacity - 1)` strides
-// past the data pointer.
-fn probe_slot<'ctx>(sess: &mut Session<'ctx, '_, '_>, data: PointerValue<'ctx>, hash: IntValue<'ctx>, step: IntValue<'ctx>, cap: IntValue<'ctx>, slot_size: u64) -> Result<PointerValue<'ctx>, CodegenError> {
+// The slot a probe step lands on: `(hash + step) & (capacity - 1)` indexes
+// the slot array directly through the slot type.
+fn probe_slot<'ctx>(sess: &mut Session<'ctx, '_, '_>, slot_ty: BasicTypeEnum<'ctx>, data: PointerValue<'ctx>, hash: IntValue<'ctx>, step: IntValue<'ctx>, cap: IntValue<'ctx>) -> Result<PointerValue<'ctx>, CodegenError> {
     let sum = sess.2.build_int_add(hash, step, "").map_err(builder_fail)?;
     let mask = sess.2.build_int_sub(cap, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
     let index = sess.2.build_and(sum, mask, "").map_err(builder_fail)?;
-    let offset = sess.2.build_int_mul(index, sess.0.i64_type().const_int(slot_size, false), "").map_err(builder_fail)?;
-    byte_offset(sess, data, offset)
+    // `index` is masked to `cap - 1`, inside the caller's table allocation.
+    offset_buffer_elem_ptr(sess, slot_ty, data, index)
 }
 
 // One FNV-1a fold: `state = (state ^ word) * prime`. A real bit mixer, not
@@ -3054,16 +3134,6 @@ fn scalar_word<'ctx>(sess: &mut Session<'ctx, '_, '_>, value: IntValue<'ctx>) ->
     } else {
         sess.2.build_int_z_extend(value, sess.0.i64_type(), "").map_err(builder_fail)
     }
-}
-
-// A GEP to element `idx` of an `[N; T]` array, indexing the array type
-// itself (deref the array, then index the element) rather than casting the
-// array pointer to its element type and GEP-ing through that coincidence.
-fn array_elem_ptr<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, ptr: PointerValue<'ctx>, idx: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
-    let ty = llvm_of(sess, key, span)?;
-    let zero = sess.0.i64_type().const_zero();
-    let gep = unsafe { sess.2.build_gep(ty, ptr, &[zero, idx], "") }.map_err(builder_fail)?;
-    Ok(gep)
 }
 
 fn key_kind_label(kind: i64) -> &'static str {
@@ -3174,8 +3244,9 @@ fn emit_key_eq<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, k
         let mut idx = 0i64;
         while idx < len {
             let ival = sess.0.i64_type().const_int(idx as u64, false);
-            let ea = array_elem_ptr(sess, key, a, ival, span)?;
-            let eb = array_elem_ptr(sess, key, b, ival, span)?;
+            let array_ty = llvm_of(sess, key, span)?;
+            let ea = offset_array_elem_ptr(sess, array_ty, a, ival)?;
+            let eb = offset_array_elem_ptr(sess, array_ty, b, ival)?;
             let feq = emit_key_eq(sess, f, elem, ea, eb, span)?;
             acc = sess.2.build_and(acc, feq, "").map_err(builder_fail)?;
             idx += 1;
@@ -3218,8 +3289,9 @@ fn emit_slice_eq<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>,
     let more = sess.2.build_int_compare(IntPredicate::ULT, i, a_len, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(more, body, done).map_err(builder_fail)?;
     sess.2.position_at_end(body);
-    let ea = offset_elem_ptr(sess, elem, a_data, i, span)?;
-    let eb = offset_elem_ptr(sess, elem, b_data, i, span)?;
+    let elem_ty = llvm_of(sess, elem, span)?;
+    let ea = offset_buffer_elem_ptr(sess, elem_ty, a_data, i)?;
+    let eb = offset_buffer_elem_ptr(sess, elem_ty, b_data, i)?;
     let elem_eq = emit_key_eq(sess, f, elem, ea, eb, span)?;
     let next = new_block(sess, f, "slice_eq_next");
     sess.2.build_conditional_branch(elem_eq, next, mismatch).map_err(builder_fail)?;
@@ -3305,7 +3377,8 @@ fn emit_key_hash_into<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'
         let len = key_len_of(sess, key);
         let mut idx = 0i64;
         while idx < len {
-            let eptr = array_elem_ptr(sess, key, ptr, sess.0.i64_type().const_int(idx as u64, false), span)?;
+            let array_ty = llvm_of(sess, key, span)?;
+            let eptr = offset_array_elem_ptr(sess, array_ty, ptr, sess.0.i64_type().const_int(idx as u64, false))?;
             emit_key_hash_into(sess, f, elem, eptr, hash_slot, span)?;
             idx += 1;
         }
@@ -3342,7 +3415,8 @@ fn emit_slice_hash_into<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue
     let more = sess.2.build_int_compare(IntPredicate::ULT, i, len, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(more, body, done).map_err(builder_fail)?;
     sess.2.position_at_end(body);
-    let eptr = offset_elem_ptr(sess, elem, data, i, span)?;
+    let elem_ty = llvm_of(sess, elem, span)?;
+    let eptr = offset_buffer_elem_ptr(sess, elem_ty, data, i)?;
     emit_key_hash_into(sess, f, elem, eptr, hash_slot, span)?;
     let i2 = sess.2.build_int_add(i, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
     store_key(sess, i_slot, i2.into())?;
@@ -3367,8 +3441,6 @@ fn rehash_into<'ctx>(
     let (old_data, old_cap) = old;
     let (new_data, new_cap) = new;
     let slot_ty = hash_map_slot_ty(sess, k_key, v_key, span)?;
-    let slot_size = sess.3.get_abi_size(&slot_ty);
-    let slot_size_const = sess.0.i64_type().const_int(slot_size, false);
     let i_slot = alloca_raw(sess, sess.0.i64_type().into(), "old", span)?;
     store_key(sess, i_slot, sess.0.i64_type().const_zero().into())?;
     let cond = new_block(sess, f, "rehash_cond");
@@ -3380,8 +3452,7 @@ fn rehash_into<'ctx>(
     let more = sess.2.build_int_compare(IntPredicate::ULT, i, old_cap, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(more, body, done).map_err(builder_fail)?;
     sess.2.position_at_end(body);
-    let offset = sess.2.build_int_mul(i, slot_size_const, "").map_err(builder_fail)?;
-    let old_slot = byte_offset(sess, old_data, offset)?;
+    let old_slot = offset_buffer_elem_ptr(sess, slot_ty, old_data, i)?;
     let flag_ptr = slot_gep(sess, slot_ty, old_slot, 0)?;
     let flag = load_i64(sess, flag_ptr)?;
     let occupied = sess.2.build_int_compare(IntPredicate::EQ, flag, sess.0.i64_type().const_int(SLOT_OCCUPIED, false), "").map_err(builder_fail)?;
@@ -3402,7 +3473,7 @@ fn rehash_into<'ctx>(
     sess.2.build_unconditional_branch(probe_body).map_err(builder_fail)?;
     sess.2.position_at_end(probe_body);
     let step = load_i64(sess, step_slot)?;
-    let new_slot = probe_slot(sess, new_data, hash, step, new_cap, slot_size)?;
+    let new_slot = probe_slot(sess, slot_ty, new_data, hash, step, new_cap)?;
     let new_flag_ptr = slot_gep(sess, slot_ty, new_slot, 0)?;
     let new_flag = load_i64(sess, new_flag_ptr)?;
     let empty = sess.2.build_int_compare(IntPredicate::EQ, new_flag, sess.0.i64_type().const_int(SLOT_EMPTY, false), "").map_err(builder_fail)?;
@@ -3520,7 +3591,7 @@ fn native_hash_map_insert<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
     let more = sess.2.build_int_compare(IntPredicate::ULT, step, cap, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(more, probe_body, exhausted).map_err(builder_fail)?;
     sess.2.position_at_end(probe_body);
-    let slot = probe_slot(sess, data, hash, step, cap, slot_size)?;
+    let slot = probe_slot(sess, slot_ty, data, hash, step, cap)?;
     let flag_ptr = slot_gep(sess, slot_ty, slot, 0)?;
     let flag = load_i64(sess, flag_ptr)?;
     let empty_const = sess.0.i64_type().const_int(SLOT_EMPTY, false);
@@ -3579,7 +3650,7 @@ fn native_hash_map_insert<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
 
     sess.2.position_at_end(do_insert);
     let at = load_i64(sess, insert_slot)?;
-    let target = probe_slot(sess, data, hash, at, cap, slot_size)?;
+    let target = probe_slot(sess, slot_ty, data, hash, at, cap)?;
     let target_flag = slot_gep(sess, slot_ty, target, 0)?;
     let target_key = slot_gep(sess, slot_ty, target, 1)?;
     let target_val = slot_gep(sess, slot_ty, target, 2)?;
@@ -3616,7 +3687,6 @@ fn native_hash_map_get<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<
     let k_key = native_arg_key(sess, params_list, 1);
     let v_key = result_arg_key(sess, ret_key, 0);
     let slot_ty = hash_map_slot_ty(sess, k_key, v_key, span)?;
-    let slot_size = sess.3.get_abi_size(&slot_ty);
     let map_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let map_ref = load_ptr(sess, p0)?;
     let dptr = struct_gep(sess, map_key, map_ref, 0, "", span)?;
@@ -3640,7 +3710,7 @@ fn native_hash_map_get<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<
     let more = sess.2.build_int_compare(IntPredicate::ULT, step, cap, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(more, probe_body, missing_block).map_err(builder_fail)?;
     sess.2.position_at_end(probe_body);
-    let slot = probe_slot(sess, data, hash, step, cap, slot_size)?;
+    let slot = probe_slot(sess, slot_ty, data, hash, step, cap)?;
     let flag_ptr = slot_gep(sess, slot_ty, slot, 0)?;
     let flag = load_i64(sess, flag_ptr)?;
     let empty_const = sess.0.i64_type().const_int(SLOT_EMPTY, false);
@@ -3696,7 +3766,6 @@ fn native_hash_map_remove<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
     let k_key = native_arg_key(sess, params_list, 1);
     let v_key = result_arg_key(sess, ret_key, 0);
     let slot_ty = hash_map_slot_ty(sess, k_key, v_key, span)?;
-    let slot_size = sess.3.get_abi_size(&slot_ty);
     let map_key = deref_key_of(sess, get_local_key(locals, 0, span)?);
     let map_ref = load_ptr(sess, p0)?;
     let dptr = struct_gep(sess, map_key, map_ref, 0, "", span)?;
@@ -3721,7 +3790,7 @@ fn native_hash_map_remove<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
     let more = sess.2.build_int_compare(IntPredicate::ULT, step, cap, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(more, probe_body, missing_block).map_err(builder_fail)?;
     sess.2.position_at_end(probe_body);
-    let slot = probe_slot(sess, data, hash, step, cap, slot_size)?;
+    let slot = probe_slot(sess, slot_ty, data, hash, step, cap)?;
     let flag_ptr = slot_gep(sess, slot_ty, slot, 0)?;
     let flag = load_i64(sess, flag_ptr)?;
     let empty_const = sess.0.i64_type().const_int(SLOT_EMPTY, false);
@@ -3895,7 +3964,9 @@ fn nul_terminated_path<'ctx>(
     // between the test and the copy; the caller rejects it on `fits`.
     let clamped = sess.2.build_select(fits, len, i64_ty.const_zero(), "").map_err(builder_fail)?.into_int_value();
     sess.2.build_memcpy(buffer, 1, data, 1, clamped).map_err(builder_fail)?;
-    let terminator = byte_offset(sess, buffer, clamped)?;
+    // NUL at `[0, clamped]` against the buffer's `[PATH_MAX + 1 x i8]`.
+    let array_ty = sess.0.i8_type().array_type(PATH_MAX as u32 + 1);
+    let terminator = offset_array_elem_ptr(sess, array_ty.into(), buffer, clamped)?;
     sess.2.build_store(terminator, sess.0.i8_type().const_zero()).map_err(builder_fail)?;
     Ok((buffer, fits))
 }
@@ -4078,7 +4149,7 @@ fn emit_strlen<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, t
     sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
     sess.2.position_at_end(cond);
     let idx = load_i64(sess, cursor)?;
-    let byte_ptr = byte_offset(sess, text, idx)?;
+    let byte_ptr = byte_elem_ptr(sess, text, idx)?;
     let byte = load_i8(sess, byte_ptr)?;
     let more = sess.2.build_int_compare(IntPredicate::NE, byte, sess.0.i8_type().const_zero(), "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(more, body, done).map_err(builder_fail)?;
@@ -4161,10 +4232,10 @@ fn native_runtime_args<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<
     let more = sess.2.build_int_compare(IntPredicate::ULT, i, argc, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(more, loop_body, loop_done).map_err(builder_fail)?;
     sess.2.position_at_end(loop_body);
-    let slot_ptr = unsafe { sess.2.build_gep(ptr_ty(sess), argv, &[i], "") }.map_err(builder_fail)?;
+    let slot_ptr = offset_buffer_elem_ptr(sess, ptr_ty(sess).into(), argv, i)?;
     let text = load_ptr(sess, slot_ptr)?;
     let length = emit_strlen(sess, f, text, span)?;
-    let entry = offset_elem_ptr(sess, elem_key, table, i, span)?;
+    let entry = offset_buffer_elem_ptr(sess, elem_ty, table, i)?;
     let entry_data = struct_gep(sess, elem_key, entry, 0, "", span)?;
     store_key(sess, entry_data, text.into())?;
     let entry_len = struct_gep(sess, elem_key, entry, 1, "", span)?;
@@ -4310,7 +4381,7 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     sess.2.position_at_end(place);
     let target_base = load_ptr(sess, buffer)?;
     let at = load_i64(sess, length)?;
-    let target = byte_offset(sess, target_base, at)?;
+    let target = byte_elem_ptr(sess, target_base, at)?;
     sess.2.build_store(target, byte).map_err(builder_fail)?;
     let advanced = sess.2.build_int_add(at, i64_ty.const_int(1, false), "").map_err(builder_fail)?;
     store_key(sess, length, advanced.into())?;
@@ -4470,36 +4541,31 @@ fn net_rc_branch<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>,
 }
 
 fn build_sockaddr_in<'ctx>(sess: &mut Session<'ctx, '_, '_>, port: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
-    // `struct sockaddr_in` is 16 bytes with 4-byte natural alignment (driven
-    // by its widest member, the u32 `sin_addr`) -- but the stores below, at
-    // byte offsets 2 and 4, get LLVM's default alignment for their value
-    // type (2, 4) regardless of what this alloca is actually declared to
-    // provide. Allocating as `[16 x i8]` (1-byte natural alignment) made
-    // those stores' align annotations claim more than the underlying memory
-    // was ever guaranteed to have -- undefined per LLVM's semantics, not
-    // just untidy: the optimizer is entitled to assume align metadata is
-    // honored. Allocating as four i32 words instead keeps the same 16 bytes
-    // but gives the buffer real 4-byte alignment, matching every store into
-    // it and the C struct this is standing in for.
-    let sa_ty = sess.0.i32_type().array_type(4);
+    // `sockaddr_in` as a typed struct: i16 family, i16 port, i32 addr, [8 x i8] zero.
+    let sa_ty = sess.0.struct_type(
+        &[
+            sess.0.i16_type().into(),
+            sess.0.i16_type().into(),
+            sess.0.i32_type().into(),
+            sess.0.i8_type().array_type(8).into(),
+        ],
+        false,
+    );
     let sa = alloca_raw(sess, sa_ty.into(), "sa", span)?;
-    let zero = sess.0.i64_type().const_zero();
-    let fam_off = byte_offset(sess, sa, zero)?;
-    sess.2.build_store(fam_off, sess.0.i16_type().const_int(2, false)).map_err(builder_fail)?;
-    let two = sess.0.i64_type().const_int(2, false);
-    let port_off = byte_offset(sess, sa, two)?;
+    let fam = sess.2.build_struct_gep(sa_ty, sa, 0, "").map_err(builder_fail)?;
+    sess.2.build_store(fam, sess.0.i16_type().const_int(2, false)).map_err(builder_fail)?;
+    let port_field = sess.2.build_struct_gep(sa_ty, sa, 1, "").map_err(builder_fail)?;
     let port16 = sess.2.build_int_truncate(port, sess.0.i16_type(), "").map_err(builder_fail)?;
     let eight = sess.0.i16_type().const_int(8, false);
     let hi = sess.2.build_right_shift(port16, eight, false, "").map_err(builder_fail)?;
     let lo = sess.2.build_left_shift(port16, eight, "").map_err(builder_fail)?;
     let swapped = sess.2.build_or(lo, hi, "").map_err(builder_fail)?;
-    sess.2.build_store(port_off, swapped).map_err(builder_fail)?;
-    let four = sess.0.i64_type().const_int(4, false);
-    let addr_off = byte_offset(sess, sa, four)?;
-    sess.2.build_store(addr_off, sess.0.i32_type().const_zero()).map_err(builder_fail)?;
-    let eight64 = sess.0.i64_type().const_int(8, false);
-    let pad_off = byte_offset(sess, sa, eight64)?;
-    sess.2.build_store(pad_off, zero).map_err(builder_fail)?;
+    sess.2.build_store(port_field, swapped).map_err(builder_fail)?;
+    let addr_field = sess.2.build_struct_gep(sa_ty, sa, 2, "").map_err(builder_fail)?;
+    sess.2.build_store(addr_field, sess.0.i32_type().const_zero()).map_err(builder_fail)?;
+    let zero_field = sess.2.build_struct_gep(sa_ty, sa, 3, "").map_err(builder_fail)?;
+    let zero8 = sess.0.i8_type().const_zero();
+    sess.2.build_memset(zero_field, 1, zero8, sess.0.i64_type().const_int(8, false)).map_err(builder_fail)?;
     Ok(sa)
 }
 
@@ -4706,7 +4772,7 @@ fn heap_nul_terminated<'ctx>(
     sess.2.build_conditional_branch(failed, after, copy_block).map_err(builder_fail)?;
     sess.2.position_at_end(copy_block);
     sess.2.build_memcpy(buf, 1, data, 1, len).map_err(builder_fail)?;
-    let nul_off = byte_offset(sess, buf, len)?;
+    let nul_off = byte_elem_ptr(sess, buf, len)?;
     sess.2.build_store(nul_off, sess.0.i8_type().const_zero()).map_err(builder_fail)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
     sess.2.position_at_end(after);
@@ -4734,8 +4800,6 @@ fn native_process_spawn<'ctx>(
     let lptr = struct_gep(sess, argv_key, argv_ref, 1, "", span)?;
     let data = load_ptr(sess, dptr)?;
     let len = load_i64(sess, lptr)?;
-    let esize = sess.3.get_abi_size(&llvm_of(sess, elem_key, span)?);
-    let stride_const = sess.0.i64_type().const_int(esize, false);
 
     let merge = new_block(sess, f, "spawn_merge");
     let enomem = sess.0.i64_type().const_int(ENOMEM, false);
@@ -4777,8 +4841,8 @@ fn native_process_spawn<'ctx>(
     let done = sess.2.build_int_compare(IntPredicate::ULT, i, len, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(done, body, after_loop).map_err(builder_fail)?;
     sess.2.position_at_end(body);
-    let off = sess.2.build_int_mul(i, stride_const, "").map_err(builder_fail)?;
-    let str_ptr = byte_offset(sess, data, off)?;
+    let elem_ty = llvm_of(sess, elem_key, span)?;
+    let str_ptr = offset_buffer_elem_ptr(sess, elem_ty, data, i)?;
     let s_data_slot = struct_gep(sess, elem_key, str_ptr, 0, "", span)?;
     let s_data = load_ptr(sess, s_data_slot)?;
     let s_len_slot = struct_gep(sess, elem_key, str_ptr, 1, "", span)?;
@@ -4790,14 +4854,13 @@ fn native_process_spawn<'ctx>(
     system_fault_result(sess, ret_key, out, enomem, span)?;
     sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
     sess.2.position_at_end(next);
-    let slot = byte_offset(sess, argv_arr, sess.2.build_int_mul(i, eight, "").map_err(builder_fail)?)?;
+    let slot = offset_buffer_elem_ptr(sess, ptr_ty(sess).into(), argv_arr, i)?;
     store_key(sess, slot, buf.into())?;
     let i2 = sess.2.build_int_add(i, one, "").map_err(builder_fail)?;
     store_key(sess, i_slot, i2.into())?;
     sess.2.build_unconditional_branch(cond).map_err(builder_fail)?;
     sess.2.position_at_end(after_loop);
-    let term_off = sess.2.build_int_mul(len, eight, "").map_err(builder_fail)?;
-    let term_slot = byte_offset(sess, argv_arr, term_off)?;
+    let term_slot = offset_buffer_elem_ptr(sess, ptr_ty(sess).into(), argv_arr, len)?;
     store_key(sess, term_slot, ptr_ty(sess).const_null().into())?;
 
     // An empty environment: `Process` has no way to name a variable's
@@ -4882,8 +4945,7 @@ fn native_process_spawn<'ctx>(
     let free_more = sess.2.build_int_compare(IntPredicate::ULT, free_i, len, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(free_more, free_body, free_after).map_err(builder_fail)?;
     sess.2.position_at_end(free_body);
-    let entry_off = sess.2.build_int_mul(free_i, eight, "").map_err(builder_fail)?;
-    let entry_slot = byte_offset(sess, argv_arr, entry_off)?;
+    let entry_slot = offset_buffer_elem_ptr(sess, ptr_ty(sess).into(), argv_arr, free_i)?;
     let entry_ptr = load_ptr(sess, entry_slot)?;
     sess.2.build_call(free, &[into_meta(entry_ptr.into())], "").map_err(builder_fail)?;
     let free_i2 = sess.2.build_int_add(free_i, one, "").map_err(builder_fail)?;
@@ -4985,13 +5047,12 @@ fn windows_last_error<'ctx>(sess: &mut Session<'ctx, '_, '_>, span: (i64, i64, i
 fn arg_bytes<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     data: PointerValue<'ctx>,
-    stride: IntValue<'ctx>,
     elem_key: i64,
     i: IntValue<'ctx>,
     span: (i64, i64, i64),
 ) -> Result<(PointerValue<'ctx>, IntValue<'ctx>), CodegenError> {
-    let off = sess.2.build_int_mul(i, stride, "").map_err(builder_fail)?;
-    let elem_ptr = byte_offset(sess, data, off)?;
+    let elem_ty = llvm_of(sess, elem_key, span)?;
+    let elem_ptr = offset_buffer_elem_ptr(sess, elem_ty, data, i)?;
     let sd = struct_gep(sess, elem_key, elem_ptr, 0, "", span)?;
     let sdata = load_ptr(sess, sd)?;
     let sl = struct_gep(sess, elem_key, elem_ptr, 1, "", span)?;
@@ -5064,7 +5125,7 @@ fn emit_backslash_run<'ctx>(
     sess.2.build_conditional_branch(more, body, done).map_err(builder_fail)?;
     sess.2.position_at_end(body);
     let w = load_i64(sess, w_slot)?;
-    let slot = byte_offset(sess, buf, w)?;
+    let slot = byte_elem_ptr(sess, buf, w)?;
     sess.2.build_store(slot, sess.0.i8_type().const_int(0x5C, false)).map_err(builder_fail)?;
     let w2 = sess.2.build_int_add(w, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
     store_key(sess, w_slot, w2.into())?;
@@ -5164,8 +5225,6 @@ fn native_process_spawn_windows<'ctx>(
     let lptr = struct_gep(sess, argv_key, argv_ref, 1, "", span)?;
     let data = load_ptr(sess, dptr)?;
     let len = load_i64(sess, lptr)?;
-    let esize = sess.3.get_abi_size(&llvm_of(sess, elem_key, span)?);
-    let stride_const = sess.0.i64_type().const_int(esize, false);
     let i64_ty = sess.0.i64_type();
     let zero = i64_ty.const_zero();
     let one = i64_ty.const_int(1, false);
@@ -5206,26 +5265,26 @@ fn native_process_spawn_windows<'ctx>(
     let not_batch = new_block(sess, f, "wspawn_not_batch");
     sess.2.build_conditional_branch(has_first, check_batch, not_batch).map_err(builder_fail)?;
     sess.2.position_at_end(check_batch);
-    let (s0_data, s0_len) = arg_bytes(sess, data, stride_const, elem_key, zero, span)?;
+    let (s0_data, s0_len) = arg_bytes(sess, data, elem_key, zero, span)?;
     let has_ext = sess.2.build_int_compare(IntPredicate::UGE, s0_len, four, "").map_err(builder_fail)?;
     let safe_len = sess.2.build_select(has_ext, s0_len, four, "").map_err(builder_fail)?.into_int_value();
     let ext_check = new_block(sess, f, "wspawn_ext_check");
     sess.2.build_conditional_branch(has_ext, ext_check, not_batch).map_err(builder_fail)?;
     sess.2.position_at_end(ext_check);
     let start = sess.2.build_int_sub(safe_len, four, "").map_err(builder_fail)?;
-    let dot_slot = byte_offset(sess, s0_data, start)?;
+    let dot_slot = byte_elem_ptr(sess, s0_data, start)?;
     let dot_raw = load_i8(sess, dot_slot)?;
     let dot = i8_lower(sess, dot_raw)?;
     let p1 = sess.2.build_int_add(start, one, "").map_err(builder_fail)?;
-    let b1_slot = byte_offset(sess, s0_data, p1)?;
+    let b1_slot = byte_elem_ptr(sess, s0_data, p1)?;
     let b1_raw = load_i8(sess, b1_slot)?;
     let b1 = i8_lower(sess, b1_raw)?;
     let p2 = sess.2.build_int_add(start, two, "").map_err(builder_fail)?;
-    let b2_slot = byte_offset(sess, s0_data, p2)?;
+    let b2_slot = byte_elem_ptr(sess, s0_data, p2)?;
     let b2_raw = load_i8(sess, b2_slot)?;
     let b2 = i8_lower(sess, b2_raw)?;
     let p3 = sess.2.build_int_add(start, three, "").map_err(builder_fail)?;
-    let b3_slot = byte_offset(sess, s0_data, p3)?;
+    let b3_slot = byte_elem_ptr(sess, s0_data, p3)?;
     let b3_raw = load_i8(sess, b3_slot)?;
     let b3 = i8_lower(sess, b3_raw)?;
     let is_dot = i8_eq(sess, dot, 0x2E)?;
@@ -5256,7 +5315,7 @@ fn native_process_spawn_windows<'ctx>(
     let scan_more = sess.2.build_int_compare(IntPredicate::ULT, si, len, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(scan_more, scan_body, scan_done).map_err(builder_fail)?;
     sess.2.position_at_end(scan_body);
-    let (sdata, slen) = arg_bytes(sess, data, stride_const, elem_key, si, span)?;
+    let (sdata, slen) = arg_bytes(sess, data, elem_key, si, span)?;
     store_key(sess, scan_j, zero.into())?;
     let scan_jcond = new_block(sess, f, "wspawn_scan_jcond");
     let scan_jbody = new_block(sess, f, "wspawn_scan_jbody");
@@ -5267,7 +5326,7 @@ fn native_process_spawn_windows<'ctx>(
     let jmore = sess.2.build_int_compare(IntPredicate::ULT, sj, slen, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(jmore, scan_jbody, scan_jdone).map_err(builder_fail)?;
     sess.2.position_at_end(scan_jbody);
-    let byte_slot = byte_offset(sess, sdata, sj)?;
+    let byte_slot = byte_elem_ptr(sess, sdata, sj)?;
     let byte = load_i8(sess, byte_slot)?;
     let is_meta = is_shell_metachar(sess, byte)?;
     let meta_fail = new_block(sess, f, "wspawn_meta_fail");
@@ -5320,7 +5379,7 @@ fn native_process_spawn_windows<'ctx>(
     let lmore = sess.2.build_int_compare(IntPredicate::ULT, li, len, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(lmore, len_body, len_done).map_err(builder_fail)?;
     sess.2.position_at_end(len_body);
-    let (sdata, slen) = arg_bytes(sess, data, stride_const, elem_key, li, span)?;
+    let (sdata, slen) = arg_bytes(sess, data, elem_key, li, span)?;
     let is_empty = sess.2.build_int_compare(IntPredicate::EQ, slen, zero, "").map_err(builder_fail)?;
     let empty_need = sess.2.build_select(is_empty, one, zero, "").map_err(builder_fail)?.into_int_value();
     store_key(sess, need_slot, empty_need.into())?;
@@ -5335,7 +5394,7 @@ fn native_process_spawn_windows<'ctx>(
     let jmore = sess.2.build_int_compare(IntPredicate::ULT, lj, slen, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(jmore, len_jbody, len_jdone).map_err(builder_fail)?;
     sess.2.position_at_end(len_jbody);
-    let byte_slot = byte_offset(sess, sdata, lj)?;
+    let byte_slot = byte_elem_ptr(sess, sdata, lj)?;
     let byte = load_i8(sess, byte_slot)?;
     let is_sp = i8_eq(sess, byte, 0x20)?;
     let is_tab = i8_eq(sess, byte, 0x09)?;
@@ -5371,7 +5430,7 @@ fn native_process_spawn_windows<'ctx>(
     let bs_at_end = new_block(sess, f, "wspawn_bs_atend");
     sess.2.build_conditional_branch(k_in, bs_check, bs_at_end).map_err(builder_fail)?;
     sess.2.position_at_end(bs_check);
-    let kb_slot = byte_offset(sess, sdata, k)?;
+    let kb_slot = byte_elem_ptr(sess, sdata, k)?;
     let kb = load_i8(sess, kb_slot)?;
     let is_kbs = i8_eq(sess, kb, 0x5C)?;
     let is_kq = i8_eq(sess, kb, 0x22)?;
@@ -5409,7 +5468,7 @@ fn native_process_spawn_windows<'ctx>(
     let need_cond = sess.2.build_int_compare(IntPredicate::NE, need, zero, "").map_err(builder_fail)?;
     let final_len = sess.2.build_select(need_cond, qlen, slen, "").map_err(builder_fail)?.into_int_value();
     let need_byte = sess.2.build_int_truncate(need, sess.0.i8_type(), "").map_err(builder_fail)?;
-    sess.2.build_store(byte_offset(sess, need_arr, li)?, need_byte).map_err(builder_fail)?;
+    sess.2.build_store(byte_elem_ptr(sess, need_arr, li)?, need_byte).map_err(builder_fail)?;
     let total = load_i64(sess, total_slot)?;
     let total2 = sess.2.build_int_add(total, sess.2.build_int_add(final_len, one, "").map_err(builder_fail)?, "").map_err(builder_fail)?;
     store_key(sess, total_slot, total2.into())?;
@@ -5448,8 +5507,8 @@ fn native_process_spawn_windows<'ctx>(
     let fmore = sess.2.build_int_compare(IntPredicate::ULT, fi, len, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(fmore, f_body, f_done).map_err(builder_fail)?;
     sess.2.position_at_end(f_body);
-    let (sdata, slen) = arg_bytes(sess, data, stride_const, elem_key, fi, span)?;
-    let need_byte_slot = byte_offset(sess, need_arr, fi)?;
+    let (sdata, slen) = arg_bytes(sess, data, elem_key, fi, span)?;
+    let need_byte_slot = byte_elem_ptr(sess, need_arr, fi)?;
     let need_byte = load_i8(sess, need_byte_slot)?;
     let need64 = sess.2.build_int_z_extend(need_byte, i64_ty, "").map_err(builder_fail)?;
     let need_cond = sess.2.build_int_compare(IntPredicate::NE, need64, zero, "").map_err(builder_fail)?;
@@ -5458,7 +5517,7 @@ fn native_process_spawn_windows<'ctx>(
     sess.2.build_conditional_branch(need_cond, f_quoted, f_raw).map_err(builder_fail)?;
     sess.2.position_at_end(f_quoted);
     let w = load_i64(sess, w_slot)?;
-    sess.2.build_store(byte_offset(sess, buf8, w)?, sess.0.i8_type().const_int(0x22, false)).map_err(builder_fail)?;
+    sess.2.build_store(byte_elem_ptr(sess, buf8, w)?, sess.0.i8_type().const_int(0x22, false)).map_err(builder_fail)?;
     let w1 = sess.2.build_int_add(w, one, "").map_err(builder_fail)?;
     store_key(sess, w_slot, w1.into())?;
     store_key(sess, fq_j, zero.into())?;
@@ -5471,7 +5530,7 @@ fn native_process_spawn_windows<'ctx>(
     let fjmore = sess.2.build_int_compare(IntPredicate::ULT, fj, slen, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(fjmore, fq_body, fq_done).map_err(builder_fail)?;
     sess.2.position_at_end(fq_body);
-    let byte_slot = byte_offset(sess, sdata, fj)?;
+    let byte_slot = byte_elem_ptr(sess, sdata, fj)?;
     let byte = load_i8(sess, byte_slot)?;
     let is_bs = i8_eq(sess, byte, 0x5C)?;
     let fq_bs = new_block(sess, f, "wspawn_fq_bs");
@@ -5486,15 +5545,15 @@ fn native_process_spawn_windows<'ctx>(
     sess.2.position_at_end(notbs_quote);
     // A literal quote inside a quoted argument is escaped as backslash-quote.
     let w = load_i64(sess, w_slot)?;
-    sess.2.build_store(byte_offset(sess, buf8, w)?, sess.0.i8_type().const_int(0x5C, false)).map_err(builder_fail)?;
+    sess.2.build_store(byte_elem_ptr(sess, buf8, w)?, sess.0.i8_type().const_int(0x5C, false)).map_err(builder_fail)?;
     let w1 = sess.2.build_int_add(w, one, "").map_err(builder_fail)?;
-    sess.2.build_store(byte_offset(sess, buf8, w1)?, sess.0.i8_type().const_int(0x22, false)).map_err(builder_fail)?;
+    sess.2.build_store(byte_elem_ptr(sess, buf8, w1)?, sess.0.i8_type().const_int(0x22, false)).map_err(builder_fail)?;
     let w2 = sess.2.build_int_add(w1, one, "").map_err(builder_fail)?;
     store_key(sess, w_slot, w2.into())?;
     sess.2.build_unconditional_branch(notbs_after).map_err(builder_fail)?;
     sess.2.position_at_end(notbs_plain);
     let w = load_i64(sess, w_slot)?;
-    sess.2.build_store(byte_offset(sess, buf8, w)?, byte).map_err(builder_fail)?;
+    sess.2.build_store(byte_elem_ptr(sess, buf8, w)?, byte).map_err(builder_fail)?;
     let w1 = sess.2.build_int_add(w, one, "").map_err(builder_fail)?;
     store_key(sess, w_slot, w1.into())?;
     sess.2.build_unconditional_branch(notbs_after).map_err(builder_fail)?;
@@ -5514,7 +5573,7 @@ fn native_process_spawn_windows<'ctx>(
     let fbs_at_end = new_block(sess, f, "wspawn_fbs_atend");
     sess.2.build_conditional_branch(k_in, fbs_check, fbs_at_end).map_err(builder_fail)?;
     sess.2.position_at_end(fbs_check);
-    let kb_slot = byte_offset(sess, sdata, k)?;
+    let kb_slot = byte_elem_ptr(sess, sdata, k)?;
     let kb = load_i8(sess, kb_slot)?;
     let is_kbs = i8_eq(sess, kb, 0x5C)?;
     let is_kq = i8_eq(sess, kb, 0x22)?;
@@ -5551,16 +5610,16 @@ fn native_process_spawn_windows<'ctx>(
     let bs2p1 = sess.2.build_int_add(bs2, one, "").map_err(builder_fail)?;
     emit_backslash_run(sess, f, buf8, w_slot, bs2p1, span)?;
     let w = load_i64(sess, w_slot)?;
-    sess.2.build_store(byte_offset(sess, buf8, w)?, sess.0.i8_type().const_int(0x22, false)).map_err(builder_fail)?;
+    sess.2.build_store(byte_elem_ptr(sess, buf8, w)?, sess.0.i8_type().const_int(0x22, false)).map_err(builder_fail)?;
     let w1 = sess.2.build_int_add(w, one, "").map_err(builder_fail)?;
     store_key(sess, w_slot, w1.into())?;
     sess.2.build_unconditional_branch(fbs_after).map_err(builder_fail)?;
     sess.2.position_at_end(fbs_plain);
     emit_backslash_run(sess, f, buf8, w_slot, bs, span)?;
     let w = load_i64(sess, w_slot)?;
-    let kb_here_slot = byte_offset(sess, sdata, k)?;
+    let kb_here_slot = byte_elem_ptr(sess, sdata, k)?;
     let kb_here = load_i8(sess, kb_here_slot)?;
-    sess.2.build_store(byte_offset(sess, buf8, w)?, kb_here).map_err(builder_fail)?;
+    sess.2.build_store(byte_elem_ptr(sess, buf8, w)?, kb_here).map_err(builder_fail)?;
     let w1 = sess.2.build_int_add(w, one, "").map_err(builder_fail)?;
     store_key(sess, w_slot, w1.into())?;
     sess.2.build_unconditional_branch(fbs_after).map_err(builder_fail)?;
@@ -5570,7 +5629,7 @@ fn native_process_spawn_windows<'ctx>(
     sess.2.build_unconditional_branch(fq_cond).map_err(builder_fail)?;
     sess.2.position_at_end(fq_done);
     let w = load_i64(sess, w_slot)?;
-    sess.2.build_store(byte_offset(sess, buf8, w)?, sess.0.i8_type().const_int(0x22, false)).map_err(builder_fail)?;
+    sess.2.build_store(byte_elem_ptr(sess, buf8, w)?, sess.0.i8_type().const_int(0x22, false)).map_err(builder_fail)?;
     let w1 = sess.2.build_int_add(w, one, "").map_err(builder_fail)?;
     store_key(sess, w_slot, w1.into())?;
     let f_next = new_block(sess, f, "wspawn_f_next");
@@ -5587,9 +5646,9 @@ fn native_process_spawn_windows<'ctx>(
     sess.2.build_conditional_branch(rjmore, fr_body, fr_done).map_err(builder_fail)?;
     sess.2.position_at_end(fr_body);
     let w = load_i64(sess, w_slot)?;
-    let rb_slot = byte_offset(sess, sdata, rj)?;
+    let rb_slot = byte_elem_ptr(sess, sdata, rj)?;
     let rb = load_i8(sess, rb_slot)?;
-    sess.2.build_store(byte_offset(sess, buf8, w)?, rb).map_err(builder_fail)?;
+    sess.2.build_store(byte_elem_ptr(sess, buf8, w)?, rb).map_err(builder_fail)?;
     let w1 = sess.2.build_int_add(w, one, "").map_err(builder_fail)?;
     store_key(sess, w_slot, w1.into())?;
     let rj2 = sess.2.build_int_add(rj, one, "").map_err(builder_fail)?;
@@ -5606,7 +5665,7 @@ fn native_process_spawn_windows<'ctx>(
     sess.2.build_conditional_branch(has_next, f_space, f_no_space).map_err(builder_fail)?;
     sess.2.position_at_end(f_space);
     let w = load_i64(sess, w_slot)?;
-    sess.2.build_store(byte_offset(sess, buf8, w)?, sess.0.i8_type().const_int(0x20, false)).map_err(builder_fail)?;
+    sess.2.build_store(byte_elem_ptr(sess, buf8, w)?, sess.0.i8_type().const_int(0x20, false)).map_err(builder_fail)?;
     let w1 = sess.2.build_int_add(w, one, "").map_err(builder_fail)?;
     store_key(sess, w_slot, w1.into())?;
     sess.2.build_unconditional_branch(f_advance).map_err(builder_fail)?;
@@ -5630,7 +5689,7 @@ fn native_process_spawn_windows<'ctx>(
     let umore = sess.2.build_int_compare(IntPredicate::ULT, ui, total, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(umore, u_body, u_done).map_err(builder_fail)?;
     sess.2.position_at_end(u_body);
-    let ub_slot = byte_offset(sess, buf8, ui)?;
+    let ub_slot = byte_elem_ptr(sess, buf8, ui)?;
     let ub = load_i8(sess, ub_slot)?;
     let ub64 = sess.2.build_int_z_extend(ub, i64_ty, "").map_err(builder_fail)?;
     let u1 = sess.2.build_int_compare(IntPredicate::ULT, ub64, i64_ty.const_int(0x80, false), "").map_err(builder_fail)?;
@@ -5680,7 +5739,7 @@ fn native_process_spawn_windows<'ctx>(
     let vmore = sess.2.build_int_compare(IntPredicate::ULT, vi, total, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(vmore, v_body, v_done).map_err(builder_fail)?;
     sess.2.position_at_end(v_body);
-    let vb_slot = byte_offset(sess, buf8, vi)?;
+    let vb_slot = byte_elem_ptr(sess, buf8, vi)?;
     let vb = load_i8(sess, vb_slot)?;
     let vb64 = sess.2.build_int_z_extend(vb, i64_ty, "").map_err(builder_fail)?;
     let v1 = sess.2.build_int_compare(IntPredicate::ULT, vb64, i64_ty.const_int(0x80, false), "").map_err(builder_fail)?;
@@ -5704,7 +5763,7 @@ fn native_process_spawn_windows<'ctx>(
     store_key(sess, v_i, sess.2.build_int_add(vi, adv1, "").map_err(builder_fail)?.into())?;
     sess.2.build_unconditional_branch(v_after).map_err(builder_fail)?;
     sess.2.position_at_end(v2b);
-    let b1_slot = byte_offset(sess, buf8, sess.2.build_int_add(vi, one, "").map_err(builder_fail)?)?;
+    let b1_slot = byte_elem_ptr(sess, buf8, sess.2.build_int_add(vi, one, "").map_err(builder_fail)?)?;
     let b1 = load_i8(sess, b1_slot)?;
     let b1_64 = sess.2.build_int_z_extend(b1, i64_ty, "").map_err(builder_fail)?;
     let lo6 = sess.2.build_and(b1_64, i64_ty.const_int(0x3F, false), "").map_err(builder_fail)?;
@@ -5714,9 +5773,9 @@ fn native_process_spawn_windows<'ctx>(
     store_key(sess, v_i, sess.2.build_int_add(vi, two, "").map_err(builder_fail)?.into())?;
     sess.2.build_unconditional_branch(v_after).map_err(builder_fail)?;
     sess.2.position_at_end(v3b);
-    let b1_slot = byte_offset(sess, buf8, sess.2.build_int_add(vi, one, "").map_err(builder_fail)?)?;
+    let b1_slot = byte_elem_ptr(sess, buf8, sess.2.build_int_add(vi, one, "").map_err(builder_fail)?)?;
     let b1 = load_i8(sess, b1_slot)?;
-    let b2_slot = byte_offset(sess, buf8, sess.2.build_int_add(vi, two, "").map_err(builder_fail)?)?;
+    let b2_slot = byte_elem_ptr(sess, buf8, sess.2.build_int_add(vi, two, "").map_err(builder_fail)?)?;
     let b2 = load_i8(sess, b2_slot)?;
     let b1_64 = sess.2.build_int_z_extend(b1, i64_ty, "").map_err(builder_fail)?;
     let b2_64 = sess.2.build_int_z_extend(b2, i64_ty, "").map_err(builder_fail)?;
@@ -5727,11 +5786,11 @@ fn native_process_spawn_windows<'ctx>(
     store_key(sess, v_i, sess.2.build_int_add(vi, three, "").map_err(builder_fail)?.into())?;
     sess.2.build_unconditional_branch(v_after).map_err(builder_fail)?;
     sess.2.position_at_end(v4b);
-    let b1_slot = byte_offset(sess, buf8, sess.2.build_int_add(vi, one, "").map_err(builder_fail)?)?;
+    let b1_slot = byte_elem_ptr(sess, buf8, sess.2.build_int_add(vi, one, "").map_err(builder_fail)?)?;
     let b1 = load_i8(sess, b1_slot)?;
-    let b2_slot = byte_offset(sess, buf8, sess.2.build_int_add(vi, two, "").map_err(builder_fail)?)?;
+    let b2_slot = byte_elem_ptr(sess, buf8, sess.2.build_int_add(vi, two, "").map_err(builder_fail)?)?;
     let b2 = load_i8(sess, b2_slot)?;
-    let b3_slot = byte_offset(sess, buf8, sess.2.build_int_add(vi, three, "").map_err(builder_fail)?)?;
+    let b3_slot = byte_elem_ptr(sess, buf8, sess.2.build_int_add(vi, three, "").map_err(builder_fail)?)?;
     let b3 = load_i8(sess, b3_slot)?;
     let b1_64 = sess.2.build_int_z_extend(b1, i64_ty, "").map_err(builder_fail)?;
     let b2_64 = sess.2.build_int_z_extend(b2, i64_ty, "").map_err(builder_fail)?;
@@ -5750,21 +5809,27 @@ fn native_process_spawn_windows<'ctx>(
     sess.2.build_unconditional_branch(v_cond).map_err(builder_fail)?;
     sess.2.position_at_end(v_done);
     let w16 = load_i64(sess, w16_slot)?;
-    let nul_off = byte_offset(sess, buf16, sess.2.build_int_mul(w16, two, "").map_err(builder_fail)?)?;
+    let nul_off = offset_buffer_elem_ptr(sess, sess.0.i16_type().into(), buf16, w16)?;
     sess.2.build_store(nul_off, sess.0.i16_type().const_zero()).map_err(builder_fail)?;
     // The UTF-8 command line is no longer needed once the wide buffer is
     // complete (the per-argument need array was already freed).
     sess.2.build_call(free, &[into_meta(buf8.into())], "").map_err(builder_fail)?;
 
     // ---- CreateProcessW ----
+    // `si`, `pi`, `env` slots are reached through their declared array types.
     let si = alloca_raw(sess, sess.0.i64_type().array_type(12).into(), "si", span)?;
     let zero8 = sess.0.i8_type().const_zero();
     sess.2.build_memset(si, 8, zero8, i64_ty.const_int(96, false)).map_err(builder_fail)?;
-    sess.2.build_store(byte_offset(sess, si, zero)?, sess.0.i32_type().const_int(96, false)).map_err(builder_fail)?;
+    let si_ty = sess.0.i64_type().array_type(12);
+    let cb_slot = offset_array_elem_ptr(sess, si_ty.into(), si, zero)?;
+    sess.2.build_store(cb_slot, sess.0.i32_type().const_int(96, false)).map_err(builder_fail)?;
     let pi = alloca_raw(sess, sess.0.i64_type().array_type(3).into(), "pi", span)?;
     let env = alloca_raw(sess, sess.0.i16_type().array_type(2).into(), "env", span)?;
-    sess.2.build_store(byte_offset(sess, env, zero)?, sess.0.i16_type().const_zero()).map_err(builder_fail)?;
-    sess.2.build_store(byte_offset(sess, env, two)?, sess.0.i16_type().const_zero()).map_err(builder_fail)?;
+    let env_ty = sess.0.i16_type().array_type(2);
+    let env_zero = offset_array_elem_ptr(sess, env_ty.into(), env, zero)?;
+    sess.2.build_store(env_zero, sess.0.i16_type().const_zero()).map_err(builder_fail)?;
+    let env_one = offset_array_elem_ptr(sess, env_ty.into(), env, one)?;
+    sess.2.build_store(env_one, sess.0.i16_type().const_zero()).map_err(builder_fail)?;
     let create = extern_fn(sess, "CreateProcessW", sess.0.i32_type().fn_type(&[
         ptr_ty(sess).into(),
         ptr_ty(sess).into(),
@@ -5807,9 +5872,10 @@ fn native_process_spawn_windows<'ctx>(
     system_fault_result(sess, ret_key, out, err_code, span)?;
     sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
     sess.2.position_at_end(create_ok);
-    let handle_slot = byte_offset(sess, pi, zero)?;
+    let pi_ty = sess.0.i64_type().array_type(3);
+    let handle_slot = offset_array_elem_ptr(sess, pi_ty.into(), pi, zero)?;
     let handle = load_i64(sess, handle_slot)?;
-    let thread_slot = byte_offset(sess, pi, i64_ty.const_int(8, false))?;
+    let thread_slot = offset_array_elem_ptr(sess, pi_ty.into(), pi, one)?;
     let thread_handle = load_i64(sess, thread_slot)?;
     let thread_ptr = sess.2.build_int_to_ptr(thread_handle, ptr_ty(sess), "").map_err(builder_fail)?;
     let close_thread = extern_close_handle(sess);
@@ -5833,8 +5899,7 @@ fn store_utf16<'ctx>(
     unit: IntValue<'ctx>,
 ) -> Result<(), CodegenError> {
     let w = load_i64(sess, w_slot)?;
-    let off = sess.2.build_int_mul(w, sess.0.i64_type().const_int(2, false), "").map_err(builder_fail)?;
-    let slot = byte_offset(sess, buf16, off)?;
+    let slot = offset_buffer_elem_ptr(sess, sess.0.i16_type().into(), buf16, w)?;
     let unit16 = sess.2.build_int_truncate(unit, sess.0.i16_type(), "").map_err(builder_fail)?;
     sess.2.build_store(slot, unit16).map_err(builder_fail)?;
     let w2 = sess.2.build_int_add(w, sess.0.i64_type().const_int(1, false), "").map_err(builder_fail)?;
@@ -5860,7 +5925,7 @@ fn emit_cont_step<'ctx>(
     sess.2.position_at_end(fail1);
     sess.2.build_unconditional_branch(bad).map_err(builder_fail)?;
     sess.2.position_at_end(ok1);
-    let bptr = byte_offset(sess, data, idx)?;
+    let bptr = byte_elem_ptr(sess, data, idx)?;
     let b = load_i8(sess, bptr)?;
     let byte = utf8_byte_value(sess, b)?;
     let top2 = sess.2.build_right_shift(byte, sess.0.i64_type().const_int(6, false), false, "").map_err(builder_fail)?;
@@ -5903,7 +5968,7 @@ fn emit_utf8_scan<'ctx>(
     let done = sess.2.build_int_compare(IntPredicate::ULT, i, len, "").map_err(builder_fail)?;
     sess.2.build_conditional_branch(done, loop_body, valid_block).map_err(builder_fail)?;
     sess.2.position_at_end(loop_body);
-    let bptr = byte_offset(sess, data, i)?;
+    let bptr = byte_elem_ptr(sess, data, i)?;
     let b = load_i8(sess, bptr)?;
     let byte = utf8_byte_value(sess, b)?;
     let top_bit = sess.2.build_right_shift(byte, sess.0.i64_type().const_int(7, false), false, "").map_err(builder_fail)?;
@@ -5952,10 +6017,10 @@ fn emit_utf8_scan<'ctx>(
     let one = sess.0.i64_type().const_int(1, false);
     let i1 = sess.2.build_int_add(i, one, "").map_err(builder_fail)?;
     let i2 = sess.2.build_int_add(i, two, "").map_err(builder_fail)?;
-    let b1p = byte_offset(sess, data, i1)?;
+    let b1p = byte_elem_ptr(sess, data, i1)?;
     let b1r = load_i8(sess, b1p)?;
     let b1 = utf8_byte_value(sess, b1r)?;
-    let b2p = byte_offset(sess, data, i2)?;
+    let b2p = byte_elem_ptr(sess, data, i2)?;
     let b2r = load_i8(sess, b2p)?;
     let b2 = utf8_byte_value(sess, b2r)?;
     let lead_lo = sess.2.build_and(byte, sess.0.i64_type().const_int(0x0F, false), "").map_err(builder_fail)?;
@@ -5992,13 +6057,13 @@ fn emit_utf8_scan<'ctx>(
     let i1b = sess.2.build_int_add(i, one, "").map_err(builder_fail)?;
     let i2b = sess.2.build_int_add(i, two, "").map_err(builder_fail)?;
     let i3b = sess.2.build_int_add(i, three_c, "").map_err(builder_fail)?;
-    let b1p = byte_offset(sess, data, i1b)?;
+    let b1p = byte_elem_ptr(sess, data, i1b)?;
     let b1r = load_i8(sess, b1p)?;
     let b1b = utf8_byte_value(sess, b1r)?;
-    let b2p = byte_offset(sess, data, i2b)?;
+    let b2p = byte_elem_ptr(sess, data, i2b)?;
     let b2r = load_i8(sess, b2p)?;
     let b2b = utf8_byte_value(sess, b2r)?;
-    let b3p = byte_offset(sess, data, i3b)?;
+    let b3p = byte_elem_ptr(sess, data, i3b)?;
     let b3r = load_i8(sess, b3p)?;
     let b3b = utf8_byte_value(sess, b3r)?;
     let lead4_lo = sess.2.build_and(byte, sess.0.i64_type().const_int(0x07, false), "").map_err(builder_fail)?;

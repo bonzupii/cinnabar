@@ -24,11 +24,14 @@ mod test_controls;
 mod repro_corpus;
 #[path = "support/stream_cases.rs"]
 mod stream_cases;
+#[path = "support/recursion_corpus.rs"]
+mod recursion_corpus;
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use repro_corpus::EXPECT_OK;
+use recursion_corpus::EXPECT_RECURSION;
 use stream_cases::{StreamCase, STREAM_CASES};
 use test_controls::{
     evenly_selected, profile_name, profile_usize, reduced_usize_control, test_profile,
@@ -532,5 +535,59 @@ fn repro_corpus_baseline() {
         cidx += 1;
     }
 
+    drop(guard);
+}
+
+#[test]
+fn recursion_runs_in_o1_stack_at_every_opt_level() {
+    let cinnabar = env!("CARGO_BIN_EXE_cinnabar");
+    let config = repro_config();
+    let dir = temp_dir("opt_tiers");
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => {}
+        Err(err) => {
+            assert!(false, "cannot create temp dir: {}", err);
+            return;
+        }
+    }
+    let guard = TempDirGuard(dir.clone());
+    let levels = ["0", "1", "2", "3"];
+    let recursive = EXPECT_RECURSION;
+    let mut lidx = 0usize;
+    while lidx < levels.len() {
+        let level = match levels.get(lidx) {
+            Some(level) => *level,
+            None => break,
+        };
+        let mut fidx = 0usize;
+        while fidx < recursive.len() {
+            let (name, want) = match recursive.get(fidx) {
+                Some(pair) => *pair,
+                None => break,
+            };
+            let bin = dir.join(format!("{}_o{}_bin", name, level));
+            let compile_code = exit_code(
+                Command::new(cinnabar)
+                    .arg(fixture_path(name))
+                    .arg("--opt-level")
+                    .arg(level)
+                    .arg("-o")
+                    .arg(&bin),
+            );
+            assert_eq!(
+                compile_code, 0,
+                "{} at -O{} failed to compile (code {})",
+                name, level, compile_code
+            );
+            let run_code = run_binary(&bin, config.run_timeout_secs);
+            assert_eq!(
+                run_code, want,
+                "{} at -O{} ran with exit {} (want {})",
+                name, level, run_code, want
+            );
+            fidx += 1;
+        }
+        lidx += 1;
+    }
     drop(guard);
 }

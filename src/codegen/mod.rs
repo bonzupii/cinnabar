@@ -337,10 +337,6 @@ fn opt_flags(level: &str) -> (String, String) {
         ("-passes=default<O1>".to_string(), "-O1".to_string())
     } else if level == "3" {
         ("-passes=default<O3>".to_string(), "-O3".to_string())
-    } else if level == "s" {
-        ("-passes=default<Os>".to_string(), "-Os".to_string())
-    } else if level == "z" {
-        ("-passes=default<Oz>".to_string(), "-Oz".to_string())
     } else {
         ("-passes=default<O2>".to_string(), "-O2".to_string())
     }

@@ -60,8 +60,11 @@ mod test_controls;
 mod repro_corpus;
 #[path = "support/stream_cases.rs"]
 mod stream_cases;
+#[path = "support/recursion_corpus.rs"]
+mod recursion_corpus;
 
 use repro_corpus::EXPECT_OK;
+use recursion_corpus::EXPECT_RECURSION;
 use stream_cases::STREAM_CASES;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -105,12 +108,15 @@ impl Drop for TempDirGuard {
     }
 }
 
-/// Builds `fixture` through the instrumented link mode, linking against
-/// the default libc every fixture shares.
-fn build_instrumented(cinnabar: &str, fixture: &Path, out: &Path) -> Result<(), String> {
+/// Builds `fixture` through the instrumented link mode at the given
+/// optimization level, linking against the default libc every fixture
+/// shares.
+fn build_instrumented(cinnabar: &str, fixture: &Path, out: &Path, level: &str) -> Result<(), String> {
     let output = Command::new(cinnabar)
         .arg(fixture)
         .arg("--instrumented")
+        .arg("--opt-level")
+        .arg(level)
         .arg("-o")
         .arg(out)
         .output()
@@ -173,7 +179,17 @@ fn run_under_valgrind(binary: &Path, args: &[&str], input: &[u8]) -> Result<Chec
         .map_err(|err| format!("cannot collect valgrind output for {}: {}", binary.display(), err))?;
     let exit = match output.status.code() {
         Some(code) => code,
-        None => return Err(format!("{} terminated without an exit status", binary.display())),
+        None => {
+            let report = match std::fs::read_to_string(&log_path) {
+                Ok(text) => text,
+                Err(err) => format!("(cannot read the checker's report at {}: {})", log_path.display(), err),
+            };
+            return Err(format!(
+                "{} terminated without an exit status; the checker's report:\n{}",
+                binary.display(),
+                report
+            ));
+        }
     };
     let report = std::fs::read_to_string(&log_path)
         .map_err(|err| format!("cannot read the checker's report at {}: {}", log_path.display(), err))?;
@@ -287,11 +303,13 @@ fn every_selected_fixture_is_clean_under_memcheck() {
         budget,
         EXPECT_OK.len()
     );
+    let levels = ["0", "1", "2", "3"];
     eprintln!(
-        "sanitizer profile: {} ({} of {} expected-success fixtures under memcheck)",
+        "sanitizer profile: {} ({} of {} expected-success fixtures, {} opt levels, under memcheck)",
         profile_name(profile),
         budget,
-        EXPECT_OK.len()
+        EXPECT_OK.len(),
+        levels.len()
     );
 
     let dir = temp_dir("corpus");
@@ -304,51 +322,65 @@ fn every_selected_fixture_is_clean_under_memcheck() {
     }
     let guard = TempDirGuard(dir.clone());
     let mut checked = 0usize;
-    let mut idx = 0usize;
-    while idx < EXPECT_OK.len() {
-        let (name, want) = match EXPECT_OK.get(idx) {
-            Some(pair) => *pair,
+    let mut lidx = 0usize;
+    while lidx < levels.len() {
+        let level = match levels.get(lidx) {
+            Some(level) => *level,
             None => break,
         };
-        if !evenly_selected(idx, EXPECT_OK.len(), budget) {
+        let mut idx = 0usize;
+        while idx < EXPECT_OK.len() {
+            let (name, want) = match EXPECT_OK.get(idx) {
+                Some(pair) => *pair,
+                None => break,
+            };
+            if !evenly_selected(idx, EXPECT_OK.len(), budget) {
+                idx += 1;
+                continue;
+            }
+            let binary = dir.join(format!("{}_o{}_instrumented", name, level));
+            match build_instrumented(cinnabar, &fixture_path(name), &binary, level) {
+                Ok(()) => {}
+                Err(message) => {
+                    assert!(false, "{}", message);
+                    return;
+                }
+            }
+            let run = match run_under_valgrind(&binary, &[], b"") {
+                Ok(run) => run,
+                Err(message) => {
+                    assert!(false, "{}", message);
+                    return;
+                }
+            };
+            assert!(
+                run.exit != VALGRIND_ERROR_EXIT,
+                "{} at -O{} is not clean under memcheck:\n{}",
+                name, level, run.report
+            );
+            // The instrumented binary must still be the same program. A link
+            // mode that changed what a fixture computes would make every clean
+            // report above meaningless.
+            assert_eq!(
+                run.exit, want,
+                "{} at -O{} exited {} under memcheck, want {} — the instrumented link \
+                 changed the program's behaviour:\n{}",
+                name, level, run.exit, want, run.report
+            );
+            checked += 1;
             idx += 1;
-            continue;
         }
-        let binary = dir.join(format!("{}_instrumented", name));
-        match build_instrumented(cinnabar, &fixture_path(name), &binary) {
-            Ok(()) => {}
-            Err(message) => {
-                assert!(false, "{}", message);
-                return;
-            }
-        }
-        let run = match run_under_valgrind(&binary, &[], b"") {
-            Ok(run) => run,
-            Err(message) => {
-                assert!(false, "{}", message);
-                return;
-            }
-        };
-        assert!(
-            run.exit != VALGRIND_ERROR_EXIT,
-            "{} is not clean under memcheck:\n{}",
-            name,
-            run.report
-        );
-        // The instrumented binary must still be the same program. A link
-        // mode that changed what a fixture computes would make every clean
-        // report above meaningless.
-        assert_eq!(
-            run.exit, want,
-            "{} exited {} under memcheck, want {} — the instrumented link \
-             changed the program's behaviour:\n{}",
-            name, run.exit, want, run.report
-        );
-        checked += 1;
-        idx += 1;
+        lidx += 1;
     }
 
-    assert_eq!(checked, budget, "selected {} fixtures but checked {}", budget, checked);
+    assert_eq!(
+        checked,
+        budget * levels.len(),
+        "selected {} fixtures across {} levels but checked {}",
+        budget,
+        levels.len(),
+        checked
+    );
     drop(guard);
 }
 
@@ -376,60 +408,70 @@ fn the_stdin_fixtures_are_clean_under_memcheck() {
     }
     let guard = TempDirGuard(dir.clone());
 
-    let mut idx = 0usize;
-    while idx < STREAM_CASES.len() {
-        let case = match STREAM_CASES.get(idx) {
-            Some(case) => case,
+    let levels = ["0", "1", "2", "3"];
+    let mut lidx = 0usize;
+    while lidx < levels.len() {
+        let level = match levels.get(lidx) {
+            Some(level) => *level,
             None => break,
         };
-        let binary = dir.join(format!("{}_instrumented", case.name));
-        match build_instrumented(cinnabar, &fixture_path(case.name), &binary) {
-            Ok(()) => {}
-            Err(message) => {
-                assert!(false, "{}", message);
-                return;
+        let mut idx = 0usize;
+        while idx < STREAM_CASES.len() {
+            let case = match STREAM_CASES.get(idx) {
+                Some(case) => case,
+                None => break,
+            };
+            let binary = dir.join(format!("{}_o{}_instrumented", case.name, level));
+            match build_instrumented(cinnabar, &fixture_path(case.name), &binary, level) {
+                Ok(()) => {}
+                Err(message) => {
+                    assert!(false, "{}", message);
+                    return;
+                }
             }
+            let run = match run_under_valgrind(&binary, case.args, case.stdin) {
+                Ok(run) => run,
+                Err(message) => {
+                    assert!(false, "{}", message);
+                    return;
+                }
+            };
+            assert!(
+                run.exit != VALGRIND_ERROR_EXIT,
+                "{} at -O{} is not clean under memcheck:\n{}",
+                case.name, level, run.report
+            );
+            assert_eq!(
+                run.exit, case.exit,
+                "{} at -O{} exited {} under memcheck, want {} — the instrumented link \
+                 changed the program's behaviour:\n{}",
+                case.name, level, run.exit, case.exit, run.report
+            );
+            // The instrumented binary must be the same program byte for byte on
+            // both descriptors, not merely one that exits the same way. This is
+            // where the link mode would show if it had changed anything, and it
+            // is the only place the two builds are compared on output at all.
+            assert!(
+                run.stdout == case.stdout,
+                "{} at -O{}: instrumented standard output differs from the shipped \
+                 contract\n  got:  {:?}\n  want: {:?}",
+                case.name,
+                level,
+                String::from_utf8_lossy(&run.stdout),
+                String::from_utf8_lossy(case.stdout)
+            );
+            assert!(
+                run.stderr == case.stderr,
+                "{} at -O{}: instrumented standard error differs from the shipped \
+                 contract\n  got:  {:?}\n  want: {:?}",
+                case.name,
+                level,
+                String::from_utf8_lossy(&run.stderr),
+                String::from_utf8_lossy(case.stderr)
+            );
+            idx += 1;
         }
-        let run = match run_under_valgrind(&binary, case.args, case.stdin) {
-            Ok(run) => run,
-            Err(message) => {
-                assert!(false, "{}", message);
-                return;
-            }
-        };
-        assert!(
-            run.exit != VALGRIND_ERROR_EXIT,
-            "{} is not clean under memcheck:\n{}",
-            case.name,
-            run.report
-        );
-        assert_eq!(
-            run.exit, case.exit,
-            "{} exited {} under memcheck, want {} — the instrumented link \
-             changed the program's behaviour:\n{}",
-            case.name, run.exit, case.exit, run.report
-        );
-        // The instrumented binary must be the same program byte for byte on
-        // both descriptors, not merely one that exits the same way. This is
-        // where the link mode would show if it had changed anything, and it
-        // is the only place the two builds are compared on output at all.
-        assert!(
-            run.stdout == case.stdout,
-            "{}: instrumented standard output differs from the shipped \
-             contract\n  got:  {:?}\n  want: {:?}",
-            case.name,
-            String::from_utf8_lossy(&run.stdout),
-            String::from_utf8_lossy(case.stdout)
-        );
-        assert!(
-            run.stderr == case.stderr,
-            "{}: instrumented standard error differs from the shipped \
-             contract\n  got:  {:?}\n  want: {:?}",
-            case.name,
-            String::from_utf8_lossy(&run.stderr),
-            String::from_utf8_lossy(case.stderr)
-        );
-        idx += 1;
+        lidx += 1;
     }
 
     drop(guard);
@@ -459,32 +501,110 @@ fn the_instrumented_link_is_what_makes_memcheck_see_anything() {
     // A fixture that allocates through the native collections, so there is
     // something for a checker to have an opinion about.
     let source = fixture_path("vec_pop_drain");
-    let instrumented = dir.join("vec_pop_drain_instrumented");
-    match build_instrumented(cinnabar, &source, &instrumented) {
+    let levels = ["0", "1", "2", "3"];
+    let mut lidx = 0usize;
+    while lidx < levels.len() {
+        let level = match levels.get(lidx) {
+            Some(level) => *level,
+            None => break,
+        };
+        let instrumented = dir.join(format!("vec_pop_drain_o{}_instrumented", level));
+        match build_instrumented(cinnabar, &source, &instrumented, level) {
+            Ok(()) => {}
+            Err(message) => {
+                assert!(false, "{}", message);
+                return;
+            }
+        }
+        let seen = match run_under_valgrind(&instrumented, &[], b"") {
+            Ok(run) => run,
+            Err(message) => {
+                assert!(false, "{}", message);
+                return;
+            }
+        };
+        assert!(
+            !seen.report.contains("0 allocs, 0 frees"),
+            "memcheck saw no allocations in the -O{} instrumented build, so the gate \
+             is measuring nothing:\nexit={} stdout={:?} stderr={:?}\n{}",
+            level,
+            seen.exit,
+            String::from_utf8_lossy(&seen.stdout),
+            String::from_utf8_lossy(&seen.stderr),
+            seen.report
+        );
+        assert!(
+            seen.report.contains("total heap usage:"),
+            "memcheck produced no heap summary for the -O{} instrumented build:\n{}",
+            level,
+            seen.report
+        );
+        lidx += 1;
+    }
+
+    drop(guard);
+}
+
+/// The O(1) call-stack guarantee holds under memcheck at every
+/// optimization level: each self-tail-recursive fixture must exit with
+/// its expected code, clean, at `-O0` through `-O3`.  A regression that
+/// let recursion fall back to real calls would die on the 1M-deep or
+/// 500k-deep fixture here, under the checker, instead of at whichever
+/// level the corpus happened to run.
+#[test]
+fn recursion_fixtures_are_clean_under_memcheck_at_every_opt_level() {
+    require_valgrind();
+    let cinnabar = env!("CARGO_BIN_EXE_cinnabar");
+    let dir = temp_dir("recursion_tiers");
+    match std::fs::create_dir_all(&dir) {
         Ok(()) => {}
-        Err(message) => {
-            assert!(false, "{}", message);
+        Err(err) => {
+            assert!(false, "cannot create temp dir: {}", err);
             return;
         }
     }
-    let seen = match run_under_valgrind(&instrumented, &[], b"") {
-        Ok(run) => run,
-        Err(message) => {
-            assert!(false, "{}", message);
-            return;
+    let guard = TempDirGuard(dir.clone());
+    let levels = ["0", "1", "2", "3"];
+    let mut lidx = 0usize;
+    while lidx < levels.len() {
+        let level = match levels.get(lidx) {
+            Some(level) => *level,
+            None => break,
+        };
+        let mut fidx = 0usize;
+        while fidx < EXPECT_RECURSION.len() {
+            let (name, want) = match EXPECT_RECURSION.get(fidx) {
+                Some(pair) => *pair,
+                None => break,
+            };
+            let binary = dir.join(format!("{}_o{}_instrumented", name, level));
+            match build_instrumented(cinnabar, &fixture_path(name), &binary, level) {
+                Ok(()) => {}
+                Err(message) => {
+                    assert!(false, "{}", message);
+                    return;
+                }
+            }
+            let run = match run_under_valgrind(&binary, &[], b"") {
+                Ok(run) => run,
+                Err(message) => {
+                    assert!(false, "{}", message);
+                    return;
+                }
+            };
+            assert!(
+                run.exit != VALGRIND_ERROR_EXIT,
+                "{} at -O{} is not clean under memcheck:\n{}",
+                name, level, run.report
+            );
+            assert_eq!(
+                run.exit, want,
+                "{} at -O{} exited {} under memcheck, want {}\n{}",
+                name, level, run.exit, want, run.report
+            );
+            fidx += 1;
         }
-    };
-    assert!(
-        !seen.report.contains("0 allocs, 0 frees"),
-        "memcheck saw no allocations in the instrumented build, so the gate \
-         is measuring nothing:\n{}",
-        seen.report
-    );
-    assert!(
-        seen.report.contains("total heap usage:"),
-        "memcheck produced no heap summary for the instrumented build:\n{}",
-        seen.report
-    );
-
+        lidx += 1;
+    }
     drop(guard);
 }

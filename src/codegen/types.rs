@@ -191,11 +191,13 @@ fn struct_llvm<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64, span: (i64, i64, i
 
 fn enum_llvm<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     let (size, align, count) = enum_payload_bounds(env, key, span)?;
-    let padded = round_up(size, align);
-    let ty = if padded == 0 {
+    let ty = if size == 0 {
         env.0.struct_type(&[env.0.i64_type().into()], false).into()
     } else {
-        let payload = env.0.i8_type().array_type(padded as u32);
+        // Payload storage is `[words x i64]`; `size` is a multiple of 8, so
+        // `words = size / 8` words hold every variant's payload.
+        let words = (size + 7) / 8;
+        let payload = env.0.i64_type().array_type(words as u32);
         env.0
             .struct_type(&[env.0.i64_type().into(), payload.into()], false)
             .into()
@@ -264,7 +266,9 @@ fn enum_payload_bounds<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64, span: (i64
         }
         idx = j;
     }
-    Ok((max_size, max_align, count))
+    // The payload region is sized in whole 64-bit words; the maximum
+    // payload size is rounded up to an 8-byte boundary.
+    Ok((round_up(max_size, 8), max_align, count))
 }
 
 pub fn payload_struct_of<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, enum_key: i64, variant_idx: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
