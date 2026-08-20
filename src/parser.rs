@@ -916,6 +916,12 @@ fn parse_if(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut V
     let start = node_start(nodes, *pos);
     *pos += 1;
     let cond = parse_expr(pos, names, nodes, lists, errors, 0)?;
+    if node_a(nodes, *pos) != TOK_NL && !at_eof(nodes, *pos) {
+        let error_file = node_file(nodes, *pos);
+        let error_start = node_start(nodes, *pos);
+        let error_end = node_end(nodes, *pos);
+        push_syntax(errors, "expected a newline before the if body", error_file, error_start, error_end);
+    }
     let then_body = parse_block(pos, names, nodes, lists, errors, &["end", "else", "elif"])?;
     let mut else_body = NONE;
     if is_name(nodes, names, *pos, "elif") {
@@ -940,6 +946,12 @@ fn parse_elif_chain(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists
     let file = node_file(nodes, elif_pos);
     let start = node_start(nodes, elif_pos);
     let cond = parse_expr(pos, names, nodes, lists, errors, 0)?;
+    if node_a(nodes, *pos) != TOK_NL && !at_eof(nodes, *pos) {
+        let error_file = node_file(nodes, *pos);
+        let error_start = node_start(nodes, *pos);
+        let error_end = node_end(nodes, *pos);
+        push_syntax(errors, "expected a newline before the if body", error_file, error_start, error_end);
+    }
     let then_body = parse_block(pos, names, nodes, lists, errors, &["end", "else", "elif"])?;
     let mut else_body = NONE;
     if is_name(nodes, names, *pos, "elif") {
@@ -1272,14 +1284,53 @@ fn parse_match_arms(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists
                 let end = node_end(nodes, body);
                 let arm = alloc_arm(nodes, file, start, end, pattern, body);
                 list_push(lists, arms, arm);
+                let mut lookahead = *pos;
+                skip_nl(nodes, &mut lookahead);
+                if !at_eof(nodes, lookahead)
+                    && !is_name(nodes, names, lookahead, "end")
+                    && !match_arm_delimiter_on_line(nodes, names, lookahead)
+                {
+                    let overflow_file = node_file(nodes, lookahead);
+                    let overflow_start = node_start(nodes, lookahead);
+                    let overflow_end = node_end(nodes, lookahead);
+                    push_syntax(
+                        errors,
+                        "match arm body must be a single expression; move multi-statement blocks into a helper function",
+                        overflow_file,
+                        overflow_start,
+                        overflow_end,
+                    );
+                    recover_match_arm(nodes, names, &mut lookahead);
+                }
+                *pos = lookahead;
             }
             None => {
-                recover_line(nodes, pos);
+                recover_match_arm(nodes, names, pos);
             }
         }
         skip_nl(nodes, pos);
     }
     Some(arms)
+}
+
+fn match_arm_delimiter_on_line(nodes: &[i64], names: &[String], mut pos: i64) -> bool {
+    while !at_eof(nodes, pos) && node_a(nodes, pos) != TOK_NL {
+        if is_sym(nodes, names, pos, "=>") {
+            return true;
+        }
+        pos += 1;
+    }
+    false
+}
+
+fn recover_match_arm(nodes: &[i64], names: &[String], pos: &mut i64) {
+    loop {
+        skip_nl(nodes, pos);
+        if at_eof(nodes, *pos) || is_name(nodes, names, *pos, "end") || match_arm_delimiter_on_line(nodes, names, *pos) {
+            return;
+        }
+        recover_line(nodes, pos);
+    }
 }
 
 fn parse_pattern(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, errors: &mut Vec<Diag>) -> Option<i64> {

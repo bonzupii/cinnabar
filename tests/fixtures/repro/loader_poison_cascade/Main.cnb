@@ -1,0 +1,5 @@
+use SyntaxErrorSibling.broken_helper
+
+pub fun main() I64
+  return broken_helper()
+end

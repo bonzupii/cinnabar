@@ -2268,9 +2268,9 @@ fn extern_fork<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
     extern_fn(sess, "fork", sess.0.i32_type().fn_type(&[], false))
 }
 
-fn extern_execve<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
+fn extern_execvp<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
     let i8p = ptr_ty(sess);
-    extern_fn(sess, "execve", sess.0.i32_type().fn_type(&[i8p.into(), i8p.into(), i8p.into()], false))
+    extern_fn(sess, "execvp", sess.0.i32_type().fn_type(&[i8p.into(), i8p.into()], false))
 }
 
 fn extern_waitpid<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
@@ -4734,8 +4734,8 @@ fn native_net_close<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx
 const ENOMEM: u64 = 12;
 
 /// Builds a fresh, NUL-terminated heap copy of a Cinnabar `String`'s bytes
-/// -- what `execve`'s `argv`/`envp` entries need and a length-prefixed
-/// `String` does not provide on its own. Unlike `nul_terminated_path`'s
+/// -- what `execvp`'s `argv` entries need and a length-prefixed `String`
+/// does not provide on its own. Unlike `nul_terminated_path`'s
 /// fixed stack buffer (fine for the one path a single `File.open` call
 /// needs), this runs once per element of a runtime-sized argv list: an
 /// `alloca` emitted inside that loop's body would be one stack slot shared
@@ -4788,7 +4788,7 @@ fn native_process_spawn<'ctx>(
     span: (i64, i64, i64),
 ) -> Result<PointerValue<'ctx>, CodegenError> {
     let p0 = get_local(locals, 0, span)?;
-    // Windows has no fork/execve; `Process.spawn` lowers through
+    // Windows has no fork/exec; `Process.spawn` lowers through
     // CreateProcessW with a quoted command line instead.
     if sess.13.abi().process_is_windows {
         return native_process_spawn_windows(sess, f, locals, ret_key, out, span);
@@ -4804,7 +4804,7 @@ fn native_process_spawn<'ctx>(
     let merge = new_block(sess, f, "spawn_merge");
     let enomem = sess.0.i64_type().const_int(ENOMEM, false);
 
-    // The `char*[]` execve needs: `len` entries plus one trailing NULL,
+    // The `char*[]` argv for execvp needs: `len` entries plus one trailing NULL,
     // eight bytes each regardless of target word size since this compiler
     // only targets LP64 triples.
     let one = sess.0.i64_type().const_int(1, false);
@@ -4863,27 +4863,6 @@ fn native_process_spawn<'ctx>(
     let term_slot = offset_buffer_elem_ptr(sess, ptr_ty(sess).into(), argv_arr, len)?;
     store_key(sess, term_slot, ptr_ty(sess).const_null().into())?;
 
-    // An empty environment: `Process` has no way to name a variable's
-    // value yet (`Runtime`'s environment-variable gap, tracked separately),
-    // so the honest thing is a real, explicit empty `envp` rather than
-    // silently forwarding whatever this process happened to inherit.
-    let envp_call = sess.2.build_call(malloc, &[into_meta(eight.into())], "").map_err(builder_fail)?;
-    let envp = match envp_call.try_as_basic_value() {
-        ValueKind::Basic(bv) => bv.into_pointer_value(),
-        ValueKind::Instruction(inst) => {
-            return Err(builder_error(span.0, span.1, span.2, &format!("internal: malloc returned void ({:?})", inst.get_opcode())));
-        }
-    };
-    let envp_oom = new_block(sess, f, "spawn_envp_oom");
-    let do_clone = new_block(sess, f, "spawn_do_clone");
-    let envp_null = is_null_ptr(sess, envp)?;
-    sess.2.build_conditional_branch(envp_null, envp_oom, do_clone).map_err(builder_fail)?;
-    sess.2.position_at_end(envp_oom);
-    system_fault_result(sess, ret_key, out, enomem, span)?;
-    sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
-    sess.2.position_at_end(do_clone);
-    store_key(sess, envp, ptr_ty(sess).const_null().into())?;
-
     let fork_call = sess.2.build_call(extern_fork(sess), &[], "").map_err(builder_fail)?;
     let fork_res = match fork_call.try_as_basic_value() {
         ValueKind::Basic(value) => value.into_int_value(),
@@ -4896,21 +4875,10 @@ fn native_process_spawn<'ctx>(
     sess.2.build_conditional_branch(is_child, child_block, parent_check).map_err(builder_fail)?;
 
     sess.2.position_at_end(child_block);
-    // argv[0] is the program path: whatever the caller put first, exactly
-    // as `execve`'s own contract requires. A failed `execve` returns (it
-    // never returns on success) into a process that is still this
-    // compiler's own address space, mid-fork -- letting it fall through
-    // to the parent's own continuation would run the rest of this native,
-    // then the caller's own code, twice. `_exit` (the non-flushing entry
-    // point, so it cannot be caught and retried) with 127 is the shell's
-    // own convention for "the command could not be executed", not a
-    // Cinnabar-specific choice.
+    // `execvp` searches PATH when argv[0] has no slash and uses an explicit
+    // path unchanged when it does.
     let path_ptr = load_ptr(sess, argv_arr)?;
-    // Neither call's return value is a value this block ever reads:
-    // `execve` returning at all is already the failure case, and `_exit`
-    // never returns. `?` still propagates a genuine builder-construction
-    // error from either.
-    sess.2.build_call(extern_execve(sess), &[into_meta(path_ptr.into()), into_meta(argv_arr.into()), into_meta(envp.into())], "").map_err(builder_fail)?;
+    sess.2.build_call(extern_execvp(sess), &[into_meta(path_ptr.into()), into_meta(argv_arr.into())], "").map_err(builder_fail)?;
     sess.2.build_call(extern_exit(sess), &[into_meta(sess.0.i32_type().const_int(127, false).into())], "").map_err(builder_fail)?;
     // Not `unreachable`: that the kernel never returns from `exit_group`
     // is a fact about the kernel, not something this compiler's type
@@ -4927,12 +4895,8 @@ fn native_process_spawn<'ctx>(
     sess.2.build_unconditional_branch(trap).map_err(builder_fail)?;
 
     sess.2.position_at_end(parent_check);
-    // Only the child ever needed `argv_arr`/`envp` past this point -- it
-    // either replaced its own image with them (execve succeeding) or
-    // exited before returning here (execve failing). The parent's own copy
-    // of every buffer this native built, from here on, is a leak: freed
-    // once, right after `fork`, regardless of whether `fork` itself
-    // succeeded (the buffers still exist even if spawning did not).
+    // The child either replaces its image through execvp or exits after
+    // execvp fails; the parent frees its argv storage after fork.
     let free = extern_free(sess);
     let free_i_slot = alloca_raw(sess, sess.0.i64_type().into(), "free_i", span)?;
     store_key(sess, free_i_slot, sess.0.i64_type().const_zero().into())?;
@@ -4953,7 +4917,6 @@ fn native_process_spawn<'ctx>(
     sess.2.build_unconditional_branch(free_cond).map_err(builder_fail)?;
     sess.2.position_at_end(free_after);
     sess.2.build_call(free, &[into_meta(argv_arr.into())], "").map_err(builder_fail)?;
-    sess.2.build_call(free, &[into_meta(envp.into())], "").map_err(builder_fail)?;
 
     let spawned = sess.2.build_int_compare(IntPredicate::SGT, fork_res, zero32, "").map_err(builder_fail)?;
     let parent_ok = new_block(sess, f, "spawn_parent_ok");

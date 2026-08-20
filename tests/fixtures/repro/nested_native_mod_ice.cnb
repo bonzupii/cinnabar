@@ -1,0 +1,12 @@
+pub mod Display
+  pub mod Terminal
+    pub nat fun print(text: &[U8]) impure Unit
+  end
+end
+
+use Display.Terminal.print
+
+pub fun main() impure I64
+  print("test")
+  return 0
+end

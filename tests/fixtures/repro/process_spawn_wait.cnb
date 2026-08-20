@@ -1,9 +1,10 @@
-#! `Process.spawn`/`Process.wait`: `fork`, `execve`, and `waitpid` issued
+#! `Process.spawn`/`Process.wait`: `fork`, `execvp`, and `waitpid` issued
 #! as external C/POSIX calls, matching the `Memory`/`Terminal`/`File`
-#! runtime convention of one libc entry point per native. `fork` rather
-#! than any platform-specific syscall, so one code path serves every
-#! POSIX platform; `spawn`/`wait` are scoped to POSIX for now (Windows
-#! has no fork/execve/waitpid C-runtime equivalent).
+#! runtime convention of one libc entry point per native. `spawn` resolves
+#! its first command name through the inherited `PATH`; `fork` rather than
+#! any platform-specific syscall keeps one path for every POSIX platform.
+#! `spawn`/`wait` are scoped to POSIX for now (Windows has no
+#! fork/execvp/waitpid C-runtime equivalent).
 #!
 #! `argv` is a `Vec(String)` the caller builds and still owns afterward --
 #! `spawn` only borrows it -- so every `String` pushed into it is drained
@@ -64,13 +65,13 @@ fun fail_argv_free(argv: Collections.Vec(Collections.String), code: I64) impure 
   return code
 end
 
-fun run(path: &[U8], want_exit: I64, fail_base: I64) impure I64
+fun run(command: &[U8], want_exit: I64, fail_base: I64) impure I64
   val argv = match vec_new[Collections.String]()
     Ok(v) => v
     Err(error) => return fail_base
   end
 
-  val arg0 = match string_from_slice(path)
+  val arg0 = match string_from_slice(command)
     Ok(s) => s
     Err(error) => return fail_argv_free(argv, fail_base + 1)
   end
@@ -100,7 +101,7 @@ fun run(path: &[U8], want_exit: I64, fail_base: I64) impure I64
 
   if code != want_exit
     #! Surface the concrete exit code `wait` decoded when it is non-zero,
-    #! so a failed `execve` (127) is distinguishable from a wrong status
+    #! so a failed `execvp` (127) is distinguishable from a wrong status
     #! decode. A zero code on a mismatch is a signaled child, which the
     #! encoded status word collapses to zero; report that as the ordinary
     #! mismatch marker rather than as a spurious success.
@@ -114,16 +115,16 @@ fun run(path: &[U8], want_exit: I64, fail_base: I64) impure I64
 end
 
 pub fun main() impure I64
-  #! `/bin/true` always exits 0 -- proves spawn+wait+exit-code decoding
-  #! for the ordinary, successful case.
-  val ok = run("/bin/true", 0, 10)
+  #! `true` is resolved through PATH and exits 0 -- proves command lookup,
+  #! spawn+wait, and exit-code decoding for the ordinary successful case.
+  val ok = run("true", 0, 10)
   if ok != 0
     return ok
   end
 
-  #! `/bin/false` always exits 1 -- proves a non-zero exit code actually
-  #! reaches the caller rather than being reported as 0 or as an error.
-  val nonzero = run("/bin/false", 1, 20)
+  #! `false` is resolved through PATH and exits 1 -- proves a non-zero exit
+  #! code reaches the caller rather than being reported as 0 or an error.
+  val nonzero = run("false", 1, 20)
   if nonzero != 0
     return nonzero
   end

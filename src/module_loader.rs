@@ -74,6 +74,9 @@ pub fn load_with_overlay(
     }
     let files = loader.0;
     let ext_mods = loader.1;
+    if !errors.is_empty() {
+        return (None, files);
+    }
     (Some((root, ext_mods)), files)
 }
 

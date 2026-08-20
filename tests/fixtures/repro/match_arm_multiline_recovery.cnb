@@ -1,0 +1,23 @@
+pub type Msg
+  pub Ping
+  pub Quit
+end
+
+fun log_step(code: I64) Unit
+  return Unit
+end
+
+fun process(msg: Msg) Unit
+  match msg
+    Msg.Ping =>
+      log_step(1)
+      log_step(2)
+    Msg.Quit => log_step(0)
+  end
+  return Unit
+end
+
+pub fun main() I64
+  process(Msg.Ping)
+  return 0
+end

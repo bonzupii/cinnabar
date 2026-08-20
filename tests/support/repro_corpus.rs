@@ -66,6 +66,7 @@ pub(crate) const EXPECT_OK: &[(&str, i32)] = &[
     ("utf8_validation", 0),
     ("multiline_const", 30),
     ("fib", 155),
+    ("borrow_short_circuit", 0),
     ("linear_branch_consume", 0),
     ("linear_loop_consume", 0),
     ("linear_field_reinit", 0),

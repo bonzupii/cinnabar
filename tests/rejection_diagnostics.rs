@@ -114,6 +114,22 @@ const BUNDLES: &[Bundle] = &[
     // failure from the unusable Result — and they are listed because the
     // compiler reports them, not because the fixture set out to cause them.
     Bundle {
+        path: "tests/fixtures/repro/match_arm_multiline_recovery.cnb",
+        diagnostics: &["match arm body must be a single expression; move multi-statement blocks into a helper function"],
+    },
+    Bundle {
+        path: "tests/fixtures/repro/nested_native_mod_ice.cnb",
+        diagnostics: &["unknown native function 'Display.Terminal.print'"],
+    },
+    Bundle {
+        path: "tests/fixtures/repro/single_line_if_syntax.cnb",
+        diagnostics: &["expected a newline before the if body"],
+    },
+    Bundle {
+        path: "tests/fixtures/repro/loader_poison_cascade/Main.cnb",
+        diagnostics: &["expected '='"],
+    },
+    Bundle {
         path: "tests/fixtures/invalid_typechecker.cnb",
         diagnostics: &[
             "constant initializer type mismatch: expected 'I64', found 'Bool'",

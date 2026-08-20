@@ -758,6 +758,7 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
         if kind == ITEM_NATIVE_FUN {
             let row = native_fun_row_of(state.0, full);
             if row == usize::MAX {
+                sym_set_native_op(state.1, sym, NAT_NONE);
                 // A native outside the registry is a resolution error,
                 // never a panic or a later-stage surprise.
                 push_error(
@@ -1292,6 +1293,10 @@ fn classify_native_modes(state: &mut State) {
     let mut idx = 0i64;
     while idx < count {
         if node_tag(state.1, idx) == NODE_SYM && sym_kind_of(state.1, idx) == SYM_NATIVE_FUN {
+            if sym_native_op(state.1, idx) == NAT_NONE {
+                idx += 1;
+                continue;
+            }
             let decl = sym_decl_of(state.1, idx);
             let derived;
             let span;

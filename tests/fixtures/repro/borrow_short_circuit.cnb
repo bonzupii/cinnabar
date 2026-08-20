@@ -1,0 +1,22 @@
+pub type State
+  pub a: Bool
+  pub b: Bool
+end
+
+fun check_a(s: &mut State) Bool
+  return s.a
+end
+
+fun check_b(s: &mut State) Bool
+  return s.b
+end
+
+pub fun main() I64
+  var s = State(a: true, b: true)
+
+  if check_a(&mut s) && check_b(&mut s)
+    return 0
+  end
+
+  return 1
+end

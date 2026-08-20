@@ -88,6 +88,13 @@ const EXPECT_REJECTED: &[&str] = &[
     "undeclared_const_cascade",
     "const_div_zero_cascade",
     "malformed_type_cascade",
+    "match_arm_multiline_recovery",
+    "nested_native_mod_ice",
+    "single_line_if_syntax",
+];
+
+const EXPECT_REJECTED_PATHS: &[&str] = &[
+    "tests/fixtures/repro/loader_poison_cascade/Main.cnb",
 ];
 
 // Compile-only fixtures: the binary must build, but is never executed.
@@ -516,6 +523,19 @@ fn repro_corpus_baseline() {
         let compile_code = compile_and_link(cinnabar, &fixture_path(name), &bin);
         assert!(compile_code != 0, "{} was unexpectedly accepted", name);
         ridx += 1;
+    }
+
+    let mut pidx = 0usize;
+    while pidx < EXPECT_REJECTED_PATHS.len() {
+        let relative = match EXPECT_REJECTED_PATHS.get(pidx) {
+            Some(path) => *path,
+            None => break,
+        };
+        let source = fixture_rel_path(relative);
+        let bin = dir.join(format!("rejected_path_{}_bin", pidx));
+        let compile_code = compile_and_link(cinnabar, &source, &bin);
+        assert!(compile_code != 0, "{} was unexpectedly accepted", relative);
+        pidx += 1;
     }
 
     let mut cidx = 0usize;

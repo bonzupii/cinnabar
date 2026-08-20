@@ -775,6 +775,9 @@ fn main() -> ExitCode {
     let entry = args.input.to_string_lossy().to_string();
     let json_out = args.emit_json;
     let (loaded, files) = module_loader::load(&mut names, &mut nodes, &mut lists, &mut errors, &entry);
+    if !errors.is_empty() {
+        return report_diagnostics(json_out, &errors, &[], &files);
+    }
     let (root, ext_mods) = match loaded {
         Some(program) => program,
         None => return report_diagnostics(json_out, &errors, &[], &files),

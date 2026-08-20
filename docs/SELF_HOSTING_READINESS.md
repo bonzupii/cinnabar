@@ -307,24 +307,25 @@ pass under the real gate with this change.
 
 ## 1e. A first slice of `Process` (§3.2.1)
 
-`Process.spawn`/`Process.wait` now exist: `fork`/`execve`/`waitpid` issued as external C/POSIX
+`Process.spawn`/`Process.wait` now exist: `fork`/`execvp`/`waitpid` issued as external C/POSIX
 calls, the same convention the `Memory`/`Terminal`/`File` runtime layer now uses everywhere (one libc
-entry point per native, nothing between the Cinnabar declaration and the C call). `fork` rather than
-any platform-specific syscall, so one code path serves every POSIX platform; `spawn`/`wait` are
-scoped to POSIX for now, because Windows has no `fork`/`execve`/`waitpid` C-runtime equivalent.
-Verified against real LLVM 21: a new fixture (`tests/fixtures/repro/process_spawn_wait.cnb`) spawns
-`/bin/true` and `/bin/false`, waits on each, and confirms the decoded exit code matches (0 and 1) —
+entry point per native, nothing between the Cinnabar declaration and the C call). `spawn` resolves a
+command name without `/` through the inherited `PATH`; a name containing `/` remains an explicit path.
+`fork` rather than any platform-specific syscall keeps one code path for every POSIX platform;
+`spawn`/`wait` are scoped to POSIX for now, because Windows has no `fork`/`execvp`/`waitpid` C-runtime
+equivalent. Verified against real LLVM 21: a new fixture (`tests/fixtures/repro/process_spawn_wait.cnb`)
+spawns `true` and `false` through `PATH`, waits on each, and confirms the decoded exit code matches (0 and 1) —
 proving argv marshaling, the fork/exec/wait sequence, and status decoding all actually work, not just
 compile. Three real bugs surfaced and were fixed before this shipped clean:
 
 - **A memory leak**, caught by `sanitizer_gate`'s Valgrind pass exactly as it's meant to: the argv
-  array, each argument's NUL-terminated copy, and the empty `envp` array were all heap-allocated
-  before `fork` but never freed in the parent afterward (the child either replaces its own image via
-  a successful `execve` or exits immediately on a failed one, so only the parent's copy of that memory
+  array and each argument's NUL-terminated copy were heap-allocated before `fork` but never freed
+  in the parent afterward (the child either replaces its own image via a successful `execvp` or exits
+  immediately on a failed one, so only the parent's copy of that memory
   outlives the call). Fixed by freeing all of it once, right after `fork` returns, in the parent's
   path only.
 - **An unjustified `unreachable`**, caught by `undefined_behaviour.rs`'s IR scan exactly as it's meant
-  to: the child's fallback path (`execve` returning at all means it failed; call `_exit` and stop)
+  to: the child's fallback path (`execvp` returning at all means it failed; call `_exit` and stop)
   ended in `build_unreachable()`, but "`_exit` never returns" is a fact about the
   kernel, not something this compiler's type checker proved the way it proves a `match` exhaustive —
   precisely the "cannot happen with nothing proving it" class that check exists to catch. Fixed by
@@ -340,17 +341,17 @@ mistake* is the point of running the real toolchain rather than reasoning about 
 §1d.
 
 Scope, deliberately: `spawn` takes a `Vec(String)` argv the caller builds and owns (borrowed, not
-consumed — the same shape `Terminal.print`'s `&String`/`&[U8]` already has) and always passes an
-explicit *empty* environment, not the parent's own — `Runtime` has no way to name an environment
-variable's value yet (§3.2.5), so forwarding the parent's environment implicitly would be scope no one
-asked for, not a completeness gain. `wait` blocks until the child exits and decodes a normal exit
-code; it does not yet distinguish a signal-terminated child (the encoded status word's low byte is a
+consumed — the same shape `Terminal.print`'s `&String`/`&[U8]` already has). On POSIX, `execvp`
+inherits the parent's environment so command names can resolve through `PATH`; the Windows lowering
+still passes its explicit empty environment because `CreateProcessW` has a separate environment-block
+ABI. `Runtime` has no way to name or mutate an environment variable's value yet (§3.2.5). `wait` blocks
+until the child exits and decodes a normal exit code; it does not yet distinguish a signal-terminated child (the encoded status word's low byte is a
 termination signal in that case, which a caller that cares can already read off the same `I64` `wait`
 returns — just not decoded automatically). No stdout/stderr capture yet: the child inherits the
-parent's own file descriptors as `fork`/`execve` naturally do, so a spawned program's output goes
+parent's own file descriptors as `fork`/`execvp` naturally do, so a spawned program's output goes
 wherever the caller's own already goes, which is enough for `cinnabar test`-style "run it and check the
 exit code" but not for `mushlings verify`-style "run it and check what it printed." Piped stdout/stderr
-is the natural next slice, needs nothing new architecturally (`pipe2`/`dup2` join `fork`/`execve` in
+is the natural next slice, needs nothing new architecturally (`pipe2`/`dup2` join `fork`/`execvp` in
 the same runtime layer, and the plumbing is the same shape as everything already built here), and was
 left for a follow-up rather than folded in blind.
 
@@ -405,12 +406,11 @@ What the current `Memory`/`Terminal`/`File`/`Net` surface doesn't cover, needed 
 today's Rust implementation, roughly ordered by how many things depend on it:
 
 1. **Process spawning — started (§1e).** `Process.spawn`/`Process.wait` exist now, lowered to the
-   external C/POSIX functions (`fork`/`execve`/`waitpid`) the runtime layer uses everywhere, verified
+   external C/POSIX functions (`fork`/`execvp`/`waitpid`) the runtime layer uses everywhere, verified
    against real LLVM 21. `cinnabar test`, `mushlings verify`, `fuzz replay`/`minimize`, and codegen's
    own final step (shelling out to `opt`/`llc`/`clang`) can all be built on this today. What's still
    missing: piped stdout/stderr capture (needs `pipe2`/`dup2`, same runtime-layer pattern, not yet
-   added), and environment variables to pass through (§3.2.5, tracked separately — `spawn` today
-   always passes an explicit empty environment). Neither blocks the common "run it, check the exit
+   added), and environment-variable mutation and explicit environment selection (§3.2.5, tracked separately). Neither blocks the common "run it, check the exit
    code" case; both block "run it and read what it printed."
 2. **Directory enumeration, `stat`, and `realpath`.** `cinnabar test`'s recursive test-file walk, and
    — load-bearing — the Milestone 5 path-confinement checks that make `build.cnb`'s

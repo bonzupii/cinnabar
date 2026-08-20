@@ -240,13 +240,22 @@ Terminal.read_line() impure Result(Collections.String, Collections.Error)
   Buffering belongs to a reader the program owns.
 
 Runtime.args() &[Collections.String]
-  The process's command-line arguments, with the program name first. The
-  result is a shared borrow, not an owned collection, because the strings
+  The process's command-line arguments, with the program name first. The result is a shared borrow, not an owned collection, because the strings
   live in memory the kernel set up for the process and last for the whole
   run — there is no moment at which freeing one would be correct.
-  Linearity enforces this rather than convention: a `String` cannot be
-  moved out of a slice, so a program can read an argument but can never
-  hand one to `string_free`.
+  Linearity enforces this rather than convention: a `String` cannot be moved
+  out of a slice, so a program can read an argument but can never hand one to
+  `string_free`.
+
+Process.spawn(argv: &Collections.Vec(Collections.String))
+    impure Result(Process.Child, Process.Error)
+  Forks and executes the command named by `argv[0]`, passing the complete
+  argument vector to the child. On POSIX targets, a command name without `/`
+  is resolved through the inherited `PATH`; a name containing `/` is used as
+  an explicit path. The child inherits the process environment and standard
+  file descriptors. The caller retains and must free `argv`; `spawn` borrows
+  it. `Process.wait` consumes the child handle and returns its normal exit
+  code.
 
 ### Visibility
 Private by default. `pub` exposes.

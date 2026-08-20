@@ -70,6 +70,22 @@ pub fn analyze(entry_path: &str, overlay: &[(String, String)], target: &Target) 
     let mut notes: Vec<Note> = Vec::new();
     let (loaded, files) =
         module_loader::load_with_overlay(&mut names, &mut nodes, &mut lists, &mut errors, entry_path, overlay);
+    if !errors.is_empty() {
+        return Analysis {
+            target: *target,
+            names,
+            nodes,
+            lists,
+            errors,
+            notes,
+            files,
+            root: NONE,
+            ext_mods: Vec::new(),
+            impls_list: NONE,
+            resolved: false,
+            typechecked: false,
+        };
+    }
     let (root, ext_mods) = match loaded {
         Some(program) => program,
         None => {

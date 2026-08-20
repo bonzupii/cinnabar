@@ -1644,10 +1644,41 @@ fn unary_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod:
 }
 
 fn binary_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: &mut Vec<i64>) -> i64 {
+    let op = node_b(ctx.1, expr);
+    if op == BIN_AND || op == BIN_OR {
+        return logical_short_circuit_effects(f, b, ctx, expr, ret, prod);
+    }
     let lhs = node_c(ctx.1, expr);
     let rhs = node_d(ctx.1, expr);
     expr_effects(f, b, ctx, lhs, MODE_VALUE, ret, prod);
     expr_effects(f, b, ctx, rhs, MODE_VALUE, ret, prod)
+}
+
+fn logical_short_circuit_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: &mut Vec<i64>) -> i64 {
+    let lhs = node_c(ctx.1, expr);
+    let rhs = node_d(ctx.1, expr);
+    let span = expr_span(ctx.1, expr);
+    let inherited_loans = b.3.clone();
+    let mut lhs_prod: Vec<i64> = Vec::new();
+    expr_effects(f, b, ctx, lhs, MODE_VALUE, ret, &mut lhs_prod);
+    b.3.clear();
+    b.3.extend(inherited_loans.iter().copied());
+    prod.clear();
+    let lhs_end = cur(b);
+    let rhs_block = new_block(f, b, BLK_STMT, rhs, span);
+    let join = new_block(f, b, BLK_JOIN, NONE, span);
+    add_edge(f, lhs_end, rhs_block);
+    add_edge(f, lhs_end, join);
+    resume(f, b, rhs_block);
+    let mut rhs_prod: Vec<i64> = Vec::new();
+    expr_effects(f, b, ctx, rhs, MODE_VALUE, ret, &mut rhs_prod);
+    b.3.clear();
+    b.3.extend(inherited_loans.iter().copied());
+    let rhs_end = cur(b);
+    add_edge(f, rhs_end, join);
+    resume(f, b, join);
+    append_prod_unique(prod, &rhs_prod);
+    cur(b)
 }
 
 // The typechecker attached the trait method's fn node to the dispatch row
