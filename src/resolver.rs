@@ -861,7 +861,60 @@ fn collect_variants(state: &mut State, hoist_scope: i64, sub: i64, enum_full: i6
         if let Some(slot) = seed_variant_slot(prim, idx) {
             state.13.set_sym(slot, sym);
         }
+        seed_protocol_variant(state, enum_full, var_name, sym);
         idx += 1;
+    }
+}
+
+// Maps a variant of one of the seven sealed native module enums to its
+// symbol slot in the Seeds table.
+fn seed_protocol_variant(state: &mut State, enum_full: i64, var_name: i64, sym: i64) {
+    let is_protocol_enum = enum_full == intern(state.0, "Memory.Error")
+        || enum_full == intern(state.0, "Collections.Error")
+        || enum_full == intern(state.0, "Terminal.Error")
+        || enum_full == intern(state.0, "File.Mode")
+        || enum_full == intern(state.0, "File.Error")
+        || enum_full == intern(state.0, "Net.Error")
+        || enum_full == intern(state.0, "Process.Error");
+    if !is_protocol_enum {
+        return;
+    }
+    if let Some(slot) = protocol_variant_slot(state.13, var_name) {
+        state.13.set_sym(slot, sym);
+    }
+}
+
+// The seeded symbol slot a protocol variant name maps to, or none for a
+// name no protocol enum declares.  The variant names are matched by the
+// name ids the resolver interned into the seed table, never by text.
+fn protocol_variant_slot(seeds: &Seeds, var_name: i64) -> Option<usize> {
+    if var_name == seeds.name(SEED_NAME_ALLOC_FAILED) {
+        Some(SEED_SYM_ALLOC_FAILED)
+    } else if var_name == seeds.name(SEED_NAME_ACCESS_OOB) {
+        Some(SEED_SYM_ACCESS_OOB)
+    } else if var_name == seeds.name(SEED_NAME_INDEX_OOB) {
+        // `Collections.Error` declares its own `IndexOutOfBounds`; its tag
+        // lives in a slot of its own rather than aliasing the primitive
+        // `IndexError` variant the resolver seeds positionally.
+        Some(SEED_SYM_COLLECTIONS_INDEX_OOB)
+    } else if var_name == seeds.name(SEED_NAME_KEY_NOT_FOUND) {
+        Some(SEED_SYM_KEY_NOT_FOUND)
+    } else if var_name == seeds.name(SEED_NAME_INVALID_UTF8) {
+        Some(SEED_SYM_INVALID_UTF8)
+    } else if var_name == seeds.name(SEED_NAME_EXIT_DIAG) {
+        Some(SEED_SYM_EXIT_DIAG)
+    } else if var_name == seeds.name(SEED_NAME_SYSTEM_FAULT) {
+        Some(SEED_SYM_SYSTEM_FAULT)
+    } else if var_name == seeds.name(SEED_NAME_READ_ONLY) {
+        Some(SEED_SYM_READ_ONLY)
+    } else if var_name == seeds.name(SEED_NAME_WRITE_TRUNCATE) {
+        Some(SEED_SYM_WRITE_TRUNCATE)
+    } else if var_name == seeds.name(SEED_NAME_END_OF_INPUT) {
+        Some(SEED_SYM_END_OF_INPUT)
+    } else if var_name == seeds.name(SEED_NAME_READ_FAILED) {
+        Some(SEED_SYM_READ_FAILED)
+    } else {
+        None
     }
 }
 
@@ -2729,6 +2782,10 @@ mod tests {
         let mut errors: Vec<Diag> = Vec::new();
         let mut notes: Vec<Note> = Vec::new();
         let mut deferred: Vec<Diag> = Vec::new();
+        // Pass one: a bare program declares no protocol enums, so only the
+        // primitive slots `seed_builtins` fills unconditionally are
+        // populated; the protocol slots stay `NONE` until their declaring
+        // native modules are resolved.
         let source = "pub fun main() I32\n  return 0\nend\n";
         let overlay = [("scratch.cnb".to_string(), source.to_string())];
         let (loaded, files) = crate::module_loader::load_with_overlay(
@@ -2764,9 +2821,56 @@ mod tests {
             nidx += 1;
         }
         let mut sidx = 0usize;
-        while sidx < SEED_SYM_COUNT {
-            assert_ne!(seeds.sym(sidx), NONE, "seed symbol slot {} left empty", sidx);
+        while sidx < SEED_SYM_PRIMITIVE_COUNT {
+            assert_ne!(seeds.sym(sidx), NONE, "primitive seed symbol slot {} left empty", sidx);
             sidx += 1;
+        }
+
+        // Pass two: declaring every sealed native module populates each
+        // protocol slot with the variant symbol of the matching name, so
+        // codegen's O(1) tag lookups are total for a program that uses the
+        // native surface.  `Terminal.Error` carries `ExitDiagnostic`, the
+        // one protocol variant the I/O modules own.
+        let mut names2: Vec<String> = Vec::new();
+        let mut nodes2: Vec<i64> = Vec::new();
+        let mut lists2: Vec<Vec<i64>> = Vec::new();
+        let mut errors2: Vec<Diag> = Vec::new();
+        let mut notes2: Vec<Note> = Vec::new();
+        let mut deferred2: Vec<Diag> = Vec::new();
+        let proto_source = "\
+pub mod Memory\n  pub type Error\n    pub AllocationFailed(Usize)\n    pub AccessOutOfBounds(Usize, Usize)\n  end\nend\n\npub mod Collections\n  pub type Error\n    pub AllocationFailed(Usize)\n    pub IndexOutOfBounds(Usize)\n    pub KeyNotFound\n    pub InvalidUtf8\n    pub EndOfInput\n    pub ReadFailed(Usize)\n  end\nend\n\npub mod Terminal\n  pub type Error\n    pub ExitDiagnostic(I64)\n  end\nend\n\npub mod File\n  pub type Mode\n    pub ReadOnly\n    pub WriteTruncate\n    pub WriteAppend\n  end\n  pub type Error\n    pub SystemFault(I64)\n  end\nend\n\npub mod Net\n  pub type Error\n    pub SystemFault(I64)\n  end\nend\n\npub mod Process\n  pub type Error\n    pub SystemFault(I64)\n  end\nend\n\npub fun main() I32\n  return 0\nend\n";
+        let overlay2 = [("scratch.cnb".to_string(), proto_source.to_string())];
+        let (loaded2, files2) = crate::module_loader::load_with_overlay(
+            &mut names2,
+            &mut nodes2,
+            &mut lists2,
+            &mut errors2,
+            "scratch.cnb",
+            &overlay2,
+        );
+        let (root2, ext_mods2) = match loaded2 {
+            Some(program) => program,
+            None => {
+                assert!(false, "module load failed: {:?}", errors2);
+                return;
+            }
+        };
+        assert_eq!(files2.len(), 1, "overlay source was not loaded");
+        let mut seeds2 = Seeds::new();
+        let resolved2 = resolve(
+            &mut names2,
+            &mut nodes2,
+            &mut lists2,
+            Diagnostics { errors: &mut errors2, notes: &mut notes2, deferred: &mut deferred2, target: &crate::target::Target::host() },
+            root2,
+            &ext_mods2,
+            &mut seeds2,
+        );
+        assert!(resolved2, "resolve failed: {:?}", errors2);
+        let mut pidx = SEED_SYM_PRIMITIVE_COUNT;
+        while pidx < SEED_SYM_COUNT {
+            assert_ne!(seeds2.sym(pidx), NONE, "protocol seed symbol slot {} left empty", pidx);
+            pidx += 1;
         }
     }
 

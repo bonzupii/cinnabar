@@ -883,7 +883,22 @@ pub const SEED_SYM_SOME: usize = SEED_SYM_ERR + 1;
 pub const SEED_SYM_NONE: usize = SEED_SYM_SOME + 1;
 pub const SEED_SYM_DIV_BY_ZERO: usize = SEED_SYM_NONE + 1;
 pub const SEED_SYM_INDEX_OOB: usize = SEED_SYM_DIV_BY_ZERO + 1;
-pub const SEED_SYM_COUNT: usize = SEED_SYM_INDEX_OOB + 1;
+// The number of symbol slots `seed_builtins` fills unconditionally for
+// every program; the protocol slots that follow are populated only when
+// their declaring native modules are resolved.
+pub const SEED_SYM_PRIMITIVE_COUNT: usize = SEED_SYM_INDEX_OOB + 1;
+pub const SEED_SYM_ALLOC_FAILED: usize = SEED_SYM_PRIMITIVE_COUNT;
+pub const SEED_SYM_ACCESS_OOB: usize = SEED_SYM_ALLOC_FAILED + 1;
+pub const SEED_SYM_COLLECTIONS_INDEX_OOB: usize = SEED_SYM_ACCESS_OOB + 1;
+pub const SEED_SYM_KEY_NOT_FOUND: usize = SEED_SYM_COLLECTIONS_INDEX_OOB + 1;
+pub const SEED_SYM_INVALID_UTF8: usize = SEED_SYM_KEY_NOT_FOUND + 1;
+pub const SEED_SYM_EXIT_DIAG: usize = SEED_SYM_INVALID_UTF8 + 1;
+pub const SEED_SYM_SYSTEM_FAULT: usize = SEED_SYM_EXIT_DIAG + 1;
+pub const SEED_SYM_READ_ONLY: usize = SEED_SYM_SYSTEM_FAULT + 1;
+pub const SEED_SYM_WRITE_TRUNCATE: usize = SEED_SYM_READ_ONLY + 1;
+pub const SEED_SYM_END_OF_INPUT: usize = SEED_SYM_WRITE_TRUNCATE + 1;
+pub const SEED_SYM_READ_FAILED: usize = SEED_SYM_END_OF_INPUT + 1;
+pub const SEED_SYM_COUNT: usize = SEED_SYM_READ_FAILED + 1;
 
 /// Fixed slots the resolver fills; later stages read instead of re-deriving.
 #[derive(Clone, Copy)]

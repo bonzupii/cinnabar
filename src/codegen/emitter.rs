@@ -505,38 +505,18 @@ fn variant_index_of(sess: &Session, variant_sym: i64, span: (i64, i64, i64)) -> 
     Ok(idx)
 }
 
-fn seeded_enum_variant_tag(sess: &Session, enum_key: i64, seed_name: usize, span: (i64, i64, i64)) -> Result<i64, CodegenError> {
-    let name_id = sess.12.name(seed_name);
-    if name_id == NONE {
-        return Err(builder_error(span.0, span.1, span.2, "internal: seeded variant name is absent"));
+// The tag of a sealed protocol variant, loaded in O(1) from the
+// resolver-seeded symbol slot in the Seeds table via `sym_variant_tag_of`.
+fn seeded_enum_variant_tag(sess: &Session, seed_sym_slot: usize, span: (i64, i64, i64)) -> Result<i64, CodegenError> {
+    let variant_sym = sess.12.sym(seed_sym_slot);
+    if variant_sym == NONE {
+        return Err(builder_error(span.0, span.1, span.2, "internal: seeded protocol variant symbol is absent"));
     }
-    let enum_sym = em_key_sym(sess, enum_key);
-    if enum_sym == NONE {
-        return Err(builder_error(span.0, span.1, span.2, "internal: error enum has no resolved symbol"));
+    let tag = sym_variant_tag_of(sess.5, variant_sym);
+    if tag == NONE {
+        return Err(builder_error(span.0, span.1, span.2, "internal: seeded protocol variant tag is absent"));
     }
-    let item = em_sym_decl(sess, enum_sym);
-    if item == NONE || node_tag(sess.5, item) != NODE_ITEM || node_a(sess.5, item) != ITEM_ENUM {
-        return Err(builder_error(span.0, span.1, span.2, "internal: error enum has no declaration"));
-    }
-    let variants = node_e(sess.5, item);
-    let count = list_len(sess.6, variants);
-    let mut idx = 0i64;
-    while idx < count {
-        let variant = list_get(sess.6, variants, idx);
-        if node_a(sess.5, variant) == name_id {
-            let variant_sym = variant_sym_of(sess.5, variant);
-            if variant_sym == NONE {
-                return Err(builder_error(span.0, span.1, span.2, "internal: error variant has no resolved symbol"));
-            }
-            let tag = sym_variant_tag_of(sess.5, variant_sym);
-            if tag == NONE {
-                return Err(builder_error(span.0, span.1, span.2, "internal: error variant tag is absent"));
-            }
-            return Ok(tag);
-        }
-        idx += 1;
-    }
-    Err(builder_error(span.0, span.1, span.2, "internal: error enum has no declared variant for the seeded identity"))
+    Ok(tag)
 }
 
 // The third declared variant when it carries one int payload, else NONE.
@@ -1890,11 +1870,9 @@ fn emit_call<'ctx, 'a>(
     Ok(out)
 }
 
-// A self-tail call becomes a loop jump: every argument is evaluated into
-// a value first, so a permutation like `f(b, a)` reads the original
-// parameter slots; then each parameter slot is overwritten and control
-// branches to `body_header`. The returned slot is never used -- the
-// current block is terminated.
+// A self-tail call becomes a loop jump: each argument is staged into an
+// entry-block alloca via `copy_value`, copied into the parameter slots,
+// then control branches to `body_header`.
 fn emit_self_tail_call<'ctx, 'a>(
     sess: &mut Session<'ctx, '_, '_>,
     ctx: &mut FnCtx<'ctx, 'a>,
@@ -1904,14 +1882,15 @@ fn emit_self_tail_call<'ctx, 'a>(
 ) -> Result<PointerValue<'ctx>, CodegenError> {
     let arg_exprs = node_d(sess.5, expr);
     let count = list_len(sess.6, arg_exprs);
-    let mut staged: Vec<BasicValueEnum<'ctx>> = Vec::new();
+    let mut staged: Vec<(i64, PointerValue<'ctx>)> = Vec::new();
     let mut idx = 0i64;
     while idx < count {
         let arg = list_get(sess.6, arg_exprs, idx);
         let akey = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, arg));
         let ptr = emit_expr(sess, ctx, arg)?;
-        let value = load_key(sess, akey, ptr, span)?;
-        staged.push(value);
+        let temp = declare_local(sess, akey, "arg", span)?;
+        copy_value(sess, akey, temp, ptr, span)?;
+        staged.push((akey, temp));
         idx += 1;
     }
     let mut idx = 0i64;
@@ -1927,11 +1906,11 @@ fn emit_self_tail_call<'ctx, 'a>(
                 ));
             }
         };
-        let value = match staged.get(idx as usize) {
-            Some(value) => *value,
+        let (akey, temp) = match staged.get(idx as usize) {
+            Some(pair) => *pair,
             None => break,
         };
-        store_key(sess, slot, value)?;
+        copy_value(sess, akey, slot, temp, span)?;
         idx += 1;
     }
     let out = declare_local(sess, ret_key, "tail", span)?;
@@ -2602,7 +2581,7 @@ fn native_allocate<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     sess.2.build_conditional_branch(null_cmp, fail_block, ok_block).map_err(builder_fail)?;
     sess.2.position_at_end(fail_block);
     let err_key = result_arg_key(sess, ret_key, 1);
-    let alloc_fail_tag = seeded_enum_variant_tag(sess, err_key, SEED_NAME_ALLOC_FAILED, span)?;
+    let alloc_fail_tag = seeded_enum_variant_tag(sess, SEED_SYM_ALLOC_FAILED, span)?;
     let fkey = variant_payload_key(sess, err_key, alloc_fail_tag, 0, span)?;
     let fail_val = build_enum_value(sess, err_key, alloc_fail_tag, &[(fkey, p0)], span)?;
     let err_result = build_result_err(sess, ret_key, err_key, fail_val, span)?;
@@ -2659,7 +2638,7 @@ fn native_write_u8<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     sess.2.build_conditional_branch(ok_cmp, ok_block, fail_block).map_err(builder_fail)?;
     sess.2.position_at_end(fail_block);
     let err_key = result_arg_key(sess, ret_key, 1);
-    let oob_tag = seeded_enum_variant_tag(sess, err_key, SEED_NAME_ACCESS_OOB, span)?;
+    let oob_tag = seeded_enum_variant_tag(sess, SEED_SYM_ACCESS_OOB, span)?;
     let f0 = variant_payload_key(sess, err_key, oob_tag, 0, span)?;
     let f1 = variant_payload_key(sess, err_key, oob_tag, 1, span)?;
     let e0 = declare_local(sess, f0, "o0", span)?;
@@ -2699,7 +2678,7 @@ fn native_read_u8<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>
     sess.2.build_conditional_branch(ok_cmp, ok_block, fail_block).map_err(builder_fail)?;
     sess.2.position_at_end(fail_block);
     let err_key = result_arg_key(sess, ret_key, 1);
-    let oob_tag = seeded_enum_variant_tag(sess, err_key, SEED_NAME_ACCESS_OOB, span)?;
+    let oob_tag = seeded_enum_variant_tag(sess, SEED_SYM_ACCESS_OOB, span)?;
     let f0 = variant_payload_key(sess, err_key, oob_tag, 0, span)?;
     let f1 = variant_payload_key(sess, err_key, oob_tag, 1, span)?;
     let e0 = declare_local(sess, f0, "o0", span)?;
@@ -2808,7 +2787,7 @@ fn native_vec_push<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
     sess.2.position_at_end(fail_block);
     let err_key = result_arg_key(sess, ret_key, 1);
-    let alloc_fail_tag = seeded_enum_variant_tag(sess, err_key, SEED_NAME_ALLOC_FAILED, span)?;
+    let alloc_fail_tag = seeded_enum_variant_tag(sess, SEED_SYM_ALLOC_FAILED, span)?;
     let fkey = variant_payload_key(sess, err_key, alloc_fail_tag, 0, span)?;
     let fval = declare_local(sess, fkey, "need", span)?;
     store_key(sess, fval, needed.into())?;
@@ -2862,7 +2841,7 @@ fn native_vec_pop<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>
     sess.2.build_conditional_branch(empty, empty_block, ok_block).map_err(builder_fail)?;
     sess.2.position_at_end(empty_block);
     let err_key = result_arg_key(sess, ret_key, 1);
-    let oob_tag = seeded_enum_variant_tag(sess, err_key, SEED_NAME_INDEX_OOB, span)?;
+    let oob_tag = seeded_enum_variant_tag(sess, SEED_SYM_COLLECTIONS_INDEX_OOB, span)?;
     let f0 = variant_payload_key(sess, err_key, oob_tag, 0, span)?;
     let f1 = variant_payload_key(sess, err_key, oob_tag, 1, span)?;
     let idx0 = declare_local(sess, f0, "oob_idx", span)?;
@@ -3668,7 +3647,7 @@ fn native_hash_map_insert<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
 
     sess.2.position_at_end(fail_block);
     let err_key = result_arg_key(sess, ret_key, 1);
-    let alloc_fail_tag = seeded_enum_variant_tag(sess, err_key, SEED_NAME_ALLOC_FAILED, span)?;
+    let alloc_fail_tag = seeded_enum_variant_tag(sess, SEED_SYM_ALLOC_FAILED, span)?;
     let fkey = variant_payload_key(sess, err_key, alloc_fail_tag, 0, span)?;
     let fval = declare_local(sess, fkey, "need", span)?;
     store_key(sess, fval, needed.into())?;
@@ -3740,7 +3719,7 @@ fn native_hash_map_get<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
     sess.2.position_at_end(missing_block);
     let err_key = result_arg_key(sess, ret_key, 1);
-    let key_missing_tag = seeded_enum_variant_tag(sess, err_key, SEED_NAME_KEY_NOT_FOUND, span)?;
+    let key_missing_tag = seeded_enum_variant_tag(sess, SEED_SYM_KEY_NOT_FOUND, span)?;
     let fail_val = build_enum_value(sess, err_key, key_missing_tag, &[], span)?;
     let err_result = build_result_err(sess, ret_key, err_key, fail_val, span)?;
     copy_to_out(sess, ret_key, out, err_result, span)?;
@@ -3824,7 +3803,7 @@ fn native_hash_map_remove<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
     sess.2.position_at_end(missing_block);
     let err_key = result_arg_key(sess, ret_key, 1);
-    let key_missing_tag = seeded_enum_variant_tag(sess, err_key, SEED_NAME_KEY_NOT_FOUND, span)?;
+    let key_missing_tag = seeded_enum_variant_tag(sess, SEED_SYM_KEY_NOT_FOUND, span)?;
     let fail_val = build_enum_value(sess, err_key, key_missing_tag, &[], span)?;
     let err_result = build_result_err(sess, ret_key, err_key, fail_val, span)?;
     copy_to_out(sess, ret_key, out, err_result, span)?;
@@ -3880,7 +3859,7 @@ fn is_eintr<'ctx>(sess: &mut Session<'ctx, '_, '_>, result: IntValue<'ctx>, span
 // passes it here to be written into the `SystemFault` payload.
 fn system_fault_result<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: PointerValue<'ctx>, code: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let err_key = result_arg_key(sess, ret_key, 1);
-    let tag = seeded_enum_variant_tag(sess, err_key, SEED_NAME_SYSTEM_FAULT, span)?;
+    let tag = seeded_enum_variant_tag(sess, SEED_SYM_SYSTEM_FAULT, span)?;
     let f0 = variant_payload_key(sess, err_key, tag, 0, span)?;
     let slot = declare_local(sess, f0, "errno", span)?;
     store_key(sess, slot, code.into())?;
@@ -3934,8 +3913,8 @@ fn open_flags_of<'ctx>(
     let i64_ty = sess.0.i64_type();
     let tag_ptr = struct_gep(sess, mode_key, mode_ptr, 0, "", span)?;
     let tag = load_i64(sess, tag_ptr)?;
-    let read_only = seeded_enum_variant_tag(sess, mode_key, SEED_NAME_READ_ONLY, span)?;
-    let truncate = seeded_enum_variant_tag(sess, mode_key, SEED_NAME_WRITE_TRUNCATE, span)?;
+    let read_only = seeded_enum_variant_tag(sess, SEED_SYM_READ_ONLY, span)?;
+    let truncate = seeded_enum_variant_tag(sess, SEED_SYM_WRITE_TRUNCATE, span)?;
     let abi = sess.13.abi();
     let read_flags = i64_ty.const_int(abi.open_binary, false);
     let truncate_flags = i64_ty.const_int(abi.open_write | abi.open_create | abi.open_truncate | abi.open_binary, false);
@@ -4303,7 +4282,7 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     sess.2.build_conditional_branch(null, alloc_failed, scan).map_err(builder_fail)?;
 
     sess.2.position_at_end(alloc_failed);
-    emit_payload_error(sess, ret_key, err_key, seeded_enum_variant_tag(sess, err_key, SEED_NAME_ALLOC_FAILED, span)?, start_capacity, out, span)?;
+    emit_payload_error(sess, ret_key, err_key, seeded_enum_variant_tag(sess, SEED_SYM_ALLOC_FAILED, span)?, start_capacity, out, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
 
     sess.2.position_at_end(scan);
@@ -4371,7 +4350,7 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     sess.2.position_at_end(grow_fail_block);
     let free_partial = extern_free(sess);
     sess.2.build_call(free_partial, &[into_meta(old.into())], "").map_err(builder_fail)?;
-    emit_payload_error(sess, ret_key, err_key, seeded_enum_variant_tag(sess, err_key, SEED_NAME_ALLOC_FAILED, span)?, doubled, out, span)?;
+    emit_payload_error(sess, ret_key, err_key, seeded_enum_variant_tag(sess, SEED_SYM_ALLOC_FAILED, span)?, doubled, out, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
 
     sess.2.position_at_end(grow_ok);
@@ -4409,7 +4388,7 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     let free_failed = extern_free(sess);
     sess.2.build_call(free_failed, &[into_meta(final_buf.into())], "").map_err(builder_fail)?;
     let errno = runtime_errno(sess, span)?;
-    emit_payload_error(sess, ret_key, err_key, seeded_enum_variant_tag(sess, err_key, SEED_NAME_READ_FAILED, span)?, errno, out, span)?;
+    emit_payload_error(sess, ret_key, err_key, seeded_enum_variant_tag(sess, SEED_SYM_READ_FAILED, span)?, errno, out, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
 
     sess.2.position_at_end(ended_block);
@@ -4425,7 +4404,7 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     // rather than handed back inside a `String` nobody asked for.
     let free = extern_free(sess);
     sess.2.build_call(free, &[into_meta(final_buf.into())], "").map_err(builder_fail)?;
-    let end_tag = seeded_enum_variant_tag(sess, err_key, SEED_NAME_END_OF_INPUT, span)?;
+    let end_tag = seeded_enum_variant_tag(sess, SEED_SYM_END_OF_INPUT, span)?;
     let end_val = build_enum_value(sess, err_key, end_tag, &[], span)?;
     let end_result = build_result_err(sess, ret_key, err_key, end_val, span)?;
     copy_to_out(sess, ret_key, out, end_result, span)?;
@@ -4446,7 +4425,7 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     sess.2.position_at_end(line_invalid);
     let free_malformed = extern_free(sess);
     sess.2.build_call(free_malformed, &[into_meta(final_buf.into())], "").map_err(builder_fail)?;
-    let invalid_tag = seeded_enum_variant_tag(sess, err_key, SEED_NAME_INVALID_UTF8, span)?;
+    let invalid_tag = seeded_enum_variant_tag(sess, SEED_SYM_INVALID_UTF8, span)?;
     let invalid_val = build_enum_value(sess, err_key, invalid_tag, &[], span)?;
     let invalid_result = build_result_err(sess, ret_key, err_key, invalid_val, span)?;
     copy_to_out(sess, ret_key, out, invalid_result, span)?;
@@ -4516,7 +4495,7 @@ fn net_errno<'ctx>(sess: &mut Session<'ctx, '_, '_>, span: (i64, i64, i64)) -> R
 
 fn net_fault_result<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let err_key = result_arg_key(sess, ret_key, 1);
-    let tag = seeded_enum_variant_tag(sess, err_key, SEED_NAME_SYSTEM_FAULT, span)?;
+    let tag = seeded_enum_variant_tag(sess, SEED_SYM_SYSTEM_FAULT, span)?;
     let f0 = variant_payload_key(sess, err_key, tag, 0, span)?;
     let code = declare_local(sess, f0, "errno", span)?;
     let err = net_errno(sess, span)?;
@@ -6068,7 +6047,7 @@ fn native_string_from_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionV
     emit_utf8_scan(sess, f, data, len, valid_block, invalid_block, span)?;
     sess.2.position_at_end(invalid_block);
     let err_key = result_arg_key(sess, ret_key, 1);
-    let invalid_tag = seeded_enum_variant_tag(sess, err_key, SEED_NAME_INVALID_UTF8, span)?;
+    let invalid_tag = seeded_enum_variant_tag(sess, SEED_SYM_INVALID_UTF8, span)?;
     let fail_val = build_enum_value(sess, err_key, invalid_tag, &[], span)?;
     let err_result = build_result_err(sess, ret_key, err_key, fail_val, span)?;
     copy_to_out(sess, ret_key, out, err_result, span)?;
@@ -6093,7 +6072,7 @@ fn native_string_from_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionV
     sess.2.build_conditional_branch(null_cmp, fail_alloc, copy_block).map_err(builder_fail)?;
     sess.2.position_at_end(fail_alloc);
     let err_key2 = result_arg_key(sess, ret_key, 1);
-    let alloc_fail_tag = seeded_enum_variant_tag(sess, err_key2, SEED_NAME_ALLOC_FAILED, span)?;
+    let alloc_fail_tag = seeded_enum_variant_tag(sess, SEED_SYM_ALLOC_FAILED, span)?;
     let fkey = variant_payload_key(sess, err_key2, alloc_fail_tag, 0, span)?;
     let fval = declare_local(sess, fkey, "need", span)?;
     store_key(sess, fval, len.into())?;

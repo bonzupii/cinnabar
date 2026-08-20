@@ -58,8 +58,8 @@ Native Container Opacity — three perspectives:
     Storing a linear value in a native container that lacks an extraction
     surface is a hard compile-time error.
 
-The error message is: "cannot store linear element in container: container
-provides no native extraction surface".
+The error message is: "cannot store linear element in container: its native
+API provides no by-value extraction operation".
 
 Type parameters are conservatively linear. A generic function's type parameter has no linearity bound in the grammar, so its instantiation is unknown at definition time; a value of a type-parameter type must therefore be consumed exactly once on every execution path, exactly as a native handle. A generic body that moves a type-parameter value is subject to the same consumption checks as one that moves a `Block`.
 

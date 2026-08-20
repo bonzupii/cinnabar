@@ -2227,7 +2227,14 @@ fn collect_const_item(state: &mut State, item: i64) {
     }
     let kind = node_a(state.1, item);
     if kind == ITEM_MODULE {
+        // Constants resolve against the scope of the module that declares
+        // them; the walk descends into the module's scope and restores the
+        // enclosing scope on the way out, exactly as the signature and
+        // body walks do.
+        let saved_scope = state.13;
+        state.13 = module_scope_of(state.1, item);
         collect_consts(state, node_e(state.1, item));
+        state.13 = saved_scope;
         return;
     }
     if kind != ITEM_CONST {
