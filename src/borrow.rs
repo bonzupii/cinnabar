@@ -1,43 +1,14 @@
-//! Flow-sensitive borrow, linearity, and container-state checking.
+//! Flow-sensitive borrow and linearity analysis.
 //!
-//! A control-flow graph is built per function (`BLK_ENTRY`, `BLK_STMT`,
-//! `BLK_JOIN`, `BLK_EXIT`) and walked to a fixpoint, so a fact holds on
-//! every path rather than on the one the source happens to read like. Each
-//! binding moves through a state lattice — `ST_UNBOUND`, `ST_LIVE`,
-//! `ST_MOVED`, `ST_PARTIAL` — driven by the operations extracted from each
-//! statement and expression (`OP_READ`, `OP_MOVE`, `OP_BORROW`,
-//! `OP_BORROW_M`, `OP_ASSIGN`, `OP_BIND`, `OP_EXIT`, `OP_RET_REF`, and the
-//! `OP_CONT_*` continuation variants covering `return`, `break`, and `try`
-//! propagation). `apply_move` is the central transition.
-//!
-//! What it enforces: a linear value is consumed exactly once on every path
-//! out of its scope, and a moved value can be neither moved nor *borrowed*
-//! again — a borrow after the move reads a resource the move already
-//! released, which is the use-after-free shape. No two `&mut` borrows of
-//! one place are live at once, and no place is mutated through a shared
-//! borrow or moved while borrowed. A struct holding one linear field among
-//! several plain ones tracks that field individually, so moving it out
-//! leaves the rest of the struct usable.
-//!
-//! A returned borrow whose origin cannot be pinned to one input is
-//! rejected, which pushes the programmer to restructure the API rather than
-//! annotate a lifetime. The per-function summary records which parameters a
-//! returned borrow derives from, and an *empty* set means static: a string
-//! literal or a `const` of reference type has no loan to trace and outlives
-//! every caller, so one function can forward another's static result
-//! without the borrow becoming untraceable at the call.
-//!
-//! Because a borrow fact can depend on a callee, the whole function set is
-//! re-checked until no summary changes, bounded by a cap derived from the
-//! function and parameter counts rather than by a fixed round limit.
+//! Each function is lowered once to a control-flow graph whose operations
+//! carry ownership, borrow, returned-reference, and container-state facts.
+//! Linear, origin, liveness, and container dataflow consume those operations
+//! and emit source-spanned diagnostics.
 //!
 //! **Invariants:**
-//! - Linearity is read here, never decided. It comes from the flag the
-//!   typechecker attached to the canonical type descriptor; this file never
-//!   infers a type of its own and never asks what a type is called.
-//! - Every diagnostic and every attached `Note` carries a span the walk
-//!   actually visited — a binding site, a path's last move, the
-//!   per-predecessor exit states behind a join inconsistency.
+//! - A function graph is built once and reused by every dataflow pass.
+//! - Container joins use the least upper bound, with `C_MAY` dominating.
+//! - Type linearity and all diagnostic spans come from earlier pipeline stages.
 
 use crate::ast::*;
 use crate::typecheck::render_type_key;
@@ -61,6 +32,14 @@ const OP_RET_REF: i64 = 7;
 const OP_CONT_EMPTY: i64 = 8;
 const OP_CONT_MAY: i64 = 9;
 const OP_CONT_FREE: i64 = 10;
+const OP_CONT_COPY: i64 = 11;
+const OP_CONT_EXTRACT: i64 = 12;
+const OP_CONT_LINK: i64 = 13;
+const OP_LINEAR_ERROR: i64 = 14;
+
+const LINEAR_ERR_UNTRACKED_MUT: i64 = 0;
+const LINEAR_ERR_WHOLE_MUT: i64 = 1;
+const LINEAR_ERR_SHARED_MOVE: i64 = 2;
 
 const EX_RETURN: i64 = 0;
 const EX_BREAK: i64 = 1;
@@ -70,6 +49,8 @@ const L_SHARED: i64 = 0;
 const L_MUT: i64 = 1;
 
 const IDX_DYN: i64 = -2;
+const TOKEN_UNKNOWN: i64 = -3;
+const TOKEN_UNSET: i64 = -4;
 
 const BLK_ENTRY: i64 = 0;
 const BLK_STMT: i64 = 1;
@@ -79,6 +60,81 @@ const BLK_EXIT: i64 = 3;
 const MODE_VALUE: i64 = 0;
 const MODE_BORROW: i64 = 1;
 const MODE_MUT: i64 = 2;
+
+struct ContainerFlow {
+    entry: Vec<Vec<i64>>,
+    entry_tokens: Vec<Vec<i64>>,
+}
+
+struct OriginFlow {
+    entry: Vec<Vec<Vec<i64>>>,
+    resolved_ops: Vec<Vec<i64>>,
+}
+
+struct FlatBits {
+    cells: Vec<u64>,
+    rows: usize,
+    words: usize,
+}
+
+impl FlatBits {
+    fn new(rows: usize, cols: usize) -> FlatBits {
+        let words = cols.div_ceil(64);
+        FlatBits { cells: vec![0; rows * words], rows, words }
+    }
+
+    fn clear_row(&mut self, row: usize) {
+        let start = row * self.words;
+        let end = start + self.words;
+        if end <= self.cells.len() {
+            self.cells[start..end].fill(0);
+        }
+    }
+
+    fn has(&self, row: usize, col: usize) -> bool {
+        if row >= self.rows {
+            return false;
+        }
+        let word = col / 64;
+        let bit = col % 64;
+        word < self.words && self.cells[row * self.words + word] & (1u64 << bit) != 0
+    }
+
+    fn set(&mut self, row: usize, col: usize) {
+        let word = col / 64;
+        let bit = col % 64;
+        if row < self.rows && word < self.words {
+            self.cells[row * self.words + word] |= 1u64 << bit;
+        }
+    }
+
+    fn clear(&mut self, row: usize, col: usize) {
+        let word = col / 64;
+        let bit = col % 64;
+        if row < self.rows && word < self.words {
+            self.cells[row * self.words + word] &= !(1u64 << bit);
+        }
+    }
+
+    fn copy_row(&mut self, dst: usize, src: &FlatBits, src_row: usize) {
+        let count = self.words.min(src.words);
+        let dst_start = dst * self.words;
+        let src_start = src_row * src.words;
+        if dst_start + count <= self.cells.len() && src_start + count <= src.cells.len() {
+            self.cells[dst_start..dst_start + count].copy_from_slice(&src.cells[src_start..src_start + count]);
+        }
+    }
+
+    fn row_equal(&self, row: usize, other: &FlatBits, other_row: usize) -> bool {
+        let count = self.words.min(other.words);
+        let start = row * self.words;
+        let other_start = other_row * other.words;
+        if self.words != other.words || start + count > self.cells.len() || other_start + count > other.cells.len() {
+            return false;
+        }
+        self.cells[start..start + count] == other.cells[other_start..other_start + count]
+    }
+}
 
 type F = (
     Vec<(i64, i64, i64, i64, i64, i64, i64)>,
@@ -92,6 +148,7 @@ type F = (
     Vec<Vec<i64>>,
     Vec<Vec<i64>>,
     Vec<(i64, i64, i64)>,
+    Vec<(i64, i64, Vec<Vec<i64>>)>,
 );
 
 type B = (
@@ -103,12 +160,6 @@ type B = (
     i64,
     i64,
     i64,
-    // (extraction result binding, container binding): the match consuming an
-    // extraction result marks the container drained on its error arm.
-    Vec<(i64, i64)>,
-    // Bindings whose initializer is a native create call (vec_new / hash_map_new):
-    // the container bound from them is provably empty.
-    Vec<i64>,
 );
 
 type Ctx<'a> = (
@@ -124,8 +175,22 @@ fn ref_origin(binding: i64) -> i64 {
     -1 - binding
 }
 
+const CALL_ORIGIN_BASE: i64 = -1000000000;
+
+fn call_origin_ref(op: i64) -> i64 {
+    CALL_ORIGIN_BASE - op
+}
+
+fn is_call_origin(entry: i64) -> bool {
+    entry <= CALL_ORIGIN_BASE
+}
+
+fn call_op_of(entry: i64) -> i64 {
+    CALL_ORIGIN_BASE - entry
+}
+
 fn is_ref_origin(entry: i64) -> bool {
-    entry < 0
+    entry < 0 && !is_call_origin(entry)
 }
 
 fn binding_at(f: &F, id: i64) -> (i64, i64, i64, i64, i64, i64, i64) {
@@ -174,13 +239,6 @@ fn block_span_at(f: &F, id: i64) -> (i64, i64, i64) {
     match f.10.get(id as usize) {
         Some(span) => *span,
         None => (NO_FILE, 0, 0),
-    }
-}
-
-fn succ_of(f: &F, block: i64) -> Vec<i64> {
-    match f.8.get(block as usize) {
-        Some(list) => list.clone(),
-        None => Vec::new(),
     }
 }
 
@@ -287,7 +345,7 @@ fn container_has_linear_elem(ctx: &mut Ctx, key: i64) -> bool {
 
 // The resolver-attached ownership mode of `expr`'s callee, or
 // NAT_MODE_NONE for a non-native call.
-fn native_mode_of(ctx: &mut Ctx, expr: i64) -> i64 {
+fn native_mode_of(ctx: &Ctx, expr: i64) -> i64 {
     let inst = expr_sym_of(ctx.1, expr);
     if node_tag(ctx.1, inst) != NODE_INST {
         return NAT_MODE_NONE;
@@ -299,7 +357,7 @@ fn native_mode_of(ctx: &mut Ctx, expr: i64) -> i64 {
     sym_native_mode(ctx.1, fn_slot)
 }
 
-fn call_is_create(ctx: &mut Ctx, expr: i64) -> bool {
+fn call_is_create(ctx: &Ctx, expr: i64) -> bool {
     if node_tag(ctx.1, expr) != NODE_EXPR || node_a(ctx.1, expr) != EXPR_CALL {
         return false;
     }
@@ -347,36 +405,19 @@ fn static_rooted_ref(ctx: &Ctx, expr: i64) -> bool {
         return sym != NONE && node_a(ctx.1, sym) == SYM_CONST;
     }
     if kind == EXPR_CALL {
-        let inst = expr_sym_of(ctx.1, expr);
-        if node_tag(ctx.1, inst) != NODE_INST {
-            return false;
-        }
-        return match summary_of(ctx.4, inst_fn_of(ctx.1, inst)) {
-            Some(positions) => positions.is_empty(),
-            None => false,
-        };
+        return false;
     }
     false
 }
 
-// The value of `expr` is a provably-empty container when it came from a
-// native create call: a direct call, a path to a binding created by one
-// (`b.9`), or a match whose scrutinee is such a value.  One
-// implementation feeds both the pattern binds of a match on the value
-// and the let-binding of the value itself, so the container state can
-// never drift between the two consumers.
-fn create_provenance(ctx: &mut Ctx, b: &B, expr: i64) -> i64 {
+fn is_empty_container_expr(ctx: &Ctx, expr: i64) -> bool {
     if call_is_create(ctx, expr) {
-        return 1;
-    }
-    let root = path_root_binding_of(ctx, b, expr);
-    if root != NONE && list_has(&b.9, root) {
-        return 1;
+        return true;
     }
     if node_tag(ctx.1, expr) == NODE_EXPR && node_a(ctx.1, expr) == EXPR_MATCH {
-        return create_provenance(ctx, b, node_b(ctx.1, expr));
+        return is_empty_container_expr(ctx, node_b(ctx.1, expr));
     }
-    0
+    false
 }
 
 // The root binding of a call argument naming a container, unwrapping the
@@ -400,63 +441,6 @@ fn container_binding_of(b: &B, ctx: &Ctx, arg: i64) -> i64 {
     NONE
 }
 
-fn extraction_container_of_binding(entries: &[(i64, i64)], binding: i64) -> i64 {
-    let mut idx = 0usize;
-    while idx < entries.len() {
-        match entries.get(idx) {
-            Some(pair) => {
-                if pair.0 == binding {
-                    return pair.1;
-                }
-            }
-            None => break,
-        }
-        idx += 1;
-    }
-    NONE
-}
-
-// `b.8` ("this binding's value came from an extraction call on that
-// container") and `b.9` ("this binding's value came from a native create
-// call") are syntactic snapshots taken once, at the binding's own
-// `STMT_LET`/pattern-bind site — they are consulted later (by
-// `create_provenance` and `extraction_container_of_binding`) as if they were
-// still true, with nothing keeping them in step with the container's actual
-// state. A container that was empty when a fact was recorded is not empty
-// forever: `let r = vec_pop(&mut v)` records `(r, v)` in `b.8`, and if `v` is
-// then refilled (`vec_push(&mut v, elem)`) before a later `match r` reads
-// `b.8`, the match's Err arm still (wrongly) proves `v` drained, and freeing
-// `v` afterward leaks whatever the intervening push added. Likewise `val v =
-// match vec_new()...` puts `v` in `b.9`, and a later `val w = v` after `v`
-// was refilled would otherwise inherit "provably empty" through `b.9`
-// unchanged.
-//
-// This is the one place either fact can go stale: any call that takes an
-// *existing* container by `&mut` outside of an extraction native. Pruning
-// both facts for that binding right here — rather than trying to make
-// `create_provenance`/`extraction_container_of_binding` themselves
-// flow-sensitive, which would need a full dataflow pass this single-walk
-// build phase doesn't have yet — keeps every later syntactic lookup honest
-// for the only way it can go wrong.
-fn invalidate_container_facts(b: &mut B, binding: i64) {
-    let mut idx = 0usize;
-    while idx < b.9.len() {
-        if b.9[idx] == binding {
-            b.9.remove(idx);
-        } else {
-            idx += 1;
-        }
-    }
-    let mut idx = 0usize;
-    while idx < b.8.len() {
-        if b.8[idx].1 == binding {
-            b.8.remove(idx);
-        } else {
-            idx += 1;
-        }
-    }
-}
-
 // Passing a linear-element container by &mut may fill it (an insertion native
 // or any callee could push), so the container state rises to MayContain.
 fn fill_container_if_mut_arg(f: &mut F, b: &mut B, ctx: &mut Ctx, arg: i64) {
@@ -467,37 +451,73 @@ fn fill_container_if_mut_arg(f: &mut F, b: &mut B, ctx: &mut Ctx, arg: i64) {
     let row = binding_at(f, binding);
     if container_has_linear_elem(ctx, row.1) {
         emit_op(f, OP_CONT_MAY, binding, NONE, (0, 0, 0), expr_span(ctx.1, arg));
-        invalidate_container_facts(b, binding);
     }
 }
 
-fn arm_is_result_err(ctx: &mut Ctx, scrut_key: i64, pat: i64, arms: i64, idx: i64) -> bool {
-    if node_tag(ctx.1, pat) != NODE_PAT {
-        return false;
+fn pattern_variant_tag(ctx: &Ctx, pat: i64) -> i64 {
+    if node_tag(ctx.1, pat) != NODE_PAT || node_a(ctx.1, pat) != PAT_VARIANT {
+        return NONE;
     }
+    let sym = pat_sym_of(ctx.1, pat);
+    if sym == NONE {
+        NONE
+    } else {
+        sym_variant_tag_of(ctx.1, sym)
+    }
+}
+
+fn enum_variant_count(ctx: &Ctx, key: i64) -> i64 {
+    let sym = tyinfo_sym_of(ctx.1, key);
+    if sym == NONE {
+        return 0;
+    }
+    let decl = node_c(ctx.1, sym);
+    if decl == NONE || node_a(ctx.1, decl) != ITEM_ENUM {
+        return 0;
+    }
+    list_len(ctx.2, node_e(ctx.1, decl))
+}
+
+fn arm_covers_extraction_failure(ctx: &Ctx, scrut_key: i64, pat: i64, arms: i64, idx: i64) -> bool {
     if ty_kind_of(ctx.1, scrut_key) != TYD_ENUM {
         return false;
     }
     if sym_prim_kind(ctx.1, tyinfo_sym_of(ctx.1, scrut_key)) != PRIM_RESULT {
         return false;
     }
-    let kind = node_a(ctx.1, pat);
-    if kind == PAT_VARIANT {
-        let pat_sym = pat_sym_of(ctx.1, pat);
-        pat_sym != NONE && sym_variant_tag_of(ctx.1, pat_sym) == BUILTIN_RESULT_ERR
-    } else if kind == PAT_BIND {
-        if idx != 1 || list_len(ctx.2, arms) != 2 {
-            return false;
-        }
-        let first_pat = node_a(ctx.1, list_get(ctx.2, arms, 0));
-        if node_tag(ctx.1, first_pat) != NODE_PAT || node_a(ctx.1, first_pat) != PAT_VARIANT {
-            return false;
-        }
-        let first_sym = pat_sym_of(ctx.1, first_pat);
-        first_sym != NONE && sym_variant_tag_of(ctx.1, first_sym) == BUILTIN_RESULT_OK
-    } else {
-        false
+    let failure = BUILTIN_RESULT_ERR;
+    let tag = pattern_variant_tag(ctx, pat);
+    if tag == failure {
+        return true;
     }
+    if node_tag(ctx.1, pat) != NODE_PAT || node_a(ctx.1, pat) != PAT_BIND {
+        return false;
+    }
+    let variants = enum_variant_count(ctx, scrut_key);
+    if variants == 0 {
+        return false;
+    }
+    let mut candidate = 0i64;
+    while candidate < variants {
+        if candidate != failure {
+            let mut covered = false;
+            let mut prior = 0i64;
+            while prior < idx {
+                let arm = list_get(ctx.2, arms, prior);
+                let prior_tag = pattern_variant_tag(ctx, node_a(ctx.1, arm));
+                if prior_tag == candidate {
+                    covered = true;
+                    break;
+                }
+                prior += 1;
+            }
+            if !covered {
+                return false;
+            }
+        }
+        candidate += 1;
+    }
+    true
 }
 
 fn cur(b: &B) -> i64 {
@@ -752,8 +772,6 @@ fn build_fn(f: &mut F, b: &mut B, ctx: &mut Ctx, fn_node: i64) -> bool {
 fn build_list(f: &mut F, b: &mut B, ctx: &mut Ctx, list: i64, out: i64, ret: i64, prod: &mut Vec<i64>) -> i64 {
     let scope_start = b.2.len();
     let name_start = b.0.len();
-    let cont_start = b.8.len();
-    let empty_start = b.9.len();
     let count = list_len(ctx.2, list);
     if count == 0 {
         let stub = new_block(f, b, BLK_JOIN, NONE, block_span_at(f, out));
@@ -797,12 +815,6 @@ fn build_list(f: &mut F, b: &mut B, ctx: &mut Ctx, list: i64, out: i64, ret: i64
     while b.0.len() > name_start {
         b.0.pop();
     }
-    while b.8.len() > cont_start {
-        b.8.pop();
-    }
-    while b.9.len() > empty_start {
-        b.9.pop();
-    }
     entry
 }
 
@@ -831,27 +843,26 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         if has_init == 1 && (flags.1 == 1 || !prod.is_empty()) {
             set_op_loans(f, op, &prod);
         }
-        if has_init == 1 && create_provenance(ctx, b, init) == 1 {
-            b.9.push(binding);
-        }
         if has_init == 1 && node_a(ctx.1, init) == EXPR_CALL {
             let container_name = callfact_extraction_of(ctx.1, init);
             if container_name != NONE {
                 let container = lookup_name(b, container_name);
-                if container >= 0 {
-                    b.8.push((binding, container));
+                let token = current_extraction_token(f, container);
+                if container >= 0 && token >= 0 {
+                    emit_op(f, OP_CONT_LINK, binding, NONE, (container, token, 0), span);
                 }
             }
         }
-        // A container binding is empty only when its value has empty
-        // provenance (a native create call, or a match on one); any other
-        // provenance (a user function, an arbitrary match) may carry
-        // linear elements.
         if container_has_linear_elem(ctx, binding_key) {
-            if has_init == 1 && create_provenance(ctx, b, init) == 1 {
-                emit_op(f, OP_CONT_EMPTY, binding, NONE, (0, 0, 0), span);
+            if has_init == 1 && is_empty_container_expr(ctx, init) {
+                emit_op(f, OP_CONT_EMPTY, binding, NONE, (NONE, NONE, 0), span);
             } else {
-                emit_op(f, OP_CONT_MAY, binding, NONE, (0, 0, 0), span);
+                let source = if has_init == 1 { path_root_binding_of(ctx, b, init) } else { NONE };
+                if source >= 0 && is_container_key(ctx.1, binding_key) {
+                    emit_op(f, OP_CONT_COPY, binding, NONE, (source, 0, 0), span);
+                } else {
+                    emit_op(f, OP_CONT_MAY, binding, NONE, (0, 0, 0), span);
+                }
             }
         }
         return (block, cont, prod);
@@ -867,6 +878,28 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         let op = emit_op(f, OP_ASSIGN, binding, path, (is_ref, tkind, owner), span);
         if tkind == 0 && (is_ref == 1 || !prod.is_empty()) {
             set_op_loans(f, op, &prod);
+        }
+        if binding >= 0 && container_has_linear_elem(ctx, binding_at(f, binding).1) {
+            if is_empty_container_expr(ctx, value) {
+                emit_op(f, OP_CONT_EMPTY, binding, NONE, (NONE, NONE, 0), span);
+            } else {
+                let source = path_root_binding_of(ctx, b, value);
+                if source >= 0 {
+                    emit_op(f, OP_CONT_COPY, binding, NONE, (source, 0, 0), span);
+                } else {
+                    emit_op(f, OP_CONT_MAY, binding, NONE, (0, 0, 0), span);
+                }
+            }
+        }
+        if binding >= 0 && node_a(ctx.1, value) == EXPR_CALL {
+            let container_name = callfact_extraction_of(ctx.1, value);
+            if container_name != NONE {
+                let container = lookup_name(b, container_name);
+                let token = current_extraction_token(f, container);
+                if container >= 0 && token >= 0 {
+                    emit_op(f, OP_CONT_LINK, binding, NONE, (container, token, 0), span);
+                }
+            }
         }
         return (block, cont, Vec::new());
     }
@@ -1329,7 +1362,6 @@ fn dotted_seg_name(ctx: &mut Ctx, base: i64, segs: i64, count: i64) -> String {
 fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64, mode: i64, prod: &mut Vec<i64>) {
     let row = binding_at(f, binding);
     let segs = node_b(ctx.1, expr);
-    let count = list_len(ctx.2, segs);
     let span = expr_span(ctx.1, expr);
     let bkind = ty_kind_of(ctx.1, row.1);
     let through_mut = bkind == TYD_REF_MUT;
@@ -1371,8 +1403,7 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
                 root_path_of(f, binding)
             };
             if rroot < 0 {
-                let text = dotted_seg_name(ctx, row.0, segs, count);
-                push_linear(ctx.3, &format!("cannot consume linear value '{}' through a mutable reference to an untracked temporary; bind the referent to a local first", text), span.0, span.1, span.2);
+                emit_op(f, OP_LINEAR_ERROR, binding, expr, (LINEAR_ERR_UNTRACKED_MUT, 0, 0), span);
                 return;
             }
             let elem_key = ty_elem_of(ctx.1, row.1);
@@ -1381,8 +1412,7 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
             // field walk that extends `rpath` also yields a concrete key), so
             // guarding on it adds no new failure mode for valid programs.
             if rkey == NONE || rpath == NONE || rpath == rroot {
-                let text = dotted_seg_name(ctx, row.0, segs, count);
-                push_linear(ctx.3, &format!("cannot consume the whole value '{}' through a mutable reference; move the referent into a local and consume that instead", text), span.0, span.1, span.2);
+                emit_op(f, OP_LINEAR_ERROR, binding, expr, (LINEAR_ERR_WHOLE_MUT, 0, 0), span);
                 return;
             }
             let target = if owner != NONE { owner } else { binding };
@@ -1390,8 +1420,7 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
             emit_op(f, OP_MOVE, target, rpath, (0, 0, 0), span);
             return;
         } else if through_shared {
-            let text = dotted_seg_name(ctx, row.0, segs, count);
-            push_linear(ctx.3, &format!("cannot copy linear value '{}' out of a shared reference", text), span.0, span.1, span.2);
+            emit_op(f, OP_LINEAR_ERROR, binding, expr, (LINEAR_ERR_SHARED_MOVE, 0, 0), span);
             return;
         }
     }
@@ -1716,37 +1745,11 @@ fn ret_is_ref_node(nodes: &[i64], ty_node: i64) -> i64 {
     }
 }
 
-fn call_origin_of(ctx: &mut Ctx, summary_key: Option<i64>, arg_prods: &[Vec<i64>], prod: &mut Vec<i64>) {
-    let positions = match summary_key {
-        Some(fn_node) => summary_of(ctx.4, fn_node),
-        None => None,
-    };
-    match positions {
-        Some(positions) => {
-            let mut idx = 0usize;
-            while idx < positions.len() {
-                match positions.get(idx) {
-                    Some(position) => {
-                        if let Some(arg_prod) = arg_prods.get(*position as usize) {
-                            append_prod_unique(prod, arg_prod);
-                        }
-                    }
-                    None => break,
-                }
-                idx += 1;
-            }
-        }
-        None => {
-            let mut idx = 0usize;
-            while idx < arg_prods.len() {
-                match arg_prods.get(idx) {
-                    Some(arg_prod) => append_prod_unique(prod, arg_prod),
-                    None => break,
-                }
-                idx += 1;
-            }
-        }
-    }
+fn emit_call_ref_fact(f: &mut F, callee: i64, mode: i64, arg_prods: &[Vec<i64>], prod: &mut Vec<i64>, span: (i64, i64, i64)) {
+    let op = emit_op(f, OP_RET_REF, NONE, NONE, (callee, 1, mode), span);
+    f.11.push((op, callee, arg_prods.to_vec()));
+    prod.clear();
+    prod.push(call_origin_ref(op));
 }
 
 fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: &mut Vec<i64>) -> i64 {
@@ -1784,7 +1787,7 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
         if ret_is_ref_node(ctx.1, node_d(ctx.1, method)) == 0 {
             prod.clear();
         } else {
-            call_origin_of(ctx, None, &arg_prods, prod);
+            emit_call_ref_fact(f, method, NAT_MODE_NONE, &arg_prods, prod, expr_span(ctx.1, expr));
         }
         return cur(b);
     }
@@ -1812,44 +1815,35 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
     }
     let ret_key = inst_ret_of(ctx.1, inst);
     if is_ref_key(ctx.1, ret_key) {
-        if call_mode == NAT_MODE_VIEW {
-            prod.clear();
-            if let Some(first_prod) = arg_prods.first() {
-                append_prod_unique(prod, first_prod);
-            }
-        } else {
-            call_origin_of(ctx, Some(inst_fn_of(ctx.1, inst)), &arg_prods, prod);
-        }
+        let callee = if call_mode == NAT_MODE_VIEW { NONE } else { inst_fn_of(ctx.1, inst) };
+        emit_call_ref_fact(f, callee, call_mode, &arg_prods, prod, expr_span(ctx.1, expr));
     } else {
         prod.clear();
+    }
+    if call_mode == NAT_MODE_EXTRACT {
+        let first = list_first(ctx.2, args);
+        let container = container_binding_of(b, ctx, first);
+        if container >= 0 && container_has_linear_elem(ctx, binding_at(f, container).1) {
+            let op = emit_op(f, OP_CONT_EXTRACT, container, NONE, (0, 0, 0), expr_span(ctx.1, expr));
+            if let Some(row) = f.4.get_mut(op as usize) {
+                row.3 = op;
+            }
+        }
     }
     if call_mode == NAT_MODE_CONSUME {
         let free_arg = list_first(ctx.2, args);
         let container = container_binding_of(b, ctx, free_arg);
+        let consume_key = list_first(ctx.2, params);
         // Only a container holding linear elements carries a drain
-        // obligation; consuming a plain handle (or a container of
-        // scalars) is an ordinary consume with nothing to drain.
-        if free_arg != NONE && container_has_linear_elem(ctx, expr_ty_of(ctx.1, free_arg)) {
+        // obligation; the instantiated native parameter key is the
+        // canonical type fact for the consumed value.
+        if free_arg != NONE && container_has_linear_elem(ctx, consume_key) {
             if container >= 0 {
                 emit_op(f, OP_CONT_FREE, container, NONE, (0, 0, 0), expr_span(ctx.1, expr));
-            } else if create_provenance(ctx, b, free_arg) != 1 {
-                // The freed value isn't a named binding (e.g. `vec_free(make_full_vec())`,
-                // freeing a call result directly) — the drain check above is keyed by
-                // binding and has nothing to key off of here. `create_provenance` still
-                // clears an anonymous value that's directly and provably fresh (a native
-                // create call, or a match on one) the same way it does for a `let`
-                // binding; anything else unresolvable starts MayContain, symmetric with
-                // a by-value container *parameter* (see the OP_CONT_MAY emitted for one
-                // above) — there's no binding to attach a deferred OP_CONT_FREE to and
-                // no later point where one could become resolvable, so the answer has
-                // to be immediate.
-                push_linear(
-                    ctx.3,
-                    "cannot free container holding linear elements: drain the container (pop all elements) before freeing",
-                    node_file(ctx.1, expr),
-                    node_start(ctx.1, expr),
-                    node_end(ctx.1, expr),
-                );
+            } else if !is_empty_container_expr(ctx, free_arg) {
+                // An anonymous non-constructor value has no binding state;
+                // retain its rejection as a CFG operation for report replay.
+                emit_op(f, OP_CONT_FREE, NONE, NONE, (0, 0, 0), expr_span(ctx.1, expr));
             }
         }
     }
@@ -1887,6 +1881,31 @@ fn path_root_binding_of(ctx: &mut Ctx, b: &B, expr: i64) -> i64 {
     lookup_name(b, first)
 }
 
+fn current_extraction_token(f: &F, container: i64) -> i64 {
+    if f.4.is_empty() {
+        return NONE;
+    }
+    let op = f.4.len() as i64 - 1;
+    let row = op_at(f, op);
+    if row.0 == OP_CONT_EXTRACT && row.1 == container {
+        row.3
+    } else {
+        NONE
+    }
+}
+
+fn latest_extraction_link(f: &F, binding: i64) -> (i64, i64) {
+    let mut op = f.4.len() as i64;
+    while op > 0 {
+        op -= 1;
+        let row = op_at(f, op);
+        if row.0 == OP_CONT_LINK && row.1 == binding {
+            return (row.3, row.4);
+        }
+    }
+    (NONE, NONE)
+}
+
 fn wrap_stmt_list(lists: &mut Vec<Vec<i64>>, stmt: i64) -> i64 {
     let list = alloc_list(lists);
     list_push(lists, list, stmt);
@@ -1901,19 +1920,13 @@ fn match_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod:
     let cont = expr_effects(f, b, ctx, scrutinee, MODE_VALUE, ret, &mut scrut_prod);
     let scrut_root = path_root_binding_of(ctx, b, scrutinee);
     let scrut_key = expr_ty_of(ctx.1, scrutinee);
-    let known_empty = create_provenance(ctx, b, scrutinee);
-    let extr_container = if node_a(ctx.1, scrutinee) == EXPR_CALL {
+    let known_empty = if is_empty_container_expr(ctx, scrutinee) { 1 } else { 0 };
+    let direct_container = if node_a(ctx.1, scrutinee) == EXPR_CALL {
         let container_name = callfact_extraction_of(ctx.1, scrutinee);
-        if container_name != NONE {
-            lookup_name(b, container_name)
-        } else {
-            NONE
-        }
-    } else if scrut_root != NONE {
-        extraction_container_of_binding(&b.8, scrut_root)
-    } else {
-        NONE
-    };
+        if container_name != NONE { lookup_name(b, container_name) } else { NONE }
+    } else { NONE };
+    let linked = if scrut_root >= 0 { latest_extraction_link(f, scrut_root) } else { (NONE, NONE) };
+    let extraction_token = if direct_container >= 0 { current_extraction_token(f, direct_container) } else { linked.1 };
     let join = new_block(f, b, BLK_JOIN, NONE, span);
     let count = list_len(ctx.2, arms);
     let mut idx = 0i64;
@@ -1927,8 +1940,12 @@ fn match_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod:
         // The empty/error arm of an extraction match proves the container
         // drained: vec_pop errors only on an empty vector, and the surface
         // contract treats the remove KeyNotFound arm the same way.
-        if extr_container != NONE && arm_is_result_err(ctx, scrut_key, pat, arms, idx) {
-            emit_op(f, OP_CONT_EMPTY, extr_container, NONE, (0, 0, 0), span);
+        if extraction_token >= 0 && arm_covers_extraction_failure(ctx, scrut_key, pat, arms, idx) {
+            if direct_container >= 0 {
+                emit_op(f, OP_CONT_EMPTY, direct_container, NONE, (extraction_token, NONE, 0), span);
+            } else if scrut_root >= 0 && linked.0 >= 0 {
+                emit_op(f, OP_CONT_EMPTY, scrut_root, NONE, (extraction_token, linked.0, 0), span);
+            }
         }
         let body = wrap_stmt_list(ctx.2, body_stmt);
         let body_entry = build_list(f, b, ctx, body, join, ret, prod);
@@ -1999,11 +2016,11 @@ fn bind_pattern_name(f: &mut F, b: &mut B, ctx: &mut Ctx, binding: (i64, i64), s
         }
         set_op_loans(f, op, &loans);
     }
-    // A container bound from a match is empty only when the scrutinee is a
-    // native create call; every other provenance may carry linear elements.
     if container_has_linear_elem(ctx, key) {
         if known_empty == 1 {
-            emit_op(f, OP_CONT_EMPTY, binding, NONE, (0, 0, 0), span);
+            emit_op(f, OP_CONT_EMPTY, binding, NONE, (NONE, NONE, 0), span);
+        } else if scrut.1 >= 0 && is_container_key(ctx.1, key) {
+            emit_op(f, OP_CONT_COPY, binding, NONE, (scrut.1, 0, 0), span);
         } else {
             emit_op(f, OP_CONT_MAY, binding, NONE, (0, 0, 0), span);
         }
@@ -2069,6 +2086,39 @@ fn max_fn_params(nodes: &[i64], lists: &[Vec<i64>], fns: &[i64]) -> i64 {
     max
 }
 
+fn empty_graph() -> F {
+    (
+        Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(),
+        Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(),
+    )
+}
+
+fn build_graphs(
+    names: &mut Vec<String>,
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    fns: &[i64],
+    summaries: &mut Vec<(i64, Vec<i64>)>,
+    scratch: &mut Vec<Diag>,
+    notes: &mut Vec<Note>,
+) -> Vec<(i64, F)> {
+    let mut graphs: Vec<(i64, F)> = Vec::new();
+    let mut idx = 0usize;
+    while idx < fns.len() {
+        let fn_node = fns[idx];
+        let mut graph = empty_graph();
+        let mut builder: B = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), NONE, NONE, NONE, NONE);
+        let mut ctx: Ctx = (names, nodes, lists, scratch, summaries, notes);
+        if build_fn(&mut graph, &mut builder, &mut ctx, fn_node) {
+            graphs.push((fn_node, graph));
+        }
+        scratch.clear();
+        notes.clear();
+        idx += 1;
+    }
+    graphs
+}
+
 pub fn borrow_check(
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,
@@ -2078,7 +2128,6 @@ pub fn borrow_check(
     ext_mods: &[(i64, i64)],
 ) -> bool {
     let before = check.errors.len();
-
     let mut summaries: Vec<(i64, Vec<i64>)> = Vec::new();
     let mut scratch: Vec<Diag> = Vec::new();
     let mut scratch_notes: Vec<Note> = Vec::new();
@@ -2092,43 +2141,23 @@ pub fn borrow_check(
         }
         m += 1;
     }
-    let cap = fns.len() as i64 * (max_fn_params(nodes, lists, &fns) + 1) + fns.len() as i64 + 1;
+    let graphs = build_graphs(names, nodes, lists, &fns, &mut summaries, &mut scratch, &mut scratch_notes);
+    let cap = graphs.len() as i64 * (max_fn_params(nodes, lists, &fns) + 1) + graphs.len() as i64 + 1;
     let mut round = 0i64;
     loop {
         let mut changed = false;
-        let mut fi = 0usize;
-        while fi < fns.len() {
-            match fns.get(fi) {
-                Some(fn_node) => {
-                    let sources = {
-                        let mut f: F = (
-                            Vec::new(),
-                            Vec::new(),
-                            Vec::new(),
-                            Vec::new(),
-                            Vec::new(),
-                            Vec::new(),
-                            Vec::new(),
-                            Vec::new(),
-                            Vec::new(),
-                            Vec::new(),
-                            Vec::new(),
-                        );
-                        let mut b: B = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), NONE, NONE, NONE, NONE, Vec::new(), Vec::new());
-                        let mut ctx: Ctx = (names, nodes, lists, &mut scratch, &mut summaries, &mut scratch_notes);
-                        if build_fn(&mut f, &mut b, &mut ctx, *fn_node) {
-                            compute_summary(&f, &mut ctx, 0, *fn_node)
-                        } else {
-                            None
-                        }
-                    };
-                    scratch.clear();
-                    scratch_notes.clear();
-                    changed |= refine_summary(&mut summaries, *fn_node, sources);
-                }
-                None => break,
-            }
-            fi += 1;
+        let mut idx = 0usize;
+        while idx < graphs.len() {
+            let fn_node = graphs[idx].0;
+            let sources = {
+                let graph = &graphs[idx].1;
+                let mut ctx: Ctx = (names, nodes, lists, &mut scratch, &mut summaries, &mut scratch_notes);
+                compute_summary(graph, &mut ctx, 0, fn_node)
+            };
+            scratch.clear();
+            scratch_notes.clear();
+            changed |= refine_summary(&mut summaries, fn_node, sources);
+            idx += 1;
         }
         round += 1;
         if !changed {
@@ -2139,141 +2168,38 @@ pub fn borrow_check(
             return false;
         }
     }
-
-    check_item_list(&mut *check, names, nodes, lists, &mut summaries, root);
     let mut idx = 0usize;
-    while idx < ext_mods.len() {
-        match ext_mods.get(idx) {
-            Some(pair) => check_item_list(&mut *check, names, nodes, lists, &mut summaries, pair.1),
-            None => break,
-        }
+    while idx < graphs.len() {
+        let graph = &graphs[idx].1;
+        let mut ctx: Ctx = (names, nodes, lists, check.errors, &mut summaries, check.notes);
+        analyze_fn(graph, &mut ctx, 0);
         idx += 1;
     }
     check.errors.len() == before
 }
 
-fn check_item_list(
-    check: &mut CheckContext,
-    names: &mut Vec<String>,
-    nodes: &mut Vec<i64>,
-    lists: &mut Vec<Vec<i64>>,
-    summaries: &mut Vec<(i64, Vec<i64>)>,
-    list: i64,
-) {
-    let count = list_len(lists, list);
-    let mut idx = 0i64;
-    while idx < count {
-        let item = list_get(lists, list, idx);
-        if node_tag(nodes, item) == NODE_ITEM {
-            let kind = node_a(nodes, item);
-            if kind == ITEM_MODULE {
-                check_item_list(&mut *check, names, nodes, lists, summaries, node_e(nodes, item));
-            } else if kind == ITEM_FUN || kind == ITEM_NATIVE_FUN {
-                check_fn(&mut *check, names, nodes, lists, summaries, node_d(nodes, item));
-            } else if kind == ITEM_IMPL {
-                check_fn_list(&mut *check, names, nodes, lists, summaries, node_f(nodes, item));
-            } else if kind == ITEM_TRAIT {
-                check_fn_list(&mut *check, names, nodes, lists, summaries, node_e(nodes, item));
-            }
-        }
-        idx += 1;
-    }
-}
-
-fn check_fn_list(
-    check: &mut CheckContext,
-    names: &mut Vec<String>,
-    nodes: &mut Vec<i64>,
-    lists: &mut Vec<Vec<i64>>,
-    summaries: &mut Vec<(i64, Vec<i64>)>,
-    list: i64,
-) {
-    let count = list_len(lists, list);
-    let mut idx = 0i64;
-    while idx < count {
-        check_fn(&mut *check, names, nodes, lists, summaries, list_get(lists, list, idx));
-        idx += 1;
-    }
-}
-
-fn check_fn(
-    check: &mut CheckContext,
-    names: &mut Vec<String>,
-    nodes: &mut Vec<i64>,
-    lists: &mut Vec<Vec<i64>>,
-    summaries: &mut Vec<(i64, Vec<i64>)>,
-    fn_node: i64,
-) {
-    if node_tag(nodes, fn_node) != NODE_FN {
-        return;
-    }
-    let mut f: F = (
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    );
-    let mut b: B = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), NONE, NONE, NONE, NONE, Vec::new(), Vec::new());
-    let mut ctx: Ctx = (names, nodes, lists, check.errors, summaries, check.notes);
-    if !build_fn(&mut f, &mut b, &mut ctx, fn_node) {
-        return;
-    }
-    let entry = 0i64;
-    analyze_fn(&mut f, &mut ctx, entry);
-}
-
-fn analyze_fn(f: &mut F, ctx: &mut Ctx, entry: i64) {
+fn analyze_fn(f: &F, ctx: &mut Ctx, entry: i64) {
     let live_after = compute_liveness(f, ctx);
     let flow = linear_fixpoint(f, ctx, entry);
-    let entry_origins = origin_fixpoint(f, ctx, entry);
-    let entry_cont = container_fixpoint(f, ctx, entry);
-    report(f, ctx, &live_after, &flow, &entry_origins, &entry_cont);
-}
-
-fn same_set(a: &[i64], b: &[i64]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut idx = 0usize;
-    while idx < a.len() {
-        match a.get(idx) {
-            Some(v) => {
-                if !list_has(b, *v) {
-                    return false;
-                }
-            }
-            None => break,
-        }
-        idx += 1;
-    }
-    true
-}
-
-fn remove_value(set: &mut Vec<i64>, value: i64) {
-    let mut idx = 0usize;
-    while idx < set.len() {
-        match set.get(idx) {
-            Some(v) => {
-                if *v == value {
-                    set.remove(idx);
-                    return;
-                }
-            }
-            None => break,
-        }
-        idx += 1;
-    }
-}
-
-fn append_unique(set: &mut Vec<i64>, value: i64) {
+    let origin_flow = origin_fixpoint(f, ctx, entry);
+    let container = container_fixpoint(f, ctx, entry);
+    let facts = ReportFacts {
+        live_after: &live_after,
+        linear: &flow,
+        entry_origins: &origin_flow.entry,
+        resolved_ops: &origin_flow.resolved_ops,
+        entry_cont: &container.entry,
+        entry_tokens: &container.entry_tokens,
+    };
+    report(f, ctx, &facts);
+}fn append_unique(set: &mut Vec<i64>, value: i64) {
     if value >= 0 && !list_has(set, value) {
+        set.push(value);
+    }
+}
+
+fn append_origin_unique(set: &mut Vec<i64>, value: i64) {
+    if (value >= 0 || is_ref_origin(value)) && !list_has(set, value) {
         set.push(value);
     }
 }
@@ -2337,120 +2263,95 @@ fn op_defs(f: &F, op: i64) -> i64 {
     }
 }
 
-fn block_reborrows(f: &F, block: i64) -> Vec<i64> {
-    let mut out: Vec<i64> = Vec::new();
-    let (first, last) = block_op_range(f, block);
-    let mut op = first;
-    while op <= last {
-        let row = op_at(f, op);
-        if (row.0 == OP_BORROW || row.0 == OP_BORROW_M) && row.1 >= 0 && binding_at(f, row.1).3 == 1 {
-            append_unique(&mut out, row.1);
-        }
-        op += 1;
-    }
-    out
-}
-
-fn compute_liveness(f: &F, ctx: &mut Ctx) -> Vec<Vec<i64>> {
-    let nblocks = f.6.len() as i64;
-    let nbind = f.0.len() as i64;
-    let mut live_in: Vec<Vec<i64>> = Vec::new();
-    let mut live_out: Vec<Vec<i64>> = Vec::new();
-    let mut blk = 0i64;
-    while blk < nblocks {
-        live_in.push(Vec::new());
-        live_out.push(Vec::new());
-        blk += 1;
-    }
-    // Live sets hold binding indices: 2 sets per block (in/out), each growing at most nbind times.
-    let cap = nblocks * nbind * 2 + 1;
+fn compute_liveness(f: &F, ctx: &mut Ctx) -> FlatBits {
+    let nblocks = f.6.len();
+    let nbind = f.0.len();
+    let mut live_in = FlatBits::new(nblocks, nbind);
+    let mut live_out = FlatBits::new(nblocks, nbind);
+    let mut out = FlatBits::new(1, nbind);
+    let mut inn = FlatBits::new(1, nbind);
+    let cap = nblocks.saturating_mul(nbind).saturating_mul(2).saturating_add(1);
     let mut guard = 0usize;
     loop {
         guard += 1;
-        if guard > cap as usize {
+        if guard > cap {
             push_internal(ctx.3, "internal: liveness analysis did not converge");
             break;
         }
         let mut changed = false;
-        let mut blk = 0i64;
-        while blk < nblocks {
-            let mut out: Vec<i64> = Vec::new();
-            let succs = succ_of(f, blk);
-            let mut si = 0usize;
-            while si < succs.len() {
-                match succs.get(si) {
-                    Some(s) => {
-                        if let Some(list) = live_in.get(*s as usize) {
-                            append_list_unique(&mut out, list);
+        let mut block = 0usize;
+        while block < nblocks {
+            out.clear_row(0);
+            if let Some(succs) = f.8.get(block) {
+                let mut si = 0usize;
+                while si < succs.len() {
+                    let succ = succs[si] as usize;
+                    let mut binding = 0usize;
+                    while binding < nbind {
+                        if live_in.has(succ, binding) {
+                            out.set(0, binding);
                         }
+                        binding += 1;
                     }
-                    None => break,
+                    si += 1;
                 }
-                si += 1;
             }
-            append_list_unique(&mut out, &block_reborrows(f, blk));
-            let mut inn = out.clone();
-            let (first, last) = block_op_range(f, blk);
+            let (first, last) = block_op_range(f, block as i64);
             let mut op = first;
             while op <= last {
-                let def = op_defs(f, op);
-                if def >= 0 {
-                    remove_value(&mut inn, def);
-                }
-                let useb = op_uses(f, op);
-                if useb >= 0 {
-                    append_unique(&mut inn, useb);
+                let row = op_at(f, op);
+                if (row.0 == OP_BORROW || row.0 == OP_BORROW_M) && row.1 >= 0 && binding_at(f, row.1).3 == 1 {
+                    out.set(0, row.1 as usize);
                 }
                 op += 1;
             }
-            if !same_set(&live_out[blk as usize], &out) {
-                live_out[blk as usize] = out;
+            inn.copy_row(0, &out, 0);
+            op = first;
+            while op <= last {
+                let def = op_defs(f, op);
+                if def >= 0 {
+                    inn.clear(0, def as usize);
+                }
+                let useb = op_uses(f, op);
+                if useb >= 0 {
+                    inn.set(0, useb as usize);
+                }
+                op += 1;
+            }
+            if !live_out.row_equal(block, &out, 0) {
+                live_out.copy_row(block, &out, 0);
                 changed = true;
             }
-            if !same_set(&live_in[blk as usize], &inn) {
-                live_in[blk as usize] = inn;
+            if !live_in.row_equal(block, &inn, 0) {
+                live_in.copy_row(block, &inn, 0);
                 changed = true;
             }
-            blk += 1;
+            block += 1;
         }
         if !changed {
             break;
         }
     }
-    let mut live_after: Vec<Vec<i64>> = Vec::new();
-    let mut opi = 0i64;
-    while opi < f.4.len() as i64 {
-        live_after.push(Vec::new());
-        opi += 1;
-    }
-    let mut blk = 0i64;
-    while blk < nblocks {
-        let mut set = live_out[blk as usize].clone();
-        let (first, last) = block_op_range(f, blk);
+    let mut live_after = FlatBits::new(f.4.len(), nbind);
+    let mut set = FlatBits::new(1, nbind);
+    let mut block = 0usize;
+    while block < nblocks {
+        set.copy_row(0, &live_out, block);
+        let (first, last) = block_op_range(f, block as i64);
         let mut op = last;
         while op >= first {
-            if let Some(slot) = live_after.get_mut(op as usize) {
-                slot.clear();
-                let mut j = 0usize;
-                while j < set.len() {
-                    match set.get(j) {
-                        Some(v) => slot.push(*v),
-                        None => break,
-                    }
-                    j += 1;
-                }
-            }
+            live_after.copy_row(op as usize, &set, 0);
             let useb = op_uses(f, op);
             if useb >= 0 {
-                append_unique(&mut set, useb);
+                set.set(0, useb as usize);
             }
             let def = op_defs(f, op);
             if def >= 0 {
-                remove_value(&mut set, def);
+                set.clear(0, def as usize);
             }
             op -= 1;
         }
-        blk += 1;
+        block += 1;
     }
     live_after
 }
@@ -2709,6 +2610,15 @@ fn apply_block_linear(f: &F, block: i64, state: &mut [i64], report: bool, ctx: &
 // (per-block entry states, per-block exit states, inconsistent joins).
 type LinearFlow = (Vec<Vec<i64>>, Vec<Vec<i64>>, Vec<(i64, i64)>);
 
+struct ReportFacts<'a> {
+    live_after: &'a FlatBits,
+    linear: &'a LinearFlow,
+    entry_origins: &'a [Vec<Vec<i64>>],
+    resolved_ops: &'a [Vec<i64>],
+    entry_cont: &'a [Vec<i64>],
+    entry_tokens: &'a [Vec<i64>],
+}
+
 fn linear_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> LinearFlow {
     let nblocks = f.6.len() as i64;
     let npaths = f.2.len() as i64;
@@ -2842,35 +2752,91 @@ fn join_cont(inn: &mut [i64], pout: &[i64]) {
     }
 }
 
-fn apply_block_container(f: &F, block: i64, cont: &mut [i64]) {
+fn apply_block_container(f: &F, block: i64, cont: &mut [i64], tokens: &mut [i64]) {
     let (first, last) = block_op_range(f, block);
     let mut op = first;
     while op <= last {
         let row = op_at(f, op);
         let kind = row.0;
         if kind == OP_CONT_EMPTY {
-            cont_set(cont, row.1, C_EMPTY);
+            if row.3 >= 0 {
+                let container = if row.4 >= 0 { row.4 } else { row.1 };
+                if container >= 0 && (container as usize) < tokens.len() && tokens[container as usize] == row.3 {
+                    cont_set(cont, container, C_EMPTY);
+                }
+            } else {
+                cont_set(cont, row.1, C_EMPTY);
+                if row.1 >= 0 && (row.1 as usize) < tokens.len() {
+                    tokens[row.1 as usize] = TOKEN_UNKNOWN;
+                }
+            }
         } else if kind == OP_CONT_MAY {
             cont_set(cont, row.1, C_MAY);
+            if row.1 >= 0 && (row.1 as usize) < tokens.len() {
+                tokens[row.1 as usize] = TOKEN_UNKNOWN;
+            }
+        } else if kind == OP_CONT_LINK {
+            if row.1 >= 0 && (row.1 as usize) < tokens.len() {
+                tokens[row.1 as usize] = row.4;
+            }
+        } else if kind == OP_CONT_COPY {
+            let source = row.3;
+            if cont_get(cont, source) == C_MAY {
+                cont_set(cont, row.1, C_MAY);
+            } else {
+                cont_set(cont, row.1, C_EMPTY);
+            }
+            if row.1 >= 0 && (row.1 as usize) < tokens.len() {
+                tokens[row.1 as usize] = TOKEN_UNKNOWN;
+            }
+        } else if kind == OP_CONT_EXTRACT
+            && row.1 >= 0 && (row.1 as usize) < tokens.len()
+        {
+            tokens[row.1 as usize] = row.3;
         }
         op += 1;
+    }
+}
+
+fn join_tokens(inn: &mut [i64], pred: &[i64]) {
+    let mut idx = 0usize;
+    while idx < inn.len() {
+        let current = inn[idx];
+        let incoming = match pred.get(idx) {
+            Some(value) => *value,
+            None => TOKEN_UNKNOWN,
+        };
+        if current == TOKEN_UNSET {
+            inn[idx] = incoming;
+        } else if current != TOKEN_UNKNOWN && incoming != current {
+            inn[idx] = TOKEN_UNKNOWN;
+        }
+        idx += 1;
     }
 }
 
 // The per-container-binding drain lattice (EmptyOrDrained < MayContain) is
 // joined with the least upper bound at block entries, so every cell changes
 // at most once and the fixpoint converges monotonically over loops.
-fn container_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> Vec<Vec<i64>> {
+fn container_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> ContainerFlow {
     let nblocks = f.6.len() as i64;
     let nbind = f.0.len() as i64;
     let mut entry_cont: Vec<Vec<i64>> = Vec::new();
     let mut exit_cont: Vec<Vec<i64>> = Vec::new();
+    let mut entry_tokens: Vec<Vec<i64>> = Vec::new();
+    let mut exit_tokens: Vec<Vec<i64>> = Vec::new();
     let mut blk = 0i64;
     while blk < nblocks {
         entry_cont.push(empty_cont(nbind));
         exit_cont.push(empty_cont(nbind));
+        entry_tokens.push(vec![TOKEN_UNKNOWN; nbind as usize]);
+        exit_tokens.push(vec![TOKEN_UNKNOWN; nbind as usize]);
         blk += 1;
     }
+    let mut inn = empty_cont(nbind);
+    let mut out = empty_cont(nbind);
+    let mut in_tokens = vec![TOKEN_UNKNOWN; nbind as usize];
+    let mut out_tokens = vec![TOKEN_UNKNOWN; nbind as usize];
     let cap = nblocks * nbind * 2 + 1;
     let mut guard = 0usize;
     loop {
@@ -2882,30 +2848,41 @@ fn container_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> Vec<Vec<i64>> {
         let mut changed = false;
         let mut blk = 0i64;
         while blk < nblocks {
-            let mut inn = empty_cont(nbind);
-            if blk != entry {
-                let preds = pred_of(f, blk);
+            inn.fill(C_EMPTY);
+            in_tokens.fill(TOKEN_UNSET);
+            if blk == entry {
+                in_tokens.fill(TOKEN_UNKNOWN);
+            } else if let Some(preds) = f.9.get(blk as usize) {
                 let mut pi = 0usize;
                 while pi < preds.len() {
-                    match preds.get(pi) {
-                        Some(p) => {
-                            if let Some(list) = exit_cont.get(*p as usize) {
-                                join_cont(&mut inn, list);
-                            }
-                        }
-                        None => break,
+                    let pred = preds[pi] as usize;
+                    if let Some(list) = exit_cont.get(pred) {
+                        join_cont(&mut inn, list);
+                    }
+                    if let Some(tokens) = exit_tokens.get(pred) {
+                        join_tokens(&mut in_tokens, tokens);
                     }
                     pi += 1;
                 }
+                let mut token = 0usize;
+                while token < in_tokens.len() {
+                    if in_tokens[token] == TOKEN_UNSET {
+                        in_tokens[token] = TOKEN_UNKNOWN;
+                    }
+                    token += 1;
+                }
             }
-            let mut out = inn.clone();
-            apply_block_container(f, blk, &mut out);
-            if !same_cont(&entry_cont[blk as usize], &inn) {
-                entry_cont[blk as usize] = inn;
+            out.copy_from_slice(&inn);
+            out_tokens.copy_from_slice(&in_tokens);
+            apply_block_container(f, blk, &mut out, &mut out_tokens);
+            if !same_cont(&entry_cont[blk as usize], &inn) || entry_tokens[blk as usize] != in_tokens {
+                entry_cont[blk as usize].copy_from_slice(&inn);
+                entry_tokens[blk as usize].copy_from_slice(&in_tokens);
                 changed = true;
             }
-            if !same_cont(&exit_cont[blk as usize], &out) {
-                exit_cont[blk as usize] = out;
+            if !same_cont(&exit_cont[blk as usize], &out) || exit_tokens[blk as usize] != out_tokens {
+                exit_cont[blk as usize].copy_from_slice(&out);
+                exit_tokens[blk as usize].copy_from_slice(&out_tokens);
                 changed = true;
             }
             blk += 1;
@@ -2914,119 +2891,214 @@ fn container_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> Vec<Vec<i64>> {
             break;
         }
     }
-    entry_cont
+    ContainerFlow { entry: entry_cont, entry_tokens }
 }
 
-fn empty_origins(nbind: i64) -> Vec<Vec<i64>> {
-    let mut out: Vec<Vec<i64>> = Vec::new();
-    let mut idx = 0i64;
-    while idx < nbind {
-        out.push(Vec::new());
-        idx += 1;
+fn origin_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> OriginFlow {
+    let nblocks = f.6.len();
+    let nbind = f.0.len();
+    let nloans = f.3.len();
+    let mut entry_loans = FlatBits::new(nblocks * nbind, nloans);
+    let mut exit_loans = FlatBits::new(nblocks * nbind, nloans);
+    let mut entry_refs = FlatBits::new(nblocks * nbind, nbind);
+    let mut exit_refs = FlatBits::new(nblocks * nbind, nbind);
+    let mut in_loans = FlatBits::new(nbind, nloans);
+    let mut out_loans = FlatBits::new(nbind, nloans);
+    let mut in_refs = FlatBits::new(nbind, nbind);
+    let mut out_refs = FlatBits::new(nbind, nbind);
+    let mut resolved_ops: Vec<Vec<i64>> = Vec::new();
+    let mut op_index = 0usize;
+    while op_index < f.4.len() {
+        resolved_ops.push(Vec::new());
+        op_index += 1;
     }
-    out
-}
-
-fn apply_block_origins(f: &F, block: i64, origins: &mut [Vec<i64>]) {
-    let (first, last) = block_op_range(f, block);
-    let mut op = first;
-    while op <= last {
-        let row = op_at(f, op);
-        let kind = row.0;
-        let binding = row.1;
-        if binding >= 0 && (kind == OP_BIND || kind == OP_ASSIGN) && (row.3 == 1 || !op_loans_at(f, op).is_empty()) {
-            let loans = op_loans_at(f, op);
-            if let Some(slot) = origins.get_mut(binding as usize) {
-                slot.clear();
-                let mut j = 0usize;
-                while j < loans.len() {
-                    match loans.get(j) {
-                        Some(loan) => slot.push(*loan),
-                        None => break,
-                    }
-                    j += 1;
-                }
-            }
-        }
-        op += 1;
-    }
-}
-
-fn origin_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> Vec<Vec<Vec<i64>>> {
-    let nblocks = f.6.len() as i64;
-    let nbind = f.0.len() as i64;
-    let nloans = f.3.len() as i64;
-    let mut entry_origins: Vec<Vec<Vec<i64>>> = Vec::new();
-    let mut exit_origins: Vec<Vec<Vec<i64>>> = Vec::new();
-    let mut blk = 0i64;
-    while blk < nblocks {
-        entry_origins.push(empty_origins(nbind));
-        exit_origins.push(empty_origins(nbind));
-        blk += 1;
-    }
-    // Entry sets grow at most nloans times per (block, binding); exit sets snap once to a fixed loan list.
-    let cap = nblocks * nbind * (nloans + 1) + 1;
+    let mut resolved: Vec<i64> = Vec::with_capacity(nloans + nbind);
+    let mut pending: Vec<i64> = Vec::with_capacity(nloans + nbind);
+    let mut visited_ops = FlatBits::new(1, f.4.len());
+    let cap = nblocks.saturating_mul(nbind).saturating_mul(nloans + 1).saturating_add(1);
     let mut guard = 0usize;
     loop {
         guard += 1;
-        if guard > cap as usize {
+        if guard > cap {
             push_internal(ctx.3, "internal: borrow-origin analysis did not converge");
             break;
         }
         let mut changed = false;
-        let mut blk = 0i64;
-        while blk < nblocks {
-            let mut inn = empty_origins(nbind);
-            if blk != entry {
-                let preds = pred_of(f, blk);
+        let mut block = 0usize;
+        while block < nblocks {
+            let mut binding = 0usize;
+            while binding < nbind {
+                in_loans.clear_row(binding);
+                in_refs.clear_row(binding);
+                binding += 1;
+            }
+            if block as i64 != entry
+                && let Some(preds) = f.9.get(block)
+            {
                 let mut pi = 0usize;
                 while pi < preds.len() {
-                    match preds.get(pi) {
-                        Some(p) => {
-                            if let Some(list) = exit_origins.get(*p as usize) {
-                                let mut bi = 0usize;
-                                while bi < nbind as usize {
-                                    if let (Some(dst), Some(src)) = (inn.get_mut(bi), list.get(bi)) {
-                                        append_prod_unique(dst, src);
-                                    }
-                                    bi += 1;
-                                }
+                    let pred = preds[pi] as usize;
+                    let mut bidx = 0usize;
+                    while bidx < nbind {
+                        let row = pred * nbind + bidx;
+                        let mut loan = 0usize;
+                        while loan < nloans {
+                            if exit_loans.has(row, loan) {
+                                in_loans.set(bidx, loan);
                             }
+                            loan += 1;
                         }
-                        None => break,
+                        let mut source = 0usize;
+                        while source < nbind {
+                            if exit_refs.has(row, source) {
+                                in_refs.set(bidx, source);
+                            }
+                            source += 1;
+                        }
+                        bidx += 1;
                     }
                     pi += 1;
                 }
             }
-            let mut out = inn.clone();
-            apply_block_origins(f, blk, &mut out);
-            let mut eq_in = true;
-            let mut eq_out = true;
-            let mut bi = 0usize;
-            while bi < nbind as usize {
-                if !same_set(&entry_origins[blk as usize][bi], &inn[bi]) {
-                    eq_in = false;
+            out_loans.cells.copy_from_slice(&in_loans.cells);
+            out_refs.cells.copy_from_slice(&in_refs.cells);
+            let (first, last) = block_op_range(f, block as i64);
+            let mut op = first;
+            while op <= last {
+                let row = op_at(f, op);
+                let binding = row.1;
+                resolved.clear();
+                pending.clear();
+                visited_ops.clear_row(0);
+                if let Some(loans) = f.5.get(op as usize) {
+                    pending.extend(loans.iter().copied());
                 }
-                if !same_set(&exit_origins[blk as usize][bi], &out[bi]) {
-                    eq_out = false;
+                let mut pending_idx = 0usize;
+                while pending_idx < pending.len() {
+                    let origin = pending[pending_idx];
+                    pending_idx += 1;
+                    if is_call_origin(origin) {
+                        let call_op = call_op_of(origin);
+                        if call_op < 0 || visited_ops.has(0, call_op as usize) {
+                            continue;
+                        }
+                        visited_ops.set(0, call_op as usize);
+                        let mut fact_idx = 0usize;
+                        while fact_idx < f.11.len() {
+                            let fact = &f.11[fact_idx];
+                            if fact.0 == call_op {
+                                let mode = op_at(f, call_op).5;
+                                if mode == NAT_MODE_VIEW {
+                                    if let Some(first) = fact.2.first() {
+                                        pending.extend(first.iter().copied());
+                                    }
+                                } else if let Some(positions) = summary_of(ctx.4, fact.1) {
+                                    let mut position_idx = 0usize;
+                                    while position_idx < positions.len() {
+                                        let position = positions[position_idx] as usize;
+                                        if let Some(arg) = fact.2.get(position) {
+                                            pending.extend(arg.iter().copied());
+                                        }
+                                        position_idx += 1;
+                                    }
+                                } else {
+                                    let mut arg_idx = 0usize;
+                                    while arg_idx < fact.2.len() {
+                                        pending.extend(fact.2[arg_idx].iter().copied());
+                                        arg_idx += 1;
+                                    }
+                                }
+                                break;
+                            }
+                            fact_idx += 1;
+                        }
+                    } else {
+                        append_origin_unique(&mut resolved, origin);
+                    }
                 }
-                bi += 1;
+                if let Some(slot) = resolved_ops.get_mut(op as usize) {
+                    slot.clear();
+                    slot.extend(resolved.iter().copied());
+                }
+                let has_loans = match f.5.get(op as usize) {
+                    Some(list) => !list.is_empty(),
+                    None => false,
+                };
+                if binding >= 0 && (row.0 == OP_BIND || row.0 == OP_ASSIGN) && (row.3 == 1 || has_loans) {
+                    let target = binding as usize;
+                    if target < nbind {
+                        out_loans.clear_row(target);
+                        out_refs.clear_row(target);
+                        let mut ri = 0usize;
+                        while ri < resolved.len() {
+                            let value = resolved[ri];
+                            if is_ref_origin(value) {
+                                out_refs.set(target, (-1 - value) as usize);
+                            } else if value >= 0 {
+                                out_loans.set(target, value as usize);
+                            }
+                            ri += 1;
+                        }
+                    }
+                }
+                op += 1;
             }
-            if !eq_in {
-                entry_origins[blk as usize] = inn;
-                changed = true;
+            let mut bidx = 0usize;
+            while bidx < nbind {
+                let row = block * nbind + bidx;
+                if !entry_loans.row_equal(row, &in_loans, bidx) {
+                    entry_loans.copy_row(row, &in_loans, bidx);
+                    changed = true;
+                }
+                if !entry_refs.row_equal(row, &in_refs, bidx) {
+                    entry_refs.copy_row(row, &in_refs, bidx);
+                    changed = true;
+                }
+                if !exit_loans.row_equal(row, &out_loans, bidx) {
+                    exit_loans.copy_row(row, &out_loans, bidx);
+                    changed = true;
+                }
+                if !exit_refs.row_equal(row, &out_refs, bidx) {
+                    exit_refs.copy_row(row, &out_refs, bidx);
+                    changed = true;
+                }
+                bidx += 1;
             }
-            if !eq_out {
-                exit_origins[blk as usize] = out;
-                changed = true;
-            }
-            blk += 1;
+            block += 1;
         }
         if !changed {
             break;
         }
     }
-    entry_origins
+    let mut result: Vec<Vec<Vec<i64>>> = Vec::new();
+    let mut block = 0usize;
+    while block < nblocks {
+        let mut bindings: Vec<Vec<i64>> = Vec::new();
+        let mut binding = 0usize;
+        while binding < nbind {
+            let row = block * nbind + binding;
+            let mut values: Vec<i64> = Vec::new();
+            let mut source = 0usize;
+            while source < nbind {
+                if entry_refs.has(row, source) {
+                    values.push(ref_origin(source as i64));
+                }
+                source += 1;
+            }
+            let mut loan = 0usize;
+            while loan < nloans {
+                if entry_loans.has(row, loan) {
+                    values.push(loan as i64);
+                }
+                loan += 1;
+            }
+            bindings.push(values);
+            binding += 1;
+        }
+        result.push(bindings);
+        block += 1;
+    }
+    OriginFlow { entry: result, resolved_ops }
 }
 
 fn exit_where(kind: i64) -> &'static str {
@@ -3160,52 +3232,30 @@ fn collect_origin_loans(f: &F, origins: &[Vec<i64>], binding: i64, out: &mut Vec
     }
 }
 
-fn conflicts_at(f: &F, ctx: &mut Ctx, op: i64, origins: &[Vec<i64>], live_after: &[Vec<i64>]) {
+fn conflicts_at(f: &F, ctx: &mut Ctx, op: i64, origins: &[Vec<i64>], live_after: &FlatBits) {
     let row = op_at(f, op);
     let kind = row.0;
     if kind != OP_BORROW && kind != OP_BORROW_M && kind != OP_MOVE && kind != OP_ASSIGN {
         return;
     }
     let binding = row.1;
-    if binding < 0 {
-        return;
-    }
-    if kind == OP_ASSIGN && row.3 == 1 && row.4 == 0 {
+    if binding < 0 || (kind == OP_ASSIGN && row.3 == 1 && row.4 == 0) {
         return;
     }
     let new_key = if kind == OP_BORROW || kind == OP_BORROW_M { row.5 } else { NONE };
-    let live = match live_after.get(op as usize) {
-        Some(list) => list,
-        None => return,
-    };
     let name = format!("{}{}", name_text(ctx.0, binding_at(f, binding).0), index_suffix(ctx, new_key));
-    let mut li = 0usize;
-    while li < live.len() {
-        let r = match live.get(li) {
-            Some(v) => *v,
-            None => break,
-        };
-        if r == binding {
-            li += 1;
-            continue;
-        }
-        if binding_at(f, r).3 == 1 {
+    let mut r = 0usize;
+    while r < f.0.len() {
+        if r != binding as usize && live_after.has(op as usize, r) && binding_at(f, r as i64).3 == 1 {
             let mut loans: Vec<i64> = Vec::new();
             let mut visited: Vec<i64> = Vec::new();
-            collect_origin_loans(f, origins, r, &mut loans, &mut visited, op);
+            collect_origin_loans(f, origins, r as i64, &mut loans, &mut visited, op);
             let mut oi = 0usize;
             while oi < loans.len() {
-                let loan = match loans.get(oi) {
-                    Some(v) => *v,
-                    None => break,
-                };
+                let loan = loans[oi];
                 let lrow = loan_at(f, loan);
                 if lrow.0 == binding && index_keys_conflict(ctx, new_key, lrow.3) {
-                    let conflict = if kind == OP_MOVE || kind == OP_ASSIGN || kind == OP_BORROW_M {
-                        true
-                    } else {
-                        lrow.1 == L_MUT
-                    };
+                    let conflict = if kind == OP_MOVE || kind == OP_ASSIGN || kind == OP_BORROW_M { true } else { lrow.1 == L_MUT };
                     if conflict {
                         let message = if kind == OP_MOVE {
                             format!("cannot move '{}' while it is borrowed", name)
@@ -3222,7 +3272,7 @@ fn conflicts_at(f: &F, ctx: &mut Ctx, op: i64, origins: &[Vec<i64>], live_after:
                 oi += 1;
             }
         }
-        li += 1;
+        r += 1;
     }
 }
 
@@ -3278,8 +3328,11 @@ fn binding_names(ctx: &mut Ctx, f: &F, ids: &[i64]) -> String {
     names.join(", ")
 }
 
-fn ret_ref_check(f: &F, ctx: &mut Ctx, op: i64, origins: &[Vec<i64>]) -> Option<Vec<i64>> {
-    let prod = op_loans_at(f, op);
+fn ret_ref_check(f: &F, ctx: &mut Ctx, op: i64, origins: &[Vec<i64>], resolved_ops: &[Vec<i64>]) -> Option<Vec<i64>> {
+    let prod = match resolved_ops.get(op as usize) {
+        Some(values) => values.clone(),
+        None => Vec::new(),
+    };
     let mut sources: Vec<i64> = Vec::new();
     let mut local = false;
     let mut visited: Vec<i64> = Vec::new();
@@ -3290,6 +3343,14 @@ fn ret_ref_check(f: &F, ctx: &mut Ctx, op: i64, origins: &[Vec<i64>]) -> Option<
         return None;
     }
     if sources.is_empty() {
+        let raw = op_loans_at(f, op);
+        let mut idx = 0usize;
+        while idx < raw.len() {
+            if is_call_origin(raw[idx]) {
+                return Some(Vec::new());
+            }
+            idx += 1;
+        }
         push_linear(ctx.3, "returned borrow has no traceable origin: it does not derive from any input reference parameter", row.6, row.7, row.8);
         return None;
     }
@@ -3307,36 +3368,29 @@ fn ret_ref_check(f: &F, ctx: &mut Ctx, op: i64, origins: &[Vec<i64>]) -> Option<
     Some(sources)
 }
 
-fn repoint_origin(f: &F, row: (i64, i64, i64, i64, i64, i64, i64, i64, i64), op: i64, origins: &mut [Vec<i64>]) {
+fn repoint_origin(row: (i64, i64, i64, i64, i64, i64, i64, i64, i64), op: i64, resolved_ops: &[Vec<i64>], origins: &mut [Vec<i64>]) {
     let kind = row.0;
     let binding = row.1;
     let is_ref_bind = kind == OP_BIND && row.3 == 1 && row.4 == 1;
     let is_ref_assign = kind == OP_ASSIGN && row.3 == 1 && row.4 == 0;
-    if binding >= 0 && (is_ref_bind || is_ref_assign) {
-        let loans = op_loans_at(f, op);
-        if let Some(slot) = origins.get_mut(binding as usize) {
-            slot.clear();
-            let mut j = 0usize;
-            while j < loans.len() {
-                match loans.get(j) {
-                    Some(loan) => slot.push(*loan),
-                    None => break,
-                }
-                j += 1;
-            }
-        }
+    if binding >= 0
+        && (is_ref_bind || is_ref_assign)
+        && let Some(resolved) = resolved_ops.get(op as usize)
+        && let Some(slot) = origins.get_mut(binding as usize)
+    {
+        slot.clear();
+        slot.extend(resolved.iter().copied());
     }
 }
 
 fn compute_summary(f: &F, ctx: &mut Ctx, entry: i64, fn_node: i64) -> Option<Vec<i64>> {
-    let entry_origins = origin_fixpoint(f, ctx, entry);
+    let origin_flow = origin_fixpoint(f, ctx, entry);
     let mut sources: Vec<i64> = Vec::new();
     let mut local = false;
-    let mut saw_ret_ref = false;
     let nblocks = f.6.len() as i64;
     let mut blk = 0i64;
     while blk < nblocks {
-        let mut origins = match entry_origins.get(blk as usize) {
+        let mut origins = match origin_flow.entry.get(blk as usize) {
             Some(list) => list.clone(),
             None => Vec::new(),
         };
@@ -3345,12 +3399,14 @@ fn compute_summary(f: &F, ctx: &mut Ctx, entry: i64, fn_node: i64) -> Option<Vec
         while op <= last {
             let row = op_at(f, op);
             if row.0 == OP_BIND || row.0 == OP_ASSIGN {
-                repoint_origin(f, row, op, &mut origins);
-            } else if row.0 == OP_RET_REF {
-                saw_ret_ref = true;
-                let prod = op_loans_at(f, op);
+                repoint_origin(row, op, &origin_flow.resolved_ops, &mut origins);
+            } else if row.0 == OP_RET_REF && row.4 != 1 {
+                let prod = match origin_flow.resolved_ops.get(op as usize) {
+                    Some(values) => values.as_slice(),
+                    None => &[],
+                };
                 let mut visited: Vec<i64> = Vec::new();
-                trace_origin(f, &origins, &prod, &mut sources, &mut local, &mut visited);
+                trace_origin(f, &origins, prod, &mut sources, &mut local, &mut visited);
             }
             op += 1;
         }
@@ -3372,7 +3428,7 @@ fn compute_summary(f: &F, ctx: &mut Ctx, entry: i64, fn_node: i64) -> Option<Vec
     // being told the origin cannot be traced.  The set only ever grows, so
     // a function that later turns out to also return an input-derived
     // borrow converges to that larger set.
-    if !saw_ret_ref && returns_reference(ctx, fn_node) {
+    if returns_reference(ctx, fn_node) {
         return Some(Vec::new());
     }
     None
@@ -3557,14 +3613,13 @@ fn span_cell_set(spans: &mut [(i64, i64, i64)], path: i64, span: (i64, i64, i64)
     }
 }
 
-fn report(
-    f: &F,
-    ctx: &mut Ctx,
-    live_after: &[Vec<i64>],
-    flow: &LinearFlow,
-    entry_origins: &[Vec<Vec<i64>>],
-    entry_cont: &[Vec<i64>],
-) {
+fn report(f: &F, ctx: &mut Ctx, facts: &ReportFacts) {
+    let live_after = facts.live_after;
+    let flow = facts.linear;
+    let entry_origins = facts.entry_origins;
+    let resolved_ops = facts.resolved_ops;
+    let entry_cont = facts.entry_cont;
+    let entry_tokens = facts.entry_tokens;
     let (entry_state, exit_states, inconsistencies) = flow;
     let mut idx = 0usize;
     while idx < inconsistencies.len() {
@@ -3613,6 +3668,10 @@ fn report(
             Some(list) => list.clone(),
             None => Vec::new(),
         };
+        let mut tokens = match entry_tokens.get(blk as usize) {
+            Some(list) => list.clone(),
+            None => Vec::new(),
+        };
         // The span of the move that most recently consumed each path within
         // this block's replay.  Same-block only: a value moved by an earlier
         // block has no single unambiguous "moved here" site (the CFG may
@@ -3625,7 +3684,7 @@ fn report(
             let kind = row.0;
             let binding = row.1;
             if kind == OP_BIND {
-                repoint_origin(f, row, op, &mut origins);
+                repoint_origin(row, op, resolved_ops, &mut origins);
                 if binding >= 0 && root_path_of(f, binding) != NONE {
                     bind_state_live(f, &mut state, binding);
                 }
@@ -3652,7 +3711,7 @@ fn report(
                 }
             } else if kind == OP_ASSIGN {
                 if row.3 == 1 && row.4 == 0 && binding >= 0 {
-                    repoint_origin(f, row, op, &mut origins);
+                    repoint_origin(row, op, resolved_ops, &mut origins);
                 } else {
                     conflicts_at(f, ctx, op, &origins, live_after);
                 }
@@ -3668,17 +3727,59 @@ fn report(
                 borrow_after_move_check(f, &state, binding, row.2, ctx, (row.6, row.7, row.8));
             } else if kind == OP_EXIT {
                 exit_check(f, ctx, op, &state);
-            } else if kind == OP_RET_REF {
-                match ret_ref_check(f, ctx, op, &origins) {
+            } else if kind == OP_RET_REF && row.4 != 1 {
+                match ret_ref_check(f, ctx, op, &origins, resolved_ops) {
                     Some(sources) => append_prod_unique(&mut fn_ret_sources, &sources),
                     None => fn_ret_errored = true,
                 }
+            } else if kind == OP_LINEAR_ERROR {
+                let segs = node_b(ctx.1, row.2);
+                let count = list_len(ctx.2, segs);
+                let text = dotted_seg_name(ctx, row.0, segs, count);
+                let message = if row.3 == LINEAR_ERR_UNTRACKED_MUT {
+                    format!("cannot consume linear value '{}' through a mutable reference to an untracked temporary; bind the referent to a local first", text)
+                } else if row.3 == LINEAR_ERR_WHOLE_MUT {
+                    format!("cannot consume the whole value '{}' through a mutable reference; move the referent into a local and consume that instead", text)
+                } else {
+                    format!("cannot copy linear value '{}' out of a shared reference", text)
+                };
+                push_linear(ctx.3, &message, row.6, row.7, row.8);
             } else if kind == OP_CONT_EMPTY {
-                cont_set(&mut cont, binding, C_EMPTY);
+                if row.3 >= 0 {
+                    let container = if row.4 >= 0 { row.4 } else { binding };
+                    if container >= 0 && (container as usize) < tokens.len() && tokens[container as usize] == row.3 {
+                        cont_set(&mut cont, container, C_EMPTY);
+                    }
+                } else {
+                    cont_set(&mut cont, binding, C_EMPTY);
+                    if binding >= 0 && (binding as usize) < tokens.len() {
+                        tokens[binding as usize] = TOKEN_UNKNOWN;
+                    }
+                }
             } else if kind == OP_CONT_MAY {
                 cont_set(&mut cont, binding, C_MAY);
+                if binding >= 0 && (binding as usize) < tokens.len() {
+                    tokens[binding as usize] = TOKEN_UNKNOWN;
+                }
+            } else if kind == OP_CONT_LINK {
+                if binding >= 0 && (binding as usize) < tokens.len() {
+                    tokens[binding as usize] = row.4;
+                }
+            } else if kind == OP_CONT_COPY {
+                if cont_get(&cont, row.3) == C_MAY {
+                    cont_set(&mut cont, binding, C_MAY);
+                } else {
+                    cont_set(&mut cont, binding, C_EMPTY);
+                }
+                if binding >= 0 && (binding as usize) < tokens.len() {
+                    tokens[binding as usize] = TOKEN_UNKNOWN;
+                }
+            } else if kind == OP_CONT_EXTRACT {
+                if binding >= 0 && (binding as usize) < tokens.len() {
+                    tokens[binding as usize] = row.3;
+                }
             } else if kind == OP_CONT_FREE
-                && cont_get(&cont, binding) == C_MAY
+                && (binding < 0 || cont_get(&cont, binding) == C_MAY)
             {
                 push_linear(
                     ctx.3,
@@ -3687,20 +3788,22 @@ fn report(
                     row.7,
                     row.8,
                 );
-                let binding_row = binding_at(f, binding);
-                let name = name_text(ctx.0, binding_row.0);
-                explain_unconsumed(f, ctx, binding, &name, binding_row.1);
-                let bind_span = bind_span_of(f, binding);
-                if bind_span.0 != NO_FILE {
-                    push_note_for_last(
-                        ctx.3,
-                        ctx.5,
-                        "extract every linear element through the container's native extraction operation before freeing it",
-                        bind_span.0,
-                        bind_span.1,
-                        bind_span.2,
-                        NOTE_GUIDANCE,
-                    );
+                if binding >= 0 {
+                    let binding_row = binding_at(f, binding);
+                    let name = name_text(ctx.0, binding_row.0);
+                    explain_unconsumed(f, ctx, binding, &name, binding_row.1);
+                    let bind_span = bind_span_of(f, binding);
+                    if bind_span.0 != NO_FILE {
+                        push_note_for_last(
+                            ctx.3,
+                            ctx.5,
+                            "extract every linear element through the container's native extraction operation before freeing it",
+                            bind_span.0,
+                            bind_span.1,
+                            bind_span.2,
+                            NOTE_GUIDANCE,
+                        );
+                    }
                 }
             }
             op += 1;
@@ -3973,11 +4076,8 @@ use Collections.vec_new
 use Collections.vec_free
 "#;
 
-    // Pins the fix to the stale-extraction-fact leak: `b.8` recorded that
-    // `popped` came from popping `v`, and nothing invalidated that record
-    // when `v` was refilled before the match on `popped` read it — so the
-    // match's Err arm still (wrongly) proved `v` drained, and `vec_free(v)`
-    // afterward leaked whatever the intervening push added.
+    // Verifies that a refill after extraction prevents a later match from
+    // proving the container drained.
     #[test]
     fn refilling_a_container_after_an_extraction_forgets_the_extraction_proved_it_empty() {
         let source = format!(
@@ -4010,9 +4110,7 @@ end
         assert!(errors.iter().any(|m| m.contains("cannot free container holding linear elements")), "{:?}", errors);
     }
 
-    // Same category, the `b.9` half: `w` moved from `v`, which was fresh
-    // from `vec_new` when it was created but had since been refilled — `w`
-    // must not inherit `v`'s stale "provably empty" fact.
+    // Verifies that moving a refilled container preserves its MayContain state.
     #[test]
     fn moving_a_refilled_container_forgets_it_was_ever_provably_empty() {
         let source = format!(
@@ -4088,16 +4186,13 @@ pub fun main() impure I64
   return 0
 end
 ",
-            CONTAINER_NATIVES
+            MINIMAL_CONTAINER_NATIVES
         );
         let errors = errors_for(&source);
         assert!(errors.iter().any(|m| m.contains("cannot free container holding linear elements")), "{:?}", errors);
     }
 
-    // Negative control: a directly-freed anonymous expression that IS
-    // provably fresh (a create call itself, not wrapped in a user function)
-    // must still be accepted -- create_provenance recognizes it same as it
-    // would for a `let` binding.
+    // A directly constructed empty container can be freed without drainage.
     #[test]
     fn freeing_a_directly_provably_fresh_container_is_still_accepted() {
         let source = format!(
