@@ -36,26 +36,37 @@ const BROKEN = /loading|please try again|something went wrong|couldn't load/i;
  */
 const SECTION_HEIGHT = 612;
 
+/*
+ * Commits dated well past anything in the repository's own log.
+ *
+ * The browser's refresh is merged into the history the build read from git
+ * rather than replacing it, so a stub dated in the repository's past would
+ * land somewhere in the middle of two hundred real rows. Dating it forward
+ * puts it at the top, where a test can find it without knowing anything about
+ * the log the build happened to read.
+ */
 const STUB = [
   {
     sha: "1111111111111111111111111111111111111111",
     commit: {
-      message: "resolver: a stubbed commit subject\n\nand a body that must not show",
-      author: { date: "2026-08-12T09:00:00Z" },
+      message:
+        "resolver: a stubbed commit subject" +
+        "\n\nand a body that must not show",
+      author: { date: "2099-08-12T09:00:00Z" },
     },
   },
   {
     sha: "2222222222222222222222222222222222222222",
     commit: {
       message: "codegen: a second stubbed subject",
-      author: { date: "2026-08-11T09:00:00Z" },
+      author: { date: "2099-08-11T09:00:00Z" },
     },
   },
   {
     sha: "3333333333333333333333333333333333333333",
     commit: {
       message: "resolver, codegen: a third, touching two areas",
-      author: { date: "2026-08-11T08:00:00Z" },
+      author: { date: "2099-08-11T08:00:00Z" },
     },
   },
 ];
@@ -72,7 +83,21 @@ function rows(page: Page) {
 
 /** One area's filter chip. */
 function chip(page: Page, name: string) {
-  return feed(page).getByRole("button", { name: new RegExp(`^${name}\\b`) });
+  return feed(page)
+    .locator("[data-areas]")
+    .getByRole("button", { name: new RegExp(`^${name}\\b`) });
+}
+
+/** One window chip — "7 days", "All". */
+function windowChip(page: Page, name: string) {
+  return feed(page)
+    .locator("[data-windows]")
+    .getByRole("button", { name: new RegExp(`^${name}\\b`) });
+}
+
+/** A row by its sha. */
+function row(page: Page, sha: string) {
+  return feed(page).locator(`[data-commit="${sha}"]`);
 }
 
 /** The section heading below the feed, for measuring whether anything moved. */
@@ -195,7 +220,12 @@ test.describe("without JavaScript", () => {
 });
 
 test.describe("when GitHub answers", () => {
-  /** Serves the stub, and waits for it to have replaced the prerendered list. */
+  /*
+   * The refresh is merged into the history the build read from git, not
+   * substituted for it. So what these assert is that the stub arrives and that
+   * the history it arrived alongside is still there — the older behaviour, of
+   * thirty commits replacing everything, would pass only half of them.
+   */
   async function withStub(page: Page, body: unknown = STUB) {
     await page.route(API, (route) =>
       route.fulfill({
@@ -211,11 +241,45 @@ test.describe("when GitHub answers", () => {
   test("the feed shows the commits it was given", async ({ page }) => {
     await withStub(page);
 
-    await expect(rows(page)).toHaveCount(STUB.length);
+    for (const stub of STUB) await expect(row(page, stub.sha)).toHaveCount(1);
     await expect(rows(page).first()).toContainText("a stubbed commit subject");
     // The message body is dropped; only the subject line is a row.
     await expect(feed(page)).not.toContainText("and a body that must not show");
     await expect(rows(page).first()).toContainText("1111111");
+  });
+
+  test("the refresh is merged into the history, not put in place of it", async ({
+    page,
+  }) => {
+    // The count before the refresh is the build's history; after it, that plus
+    // whatever the history did not already hold.
+    await page.route(API, (route) => route.abort("failed"));
+    await page.goto("/roadmap/");
+    const history = await rows(page).count();
+    expect(history).toBeGreaterThan(STUB.length);
+
+    await page.unrouteAll();
+    await withStub(page);
+    await expect(rows(page)).toHaveCount(history + STUB.length);
+  });
+
+  test("a commit in both sources is listed once", async ({ page }) => {
+    // The refresh asks for the newest thirty and the history already holds
+    // them, so almost every real response overlaps it completely.
+    await page.route(API, (route) => route.abort("failed"));
+    await page.goto("/roadmap/");
+    const history = await rows(page).count();
+    const newest = await rows(page).first().getAttribute("data-commit");
+
+    await page.unrouteAll();
+    await withStub(page, [
+      {
+        sha: newest,
+        commit: { message: "site: already here", author: { date: "2026-08-20T09:00:00Z" } },
+      },
+      STUB[0],
+    ]);
+    await expect(rows(page)).toHaveCount(history + 1);
   });
 
   test("the area is lifted out of the subject and into its own column", async ({
@@ -236,21 +300,10 @@ test.describe("when GitHub answers", () => {
 
   test("the commits are grouped under the day they landed", async ({ page }) => {
     await withStub(page);
-    await expect(feed(page)).toContainText("2026-08-12");
+    await expect(feed(page)).toContainText("2099-08-12");
     await expect(feed(page)).toContainText("1 commit");
-    await expect(feed(page)).toContainText("2026-08-11");
+    await expect(feed(page)).toContainText("2099-08-11");
     await expect(feed(page)).toContainText("2 commits");
-  });
-
-  test("the summary counts the window it is showing", async ({ page }) => {
-    await withStub(page);
-
-    const summary = feed(page).locator(".rule-grid").first();
-    await expect(summary).toContainText("3");
-    await expect(summary).toContainText("Commits");
-    await expect(summary).toContainText("Active days");
-    // Two areas across three commits, one of which names both.
-    await expect(summary).toContainText("Areas touched");
   });
 
   test("the permalink is built from the sha, not taken from the payload", async ({
@@ -259,7 +312,7 @@ test.describe("when GitHub answers", () => {
     await withStub(page, [
       { ...STUB[0], html_url: "https://example.invalid/not-a-commit" },
     ]);
-    await expect(rows(page).first()).toHaveAttribute(
+    await expect(row(page, STUB[0].sha)).toHaveAttribute(
       "href",
       `https://github.com/bonzupii/cinnabar/commit/${STUB[0].sha}`,
     );
@@ -313,17 +366,75 @@ test.describe("when GitHub answers", () => {
   });
 
   test("a malformed entry is dropped rather than rendered", async ({ page }) => {
-    await page.route(API, (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify([{ sha: "../../etc/passwd", commit: {} }, STUB[0]]),
-      }),
-    );
-    await page.goto("/roadmap/");
-    await expect(feed(page)).toContainText("a stubbed commit subject");
-    await expect(rows(page)).toHaveCount(1);
+    await withStub(page, [{ sha: "../../etc/passwd", commit: {} }, STUB[0]]);
+    await expect(row(page, STUB[0].sha)).toHaveCount(1);
+    await expect(feed(page)).not.toContainText("etc/passwd");
     await assertSectionIsWhole(page);
+  });
+});
+
+test.describe("the time window", () => {
+  test.beforeEach(async ({ page }) => {
+    // The history the windows are measured against comes from git at build
+    // time, so none of these needs a stubbed response.
+    await page.route(API, (route) => route.abort("failed"));
+    await page.goto("/roadmap/");
+  });
+
+  test("offers a window shorter than the history, and 'All'", async ({ page }) => {
+    // This repository is a few weeks old, so `7 days` is the only fixed window
+    // shorter than its span. The others appear as it ages; a button selecting
+    // the same commits as the one beside it would not be a control.
+    await expect(windowChip(page, "All")).toHaveAttribute("aria-pressed", "true");
+    await expect(windowChip(page, "7 days")).toBeVisible();
+    await expect(feed(page).locator("[data-windows]").getByRole("button")).toHaveCount(
+      2,
+    );
+  });
+
+  test("narrowing the window narrows the log and the chart", async ({ page }) => {
+    const all = await rows(page).count();
+    const axis = feed(page).locator(".rule-grid > div").last();
+    const from = (await axis.innerText()).split("\n")[0];
+
+    await windowChip(page, "7 days").click();
+
+    expect(await rows(page).count()).toBeLessThan(all);
+    // The chart's axis starts later than it did, because the span it draws is
+    // the window's rather than the whole history's.
+    expect((await axis.innerText()).split("\n")[0] > from).toBe(true);
+  });
+
+  test("the area chips count the window, not the whole history", async ({ page }) => {
+    const wide = await chip(page, "All").innerText();
+    await windowChip(page, "7 days").click();
+    expect(await chip(page, "All").innerText()).not.toBe(wide);
+  });
+
+  test("choosing a window moves nothing on the page", async ({ page }) => {
+    const before = await documentY(page);
+    const tall = await height(page);
+
+    await windowChip(page, "7 days").click();
+    await expect(windowChip(page, "7 days")).toHaveAttribute("aria-pressed", "true");
+
+    expect(await height(page)).toBe(tall);
+    expect(await documentY(page)).toBe(before);
+  });
+
+  test("the history reaches further back than the API alone could", async ({
+    page,
+  }) => {
+    /*
+     * The point of reading git at build time. One page of the commits endpoint
+     * is thirty, and this repository lands about fifteen commits on a day it
+     * moves at all, so an API-only feed covered about two days.
+     */
+    expect(await rows(page).count()).toBeGreaterThan(30);
+    const days = await feed(page)
+      .locator("[data-windows] ~ ol [id^='commits-']")
+      .count();
+    expect(days).toBeGreaterThan(2);
   });
 });
 
@@ -345,40 +456,57 @@ test.describe("filtering by area", () => {
   test("a chip narrows the log to the commits touching that area", async ({
     page,
   }) => {
-    // The third stub names both areas, so it is an answer to either question.
-    await expect(chip(page, "resolver")).toHaveText(/resolver\s*2/);
+    /*
+     * Counted against the chip rather than against a literal. The log is the
+     * repository's own history merged with the response, so how many commits
+     * touched the resolver is a fact about the repository on the day the suite
+     * runs — and a test that hard-codes it fails on the next push rather than
+     * on a regression.
+     */
+    const all = await rows(page).count();
+    const claimed = Number((await chip(page, "resolver").innerText()).match(/\d+/)![0]);
+    expect(claimed).toBeLessThan(all);
+
     await chip(page, "resolver").click();
 
     await expect(chip(page, "resolver")).toHaveAttribute("aria-pressed", "true");
-    await expect(rows(page)).toHaveCount(2);
+    await expect(rows(page)).toHaveCount(claimed);
+    // The stub that names only the other area is gone; the one naming both is
+    // an answer to either question and stays.
     await expect(feed(page)).not.toContainText("a second stubbed subject");
+    await expect(feed(page)).toContainText("a third, touching two areas");
   });
 
   test("the summary follows the filter rather than the window", async ({ page }) => {
+    const claimed = (await chip(page, "codegen").innerText()).match(/\d+/)![0];
     await chip(page, "codegen").click();
-    const summary = feed(page).locator(".rule-grid").first();
-    // Two codegen commits, both on the same day, one area between them.
-    await expect(summary.locator("div").first()).toContainText("2");
+
+    const commits = feed(page).locator(".rule-grid > div").first();
+    await expect(commits).toContainText(claimed);
+    await expect(commits).toContainText("Commits");
   });
 
   test("filtering moves nothing on the page", async ({ page }) => {
     const before = await documentY(page);
     const tall = await height(page);
+    const all = await rows(page).count();
 
     await chip(page, "codegen").click();
-    await expect(rows(page)).toHaveCount(2);
+    await expect(rows(page)).not.toHaveCount(all);
 
     expect(await height(page)).toBe(tall);
     expect(await documentY(page)).toBe(before);
   });
 
   test("pressing the same chip again clears the filter", async ({ page }) => {
+    const all = await rows(page).count();
+
     await chip(page, "codegen").click();
+    await expect(rows(page)).not.toHaveCount(all);
+
     await chip(page, "codegen").click();
-    await expect(rows(page)).toHaveCount(STUB.length);
-    await expect(
-      feed(page).getByRole("button", { name: /^All/ }),
-    ).toHaveAttribute("aria-pressed", "true");
+    await expect(rows(page)).toHaveCount(all);
+    await expect(chip(page, "All")).toHaveAttribute("aria-pressed", "true");
   });
 
   test("the log is reachable and scrollable from the keyboard", async ({ page }) => {

@@ -16,6 +16,7 @@ import {
 } from "@/content/roadmap";
 import { CONTAINER, ICON } from "@/lib/constants";
 import { COMMITS_URL, fetchCommits } from "@/lib/github";
+import { isShallow, readGitLog } from "@/lib/git-log";
 import { ogImageMetadata } from "@/lib/og-image";
 import { readPageContent, type PageContent } from "@/lib/page-content";
 import { linkRepoFile, readRepoDoc } from "@/lib/repo-docs";
@@ -94,6 +95,17 @@ export default async function RoadmapPage() {
   ]);
 
   /*
+   * The history the section's windows are measured against, read from the
+   * repository this site is built inside rather than from the API.
+   *
+   * The API path cannot supply it: `/repos/{repo}/commits` pages at a hundred,
+   * so any real history is several requests, and this repository lands about
+   * fifteen commits on a day it moves at all — a window of thirty commits is a
+   * window of two days. git has the whole log locally and costs nothing.
+   */
+  const history = readGitLog();
+
+  /*
    * A swallowed failure is invisible by construction, and this one already
    * hid a real mistake once: an earlier version asked for `cache: "no-store"`,
    * which Next rejects inside a statically exported page, so every build
@@ -103,7 +115,27 @@ export default async function RoadmapPage() {
   if (commits.length === 0) {
     console.warn(
       "[roadmap] GitHub returned no commits at build time; the activity feed" +
-        " will ship its static fallback and fill in from the browser.",
+        " will ship the repository's own log and fill in from the browser.",
+    );
+  }
+
+  /*
+   * Both of these are silent failures too, and both change what the section
+   * claims rather than whether it renders: with no log the windows collapse to
+   * whatever the API returned, and from a shallow clone "All" means "all of
+   * the depth this checkout was given". Deploys here are run by hand from a
+   * full clone, so either line means something changed about how the site is
+   * built.
+   */
+  if (history.length === 0) {
+    console.warn(
+      "[roadmap] git returned no commits at build time; the activity feed's" +
+        " windows will cover only the commits the API returned.",
+    );
+  } else if (isShallow()) {
+    console.warn(
+      "[roadmap] the checkout is shallow, so the activity feed's history" +
+        " reaches only as far back as the clone depth.",
     );
   }
 
@@ -223,6 +255,7 @@ export default async function RoadmapPage() {
         />
         <Reveal className="mt-9">
           <ActivityFeed
+            history={history}
             initial={commits}
             fallback={content.block("activity-fallback")}
           />

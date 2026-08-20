@@ -6,12 +6,15 @@ import {
   COMMITS_ENDPOINT,
   activeDays,
   activityAreas,
+  availableWindows,
   cadence,
   describeSubject,
+  mergeCommits,
   fetchCommits,
   groupByDay,
   parseCommits,
   readCachedCommits,
+  withinWindow,
   writeCachedCommits,
   type CacheStorage,
   type Commit,
@@ -239,29 +242,98 @@ describe("summarising a window", () => {
   });
 
   describe("the cadence chart", () => {
-    it("draws one column per day, ending on the newest commit", () => {
-      const series = cadence(window, 7);
+    it("draws one column per day across the span the commits cover", () => {
+      const series = cadence(window);
+      // 2026-08-10 to 2026-08-16 inclusive.
       expect(series).toHaveLength(7);
-      expect(series[0].date).toBe("2026-08-10");
-      expect(series[6].date).toBe("2026-08-16");
+      expect(series[0]).toMatchObject({ date: "2026-08-10", days: 1 });
+      expect(series[6]).toMatchObject({ date: "2026-08-16", days: 1 });
     });
 
     it("keeps the quiet days, which are the point of the chart", () => {
-      expect(cadence(window, 7).map((day) => day.count)).toEqual([1, 0, 0, 0, 2, 0, 2]);
+      expect(cadence(window).map((day) => day.count)).toEqual([1, 0, 0, 0, 2, 0, 2]);
     });
 
     it("ends on the newest date even when the list is not sorted", () => {
       // The endpoint returns newest first and this does not re-sort, so the
       // anchor is found rather than assumed.
       const shuffled = [window[4], window[0], window[2]];
-      expect(cadence(shuffled, 3).at(-1)?.date).toBe("2026-08-16");
+      expect(cadence(shuffled).at(-1)?.date).toBe("2026-08-16");
+    });
+
+    it("buckets by week once a column per day stops being legible", () => {
+      const long = [
+        commit("a", "docs: old", "2026-01-01T00:00:00Z"),
+        commit("b", "docs: new", "2026-08-16T00:00:00Z"),
+      ];
+      const series = cadence(long);
+      expect(series.every((column) => column.days === 7)).toBe(true);
+      // The last column still ends on the newest commit, so the weeks are
+      // counted back from the data rather than from an arbitrary Monday.
+      expect(series.at(-1)?.date).toBe("2026-08-10");
+      expect(series.at(-1)?.count).toBe(1);
+      expect(series.reduce((total, column) => total + column.count, 0)).toBe(2);
     });
 
     it("is empty rather than anchored to today when there is nothing to draw", () => {
       // A chart anchored to `Date.now()` would be one string on the server and
       // another in the browser — the hydration mismatch the absolute dates
       // exist to avoid.
-      expect(cadence([], 7)).toEqual([]);
+      expect(cadence([])).toEqual([]);
+    });
+  });
+
+  describe("windows", () => {
+    it("offers only the windows shorter than the history in hand", () => {
+      // Seven days of commits: a 30-day window would select the same set the
+      // "all" button already selects.
+      expect(availableWindows(window)).toEqual([null]);
+    });
+
+    it("offers more as the history grows past each one", () => {
+      const long = [
+        commit("a", "docs: old", "2025-01-01T00:00:00Z"),
+        commit("b", "docs: new", "2026-08-16T00:00:00Z"),
+      ];
+      expect(availableWindows(long)).toEqual([7, 30, 90, 365, null]);
+    });
+
+    it("measures the window back from the newest commit, not from today", () => {
+      // Anchored to today, "the last 7 days" of a repository quiet for a month
+      // would be empty rather than its most recent week of work.
+      expect(withinWindow(window, 3).map((c) => c.date)).toEqual([
+        "2026-08-16",
+        "2026-08-16",
+        "2026-08-14",
+        "2026-08-14",
+      ]);
+    });
+
+    it("takes everything for the null window", () => {
+      expect(withinWindow(window, null)).toHaveLength(window.length);
+    });
+
+    it("has nothing to window when there are no commits", () => {
+      expect(availableWindows([])).toEqual([null]);
+      expect(withinWindow([], 7)).toEqual([]);
+    });
+  });
+
+  describe("merging the build's history with the browser's refresh", () => {
+    it("keeps one entry per sha across both sources", () => {
+      const merged = mergeCommits(window, [window[0], window[1]]);
+      expect(merged).toHaveLength(window.length);
+    });
+
+    it("carries commits the other source does not have, newest first", () => {
+      // The history reaches back further; the refresh reaches forward to what
+      // landed after the deploy.
+      const older = commit("9", "docs: older", "2026-08-01T09:00:00Z");
+      const newer = commit("8", "docs: newer", "2026-08-20T09:00:00Z");
+      const merged = mergeCommits([...window, older], [newer, window[0]]);
+      expect(merged[0].sha).toBe(newer.sha);
+      expect(merged.at(-1)?.sha).toBe(older.sha);
+      expect(merged).toHaveLength(window.length + 2);
     });
   });
 });

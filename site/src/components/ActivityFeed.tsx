@@ -2,14 +2,16 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
-  CADENCE_DAYS,
   activeDays,
   activityAreas,
+  availableWindows,
   cadence,
   fetchCommits,
   groupByDay,
+  mergeCommits,
   readCachedCommits,
   sessionCache,
+  withinWindow,
   writeCachedCommits,
   type CadenceDay,
   type Commit,
@@ -65,16 +67,17 @@ const DAY_HEADER = "h-8";
 const LOG_VIEWPORT = "h-[296px]";
 
 /**
- * The height the whole section holds, in either state.
+ * The height the section holds when it has no window row.
  *
- * The summary, the filter and the log assemble to 612px — 228 + 20 + 48 + 20 +
- * 296, and within a pixel of that at every breakpoint, because every one of
- * those parts is a fixed height. The fallback pads to the same figure.
+ * The summary, the area filter and the log assemble to 612px — 228 + 20 + 48 +
+ * 20 + 296, and within a pixel of that at every breakpoint, because every one
+ * of those parts is a fixed height. A window row adds a further 68.
  *
- * The case that needs it is narrow but real: a build that could not reach
- * GitHub ships the fallback, and a reader whose own request succeeds gets the
- * feed swapped in underneath the rest of the page. Pinned here, that swap
- * moves nothing either.
+ * This is the figure the fallback pads to, and it is the no-row height on
+ * purpose: the case it has to match is a build that reached neither git nor
+ * GitHub, and a history of nothing offers no windows to choose between. So the
+ * reader whose own request succeeds gets the feed swapped in at exactly the
+ * height the fallback was holding, and nothing below it moves.
  *
  * tests/e2e/github-activity.spec.ts asserts this height in every state,
  * including the ones where nothing was fetched at all.
@@ -104,25 +107,33 @@ function Figure({ value, label }: { value: number; label: string }) {
 }
 
 /**
- * Commits per day, as a column per day.
+ * Commits per column, as a column per day or per week.
  *
  * Drawn with `preserveAspectRatio="none"` over a 100-unit-tall viewBox so the
  * chart stretches to whatever width the cell is without the columns changing
- * proportion. A day with nothing in it keeps a two-unit stub in the hairline
- * colour rather than disappearing, so the row of columns reads as a calendar
+ * proportion. A column with nothing in it keeps a two-unit stub in the
+ * hairline colour rather than disappearing, so the row reads as a calendar
  * with gaps rather than as a chart with fewer bars than days.
  *
  * `role="img"` with a written label: the shape is the point, and a screen
- * reader is better served by the sentence than by twenty-eight rectangles.
+ * reader is better served by the sentence than by four hundred rectangles.
  */
 function Cadence({ series }: { series: readonly CadenceDay[] }) {
-  const peak = Math.max(1, ...series.map((day) => day.count));
-  const landed = series.filter((day) => day.count > 0).length;
+  const peak = Math.max(1, ...series.map((column) => column.count));
+  const landed = series.filter((column) => column.count > 0).length;
   // The caller only ever draws this with a full series; the fallbacks are so
   // that an empty one degrades to an empty frame rather than to a broken
   // viewBox and a thrown read.
   const first = series[0]?.date ?? "";
   const last = series[series.length - 1]?.date ?? "";
+  const weekly = (series[0]?.days ?? 1) > 1;
+  const unit = weekly ? "week" : "day";
+  /*
+   * Three units of column to one of gap, whatever the count. A fixed gap in
+   * user units would close up at four hundred columns and swallow the chart
+   * into a solid block; keeping the ratio means the gaps thin with the columns
+   * and the shape survives.
+   */
   const width = Math.max(1, series.length * 4 - 1);
 
   return (
@@ -133,22 +144,33 @@ function Cadence({ series }: { series: readonly CadenceDay[] }) {
         className="h-12 w-full"
         role="img"
         aria-label={
-          `Commits per day over the ${series.length} days ending ${last}: ` +
-          `something landed on ${landed} of them, at most ${peak} in a day.`
+          `Commits per ${unit} across the ${series.length} ${unit}s ending ` +
+          `${last}: something landed in ${landed} of them, at most ${peak} ` +
+          `in one.`
         }
       >
-        {series.map((day, index) => {
-          // Six units is the shortest a real column can be and still read as
-          // taller than an empty day's stub.
-          const height = day.count === 0 ? 2 : Math.max(6, (day.count / peak) * 100);
+        {series.map((column, index) => {
+          /*
+           * A floor of twelve units on any column that has commits in it.
+           *
+           * Cadence is long-tailed — this repository has days with one commit
+           * and days with forty — so a purely linear column for a quiet day
+           * comes out at two or three units, which is the same mark as the
+           * two-unit stub that means "nothing landed". The floor is what keeps
+           * "a little" and "none" apart. It distorts only the bottom of the
+           * scale, and the alternative, compressing the whole scale with a
+           * square root, would distort all of it.
+           */
+          const height =
+            column.count === 0 ? 2 : Math.max(12, (column.count / peak) * 100);
           return (
             <rect
-              key={day.date}
+              key={column.date}
               x={index * 4}
               y={100 - height}
               width={3}
               height={height}
-              className={day.count === 0 ? "fill-hairline-strong" : "fill-cinnabar"}
+              className={column.count === 0 ? "fill-hairline-strong" : "fill-cinnabar"}
             />
           );
         })}
@@ -161,7 +183,7 @@ function Cadence({ series }: { series: readonly CadenceDay[] }) {
       */}
       <div className="text-label flex items-baseline justify-between gap-4 font-mono text-[10px] tracking-[0.12em] uppercase">
         <span className="text-secondary">{first}</span>
-        <span className="hidden sm:block">Commits per day</span>
+        <span className="hidden sm:block">Commits per {unit}</span>
         <span className="text-secondary">{last}</span>
       </div>
     </div>
@@ -289,7 +311,19 @@ function Day({
 /* ----------------------------------------------------------------- feed -- */
 
 export type ActivityFeedProps = {
-  /** Fetched at build time. Rendered as-is until something better arrives. */
+  /**
+   * The repository's own log, read from git at build time.
+   *
+   * This is the depth of the section: every window longer than the last
+   * deploy is answered from here. It is prerendered, so it is also what a
+   * reader with scripts off and a crawler see.
+   */
+  history: readonly Commit[];
+  /**
+   * The API's view of the newest commits, fetched at build time and again on
+   * mount. This is the freshness: it covers whatever landed since the deploy,
+   * and is merged into the history rather than replacing it.
+   */
   initial: readonly Commit[];
   /**
    * Shown when there is nothing to list. Plain prose from the route's
@@ -300,11 +334,25 @@ export type ActivityFeedProps = {
   fallback: string;
 };
 
-export default function ActivityFeed({ initial, fallback }: ActivityFeedProps) {
+/** How a window is named on its chip. `null` is the whole history. */
+function windowLabel(days: number | null): string {
+  if (days === null) return "All";
+  if (days % 365 === 0) return days === 365 ? "1 year" : `${days / 365} years`;
+  return `${days} days`;
+}
+
+export default function ActivityFeed({
+  history,
+  initial,
+  fallback,
+}: ActivityFeedProps) {
   // `initial` is what the server rendered, so the first client render matches
   // it exactly and there is no hydration mismatch to reconcile.
-  const [commits, setCommits] = useState<readonly Commit[]>(initial);
+  const [fresh, setFresh] = useState<readonly Commit[]>(initial);
   const [selected, setSelected] = useState<string | null>(null);
+  // Not named `window`: this is a client component, and shadowing the global
+  // there is a footgun waiting for the first line that reaches for it.
+  const [picked, setPicked] = useState<number | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -323,34 +371,61 @@ export default function ActivityFeed({ initial, fallback }: ActivityFeedProps) {
       ? Promise.resolve(cached)
       : fetchCommits({ signal: controller.signal });
 
-    void pending.then((fresh) => {
+    void pending.then((arrived) => {
       // An empty result is every failure mode at once — offline, rate
       // limited, blocked by an extension, garbage JSON — and the response to
-      // all of them is to leave the prerendered list alone.
-      if (fresh.length === 0 || controller.signal.aborted) return;
-      setCommits(fresh);
-      if (!cached) writeCachedCommits(storage, fresh, Date.now());
+      // all of them is to leave what the build rendered alone.
+      if (arrived.length === 0 || controller.signal.aborted) return;
+      setFresh(arrived);
+      if (!cached) writeCachedCommits(storage, arrived, Date.now());
     });
 
     return () => controller.abort();
   }, []);
 
-  const areas = useMemo(() => activityAreas(commits), [commits]);
+  /*
+   * The two sources as one list: the build's history for depth, the refresh
+   * for the commits that landed after it. They overlap heavily and are
+   * deduplicated by sha, so the merge costs nothing but keeps the section
+   * both complete and current between deploys.
+   */
+  const commits = useMemo(() => mergeCommits(history, fresh), [history, fresh]);
 
   /*
-   * The selection, reconciled against the areas actually in hand.
+   * Which windows to offer, decided from the prerendered props rather than
+   * from the merged list.
    *
-   * Derived rather than corrected in an effect: the fresh list can touch
-   * different areas from the one the build prerendered, and a filter left
-   * pointing at an area that is no longer there would empty the log. Reading
-   * it this way means the stale selection simply stops applying, in the same
-   * render that replaced the data.
+   * Both props are server-rendered constants, so the answer is the same in the
+   * browser as it was at build time and the window row cannot appear or
+   * vanish when the refresh lands. Read from the merged list it could: a
+   * repository crosses seven days old exactly once, and on that day a reader
+   * loading between the build and the refresh would watch a row of chips push
+   * the page down. The counts inside the chips still read the merged list —
+   * only whether a window is on offer is pinned.
    */
+  const windows = useMemo(
+    () => availableWindows(history.length > 0 ? history : initial),
+    [history, initial],
+  );
+
+  /*
+   * The window and the area, each reconciled against what is actually in hand.
+   *
+   * Derived rather than corrected in an effect: the merged list can offer
+   * different windows and touch different areas from the one the build
+   * prerendered, and a selection left pointing at something that is no longer
+   * offered would empty the log. Reading them this way means a stale selection
+   * simply stops applying, in the same render that replaced the data.
+   */
+  const span = windows.includes(picked) ? picked : null;
+  const inWindow = useMemo(() => withinWindow(commits, span), [commits, span]);
+
+  const areas = useMemo(() => activityAreas(inWindow), [inWindow]);
   const active = selected && areas.some((a) => a.area === selected) ? selected : null;
 
   const shown = useMemo(
-    () => (active ? commits.filter((commit) => commit.areas.includes(active)) : commits),
-    [commits, active],
+    () => (active ? inWindow.filter((commit) => commit.areas.includes(active)) : inWindow),
+    [inWindow, active],
   );
 
   if (commits.length === 0) {
@@ -366,42 +441,63 @@ export default function ActivityFeed({ initial, fallback }: ActivityFeedProps) {
     );
   }
 
-  const series = cadence(shown, CADENCE_DAYS);
-
   return (
     <div data-activity="commits" className={`flex flex-col gap-5 ${SLOT}`}>
       {/*
-        The window in three numbers and a shape. All four read the filtered
+        The selection in three numbers and a shape. All four read the filtered
         list, so a reader who narrows to one area is told about that area
         rather than about the window they just narrowed away from.
       */}
       <div className="rule-grid grid grid-cols-3">
         <Figure value={shown.length} label="Commits" />
         <Figure value={activeDays(shown)} label="Active days" />
-        <Figure value={activityAreas(shown).length} label="Areas touched" />
-        <Cadence series={series} />
+        <Figure value={areas.length} label="Areas touched" />
+        <Cadence series={cadence(shown)} />
       </div>
 
       {/*
-        One line, always. `overflow-x-auto` rather than `flex-wrap` because a
-        second row of chips would be a second row of height, and the height of
-        this section cannot depend on how many subsystems a fortnight happened
-        to touch.
+        Two filter rows, each one line and each a fixed height.
 
-        The row is 48px for 36px chips so that the scrollbar, where the
-        platform draws a real one, has its own 12px to sit in. Sized instead to
-        the chips, the row would grow by the height of a scrollbar the moment
-        one more area appeared than fits — which is the same shift, arriving by
-        a subtler route.
+        `overflow-x-auto` rather than `flex-wrap` because a second row of chips
+        would be a second row of height, and the height of this section cannot
+        depend on how long the log is or how many subsystems it touched. Each
+        row is 48px for 36px chips so that the scrollbar, where the platform
+        draws a real one, has its own 12px to sit in; sized instead to the
+        chips, a row would grow by the height of a scrollbar the moment one
+        more chip appeared than fits — the same shift, by a subtler route.
+
+        The window row is only drawn when there is more than one window to
+        choose between. A repository younger than the shortest window has one
+        answer to the question and does not need to be asked it.
       */}
+      {windows.length > 1 ? (
+        <div
+          role="group"
+          aria-label="Choose the time window"
+          data-windows
+          className="flex h-12 flex-none items-start gap-2 overflow-x-auto scrollbar-thin"
+        >
+          {windows.map((choice) => (
+            <Chip
+              key={choice ?? "all"}
+              label={windowLabel(choice)}
+              count={withinWindow(commits, choice).length}
+              pressed={span === choice}
+              onClick={() => setPicked(choice)}
+            />
+          ))}
+        </div>
+      ) : null}
+
       <div
         role="group"
         aria-label="Filter the log by area"
+        data-areas
         className="flex h-12 flex-none items-start gap-2 overflow-x-auto scrollbar-thin"
       >
         <Chip
           label="All"
-          count={commits.length}
+          count={inWindow.length}
           pressed={active === null}
           onClick={() => setSelected(null)}
         />

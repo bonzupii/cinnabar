@@ -28,28 +28,46 @@
 export const REPO = "bonzupii/cinnabar";
 
 /**
- * How many commits the feed reads, summarises and lists.
+ * How many commits the live refresh asks GitHub for.
  *
- * Thirty rather than the five this started at, because the feed no longer just
- * proves the project is alive — it says what has been moving, and one screen
- * of five rows cannot. Thirty is one page of GitHub's default pagination, so
- * it costs the same single request; it is roughly a fortnight of this
- * repository, which is long enough for the per-day cadence to have a shape;
- * and it is small enough that the prerendered list stays a few kilobytes of
- * HTML. The list scrolls inside a fixed-height frame, so the number does not
- * decide how much of the page the section occupies.
+ * The refresh exists to cover the gap between the last deploy and now, not to
+ * carry the history — that comes from the repository itself at build time, in
+ * lib/git-log.ts. Thirty is one page of GitHub's default pagination, so the
+ * gap is covered by a single request however busy the days since the deploy
+ * were, and this repository lands about fifteen commits on a day it moves at
+ * all.
  */
 export const ACTIVITY_COUNT = 30;
 
 /**
- * How many days the cadence chart draws, ending on the newest commit's date.
+ * How many commits the prerendered history carries.
  *
- * Four weeks, so the columns line up week on week. Deliberately anchored to
- * the data rather than to `Date.now()`: a chart that ended today would be one
- * string on the server and another in the browser, which is the hydration
- * mismatch the absolute dates below exist to avoid.
+ * A ceiling rather than a target: it is what stops the page growing without
+ * bound as the log does. Four hundred commits is about 45 kB of markup before
+ * compression, and the whole of this repository several times over. Past it
+ * the oldest are dropped, and the axis under the cadence chart says which day
+ * the history in hand actually starts on — so a truncated history states its
+ * own earliest date rather than implying it reaches the first commit.
  */
-export const CADENCE_DAYS = 28;
+export const HISTORY_LIMIT = 400;
+
+/**
+ * The windows the reader can put the section into, longest last.
+ *
+ * A window is offered only when it is shorter than the history in hand, plus
+ * an always-present "All" — see `availableWindows`. A repository three weeks
+ * old therefore offers `7 days` and `All` and nothing else, rather than four
+ * buttons that select the same commits.
+ */
+export const WINDOWS = [7, 30, 90, 365] as const;
+
+/**
+ * The span past which the cadence chart buckets by week instead of by day.
+ *
+ * Ten weeks. Below it a column per day is legible at the width the chart gets;
+ * a year of daily columns is not, and a year of weekly ones is fifty-two.
+ */
+export const DAILY_SPAN_LIMIT = 70;
 
 /** Where the reader goes for the whole log. */
 export const COMMITS_URL = `https://github.com/${REPO}/commits/main/`;
@@ -59,7 +77,7 @@ export const COMMITS_ENDPOINT =
   `?sha=main&per_page=${ACTIVITY_COUNT}`;
 
 /** sessionStorage key. Versioned, so a shape change cannot read old entries. */
-export const CACHE_KEY = "cinnabar:activity:v1";
+export const CACHE_KEY = "cinnabar:activity:v2";
 
 /**
  * How long a cached list is served before another request is made.
@@ -190,7 +208,7 @@ function commitUrl(sha: string): string {
  * cache store whole commits and still be treated as untrusted input: a
  * poisoned `url` or `areas` in storage is not read, so it cannot be rendered.
  */
-function makeCommit(sha: string, subject: string, date: string): Commit {
+export function makeCommit(sha: string, subject: string, date: string): Commit {
   const { areas, title } = describeSubject(subject);
   return {
     sha,
@@ -340,41 +358,151 @@ export function groupByDay(commits: readonly Commit[]): CommitDay[] {
   return days;
 }
 
-/** One column of the cadence chart. */
-export type CadenceDay = { date: string; count: number };
+/* --------------------------------------------------------------- windows -- */
 
 /**
- * Commits per day over the `days` ending on the newest date in the list.
+ * The whole span the given commits cover, as `YYYY-MM-DD` bounds.
  *
- * Anchored to the data rather than to today for the reason given on
- * `CADENCE_DAYS`, and it means the chart is still a true picture of the window
- * if the repository goes quiet — the last column is the last day something
- * landed, and the dates under the chart say when that was.
+ * Read from the commits rather than assumed to be sorted: the endpoint returns
+ * newest first and the build's history is in git's order, but a merge of the
+ * two is only as ordered as its inputs.
+ */
+export function spanOf(
+  commits: readonly Commit[],
+): { first: string; last: string } | undefined {
+  if (commits.length === 0) return undefined;
+  let first = commits[0].date;
+  let last = commits[0].date;
+  for (const commit of commits) {
+    // Lexicographic order is chronological order for `YYYY-MM-DD`.
+    if (commit.date < first) first = commit.date;
+    if (commit.date > last) last = commit.date;
+  }
+  return { first, last };
+}
+
+/** Whole days from `first` to `last` inclusive; 1 for a single day. */
+export function spanDays(first: string, last: string): number {
+  return Math.round((Date.parse(last) - Date.parse(first)) / DAY_MS) + 1;
+}
+
+/**
+ * The windows worth offering for the history in hand.
+ *
+ * `null` is "all of it" and is always last and always present. A fixed window
+ * is offered only when it is strictly shorter than the span, because a button
+ * that selects every commit the button beside it already selects is a control
+ * that does nothing — and a three-week-old repository would otherwise show
+ * four of them.
+ */
+export function availableWindows(commits: readonly Commit[]): (number | null)[] {
+  const span = spanOf(commits);
+  if (!span) return [null];
+  const days = spanDays(span.first, span.last);
+  return [...WINDOWS.filter((window) => window < days), null];
+}
+
+/**
+ * The commits inside a window, which is measured back from the newest commit.
+ *
+ * Back from the data, not back from `Date.now()`. A window anchored to today
+ * would put a different set of commits on the server than in the browser —
+ * the hydration mismatch the absolute dates exist to avoid — and it would make
+ * "the last 7 days" of a repository that has been quiet for a month an empty
+ * feed rather than its most recent week of work.
+ */
+export function withinWindow(
+  commits: readonly Commit[],
+  window: number | null,
+): Commit[] {
+  const span = spanOf(commits);
+  if (window === null || !span) return [...commits];
+  const from = new Date(Date.parse(span.last) - (window - 1) * DAY_MS)
+    .toISOString()
+    .slice(0, 10);
+  return commits.filter((commit) => commit.date >= from);
+}
+
+/* --------------------------------------------------------------- cadence -- */
+
+/** One column of the cadence chart. */
+export type CadenceDay = {
+  /** The day the column starts on. */
+  date: string;
+  /** Days the column covers — 1 while the chart is drawing days, else 7. */
+  days: number;
+  count: number;
+};
+
+/**
+ * Commits per column across the span the given commits cover.
+ *
+ * Columns are days while the span is short enough for a column per day to be
+ * legible, and weeks past `DAILY_SPAN_LIMIT`; `days` on each column says
+ * which, so the axis can label itself rather than the caller guessing. The
+ * last column always ends on the newest commit's date, so weeks are counted
+ * back from the data rather than from an arbitrary Monday.
  *
  * Days with nothing in them are present with a count of zero rather than
  * absent: the gaps are the point of the chart.
  */
-export function cadence(
-  commits: readonly Commit[],
-  days: number = CADENCE_DAYS,
-): CadenceDay[] {
-  if (commits.length === 0 || days <= 0) return [];
+export function cadence(commits: readonly Commit[]): CadenceDay[] {
+  const span = spanOf(commits);
+  if (!span) return [];
+
+  const total = spanDays(span.first, span.last);
+  const days = total <= DAILY_SPAN_LIMIT ? 1 : 7;
+  const columns = Math.ceil(total / days);
 
   const counts = new Map<string, number>();
-  let newest = commits[0].date;
   for (const commit of commits) {
     counts.set(commit.date, (counts.get(commit.date) ?? 0) + 1);
-    // Lexicographic order is chronological order for `YYYY-MM-DD`.
-    if (commit.date > newest) newest = commit.date;
   }
 
-  const end = Date.parse(`${newest}T00:00:00Z`);
+  const end = Date.parse(span.last);
   const series: CadenceDay[] = [];
-  for (let back = days - 1; back >= 0; back -= 1) {
-    const date = new Date(end - back * DAY_MS).toISOString().slice(0, 10);
-    series.push({ date, count: counts.get(date) ?? 0 });
+  for (let column = columns - 1; column >= 0; column -= 1) {
+    // The column's last day, then its first, so the newest column ends on the
+    // newest commit whatever the span divides into.
+    const to = end - column * days * DAY_MS;
+    const from = to - (days - 1) * DAY_MS;
+    let count = 0;
+    for (let day = 0; day < days; day += 1) {
+      const date = new Date(from + day * DAY_MS).toISOString().slice(0, 10);
+      count += counts.get(date) ?? 0;
+    }
+    series.push({
+      date: new Date(from).toISOString().slice(0, 10),
+      days,
+      count,
+    });
   }
   return series;
+}
+
+/* ---------------------------------------------------------------- merging -- */
+
+/**
+ * The build's history and the browser's refresh, as one list.
+ *
+ * Union by sha, newest first. The two sources overlap by design — the refresh
+ * asks for the last thirty commits and the history already holds most of them
+ * — and they disagree only at the ends: the history reaches back further, the
+ * refresh reaches forward to whatever landed since the deploy. Neither is
+ * preferred on a conflict because there cannot be one; a sha names a commit
+ * whose subject and date are part of what it is.
+ */
+export function mergeCommits(
+  history: readonly Commit[],
+  fresh: readonly Commit[],
+): Commit[] {
+  const merged = new Map<string, Commit>();
+  for (const commit of [...fresh, ...history]) {
+    if (!merged.has(commit.sha)) merged.set(commit.sha, commit);
+  }
+  return [...merged.values()].sort((a, b) =>
+    a.date === b.date ? 0 : a.date < b.date ? 1 : -1,
+  );
 }
 
 export type FetchOptions = {
