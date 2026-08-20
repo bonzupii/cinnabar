@@ -32,6 +32,7 @@
 //!   stage ever runs on facts an earlier one failed to establish.
 
 use cinnabar::ast::*;
+use cinnabar::target::Target;
 use cinnabar::{advanced_tools, analysis, borrow, codegen, docs, module_loader, native_stub, project, resolver, typecheck};
 use ariadne::{Color, FnCache, Label, Report, ReportKind, Source};
 use clap::builder::PathBufValueParser;
@@ -178,8 +179,8 @@ fn parse_args() -> Option<CliArgs> {
                 .short('O')
                 .long("opt-level")
                 .value_name("LEVEL")
-                .value_parser(clap::builder::PossibleValuesParser::new(["0", "1", "2", "3", "s", "z"]))
-                .help("Optimization level: 0, 1, 2, 3, s, z (default 2)"),
+                .value_parser(clap::builder::PossibleValuesParser::new(["0", "1", "2", "3"]))
+                .help("Optimization level: 0, 1, 2, 3 (default 2)"),
         )
         .arg(
             Arg::new("emit_llvm")
@@ -740,7 +741,7 @@ fn parse_args() -> Option<CliArgs> {
 }
 
 fn target_arg() -> Arg {
-    Arg::new("target").long("target").default_value("host").help("Compilation target: host, linux, darwin, bsd, or windows")
+    Arg::new("target").long("target").default_value("host").help("Compilation target: host, an OS name, or x86_64-/aarch64-prefixed target")
 }
 
 fn tool_args(input: PathBuf, tool_command: ToolCommand, output: Option<PathBuf>) -> CliArgs {
@@ -758,6 +759,13 @@ fn main() -> ExitCode {
     if let Some(tool_command) = args.tool_command {
         return run_tool_command(&args.input, args.output.as_deref(), tool_command);
     }
+    // The target is parsed once, here, and every later stage — frontend
+    // analysis, IR emission, layout, and linking — reads the same
+    // descriptor rather than re-deriving the platform from a string.
+    let mut target = match Target::parse(&args.target) {
+        Ok(target) => target,
+        Err(error) => return source_less_failure(&error.to_string()),
+    };
     let mut names: Vec<String> = Vec::new();
     let mut nodes: Vec<i64> = Vec::new();
     let mut lists: Vec<Vec<i64>> = Vec::new();
@@ -785,19 +793,22 @@ fn main() -> ExitCode {
         dump_program(&names, &nodes, &lists, root);
         return ExitCode::SUCCESS;
     }
+    let mut seeds = Seeds::new();
     let resolver_diagnostics = resolver::Diagnostics {
         errors: &mut errors,
         notes: &mut notes,
         deferred: &mut deferred,
+        target: &target,
     };
-    if !resolver::resolve(&mut names, &mut nodes, &mut lists, resolver_diagnostics, root, &ext_mods) {
+    if !resolver::resolve(&mut names, &mut nodes, &mut lists, resolver_diagnostics, root, &ext_mods, &mut seeds) {
         return report_diagnostics(json_out, &errors, &notes, &files);
     }
-    let (ok, impls_list) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods);
+    let mut check = CheckContext { errors: &mut errors, notes: &mut notes, seeds: &seeds, target: &target };
+    let (ok, impls_list) = typecheck::typecheck(&mut names, &mut nodes, &mut lists, &mut check, root, &ext_mods);
     if !ok {
         return report_diagnostics(json_out, &errors, &notes, &files);
     }
-    if !borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut errors, &mut notes, root, &ext_mods) {
+    if !borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut check, root, &ext_mods) {
         // The structured envelope always carries the checker's notes: a
         // consumer asked for machine-readable output, and there is no
         // terminal to keep uncluttered. --explain-borrow=json is the older
@@ -854,7 +865,7 @@ fn main() -> ExitCode {
     let entry_span = entry_span_of(&files);
     if args.emit_llvm {
         let out = emit_out_path(&args, "ll");
-        let written = compile_to_ir(&names, &mut nodes, &mut lists, impls_list, entry_span, &args.target)
+        let written = compile_to_ir(&names, &mut nodes, &mut lists, impls_list, entry_span, &target, &seeds)
             .and_then(|ir_text| write_output_text(&out, &ir_text));
         if let Err(codegen_err) = written {
             return report_codegen_error(json_out, &codegen_err, &files);
@@ -863,17 +874,17 @@ fn main() -> ExitCode {
     }
     if args.emit_obj {
         let out = emit_out_path(&args, "o");
-        // Object emission stops before linking, so the link mode is never
-        // consulted; it is carried only to share BuildTarget with the link
-        // path.
-        let target = codegen::BuildTarget {
+        // Object emission stops before linking, so the descriptor's link
+        // mode is never consulted; the target is carried only to share the
+        // BuildTarget shape with the link path.
+        let build_target = codegen::BuildTarget {
             out: &out,
             opt_level: &args.opt_level,
-            mode: codegen::LinkMode::Dynamic,
-            platform: &args.target,
+            target: &target,
+            instrumented: false,
         };
         if let Err(codegen_err) =
-            compile_to_object(&names, &mut nodes, &mut lists, impls_list, &target, entry_span)
+            compile_to_object(&names, &mut nodes, &mut lists, impls_list, &build_target, entry_span, &seeds)
         {
             return report_codegen_error(json_out, &codegen_err, &files);
         }
@@ -883,34 +894,28 @@ fn main() -> ExitCode {
         Some(path) => path.clone(),
         None => default_out_path(&args.input),
     };
-    if args.static_link && (args.target != "host" && args.target != "linux" || !cfg!(all(feature = "static-musl", target_os = "linux"))) {
+    if args.static_link && (!target.supports_static_musl() || !cfg!(all(feature = "static-musl", target_os = "linux"))) {
         // A refusal about how this binary was built has no line of the
         // user's program to point at, so it travels as a source-less
         // diagnostic — through the same reporter, and into the same
         // envelope, as every other one.
-        let unsupported: Diag = (
-            "--static requires a Linux compiler built with the static-musl feature".to_string(),
-            NO_FILE,
-            0,
-            0,
-        );
+        let unsupported = Diag {
+            message: "--static requires a Linux compiler built with the static-musl feature".to_string(),
+            file: NO_FILE,
+            start: 0,
+            end: 0,
+            kind: DiagKind::Internal,
+        };
         return report_diagnostics(json_out, &[unsupported], &[], &files);
     }
-    let target = codegen::BuildTarget {
+    target.link = target.link_mode(args.static_link);
+    let build_target = codegen::BuildTarget {
         out: &out,
         opt_level: &args.opt_level,
-        mode: if args.instrumented {
-            codegen::LinkMode::Instrumented
-        } else if args.static_link {
-            codegen::LinkMode::StaticMusl
-        } else if args.target == "windows" || (args.target == "host" && cfg!(target_os = "windows")) {
-            codegen::LinkMode::WindowsMinGW
-        } else {
-            codegen::LinkMode::Dynamic
-        },
-        platform: &args.target,
+        target: &target,
+        instrumented: args.instrumented,
     };
-    if let Err(codegen_err) = compile_and_link(&names, &mut nodes, &mut lists, impls_list, &target, entry_span) {
+    if let Err(codegen_err) = compile_and_link(&names, &mut nodes, &mut lists, impls_list, &build_target, entry_span, &seeds) {
         return report_codegen_error(json_out, &codegen_err, &files);
     }
     if args.run {
@@ -945,12 +950,13 @@ fn report_diagnostics(emit_json: bool, errors: &[Diag], notes: &[Note], files: &
 /// consumer needs no second shape for failures below the front end.
 fn report_codegen_error(emit_json: bool, codegen_err: &codegen::error::CodegenError, files: &[(String, String)]) -> ExitCode {
     if emit_json {
-        let diag: Diag = (
-            codegen_error_message(codegen_err),
-            codegen_err.span.0,
-            codegen_err.span.1,
-            codegen_err.span.2,
-        );
+        let diag = Diag {
+            message: codegen_error_message(codegen_err),
+            file: codegen_err.span.0,
+            start: codegen_err.span.1,
+            end: codegen_err.span.2,
+            kind: DiagKind::Internal,
+        };
         return finish_with_diagnostics_json(&[diag], &[], files);
     }
     finish_with_codegen_error(codegen_err, files)
@@ -1061,7 +1067,7 @@ fn inspect_binary(path: &Path, output: Option<&Path>) -> ExitCode {
         Ok(value) => value,
         Err(failure) => return finish_with_manifest_error(&failure),
     };
-    let analyzed = analysis::analyze(&entry.to_string_lossy(), &[]);
+    let analyzed = analysis::analyze(&entry.to_string_lossy(), &[], &Target::host());
     if !analyzed.errors.is_empty() {
         return finish_with_diagnostics(&analyzed.errors, &analyzed.notes, &analyzed.files);
     }
@@ -1183,7 +1189,7 @@ fn emit_soundness(path: &Path, output: Option<&Path>) -> ExitCode {
         Ok(value) => value,
         Err(failure) => return finish_with_manifest_error(&failure),
     };
-    let analyzed = analysis::analyze(&entry.to_string_lossy(), &[]);
+    let analyzed = analysis::analyze(&entry.to_string_lossy(), &[], &Target::host());
     if !analyzed.errors.is_empty() {
         return finish_with_diagnostics(&analyzed.errors, &analyzed.notes, &analyzed.files);
     }
@@ -1262,7 +1268,7 @@ fn generate_documentation(path: &Path, output: Option<&Path>, serve: bool, addre
         Err(failure) => return finish_with_manifest_error(&failure),
     };
     let entry_text = entry.to_string_lossy().to_string();
-    let analyzed = analysis::analyze(&entry_text, &[]);
+    let analyzed = analysis::analyze(&entry_text, &[], &Target::host());
     if !analyzed.errors.is_empty() {
         return report_diagnostics(emit_json, &analyzed.errors, &analyzed.notes, &analyzed.files);
     }
@@ -1318,9 +1324,10 @@ fn initialize_project(path: &Path) -> ExitCode {
 }
 
 fn run_project_compiler(path: &Path, run: bool, check: bool, target: &str) -> ExitCode {
-    if let Err(message) = advanced_tools::validate_target(target) {
-        return source_less_failure(&message);
-    }
+    let parsed = match Target::parse(target) {
+        Ok(value) => value,
+        Err(error) => return source_less_failure(&error.to_string()),
+    };
     let manifest = match project::discover(path) {
         Ok(value) => value,
         Err(failure) => return finish_with_manifest_error(&failure),
@@ -1331,7 +1338,12 @@ fn run_project_compiler(path: &Path, run: bool, check: bool, target: &str) -> Ex
     };
     let mut invocation = Command::new(executable);
     invocation.arg(&manifest.entry);
-    invocation.arg("--target").arg(target);
+    let target_arg = if parsed.is_host() {
+        "host".to_string()
+    } else {
+        parsed.triple()
+    };
+    invocation.arg("--target").arg(target_arg);
     if check {
         invocation.arg("--check-only");
     } else {
@@ -1475,18 +1487,18 @@ fn render_diag(
     notes: &[Note],
     diag_idx: i64,
 ) -> Result<(), String> {
-    if diag.1 == NO_FILE {
-        return render_source_less(&diag.0);
+    if diag.file == NO_FILE {
+        return render_source_less(&diag.message);
     }
-    let path = match file_path_of(files, diag.1) {
+    let path = match file_path_of(files, diag.file) {
         Some(path) => path,
         None => {
-            return render_source_less(&format!("{} (unknown source file {})", diag.0, diag.1));
+            return render_source_less(&format!("{} (unknown source file {})", diag.message, diag.file));
         }
     };
-    let span = diag.2 as usize..diag.3 as usize;
+    let span = diag.start as usize..diag.end as usize;
     let mut report = Report::build(ReportKind::Error, (path.clone(), span.clone()))
-        .with_message(&diag.0)
+        .with_message(&diag.message)
         .with_label(Label::new((path, span)).with_message("here").with_color(Color::Red));
     let mut note_idx = 0usize;
     while note_idx < notes.len() {
@@ -1510,7 +1522,7 @@ fn render_diag(
     report
         .finish()
         .print(&mut *cache)
-        .map_err(|render_err| format!("cannot render '{}': {}", diag.0, render_err))
+        .map_err(|render_err| format!("cannot render '{}': {}", diag.message, render_err))
 }
 
 fn render_codegen_error(codegen_err: &codegen::error::CodegenError, files: &[(String, String)]) -> Result<(), String> {

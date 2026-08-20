@@ -4,9 +4,9 @@
 //! typechecker canonicalized. All numbers come from the exact same lowering
 //! a real build uses: the canonical type keys are lowered through
 //! `types::llvm_type` and measured with LLVM's target data for the host
-//! machine. Field keys reuse `struct_field_keys` (the lowering's own
-//! substitution path) and enum variant tags are read from the typechecker's
-//! `NODE_VARFACT` rows.
+//! machine. Field keys are read from the typechecker's precomputed
+//! NODE_FIELDKEY fact rows, and enum variant tags are read from variant
+//! symbol rows attached by the typechecker.
 //!
 //! `measure_all` lowers each candidate key and returns a `Vec<TypeLayout>`
 //! plus the target triple. `render_layouts` formats that vector as aligned
@@ -23,7 +23,7 @@ use crate::ast::*;
 use crate::codegen::error::*;
 use crate::codegen::host_target;
 use crate::codegen::types::{
-    llvm_type, payload_struct_of, struct_field_keys, EnumInfos, KeyTypes, PayloadStructs, TyEnv,
+    llvm_type, payload_struct_of, EnumInfos, KeyTypes, PayloadStructs, TyEnv,
 };
 use crate::emit_json::LAYOUT_FORMAT;
 use crate::typecheck::render_type_key;
@@ -307,11 +307,7 @@ fn measure_struct(
     align: u32,
     span: (i64, i64, i64),
 ) -> Result<TypeLayout, CodegenError> {
-    let row = find_tyinfo(env.3, key);
-    let sym = node_c(env.3, row);
-    let item = node_c(env.3, sym);
-    let args = node_d(env.3, row);
-    let field_keys = struct_field_keys(env.3, env.4, item, args);
+    let rows = fieldkey_rows_of(env.3, key);
     let struct_ty = match ty {
         BasicTypeEnum::StructType(st) => st,
         BasicTypeEnum::ArrayType(other) => {
@@ -335,9 +331,13 @@ fn measure_struct(
     };
     let mut fields: Vec<FieldLayout> = Vec::new();
     let mut idx = 0usize;
-    while idx < field_keys.len() {
-        let (fname, fkey) = match field_keys.get(idx) {
-            Some(pair) => *pair,
+    while idx < rows.len() {
+        let fname = match rows.get(idx) {
+            Some(row) => row.0,
+            None => break,
+        };
+        let fkey = match rows.get(idx) {
+            Some(row) => row.1,
             None => break,
         };
         let offset = match env.1.offset_of_element(&struct_ty, idx as u32) {
@@ -407,12 +407,14 @@ fn measure_enum(
     while idx < count {
         let variant = list_get(env.4, variants_list, idx);
         let vname = node_a(env.3, variant);
-        // The declared-order tag is the typechecker's attached fact; NONE
-        // means the fact row was never created (an unreferenced builtin
-        // instantiation), in which case the variant list's declared order
-        // is the same single fact read from the tree it was derived from.
-        let fact_tag = varfact_index_of(env.3, key, vname);
-        let tag = if fact_tag == NONE { idx } else { fact_tag };
+        let variant_sym = variant_sym_of(env.3, variant);
+        if variant_sym == NONE {
+            return Err(builder_error(span.0, span.1, span.2, &format!("enum key {} has a variant without a resolved symbol", key)));
+        }
+        let tag = sym_variant_tag_of(env.3, variant_sym);
+        if tag == NONE {
+            return Err(builder_error(span.0, span.1, span.2, &format!("enum key {} has a variant without an attached tag", key)));
+        }
         let payload_ty = payload_struct_of(env, key, idx, span)?;
         let payload_size = env.1.get_abi_size(&payload_ty);
         variants.push(VariantLayout { name: vname, tag, payload_size });

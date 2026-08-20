@@ -90,10 +90,11 @@ fn tier_five_and_six_commands_work_end_to_end() -> Result<(), Box<dyn Error>> {
     std::fs::create_dir_all(&directory)?;
     let source = directory.join("main.cnb");
     std::fs::write(&source, "fun main() I32\n  return 0\nend\n")?;
-
-    let idl = directory.join("device.idl");
-    let native = directory.join("Device.cnb");
-    std::fs::write(&idl, "module Device\ntype Handle\ntype Buffer<T>\ntype Error\nfun open(port: U16) Handle impure\nfun read<T>(handle: &Handle, out: &mut [T]) Result(Usize, Device.Error) impure\n")?;
+    // Generated names must be registered natives, so this exercises the
+    // real `Memory` surface; the IDL's `type` generates `nat type` only.
+    let idl = directory.join("memory.idl");
+    let native = directory.join("Memory.cnb");
+    std::fs::write(&idl, "module Memory\ntype Block\nfun allocate(size: Usize) Block impure\nfun deallocate(block: Block) Unit impure\nfun write_u8(block: &Block, offset: Usize, value: U8) Unit impure\nfun read_u8(block: &Block, offset: Usize) U8 impure\n")?;
     let generated = run(compiler, &["native-stub", &path_text(&idl), "-o", &path_text(&native)])?;
     assert!(generated.status.success(), "native-stub failed: {}", text(&generated));
     let checked_native = run(compiler, &[&path_text(&native), "--check-only"])?;

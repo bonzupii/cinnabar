@@ -20,6 +20,7 @@ use cinnabar::analysis::{
 };
 use cinnabar::ast::NO_FILE;
 use cinnabar::format::format_source;
+use cinnabar::target::Target;
 use serde_json::Value;
 use std::error::Error;
 use std::path::PathBuf;
@@ -39,10 +40,10 @@ fn offset_of(haystack: &str, needle: &str) -> i64 {
 
 #[test]
 fn spec_analyzes_clean() {
-    let analysis = analyze(&fixture("spec.cnb"), &[]);
+    let analysis = analyze(&fixture("spec.cnb"), &[], &Target::host());
     assert!(analysis.resolved);
     assert!(analysis.typechecked);
-    let rendered: Vec<String> = analysis.errors.iter().map(|diag| diag.0.clone()).collect();
+    let rendered: Vec<String> = analysis.errors.iter().map(|diag| diag.message.clone()).collect();
     assert!(analysis.errors.is_empty(), "unexpected errors: {:?}", rendered);
 }
 
@@ -74,7 +75,7 @@ fn position_mapping_roundtrips() {
 #[test]
 fn definition_crosses_module_files() {
     let entry = fixture("multi_file/main.cnb");
-    let analysis = analyze(&entry, &[]);
+    let analysis = analyze(&entry, &[], &Target::host());
     assert!(analysis.resolved, "errors: {:?}", analysis.errors);
     let main_text = analysis
         .files
@@ -102,7 +103,7 @@ fn definition_crosses_module_files() {
 #[test]
 fn hover_shows_attached_types_and_signatures() {
     let entry = fixture("multi_file/main.cnb");
-    let analysis = analyze(&entry, &[]);
+    let analysis = analyze(&entry, &[], &Target::host());
     let main_text = analysis
         .files
         .first()
@@ -134,7 +135,7 @@ fn hover_shows_attached_types_and_signatures() {
 #[test]
 fn references_span_the_module_graph() {
     let entry = fixture("multi_file/main.cnb");
-    let analysis = analyze(&entry, &[]);
+    let analysis = analyze(&entry, &[], &Target::host());
     let main_text = analysis
         .files
         .first()
@@ -164,7 +165,7 @@ fn references_span_the_module_graph() {
 #[test]
 fn completions_offer_symbols_locals_and_keywords() {
     let entry = fixture("multi_file/main.cnb");
-    let analysis = analyze(&entry, &[]);
+    let analysis = analyze(&entry, &[], &Target::host());
     let main_text = analysis
         .files
         .first()
@@ -186,7 +187,7 @@ fn completions_offer_symbols_locals_and_keywords() {
 #[test]
 fn completions_exclude_symbols_the_resolver_hides() {
     let entry = fixture("spec.cnb");
-    let analysis = analyze(&entry, &[]);
+    let analysis = analyze(&entry, &[], &Target::host());
     let text = analysis
         .files
         .first()
@@ -214,7 +215,7 @@ fn completions_exclude_locals_from_sibling_branches() {
     let entry = fixture("multi_file/main.cnb");
     let source = "pub fun main() I64\n  if true\n    val only_then: I64 = 1\n    return only_then\n  else\n    val only_else: I64 = 2\n    return only_else\n  end\nend\n";
     let overlay = [(entry.clone(), source.to_string())];
-    let analysis = analyze(&entry, &overlay);
+    let analysis = analyze(&entry, &overlay, &Target::host());
     assert!(analysis.errors.is_empty(), "unexpected errors: {:?}", analysis.errors);
     let file = file_id_of(&analysis, &entry);
     let in_else = offset_of(source, "return only_else") + 7;
@@ -231,7 +232,7 @@ fn completions_exclude_locals_from_sibling_branches() {
 #[test]
 fn completions_follow_resolver_visibility_and_branch_scope() {
     let entry = fixture("tooling_scope.cnb");
-    let analysis = analyze(&entry, &[]);
+    let analysis = analyze(&entry, &[], &Target::host());
     let text = analysis
         .files
         .first()
@@ -255,7 +256,7 @@ fn completions_follow_resolver_visibility_and_branch_scope() {
 #[test]
 fn signature_help_tracks_the_active_argument() {
     let entry = fixture("multi_file/main.cnb");
-    let analysis = analyze(&entry, &[]);
+    let analysis = analyze(&entry, &[], &Target::host());
     let main_text = analysis
         .files
         .first()
@@ -274,8 +275,8 @@ fn signature_help_tracks_the_active_argument() {
 
 #[test]
 fn borrow_notes_explain_inconsistent_paths() {
-    let analysis = analyze(&fixture("explain_leak.cnb"), &[]);
-    let rendered: Vec<String> = analysis.errors.iter().map(|diag| diag.0.clone()).collect();
+    let analysis = analyze(&fixture("explain_leak.cnb"), &[], &Target::host());
+    let rendered: Vec<String> = analysis.errors.iter().map(|diag| diag.message.clone()).collect();
     assert!(
         rendered.iter().any(|message| message.contains("consumed on some paths")),
         "expected a path-inconsistency error, got: {:?}",
@@ -338,13 +339,13 @@ fn overlay_buffers_shadow_the_file_system() {
     let entry = fixture("multi_file/main.cnb");
     let broken = "use Math.add\n\npub fun main() I64\n  return add(10)\nend\n";
     let overlay = [(entry.clone(), broken.to_string())];
-    let analysis = analyze(&entry, &overlay);
+    let analysis = analyze(&entry, &overlay, &Target::host());
     assert!(
         !analysis.errors.is_empty(),
         "overlay with an arity error should fail to check"
     );
     // The same entry with the on-disk (valid) content stays clean.
-    let clean = analyze(&entry, &[]);
+    let clean = analyze(&entry, &[], &Target::host());
     assert!(clean.errors.is_empty(), "on-disk fixture should be clean: {:?}", clean.errors);
 }
 
@@ -355,7 +356,7 @@ fn formatter_is_idempotent_and_preserves_the_reference_program() -> Result<(), B
     let formatted = format_source(&source);
     assert_eq!(format_source(&formatted), formatted, "formatter was not idempotent");
     let overlay = [(entry.clone(), formatted)];
-    let analysis = analyze(&entry, &overlay);
+    let analysis = analyze(&entry, &overlay, &Target::host());
     assert!(analysis.resolved, "formatted source did not resolve: {:?}", analysis.errors);
     assert!(analysis.typechecked, "formatted source did not typecheck: {:?}", analysis.errors);
     assert!(analysis.errors.is_empty(), "formatting changed program validity: {:?}", analysis.errors);
@@ -430,7 +431,7 @@ fn project_and_documentation_commands_work_end_to_end() -> Result<(), Box<dyn Er
 #[test]
 fn folding_ranges_cover_module_and_function_bodies() {
     let entry = fixture("explain_leak.cnb");
-    let analysis = analyze(&entry, &[]);
+    let analysis = analyze(&entry, &[], &Target::host());
     assert!(analysis.resolved, "errors: {:?}", analysis.errors);
     let entry_file = file_id_of(&analysis, &entry);
     let text = analysis.files.first().map(|pair| pair.1.clone()).unwrap_or_default();
@@ -456,7 +457,7 @@ fn folding_ranges_cover_module_and_function_bodies() {
 #[test]
 fn document_symbols_nest_module_contents() {
     let entry = fixture("explain_leak.cnb");
-    let analysis = analyze(&entry, &[]);
+    let analysis = analyze(&entry, &[], &Target::host());
     assert!(analysis.resolved, "errors: {:?}", analysis.errors);
     let entry_file = file_id_of(&analysis, &entry);
     let symbols = document_symbols(&analysis, entry_file);
@@ -477,7 +478,7 @@ fn document_symbols_nest_module_contents() {
 #[test]
 fn workspace_symbols_find_declarations_across_files() {
     let entry = fixture("multi_file/main.cnb");
-    let analysis = analyze(&entry, &[]);
+    let analysis = analyze(&entry, &[], &Target::host());
     assert!(analysis.resolved, "errors: {:?}", analysis.errors);
     let found = workspace_symbols(&analysis, "add");
     assert!(!found.is_empty(), "expected 'add' to be found");
@@ -497,7 +498,7 @@ fn workspace_symbols_find_declarations_across_files() {
 #[test]
 fn rename_edits_cover_every_occurrence_across_files() {
     let entry = fixture("multi_file/main.cnb");
-    let analysis = analyze(&entry, &[]);
+    let analysis = analyze(&entry, &[], &Target::host());
     assert!(analysis.resolved, "errors: {:?}", analysis.errors);
     let entry_file = file_id_of(&analysis, &entry);
     let main_text = analysis.files.first().map(|pair| pair.1.clone()).unwrap_or_default();
@@ -523,7 +524,7 @@ fn rename_edits_cover_every_occurrence_across_files() {
 #[test]
 fn rename_edits_refuse_a_position_with_no_symbol() {
     let entry = fixture("dead_code.cnb");
-    let analysis = analyze(&entry, &[]);
+    let analysis = analyze(&entry, &[], &Target::host());
     let entry_file = file_id_of(&analysis, &entry);
     let text = analysis.files.first().map(|pair| pair.1.clone()).unwrap_or_default();
     // Well inside the file's opening doc comment: comments carry no parse
@@ -537,7 +538,7 @@ fn rename_edits_refuse_a_position_with_no_symbol() {
 #[test]
 fn semantic_tokens_classify_a_function_call() {
     let entry = fixture("multi_file/main.cnb");
-    let analysis = analyze(&entry, &[]);
+    let analysis = analyze(&entry, &[], &Target::host());
     assert!(analysis.resolved, "errors: {:?}", analysis.errors);
     let entry_file = file_id_of(&analysis, &entry);
     let text = analysis.files.first().map(|pair| pair.1.clone()).unwrap_or_default();
@@ -553,7 +554,7 @@ fn semantic_tokens_classify_a_function_call() {
 #[test]
 fn inlay_hints_report_inferred_type_for_unannotated_bindings() {
     let entry = fixture("tooling_scope.cnb");
-    let analysis = analyze(&entry, &[]);
+    let analysis = analyze(&entry, &[], &Target::host());
     assert!(analysis.resolved && analysis.typechecked, "errors: {:?}", analysis.errors);
     let entry_file = file_id_of(&analysis, &entry);
     let text = analysis.files.first().map(|pair| pair.1.clone()).unwrap_or_default();
@@ -570,7 +571,7 @@ fn code_actions_remove_an_unused_import() {
     let source = "pub mod Tools\n  pub fun visible() I64\n    return 1\n  end\nend\n\nuse Tools.visible\n\npub fun main() I64\n  return Tools.visible()\nend\n";
     let path = fixture("synthetic_unused_import.cnb");
     let overlay = vec![(path.clone(), source.to_string())];
-    let analysis = analyze(&path, &overlay);
+    let analysis = analyze(&path, &overlay, &Target::host());
     assert!(analysis.resolved, "errors: {:?}", analysis.errors);
     let entry_file = file_id_of(&analysis, &path);
     let fixes = code_actions(&analysis, entry_file, 0, source.len() as i64);

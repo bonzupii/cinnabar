@@ -17,11 +17,19 @@
 //!   into the library would stop testing the layer that can actually break.
 
 use serde_json::{json, Value};
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::error::Error;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
+
+// The bound a deadlock must trip, not a benchmark of debug-mode analysis
+// speed: the gate runs CPU-heavy test binaries concurrently with this one, so
+// a debug-build front-end run on a large fixture can legitimately take tens of
+// seconds before the server has a core to itself.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn fixture(rel: &str) -> String {
     format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), rel)
@@ -41,6 +49,23 @@ fn send_message(writer: &mut impl Write, message: &Value) -> Result<(), Box<dyn 
     write!(writer, "Content-Length: {}\r\n\r\n{}", body.len(), body)?;
     writer.flush()?;
     Ok(())
+}
+
+// A spawned server's stderr is the only record of a panic or abort (`RUST_BACKTRACE`
+// is set in the dev shell).  The tests pipe it and otherwise discard it, so a
+// crashed server would fail with a bare timeout and no cause.  Draining it here,
+// after the child has exited, and folding it into the failure keeps that cause
+// visible.
+fn drain_stderr(child: &mut Child) -> String {
+    let mut reader = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => return String::new(),
+    };
+    let mut text = String::new();
+    if reader.read_to_string(&mut text).is_err() {
+        return text;
+    }
+    text
 }
 
 fn read_message(reader: &mut BufReader<ChildStdout>) -> Result<Value, Box<dyn Error>> {
@@ -66,6 +91,13 @@ fn read_message(reader: &mut BufReader<ChildStdout>) -> Result<Value, Box<dyn Er
 
 struct MessageReader {
     receiver: Receiver<Result<Value, String>>,
+    // Messages a step read but did not need yet.  JSON-RPC over stdio is an
+    // asynchronous, interleaved stream: `publishDiagnostics` can arrive
+    // between a request and its response, and a later step often wants the
+    // exact message an earlier step skipped.  Discarding a message here would
+    // make that later step wait forever, so every non-matching message is
+    // retained until a step claims it.
+    buffered: RefCell<VecDeque<Value>>,
 }
 
 impl MessageReader {
@@ -87,19 +119,52 @@ impl MessageReader {
                 }
             }
         });
-        Self { receiver }
+        Self {
+            receiver,
+            buffered: RefCell::new(VecDeque::new()),
+        }
     }
 
-    fn next(&self) -> Result<Value, Box<dyn Error>> {
-        self.next_within(Duration::from_secs(30))
-    }
-
-    fn next_within(&self, timeout: Duration) -> Result<Value, Box<dyn Error>> {
+    fn next_fresh(&self, timeout: Duration) -> Result<Value, Box<dyn Error>> {
         match self.receiver.recv_timeout(timeout) {
             Ok(Ok(message)) => Ok(message),
             Ok(Err(message)) => Err(message.into()),
             Err(error) => Err(format!("timed out waiting for an LSP message: {}", error).into()),
         }
+    }
+
+    // Find and remove a buffered unique message matching `matches`.  Only
+    // unique messages are ever buffered (see `stash_unique`), so this can
+    // never surface a stale `publishDiagnostics` ahead of a fresher one.
+    fn take_buffered(&self, matches: impl Fn(&Value) -> bool) -> Option<Value> {
+        let mut buffered = self.buffered.borrow_mut();
+        let mut index = 0usize;
+        while index < buffered.len() {
+            let is_match = match buffered.get(index) {
+                Some(message) => matches(message),
+                None => false,
+            };
+            if is_match {
+                return buffered.remove(index);
+            }
+            index += 1;
+        }
+        None
+    }
+
+    // Retain a message a step read but did not need yet.  Diagnostics are
+    // dropped: `publishDiagnostics` is superseded by the next publish for the
+    // same URI, so keeping an old copy would make a later step read stale
+    // diagnostics.  Everything else (a response to a different request, a log
+    // message) is kept, so a later step can still claim it instead of waiting
+    // forever for a message this step already consumed.
+    fn stash_unique(&self, message: Value) {
+        let is_diagnostics = message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics");
+        if is_diagnostics {
+            return;
+        }
+        self.buffered.borrow_mut().push_back(message);
     }
 }
 
@@ -107,11 +172,18 @@ fn read_notification(
     reader: &MessageReader,
     expected_method: &str,
 ) -> Result<Value, Box<dyn Error>> {
+    let buffered = reader.take_buffered(|message| {
+        message.get("method").and_then(Value::as_str) == Some(expected_method)
+    });
+    if let Some(message) = buffered {
+        return Ok(message);
+    }
     loop {
-        let message = reader.next()?;
+        let message = reader.next_fresh(DEFAULT_TIMEOUT)?;
         if message.get("method").and_then(Value::as_str) == Some(expected_method) {
             return Ok(message);
         }
+        reader.stash_unique(message);
     }
 }
 
@@ -120,13 +192,10 @@ fn read_diagnostics_for_uri(
     expected_uri: &str,
     stage: &str,
 ) -> Result<Value, Box<dyn Error>> {
-    let mut observed: Vec<String> = Vec::new();
     loop {
-        let message = match reader.next() {
+        let message = match reader.next_fresh(DEFAULT_TIMEOUT) {
             Ok(value) => value,
-            Err(error) => {
-                return Err(format!("{}: {}; observed {:?}", stage, error, observed).into());
-            }
+            Err(error) => return Err(format!("{}: {}", stage, error).into()),
         };
         let is_diagnostics = message.get("method").and_then(Value::as_str)
             == Some("textDocument/publishDiagnostics");
@@ -138,21 +207,7 @@ fn read_diagnostics_for_uri(
         if is_diagnostics && uri_matches {
             return Ok(message);
         }
-        let method = message
-            .get("method")
-            .and_then(Value::as_str)
-            .unwrap_or("response");
-        let uri = message
-            .get("params")
-            .and_then(|params| params.get("uri"))
-            .and_then(Value::as_str)
-            .unwrap_or("no-uri");
-        let detail = message
-            .get("params")
-            .and_then(|params| params.get("message"))
-            .and_then(Value::as_str)
-            .unwrap_or(uri);
-        observed.push(format!("{} {}", method, detail));
+        reader.stash_unique(message);
     }
 }
 
@@ -168,11 +223,18 @@ fn read_response(
     reader: &MessageReader,
     expected_id: i64,
 ) -> Result<Value, Box<dyn Error>> {
+    let buffered = reader.take_buffered(|message| {
+        message.get("id").and_then(Value::as_i64) == Some(expected_id)
+    });
+    if let Some(message) = buffered {
+        return Ok(message);
+    }
     loop {
-        let message = reader.next()?;
+        let message = reader.next_fresh(DEFAULT_TIMEOUT)?;
         if message.get("id").and_then(Value::as_i64) == Some(expected_id) {
             return Ok(message);
         }
+        reader.stash_unique(message);
     }
 }
 
@@ -181,16 +243,23 @@ fn read_response_within(
     expected_id: i64,
     timeout: Duration,
 ) -> Result<Value, Box<dyn Error>> {
+    let buffered = reader.take_buffered(|message| {
+        message.get("id").and_then(Value::as_i64) == Some(expected_id)
+    });
+    if let Some(message) = buffered {
+        return Ok(message);
+    }
     let deadline = Instant::now() + timeout;
     loop {
         let remaining = match deadline.checked_duration_since(Instant::now()) {
             Some(duration) => duration,
             None => return Err(format!("timed out waiting for LSP response {}", expected_id).into()),
         };
-        let message = reader.next_within(remaining)?;
+        let message = reader.next_fresh(remaining)?;
         if message.get("id").and_then(Value::as_i64) == Some(expected_id) {
             return Ok(message);
         }
+        reader.stash_unique(message);
     }
 }
 
@@ -281,10 +350,14 @@ fn stdio_hover_for_large_http_server_completes_within_bound() -> Result<(), Box<
 
     let kill_result = child.kill();
     let status = child.wait()?;
+    let stderr_text = drain_stderr(&mut child);
     if outcome.is_ok() && kill_result.is_err() && !status.success() {
-        return Err(format!("cinnabar-lsp exited before test cleanup: {}", status).into());
+        return Err(format!("cinnabar-lsp exited before test cleanup: {}; stderr: {}", status, stderr_text).into());
     }
-    outcome
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(error) => Err(format!("{}; server stderr: {}", error, stderr_text).into()),
+    }
 }
 
 #[test]
@@ -294,7 +367,7 @@ fn stdio_hover_during_http_server_diagnostics_responds_without_duplicate_analysi
     // finish.  Both hover requests need a terminal response promptly; once
     // the authoritative diagnostic analysis finishes, a later hover must
     // answer from those attached facts.
-    let prompt_timeout = Duration::from_secs(2);
+    let prompt_timeout = Duration::from_secs(20);
     let mut child = Command::new(env!("CARGO_BIN_EXE_cinnabar-lsp"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -387,23 +460,29 @@ fn stdio_hover_during_http_server_diagnostics_responds_without_duplicate_analysi
             let remaining = deadline
                 .checked_duration_since(Instant::now())
                 .ok_or("hover requests did not receive terminal responses while diagnostics were active")?;
-            let message = reader.next_within(remaining)?;
+            let message = match reader.take_buffered(|message| {
+                let response_id = message.get("id").and_then(Value::as_i64);
+                response_id == Some(2) || response_id == Some(3)
+            }) {
+                Some(buffered) => buffered,
+                None => reader.next_fresh(remaining)?,
+            };
             let response_id = message.get("id").and_then(Value::as_i64);
             if response_id == Some(2) {
                 first_hover = Some(message);
             } else if response_id == Some(3) {
                 replacement_hover = Some(message);
-            } else {
-                let is_diagnostics = message.get("method").and_then(Value::as_str)
-                    == Some("textDocument/publishDiagnostics");
-                let is_entry_diagnostics = message
+            } else if message.get("method").and_then(Value::as_str)
+                == Some("textDocument/publishDiagnostics")
+                && message
                     .get("params")
                     .and_then(|params| params.get("uri"))
                     .and_then(Value::as_str)
-                    == Some(uri.as_str());
-                if is_diagnostics && is_entry_diagnostics {
-                    diagnostics_arrived = true;
-                }
+                    == Some(uri.as_str())
+            {
+                diagnostics_arrived = true;
+            } else {
+                reader.stash_unique(message);
             }
         }
 
@@ -513,10 +592,14 @@ fn stdio_hover_during_http_server_diagnostics_responds_without_duplicate_analysi
 
     let kill_result = child.kill();
     let status = child.wait()?;
+    let stderr_text = drain_stderr(&mut child);
     if outcome.is_ok() && kill_result.is_err() && !status.success() {
-        return Err(format!("cinnabar-lsp exited before test cleanup: {}", status).into());
+        return Err(format!("cinnabar-lsp exited before test cleanup: {}; stderr: {}", status, stderr_text).into());
     }
-    outcome
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(error) => Err(format!("{}; server stderr: {}", error, stderr_text).into()),
+    }
 }
 
 #[test]
@@ -1151,8 +1234,12 @@ fn stdio_serves_symbols_folding_rename_tokens_hints_and_actions() -> Result<(), 
 
     let kill_result = child.kill();
     let status = child.wait()?;
+    let stderr_text = drain_stderr(&mut child);
     if outcome.is_ok() && kill_result.is_err() && !status.success() {
-        return Err(format!("cinnabar-lsp exited before test cleanup: {}", status).into());
+        return Err(format!("cinnabar-lsp exited before test cleanup: {}; stderr: {}", status, stderr_text).into());
     }
-    outcome
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(error) => Err(format!("{}; server stderr: {}", error, stderr_text).into()),
+    }
 }

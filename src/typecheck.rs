@@ -10,7 +10,7 @@
 //!
 //! This is the stage that computes what the rest of the compiler consumes,
 //! which is why it is the largest file in the tree. Enum variant tags
-//! (`NODE_VARFACT`), struct field offsets (`NODE_FIELDKEY`), trait dispatch
+//! (variant symbol tags), struct field offsets (`NODE_FIELDKEY`), trait dispatch
 //! targets (`NODE_TRAIT`), and one `NODE_INST` per instantiated generic are
 //! all established here. So is linearity: every type key is marked linear
 //! or not — a native handle by declaration, an aggregate if any member is,
@@ -41,6 +41,7 @@
 use crate::ast::*;
 use crate::resolver::NS_VALUE;
 use crate::suggest;
+use crate::target::Target;
 
 const IMPL_STRIDE: i64 = 3;
 
@@ -67,23 +68,31 @@ type State<'a> = (
     // The return-type node of the function currently being checked, so a
     // return-type mismatch can label the declaration it violates.
     i64,
+    // Resolver-seeded primitive type symbols and the `Self` name.
+    &'a Seeds,
+    // The platform a build is for, so typechecking can reject an operation
+    // a target does not support before code generation begins.
+    &'a Target,
+    // The canonical key of the first seeded builtin (I8); every other
+    // builtin subtype key is this base plus its BUILTIN_* index, so a
+    // builtin lookup is a constant-time add instead of an arena scan.
+    i64,
 );
 
 pub fn typecheck(
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
-    errors: &mut Vec<Diag>,
-    notes: &mut Vec<Note>,
+    check: &mut CheckContext,
     root: i64,
     ext_mods: &[(i64, i64)],
 ) -> (bool, i64) {
-    seed_builtins(names, nodes, lists);
-    let unit_sym = find_type_sym_by_name(nodes, intern(names, "Unit"));
-    let result_sym = find_type_sym_by_name(nodes, intern(names, "Result"));
-    let option_sym = find_type_sym_by_name(nodes, intern(names, "Option"));
-    let div_err_sym = find_type_sym_by_name(nodes, intern(names, "DivError"));
-    let index_err_sym = find_type_sym_by_name(nodes, intern(names, "IndexError"));
+    let builtin_base = seed_builtins(nodes, lists, check.seeds);
+    let unit_sym = check.seeds.sym(SEED_SYM_UNIT);
+    let result_sym = check.seeds.sym(SEED_SYM_RESULT);
+    let option_sym = check.seeds.sym(SEED_SYM_OPTION);
+    let div_err_sym = check.seeds.sym(SEED_SYM_DIV_ERROR);
+    let index_err_sym = check.seeds.sym(SEED_SYM_INDEX_ERROR);
     let mut impls: Vec<i64> = Vec::new();
     let mut vars: Vec<(i64, i64)> = Vec::new();
     let mut origins: Vec<(i64, i64, i64)> = Vec::new();
@@ -94,7 +103,7 @@ pub fn typecheck(
         names,
         nodes,
         lists,
-        errors,
+        check.errors,
         &mut env,
         &mut impls,
         &mut vars,
@@ -107,8 +116,11 @@ pub fn typecheck(
         0,
         0,
         &mut local_fact_sources,
-        notes,
+        check.notes,
         0,
+        check.seeds,
+        check.target,
+        builtin_base,
     );
 
     collect_types(&mut state, root);
@@ -120,6 +132,12 @@ pub fn typecheck(
         }
         idx += 1;
     }
+
+    // Linearity is settled now, before any signature, constant, or
+    // expression checking: every descriptor that exists already carries its
+    // flag, and every descriptor created later carries it from creation, so
+    // `tyinfo_is_linear` is a constant-time read for the whole check.
+    attach_linearity(state.1, state.2);
 
     check_fn_sigs_list(&mut state, root);
     idx = 0;
@@ -203,75 +221,55 @@ fn sym_home(nodes: &[i64], sym: i64) -> i64 {
     node_d(nodes, sym)
 }
 
-fn builtin_key_of(nodes: &[i64], sub: i64) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_TYINFO && node_b(nodes, idx) == TYD_BUILTIN && node_f(nodes, idx) == sub {
-            return node_a(nodes, idx);
+// The canonical key of a builtin subtype: the seeded builtin descriptors
+// are contiguous and start at the base key, so a subtype key is the base
+// plus its BUILTIN_* index.
+fn builtin_key_of(base: i64, sub: i64) -> i64 {
+    if base == NONE {
+        return NONE;
+    }
+    base + sub
+}
+
+// The canonical key of a builtin primitive symbol, resolved by matching the
+// symbol against the seeded subtype slots; constant in the number of
+// builtins rather than proportional to the arena size.
+fn builtin_key_of_sym(seeds: &Seeds, base: i64, sym: i64) -> i64 {
+    if base == NONE {
+        return NONE;
+    }
+    let mut sub = 0i64;
+    while sub <= BUILTIN_USIZE {
+        if seeds.sym(SEED_SYM_I8 + sub as usize) == sym {
+            return base + sub;
         }
-        idx += 1;
+        sub += 1;
+    }
+    if seeds.sym(SEED_SYM_BOOL) == sym {
+        return base + BUILTIN_BOOL;
     }
     NONE
 }
 
-fn builtin_key_of_sym(nodes: &[i64], sym: i64) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_TYINFO && node_b(nodes, idx) == TYD_BUILTIN && node_c(nodes, idx) == sym {
-            return node_a(nodes, idx);
-        }
-        idx += 1;
+// Seeds the builtin type descriptors in subtype order and returns the base
+// key (the I8 descriptor), from which every other builtin key is an offset.
+fn seed_builtins(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, seeds: &Seeds) -> i64 {
+    let base = seed_builtin(nodes, lists, seeds.sym(SEED_SYM_I8), BUILTIN_I8);
+    let mut sub = 1i64;
+    while sub <= BUILTIN_USIZE {
+        seed_builtin(nodes, lists, seeds.sym(SEED_SYM_I8 + sub as usize), sub);
+        sub += 1;
     }
-    NONE
+    seed_builtin(nodes, lists, seeds.sym(SEED_SYM_BOOL), BUILTIN_BOOL);
+    base
 }
 
-fn seed_builtins(names: &mut Vec<String>, nodes: &mut Vec<i64>, lists: &mut [Vec<i64>]) {
-    let ints = [
-        (intern(names, "I8"), BUILTIN_I8),
-        (intern(names, "I16"), BUILTIN_I16),
-        (intern(names, "I32"), BUILTIN_I32),
-        (intern(names, "I64"), BUILTIN_I64),
-        (intern(names, "Isize"), BUILTIN_ISIZE),
-        (intern(names, "U8"), BUILTIN_U8),
-        (intern(names, "U16"), BUILTIN_U16),
-        (intern(names, "U32"), BUILTIN_U32),
-        (intern(names, "U64"), BUILTIN_U64),
-        (intern(names, "Usize"), BUILTIN_USIZE),
-    ];
-    let mut idx = 0usize;
-    while idx < ints.len() {
-        let (name_id, sub) = match ints.get(idx) {
-            Some(pair) => *pair,
-            None => break,
-        };
-        seed_builtin(nodes, lists, name_id, sub);
-        idx += 1;
-    }
-    let bool_name = intern(names, "Bool");
-    seed_builtin(nodes, lists, bool_name, BUILTIN_BOOL);
-}
-
-fn seed_builtin(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], name: i64, sub: i64) {
-    let sym = find_type_sym_by_name(nodes, name);
+fn seed_builtin(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, sym: i64, sub: i64) -> i64 {
     if sym != NONE {
-        canon_tyinfo(nodes, lists, TYD_BUILTIN, sym, NONE, NONE, sub);
+        canon_tyinfo(nodes, lists, TYD_BUILTIN, sym, NONE, NONE, sub)
+    } else {
+        NONE
     }
-}
-
-fn find_type_sym_by_name(nodes: &[i64], name: i64) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_SYM {
-            let kind = node_a(nodes, idx);
-            if (kind == SYM_TYPE || kind == SYM_STRUCT || kind == SYM_ENUM || kind == SYM_TRAIT)
-                && node_b(nodes, idx) == name
-            {
-                return idx;
-            }
-        }
-        idx += 1;
-    }
-    NONE
 }
 
 fn push_scope(env: &mut Vec<Vec<i64>>) {
@@ -447,11 +445,11 @@ fn fresh_var(vars: &mut Vec<(i64, i64)>, origins: &mut Vec<(i64, i64, i64)>, exp
     var
 }
 
-fn param_decl_key(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], owner: i64, name: i64, bound: i64) -> i64 {
+fn param_decl_key(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, owner: i64, name: i64, bound: i64) -> i64 {
     canon_tyinfo(nodes, lists, TYD_PARAM, name, NONE, owner, bound)
 }
 
-fn bind_type_params(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], env: &mut [Vec<i64>], owner: i64, params: i64) {
+fn bind_type_params(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, env: &mut [Vec<i64>], owner: i64, params: i64) {
     let count = list_len(lists, params);
     let mut idx = 0i64;
     while idx < count {
@@ -494,30 +492,30 @@ fn declared_param_keys(nodes: &[i64], lists: &[Vec<i64>], item: i64) -> Vec<i64>
     keys
 }
 
-fn named_key(names: &[String], nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], errors: &mut Vec<Diag>, sym: i64, span: (i64, i64, i64)) -> i64 {
+fn named_key(state: &mut State, sym: i64, span: (i64, i64, i64)) -> i64 {
     let (file, start, end) = span;
-    let kind = sym_kind(nodes, sym);
+    let kind = sym_kind(state.1, sym);
     if kind == SYM_TYPE {
-        let decl = sym_decl(nodes, sym);
+        let decl = sym_decl(state.1, sym);
         if decl == NONE {
-            return builtin_key_of_sym(nodes, sym);
+            return builtin_key_of_sym(state.18, state.20, sym);
         }
-        if declared_param_count(nodes, lists, decl) > 0 {
-            push_error(errors, &format!("type '{}' requires type arguments", name_text(names, sym_name(nodes, sym))), file, start, end);
-            return unknown_key(nodes, lists);
+        if declared_param_count(state.1, state.2, decl) > 0 {
+            push_type_error(state.3, &format!("type '{}' requires type arguments", name_text(state.0, sym_name(state.1, sym))), file, start, end);
+            return unknown_key(state.1, state.2);
         }
-        return canon_tyinfo(nodes, lists, TYD_NATIVE, sym, NONE, NONE, NONE);
+        return canon_tyinfo(state.1, state.2, TYD_NATIVE, sym, NONE, NONE, NONE);
     }
     let kind_of = if kind == SYM_STRUCT { TYD_STRUCT } else { TYD_ENUM };
-    let decl = sym_decl(nodes, sym);
-    if declared_param_count(nodes, lists, decl) > 0 {
-        push_error(errors, &format!("type '{}' requires type arguments", name_text(names, sym_name(nodes, sym))), file, start, end);
-        return unknown_key(nodes, lists);
+    let decl = sym_decl(state.1, sym);
+    if declared_param_count(state.1, state.2, decl) > 0 {
+        push_type_error(state.3, &format!("type '{}' requires type arguments", name_text(state.0, sym_name(state.1, sym))), file, start, end);
+        return unknown_key(state.1, state.2);
     }
-    canon_tyinfo(nodes, lists, kind_of, sym, NONE, NONE, NONE)
+    canon_tyinfo(state.1, state.2, kind_of, sym, NONE, NONE, NONE)
 }
 
-fn unknown_key(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>]) -> i64 {
+fn unknown_key(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) -> i64 {
     canon_tyinfo(nodes, lists, TYD_UNKNOWN, NONE, NONE, NONE, NONE)
 }
 
@@ -577,27 +575,27 @@ fn canon_ty_kind(state: &mut State, ty: i64, kind: i64, self_key: i64, write: i6
         }
         let sym = ty_sym_of(state.1, ty);
         if sym == NONE {
-            push_error(state.3, &format!("unknown type '{}'", name_text(state.0, name)), file, start, end);
+            push_type_error(state.3, &format!("unknown type '{}'", name_text(state.0, name)), file, start, end);
             return unknown_key(state.1, state.2);
         }
-        return named_key(state.0, state.1, state.2, state.3, sym, (file, start, end));
+        return named_key(state, sym, (file, start, end));
     }
     if kind == TY_PATH {
         let sym = ty_sym_of(state.1, ty);
         if sym == NONE {
-            push_error(state.3, "cannot resolve type", file, start, end);
+            push_type_error(state.3, "cannot resolve type", file, start, end);
             return unknown_key(state.1, state.2);
         }
-        return named_key(state.0, state.1, state.2, state.3, sym, (file, start, end));
+        return named_key(state, sym, (file, start, end));
     }
     if kind == TY_GENERIC {
         let sym = ty_sym_of(state.1, ty);
         if sym == NONE {
-            push_error(state.3, "cannot resolve type", file, start, end);
+            push_type_error(state.3, "cannot resolve type", file, start, end);
             return unknown_key(state.1, state.2);
         }
         if sym_kind(state.1, sym) == SYM_TYPE && sym_decl(state.1, sym) == NONE {
-            push_error(state.3, &format!("builtin type '{}' does not take type arguments", name_text(state.0, sym_name(state.1, sym))), file, start, end);
+            push_type_error(state.3, &format!("builtin type '{}' does not take type arguments", name_text(state.0, sym_name(state.1, sym))), file, start, end);
             return unknown_key(state.1, state.2);
         }
         let targs = node_c(state.1, ty);
@@ -630,10 +628,10 @@ fn canon_ty_kind(state: &mut State, ty: i64, kind: i64, self_key: i64, write: i6
         if found.0 != NONE {
             return found.0;
         }
-        push_error(state.3, &format!("unknown type parameter '{}'", name_text(state.0, name)), file, start, end);
+        push_type_error(state.3, &format!("unknown type parameter '{}'", name_text(state.0, name)), file, start, end);
         return unknown_key(state.1, state.2);
     }
-    push_error(state.3, "malformed type", file, start, end);
+    push_type_error(state.3, "malformed type", file, start, end);
     unknown_key(state.1, state.2)
 }
 
@@ -741,11 +739,10 @@ fn is_option_key(nodes: &[i64], key: i64) -> bool {
     key_kind(nodes, key) == TYD_ENUM && sym_prim_kind(nodes, key_sym(nodes, key)) == PRIM_OPTION
 }
 
-fn attach_variant_facts(nodes: &mut Vec<i64>, lists: &[Vec<i64>]) {
+fn attach_variant_facts(nodes: &mut [i64], lists: &[Vec<i64>]) {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
         if node_tag(nodes, idx) == NODE_TYINFO && node_b(nodes, idx) == TYD_ENUM {
-            let key = node_a(nodes, idx);
             let sym = node_c(nodes, idx);
             if sym != NONE {
                 let decl = sym_decl(nodes, sym);
@@ -757,7 +754,7 @@ fn attach_variant_facts(nodes: &mut Vec<i64>, lists: &[Vec<i64>]) {
                         let variant = list_get(lists, variants, v);
                         let vsym = variant_sym_of(nodes, variant);
                         if vsym != NONE {
-                            alloc_varfact(nodes, key, node_a(nodes, variant), vsym, v);
+                            sym_set_variant_tag(nodes, vsym, v);
                         }
                         v += 1;
                     }
@@ -769,23 +766,22 @@ fn attach_variant_facts(nodes: &mut Vec<i64>, lists: &[Vec<i64>]) {
 }
 
 fn attach_linearity(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) {
+    // Settles flags for descriptors created before all declarations were
+    // collected, and recomputes native has-linear-elements flags now that
+    // type arguments resolve.
     let mut seen: Vec<i64> = Vec::new();
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
         if node_tag(nodes, idx) == NODE_TYINFO {
             seen.clear();
-            linear_of(nodes, lists, node_a(nodes, idx), &mut seen);
-            // A native container holds linear elements when any of its type
-            // arguments is linear (HashMap(K, V): the key counts too).  The
-            // flag is attached per canonical key so the borrow checker reads
-            // one integer instead of re-deriving linearity (Single-Fact).
+            linear_flag_of(nodes, lists, node_a(nodes, idx), &mut seen);
             if node_b(nodes, idx) == TYD_NATIVE {
                 let args = node_d(nodes, idx);
                 let count = list_len(lists, args);
                 let mut has = 0;
                 let mut ai = 0i64;
                 while ai < count {
-                    if linear_of(nodes, lists, list_get(lists, args, ai), &mut seen) == 1 {
+                    if linear_flag_of(nodes, lists, list_get(lists, args, ai), &mut seen) == 1 {
                         has = 1;
                     }
                     ai += 1;
@@ -813,89 +809,9 @@ fn has_value(list: &[i64], value: i64) -> bool {
     false
 }
 
-fn linear_of(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, key: i64, seen: &mut Vec<i64>) -> i64 {
-    if key < 0 {
-        return 0;
-    }
-    let row = find_tyinfo(nodes, key);
-    if row == NONE {
-        return 0;
-    }
-    let stored = node_get(nodes, row, NODE_FILE);
-    if stored == 0 || stored == 1 {
-        return stored;
-    }
-    if has_value(seen, key) {
-        return 0;
-    }
-    seen.push(key);
-    let kind = node_b(nodes, row);
-    let flag = if kind == TYD_NATIVE {
-        1
-    } else if kind == TYD_ARRAY {
-        linear_of(nodes, lists, node_e(nodes, row), seen)
-    } else if kind == TYD_STRUCT || kind == TYD_ENUM {
-        linear_members_of(nodes, lists, node_c(nodes, row), key, seen)
-    } else if kind == TYD_PARAM {
-        // Type parameters carry no linearity bound in the grammar, so the
-        // only sound default is to treat them as linear (MANIFESTO): a
-        // generic body must consume its type-parameter values exactly once.
-        1
-    } else {
-        0
-    };
-    node_set(nodes, row, NODE_FILE, flag);
-    flag
-}
-
-fn linear_members_of(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, sym: i64, key: i64, seen: &mut Vec<i64>) -> i64 {
-    if sym == NONE {
-        return 0;
-    }
-    let decl = sym_decl(nodes, sym);
-    if decl == NONE || node_tag(nodes, decl) != NODE_ITEM {
-        return 0;
-    }
-    let kind = node_a(nodes, decl);
-    let row = find_tyinfo(nodes, key);
-    let args = if row == NONE { NONE } else { node_d(nodes, row) };
-    if kind == ITEM_STRUCT {
-        let fields = node_e(nodes, decl);
-        let count = list_len(lists, fields);
-        let mut idx = 0i64;
-        while idx < count {
-            let fty_node = node_b(nodes, list_get(lists, fields, idx));
-            let fty = subst_declared_key(nodes, lists, decl, args, ty_key_of(nodes, fty_node));
-            if linear_of(nodes, lists, fty, seen) == 1 {
-                return 1;
-            }
-            idx += 1;
-        }
-    } else if kind == ITEM_ENUM {
-        let variants = node_e(nodes, decl);
-        let count = list_len(lists, variants);
-        let mut idx = 0i64;
-        while idx < count {
-            let payload = node_b(nodes, list_get(lists, variants, idx));
-            let pcount = list_len(lists, payload);
-            let mut pidx = 0i64;
-            while pidx < pcount {
-                let pty_node = list_get(lists, payload, pidx);
-                let pty = subst_declared_key(nodes, lists, decl, args, ty_key_of(nodes, pty_node));
-                if linear_of(nodes, lists, pty, seen) == 1 {
-                    return 1;
-                }
-                pidx += 1;
-            }
-            idx += 1;
-        }
-    }
-    0
-}
-
 // Whether a canonical type key's value can carry a reference anywhere in its
 // structure, not only when the key itself is bare `&T`/`&mut T`/`&[T]`. The
-// borrow checker's returned-borrow obligation (Manifesto principle 5) must
+// borrow checker's returned-borrow obligation must
 // apply to a function returning `Result(&T, E)` or a struct with a reference
 // field the same way it applies to a bare `&T` return; gating on the key's
 // own bare kind let a dangling reference escape wrapped in either shape.
@@ -1009,33 +925,23 @@ fn subst_declared_key(
     subst_key(nodes, lists, declared, &from, &to)
 }
 
-// One fact row per (canonical struct key, field name): the substituted
-// field key and its declared-order index, computed here from the declared
-// field types and the key's own type arguments.  The borrow checker and
-// codegen read these rows instead of re-walking ITEM_STRUCT lists and
-// re-running generic substitution (Single-Fact Rule).
+// One fact row per (canonical struct key, field name) and per (canonical
+// enum key, variant, payload field): the substituted member key and its
+// declared-order index, computed from the declared member types and the
+// key's own type arguments.  Descriptor creation in `canon_tyinfo` already
+// recorded these rows; this sweep re-verifies every struct and enum
+// descriptor in the arena so no key reaches codegen without its member
+// facts, whatever order canonicalization happened in.
 fn attach_fieldkey_facts(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_TYINFO && node_b(nodes, idx) == TYD_STRUCT {
-            let key = node_a(nodes, idx);
-            let sym = node_c(nodes, idx);
-            if sym != NONE {
-                let decl = sym_decl(nodes, sym);
-                if decl != NONE && node_tag(nodes, decl) == NODE_ITEM && node_a(nodes, decl) == ITEM_STRUCT {
-                    let fields = node_e(nodes, decl);
-                    let count = list_len(lists, fields);
-                    let from = declared_param_keys(nodes, lists, decl);
-                    let to = list_to_vec(lists, key_args(nodes, key));
-                    let mut f = 0i64;
-                    while f < count {
-                        let field = list_get(lists, fields, f);
-                        let declared = ty_key_of(nodes, node_b(nodes, field));
-                        let fkey = subst_key(nodes, lists, declared, &from, &to);
-                        alloc_fieldkey(nodes, key, node_a(nodes, field), fkey, f);
-                        f += 1;
-                    }
-                }
+        if node_tag(nodes, idx) == NODE_TYINFO {
+            let kind = node_b(nodes, idx);
+            if kind == TYD_STRUCT || kind == TYD_ENUM {
+                let key = node_a(nodes, idx);
+                let sym = node_c(nodes, idx);
+                let args = node_d(nodes, idx);
+                attach_member_facts(nodes, lists, key, kind, sym, args);
             }
         }
         idx += 1;
@@ -1045,7 +951,6 @@ fn attach_fieldkey_facts(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) {
 fn attach_type_facts(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) {
     attach_variant_facts(nodes, lists);
     attach_fieldkey_facts(nodes, lists);
-    attach_linearity(nodes, lists);
 }
 
 fn unify_key(nodes: &[i64], lists: &[Vec<i64>], vars: &mut Vec<(i64, i64)>, a: i64, b: i64) -> bool {
@@ -1295,7 +1200,7 @@ fn collect_impl_item(state: &mut State, item: i64) {
         if impl_at(state.5, (di * IMPL_STRIDE) as usize) == trait_sym
             && impl_at(state.5, (di * IMPL_STRIDE + 1) as usize) == for_key
         {
-            push_error(state.3, &format!("duplicate impl of trait '{}' for type '{}'", name_text(state.0, sym_name(state.1, trait_sym)), render_key(state.0, state.1, state.2, state.6, state.7, for_key)), node_file(state.1, item), node_start(state.1, item), node_end(state.1, item));
+            push_type_error(state.3, &format!("duplicate impl of trait '{}' for type '{}'", name_text(state.0, sym_name(state.1, trait_sym)), render_key(state.0, state.1, state.2, state.6, state.7, for_key)), node_file(state.1, item), node_start(state.1, item), node_end(state.1, item));
             return;
         }
         di += 1;
@@ -1341,7 +1246,7 @@ fn verify_impl_complete(state: &mut State, trait_sym: i64, for_key: i64, item: i
         let trait_method = list_get(state.2, declared, idx);
         let name = node_a(state.1, trait_method);
         if find_method_by_name(state.1, state.2, methods, name) == NONE {
-            push_error(
+            push_type_error(
                 state.3,
                 &format!(
                     "impl of trait '{}' for '{}' is missing method '{}'",
@@ -1368,7 +1273,7 @@ fn verify_impl_method(state: &mut State, trait_sym: i64, for_key: i64, method: i
         let file = node_file(state.1, method);
         let start = node_start(state.1, method);
         let end = node_end(state.1, method);
-        push_error(state.3, &format!("impl method '{}' does not match any trait method", name_text(state.0, node_a(state.1, method))), file, start, end);
+        push_type_error(state.3, &format!("impl method '{}' does not match any trait method", name_text(state.0, node_a(state.1, method))), file, start, end);
         return;
     }
     push_scope(state.4);
@@ -1384,7 +1289,7 @@ fn verify_impl_method(state: &mut State, trait_sym: i64, for_key: i64, method: i
         pidx += 1;
     }
     let self_var = fresh_var_local(&mut t_vars);
-    bind(state.4, intern(state.0, "Self"), self_var, 0, NONE);
+    bind(state.4, state.18.name(SEED_NAME_SELF), self_var, 0, NONE);
     let t_params = node_c(state.1, trait_method);
     let i_params = node_c(state.1, method);
     let tn = list_len(state.2, t_params);
@@ -1419,7 +1324,7 @@ fn verify_impl_method(state: &mut State, trait_sym: i64, for_key: i64, method: i
         let file = node_file(state.1, method);
         let start = node_start(state.1, method);
         let end = node_end(state.1, method);
-        push_error(state.3, &format!("impl method '{}' signature does not match the trait declaration", name_text(state.0, node_a(state.1, method))), file, start, end);
+        push_type_error(state.3, &format!("impl method '{}' signature does not match the trait declaration", name_text(state.0, node_a(state.1, method))), file, start, end);
     }
     pop_scope(state.4);
 }
@@ -1525,10 +1430,8 @@ fn check_fn_sigs_item(state: &mut State, item: i64) {
         check_fn_sigs(state, node_d(state.1, item));
     } else if kind == ITEM_TRAIT {
         // Trait method signatures are canon'd here (with write) so the
-        // borrow checker reads their parameter and return keys from the
-        // attached type rows instead of re-deriving modes from raw
-        // NODE_TY tags (Single-Fact Rule).  The methods have no bodies, so
-        // only their signatures are visited.
+        // borrow checker reads their keys from the attached type rows.
+        // The methods have no bodies, so only their signatures are visited.
         let methods = node_e(state.1, item);
         let count = list_len(state.2, methods);
         let mut idx = 0i64;
@@ -1583,7 +1486,7 @@ fn check_fn(state: &mut State, fn_node: i64, self_key: i64, is_main: i64) {
     if is_main == 1 {
         let ret_kind = key_kind(state.1, ret);
         if ret_kind != TYD_BUILTIN && ret_kind != TYD_ENUM {
-            push_error(state.3, "main must return a builtin scalar, Unit, or an exit-status enum", node_file(state.1, ret_ty), node_start(state.1, ret_ty), node_end(state.1, ret_ty));
+            push_type_error(state.3, "main must return a builtin scalar, Unit, or an exit-status enum", node_file(state.1, ret_ty), node_start(state.1, ret_ty), node_end(state.1, ret_ty));
         } else if ret_kind == TYD_ENUM {
             // Unit is the only non-exit-status enum `main` may return.
             let esym = key_sym(state.1, ret);
@@ -1603,12 +1506,9 @@ fn check_fn(state: &mut State, fn_node: i64, self_key: i64, is_main: i64) {
     state.17 = saved_ret_ty_node;
 }
 
-// The exit-status enum contract (MANIFESTO): 2 or 3 variants shaped
-// (Success, Failure, Optional Diagnostic(Int)) — the first two carry no
-// payload, and the optional third carries exactly one integer-scalar
-// payload used as the process exit code.  Any other enum returned from
-// `main` is a compile error; codegen derives the exit code only from
-// this shape.
+// The exit-status enum shape: 2 or 3 variants (Success, Failure, and an
+// optional integer-scalar Diagnostic) whose third variant's payload is the
+// process exit code.  Any other enum returned from `main` is an error.
 fn check_exit_status_enum(state: &mut State, esym: i64, ret_ty: i64) {
     let decl = sym_decl(state.1, esym);
     if decl == NONE || node_tag(state.1, decl) != NODE_ITEM || node_a(state.1, decl) != ITEM_ENUM {
@@ -1633,7 +1533,7 @@ fn check_exit_status_enum(state: &mut State, esym: i64, ret_ty: i64) {
         ok = list_len(state.2, payload_list) == 1 && is_int_key(state.1, payload_key);
     }
     if !ok {
-        push_error(
+        push_type_error(
             state.3,
             &format!(
                 "main return enum '{}' does not conform to the exit-status enum contract: expected 2 or 3 variants with shape (Success, Failure, Optional Diagnostic(Int))",
@@ -1909,12 +1809,13 @@ fn tail_walk_expr(state: &mut State, fn_node: i64, expr: i64, tail: i64) {
     }
     let kind = node_a(state.1, expr);
     if kind == EXPR_CALL {
+        callfact_set_tail(state.1, expr, tail);
         let inst = expr_sym_of(state.1, expr);
         let fn_slot = inst_fn_of(state.1, inst);
         let is_self = node_tag(state.1, fn_slot) == NODE_FN && fn_slot == fn_node;
         if tail == 0 {
             if is_self {
-                push_error(
+                push_type_error(
                     state.3,
                     &format!(
                         "non-tail recursive call to '{}' is forbidden: self-recursion must be in tail position (rewrite using an accumulator or an explicit work stack)",
@@ -1932,7 +1833,7 @@ fn tail_walk_expr(state: &mut State, fn_node: i64, expr: i64, tail: i64) {
             let root = callfact_root_name_of(state.1, expr);
             if root != NONE {
                 if root >= 0 {
-                    push_error(
+                    push_type_error(
                         state.3,
                         &format!(
                             "cannot pass borrow of local variable '{}' into tail-recursive call: local does not outlive the frame jump",
@@ -1943,7 +1844,7 @@ fn tail_walk_expr(state: &mut State, fn_node: i64, expr: i64, tail: i64) {
                         node_end(state.1, expr),
                     );
                 } else {
-                    push_error(
+                    push_type_error(
                         state.3,
                         "cannot pass a borrow rooted in this function's frame into tail-recursive call: the borrow does not outlive the frame jump",
                         node_file(state.1, expr),
@@ -2027,7 +1928,7 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
             let ikey = check_expr(state, init, dkey, ret, impure, self_key);
             let ok = unify_key(state.1, state.2, state.6, ikey, dkey);
             if !ok && key_kind(state.1, ikey) != TYD_UNKNOWN && key_kind(state.1, dkey) != TYD_UNKNOWN {
-                push_error(state.3, &format!("cannot assign '{}' to '{}'", render_key(state.0, state.1, state.2, state.6, state.7, ikey), render_key(state.0, state.1, state.2, state.6, state.7, dkey)), file, start, end);
+                push_type_error(state.3, &format!("cannot assign '{}' to '{}'", render_key(state.0, state.1, state.2, state.6, state.7, ikey), render_key(state.0, state.1, state.2, state.6, state.7, dkey)), file, start, end);
                 push_note_for_last(
                     state.3,
                     state.16,
@@ -2053,7 +1954,7 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
         let vkey = check_expr(state, value, tkey, ret, impure, self_key);
         let ok = unify_key(state.1, state.2, state.6, vkey, tkey);
         if !ok && key_kind(state.1, vkey) != TYD_UNKNOWN && key_kind(state.1, tkey) != TYD_UNKNOWN {
-            push_error(state.3, &format!("cannot assign '{}' to '{}'", render_key(state.0, state.1, state.2, state.6, state.7, vkey), render_key(state.0, state.1, state.2, state.6, state.7, tkey)), file, start, end);
+            push_type_error(state.3, &format!("cannot assign '{}' to '{}'", render_key(state.0, state.1, state.2, state.6, state.7, vkey), render_key(state.0, state.1, state.2, state.6, state.7, tkey)), file, start, end);
             let declared_ty = assign_target_declared_type(state, target);
             if declared_ty != NONE {
                 push_note_for_last(
@@ -2073,7 +1974,7 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
     if kind == STMT_WHILE {
         let cond = check_expr(state, node_b(state.1, stmt), NONE, ret, impure, self_key);
         if !is_bool_key(state.1, cond) {
-            push_error(state.3, "while condition must be Bool", file, start, end);
+            push_type_error(state.3, "while condition must be Bool", file, start, end);
         }
         push_scope(state.4);
         state.14 += 1;
@@ -2087,7 +1988,7 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
     if kind == STMT_IF {
         let cond = check_expr(state, node_b(state.1, stmt), NONE, ret, impure, self_key);
         if !is_bool_key(state.1, cond) {
-            push_error(state.3, "if condition must be Bool", file, start, end);
+            push_type_error(state.3, "if condition must be Bool", file, start, end);
         }
         push_scope(state.4);
         check_stmt_list(state, node_c(state.1, stmt), ret, impure, self_key);
@@ -2106,14 +2007,14 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
         let key;
         if value == NONE {
             if !is_unit_key(state.1, ret) {
-                push_error(state.3, &format!("return with no value in a function returning '{}'", render_key(state.0, state.1, state.2, state.6, state.7, ret)), file, start, end);
+                push_type_error(state.3, &format!("return with no value in a function returning '{}'", render_key(state.0, state.1, state.2, state.6, state.7, ret)), file, start, end);
             }
             key = unit_key_of(state);
         } else {
             key = check_expr(state, value, ret, ret, impure, self_key);
             let ok = unify_key(state.1, state.2, state.6, key, ret);
             if !ok && key_kind(state.1, key) != TYD_UNKNOWN && key_kind(state.1, ret) != TYD_UNKNOWN {
-                push_error(state.3, &format!("return type mismatch: expected '{}', found '{}'", render_key(state.0, state.1, state.2, state.6, state.7, ret), render_key(state.0, state.1, state.2, state.6, state.7, key)), file, start, end);
+                push_type_error(state.3, &format!("return type mismatch: expected '{}', found '{}'", render_key(state.0, state.1, state.2, state.6, state.7, ret), render_key(state.0, state.1, state.2, state.6, state.7, key)), file, start, end);
                 if state.17 != NONE {
                     push_note_for_last(
                         state.3,
@@ -2133,7 +2034,7 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
     if kind == STMT_BREAK || kind == STMT_CONTINUE {
         if state.14 == 0 {
             let what = if kind == STMT_BREAK { "break" } else { "continue" };
-            push_error(state.3, &format!("{} outside of a loop", what), file, start, end);
+            push_type_error(state.3, &format!("{} outside of a loop", what), file, start, end);
         }
         let unit = unit_key_of(state);
         stmt_set_ty(state.1, stmt, unit);
@@ -2142,7 +2043,7 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
     let expr = node_b(state.1, stmt);
     let key = check_expr(state, expr, NONE, ret, impure, self_key);
     if is_result_key(state.1, key) {
-        push_error(state.3, "unhandled Result value: use try or match", file, start, end);
+        push_type_error(state.3, "unhandled Result value: use try or match", file, start, end);
         let origin = call_result_origin(state, expr);
         if origin != NONE {
             push_note_for_last(
@@ -2156,7 +2057,7 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
             );
         }
     } else if is_option_key(state.1, key) {
-        push_error(state.3, "unhandled Option value: use try or match", file, start, end);
+        push_type_error(state.3, "unhandled Option value: use try or match", file, start, end);
         let origin = call_result_origin(state, expr);
         if origin != NONE {
             push_note_for_last(
@@ -2346,7 +2247,7 @@ fn collect_const_item(state: &mut State, item: i64) {
     // diagnostic; the mismatch below would be a "found '?'" cascade, so it
     // is suppressed (Single-Fact: fold_const owns the error return key).
     if !ok && key_kind(state.1, key) != TYD_UNKNOWN && key_kind(state.1, declared) != TYD_UNKNOWN {
-        push_error(state.3, &format!("constant initializer type mismatch: expected '{}', found '{}'", render_key(state.0, state.1, state.2, state.6, state.7, declared), render_key(state.0, state.1, state.2, state.6, state.7, key)), file, start, end);
+        push_type_error(state.3, &format!("constant initializer type mismatch: expected '{}', found '{}'", render_key(state.0, state.1, state.2, state.6, state.7, declared), render_key(state.0, state.1, state.2, state.6, state.7, key)), file, start, end);
         push_note_for_last(
             state.3,
             state.16,
@@ -2364,7 +2265,7 @@ fn collect_const_item(state: &mut State, item: i64) {
 fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, i64) {
     if node_tag(state.1, expr) != NODE_EXPR {
         if quiet == 0 {
-            push_error(state.3, "constant expression required", node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
+            push_type_error(state.3, "constant expression required", node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
         }
         return (0, recover_ty(state, expr, declared));
     }
@@ -2376,7 +2277,7 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
         let lit = node_b(state.1, expr);
         let value = node_c(state.1, expr);
         if lit == LIT_TRUE || lit == LIT_FALSE {
-            return (value, builtin_key_of(state.1, BUILTIN_BOOL));
+            return (value, builtin_key_of(state.20, BUILTIN_BOOL));
         }
         if lit == LIT_STRING {
             // A string constant folds to the interned name id of its bytes,
@@ -2389,7 +2290,7 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
         let key = if is_int_key(state.1, declared) {
             declared
         } else {
-            builtin_key_of(state.1, BUILTIN_I64)
+            builtin_key_of(state.20, BUILTIN_I64)
         };
         if !range_check_literal(state, value, lit, 0, key, (file, start, end), quiet) {
             // The literal's value is out of range for the target width, but
@@ -2414,7 +2315,7 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
         let target = if is_int_key(state.1, declared) {
             declared
         } else {
-            builtin_key_of(state.1, BUILTIN_I64)
+            builtin_key_of(state.20, BUILTIN_I64)
         };
         if node_tag(state.1, operand) == NODE_EXPR
             && node_a(state.1, operand) == EXPR_LIT
@@ -2422,7 +2323,7 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
         {
             if !key_is_signed(state.1, target) {
                 if quiet == 0 {
-                    push_error(state.3, "unary '-' is not allowed on unsigned integer types", file, start, end);
+                    push_type_error(state.3, "unary '-' is not allowed on unsigned integer types", file, start, end);
                 }
                 return (0, recover_ty(state, expr, target));
             }
@@ -2440,7 +2341,7 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
         let (value, key) = fold_const(state, operand, NONE, quiet);
         if is_int_key(state.1, declared) && !key_is_signed(state.1, declared) {
             if quiet == 0 {
-                push_error(state.3, "unary '-' is not allowed on unsigned integer types", file, start, end);
+                push_type_error(state.3, "unary '-' is not allowed on unsigned integer types", file, start, end);
             }
             // The negation is rejected, but the constant still recovers to
             // the declared key, so the unsigned-negation diagnostic is the
@@ -2469,7 +2370,7 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
             let item = sym_decl(state.1, sym);
             if !has_const_value(state.1, sym) {
                 if quiet == 0 {
-                    push_error(state.3, &format!("constant '{}' must be declared before use", name_text(state.0, node_d(state.1, item))), file, start, end);
+                    push_type_error(state.3, &format!("constant '{}' must be declared before use", name_text(state.0, node_d(state.1, item))), file, start, end);
                 }
                 return (0, recover_ty(state, expr, declared));
             }
@@ -2485,13 +2386,13 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
             let path_text = join_path(state.0, &segs);
             if quiet == 0 {
                 if path_text.is_empty() {
-                    push_error(state.3, "constant expression required", file, start, end);
+                    push_type_error(state.3, "constant expression required", file, start, end);
                 } else {
-                    push_error(state.3, &format!("constant '{}' must be declared before use", path_text), file, start, end);
+                    push_type_error(state.3, &format!("constant '{}' must be declared before use", path_text), file, start, end);
                 }
             }
         } else if quiet == 0 {
-            push_error(state.3, "constant expression required", file, start, end);
+            push_type_error(state.3, "constant expression required", file, start, end);
         }
         // The path failed in a typed constant initializer: the constant
         // recovers to the declared key so no "found '?'" cascade follows
@@ -2546,7 +2447,7 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
         let ok = unify_key(state.1, state.2, state.6, lk, rk);
         if !ok {
             if quiet == 0 {
-                push_error(state.3, "constant operands have different types", file, start, end);
+                push_type_error(state.3, "constant operands have different types", file, start, end);
             }
             return (0, recover_ty(state, expr, declared));
         }
@@ -2560,7 +2461,7 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
         return (v, k);
     }
     if quiet == 0 {
-        push_error(state.3, "constant expression required", file, start, end);
+        push_type_error(state.3, "constant expression required", file, start, end);
     }
     (0, recover_ty(state, expr, declared))
 }
@@ -2618,7 +2519,7 @@ fn mask_int(value: u64, width: u32) -> u64 {
 // hold for every signed width.
 fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, i64, i64), quiet: i64) -> (i64, i64) {
     let (file, start, end) = span;
-    let bool_key = builtin_key_of(state.1, BUILTIN_BOOL);
+    let bool_key = builtin_key_of(state.20, BUILTIN_BOOL);
     if op == BIN_AND || op == BIN_OR {
         // `check_binary` requires Bool operands for `&&`/`||`; folding must
         // enforce the identical rule; otherwise `const C: Bool = 1 && 2`
@@ -2628,7 +2529,7 @@ fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, 
         // written to rule out everywhere.
         if !is_bool_key(state.1, key) {
             if quiet == 0 {
-                push_error(state.3, &format!("logical operator '{}' requires Bool operands", op_text(op)), file, start, end);
+                push_type_error(state.3, &format!("logical operator '{}' requires Bool operands", op_text(op)), file, start, end);
             }
             return (0, unknown_key(state.1, state.2));
         }
@@ -2660,7 +2561,7 @@ fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, 
             } else {
                 format!("constant binary operator '{}' requires integer operands", op_text(op))
             };
-            push_error(state.3, &message, file, start, end);
+            push_type_error(state.3, &message, file, start, end);
         }
         return (0, unknown_key(state.1, state.2));
     }
@@ -2682,7 +2583,7 @@ fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, 
         if op == BIN_DIV {
             if b == 0 {
                 if quiet == 0 {
-                    push_error(state.3, "division by zero in constant", file, start, end);
+                    push_type_error(state.3, "division by zero in constant", file, start, end);
                 }
                 return (0, unknown_key(state.1, state.2));
             }
@@ -2691,7 +2592,7 @@ fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, 
         if op == BIN_MOD {
             if b == 0 {
                 if quiet == 0 {
-                    push_error(state.3, "modulo by zero in constant", file, start, end);
+                    push_type_error(state.3, "modulo by zero in constant", file, start, end);
                 }
                 return (0, unknown_key(state.1, state.2));
             }
@@ -2750,7 +2651,7 @@ fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, 
         if op == BIN_DIV {
             if b == 0 {
                 if quiet == 0 {
-                    push_error(state.3, "division by zero in constant", file, start, end);
+                    push_type_error(state.3, "division by zero in constant", file, start, end);
                 }
                 return (0, unknown_key(state.1, state.2));
             }
@@ -2759,7 +2660,7 @@ fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, 
         if op == BIN_MOD {
             if b == 0 {
                 if quiet == 0 {
-                    push_error(state.3, "modulo by zero in constant", file, start, end);
+                    push_type_error(state.3, "modulo by zero in constant", file, start, end);
                 }
                 return (0, unknown_key(state.1, state.2));
             }
@@ -2802,7 +2703,7 @@ fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, 
         }
     }
     if quiet == 0 {
-        push_error(state.3, "unknown constant operator", file, start, end);
+        push_type_error(state.3, "unknown constant operator", file, start, end);
     }
     (0, unknown_key(state.1, state.2))
 }
@@ -2846,7 +2747,7 @@ fn check_expr(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64
     if kind == EXPR_FIELD_ACCESS {
         return check_field_access(state, expr, expected, ret, impure, self_key);
     }
-    push_error(state.3, "malformed expression", node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
+    push_type_error(state.3, "malformed expression", node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
     recover_ty(state, expr, expected)
 }
 
@@ -2859,7 +2760,7 @@ fn check_expr(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64
 // rest of the language already has — `Slice.len`, indexing, and
 // `Collections.string_from_slice` all work on it unchanged.
 fn byte_slice_key(state: &mut State) -> i64 {
-    let byte = builtin_key_of(state.1, BUILTIN_U8);
+    let byte = builtin_key_of(state.20, BUILTIN_U8);
     let slice = canon_tyinfo(state.1, state.2, TYD_SLICE, NONE, NONE, byte, NONE);
     canon_tyinfo(state.1, state.2, TYD_REF, NONE, NONE, slice, NONE)
 }
@@ -2867,7 +2768,7 @@ fn byte_slice_key(state: &mut State) -> i64 {
 fn check_lit(state: &mut State, expr: i64, expected: i64) -> i64 {
     let lit = node_b(state.1, expr);
     if lit == LIT_TRUE || lit == LIT_FALSE {
-        let key = builtin_key_of(state.1, BUILTIN_BOOL);
+        let key = builtin_key_of(state.20, BUILTIN_BOOL);
         expr_set_ty(state.1, expr, key);
         return key;
     }
@@ -2882,7 +2783,7 @@ fn check_lit(state: &mut State, expr: i64, expected: i64) -> i64 {
     let key = if is_int_key(state.1, expected) {
         expected
     } else {
-        builtin_key_of(state.1, BUILTIN_I64)
+        builtin_key_of(state.20, BUILTIN_I64)
     };
     let value = node_c(state.1, expr);
     let file = node_file(state.1, expr);
@@ -2898,6 +2799,17 @@ fn check_lit(state: &mut State, expr: i64, expected: i64) -> i64 {
     key
 }
 
+// The bit width a scalar of sub-kind `sub` is range-checked against. The
+// pointer-width pair (`Isize`/`Usize`) reads the target's architecture
+// width; every fixed-width integer uses its declared width.
+fn scalar_width(state: &mut State, sub: i64) -> u32 {
+    if sub == BUILTIN_ISIZE || sub == BUILTIN_USIZE {
+        state.19.pointer_width_bits()
+    } else {
+        builtin_int_width(sub)
+    }
+}
+
 // Rejects an integer literal whose magnitude does not fit the width and
 // signedness of `key` (the type it is being adopted into).  `lit` picks the
 // diagnostic spelling (hex vs decimal); `negated` marks a value produced by
@@ -2909,7 +2821,7 @@ fn range_check_literal(state: &mut State, value: i64, lit: i64, negated: i64, ke
         return true;
     }
     let sub = tyinfo_builtin_kind(state.1, key);
-    let width = builtin_int_width(sub);
+    let width = scalar_width(state, sub);
     if width == 0 {
         return true;
     }
@@ -2938,7 +2850,7 @@ fn range_check_literal(state: &mut State, value: i64, lit: i64, negated: i64, ke
         } else {
             format!("{}", bits)
         };
-        push_error(state.3, &format!("integer literal {} is out of range for '{}'", shown, render_key(state.0, state.1, state.2, state.6, state.7, key)), file, start, end);
+        push_type_error(state.3, &format!("integer literal {} is out of range for '{}'", shown, render_key(state.0, state.1, state.2, state.6, state.7, key)), file, start, end);
     }
     ok
 }
@@ -2974,7 +2886,7 @@ fn check_unary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
         } else if op == UN_NEG {
             let inner_is_int = is_int_key(state.1, inner);
             if !inner_is_int {
-                push_error(state.3, "unary '-' requires an integer operand", file, start, end);
+                push_type_error(state.3, "unary '-' requires an integer operand", file, start, end);
             }
             // Only a bare integer-literal operand is untyped and may adopt
             // the expected width (`-5` types as I8 in `val x: I8 = -5`); a
@@ -2988,7 +2900,7 @@ fn check_unary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
                 // The negated literal adopts the expected width, so `-5` types
                 // as I8 in `val x: I8 = -5`; only signed widths may be negated.
                 if !key_is_signed(state.1, expected) {
-                    push_error(state.3, "unary '-' is not allowed on unsigned integer types", file, start, end);
+                    push_type_error(state.3, "unary '-' is not allowed on unsigned integer types", file, start, end);
                     key = recover_ty(state, expr, expected);
                 } else {
                     let (value, vkey) = fold_const(state, operand, NONE, 1);
@@ -2999,7 +2911,7 @@ fn check_unary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
                 }
             } else if inner_is_int {
                 if !key_is_signed(state.1, inner) {
-                    push_error(state.3, "unary '-' is not allowed on unsigned integer types", file, start, end);
+                    push_type_error(state.3, "unary '-' is not allowed on unsigned integer types", file, start, end);
                     key = recover_ty(state, expr, expected);
                 } else {
                     key = inner;
@@ -3009,7 +2921,7 @@ fn check_unary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
             }
         } else {
             if !is_bool_key(state.1, inner) {
-                push_error(state.3, "unary '!' requires a Bool operand", file, start, end);
+                push_type_error(state.3, "unary '!' requires a Bool operand", file, start, end);
                 key = recover_ty(state, expr, expected);
             } else {
                 key = inner;
@@ -3093,7 +3005,7 @@ fn check_static_zero_divisor(state: &mut State, op: i64, rhs: i64) -> i64 {
         } else {
             "modulo by zero"
         };
-        push_error(state.3, message, node_file(state.1, rhs), node_start(state.1, rhs), node_end(state.1, rhs));
+        push_type_error(state.3, message, node_file(state.1, rhs), node_start(state.1, rhs), node_end(state.1, rhs));
         1
     } else {
         0
@@ -3161,16 +3073,16 @@ fn check_binary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i
     let file = node_file(state.1, expr);
     let start = node_start(state.1, expr);
     let end = node_end(state.1, expr);
-    let bool_key = builtin_key_of(state.1, BUILTIN_BOOL);
+    let bool_key = builtin_key_of(state.20, BUILTIN_BOOL);
     let operand_expected = binary_operand_expected(state, op, expected);
     if op == BIN_AND || op == BIN_OR {
         let (l, r) = check_binary_operands(state, (lhs, rhs, operand_expected), ret, impure, self_key);
         if !is_bool_key(state.1, l) {
-            push_error(state.3, &format!("logical operator '{}' requires Bool operands", op_text(op)), file, start, end);
+            push_type_error(state.3, &format!("logical operator '{}' requires Bool operands", op_text(op)), file, start, end);
         }
         let ok = unify_key(state.1, state.2, state.6, l, r);
         if !ok && key_kind(state.1, l) != TYD_UNKNOWN && key_kind(state.1, r) != TYD_UNKNOWN {
-            push_error(state.3, "logical operands have different types", file, start, end);
+            push_type_error(state.3, "logical operands have different types", file, start, end);
         }
         expr_set_ty(state.1, expr, bool_key);
         return bool_key;
@@ -3180,14 +3092,14 @@ fn check_binary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i
         let ok = unify_key(state.1, state.2, state.6, l, r);
         if !ok {
             if key_kind(state.1, l) != TYD_UNKNOWN && key_kind(state.1, r) != TYD_UNKNOWN {
-                push_error(state.3, &format!("comparison '{}' requires operands of the same type", op_text(op)), file, start, end);
+                push_type_error(state.3, &format!("comparison '{}' requires operands of the same type", op_text(op)), file, start, end);
             }
         } else if !comparable_key(state.1, l, op) && key_kind(state.1, l) != TYD_UNKNOWN {
             // The operands agree but the type has no comparison. Reported
             // only when they agree, so a mismatch produces one diagnostic
             // rather than a same-type error followed by a not-comparable
             // cascade.
-            push_error(state.3, &format!("comparison '{}' is not defined for '{}': compare integer or Bool values, or take the value apart with match", op_text(op), render_key(state.0, state.1, state.2, state.6, state.7, l)), file, start, end);
+            push_type_error(state.3, &format!("comparison '{}' is not defined for '{}': compare integer or Bool values, or take the value apart with match", op_text(op), render_key(state.0, state.1, state.2, state.6, state.7, l)), file, start, end);
         }
         expr_set_ty(state.1, expr, bool_key);
         return bool_key;
@@ -3195,19 +3107,19 @@ fn check_binary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i
     let (l, r) = check_binary_operands(state, (lhs, rhs, operand_expected), ret, impure, self_key);
     let lhs_bad = !is_int_key(state.1, l);
     if lhs_bad {
-        push_error(state.3, &format!("binary operator '{}' requires integer operands", op_text(op)), file, start, end);
+        push_type_error(state.3, &format!("binary operator '{}' requires integer operands", op_text(op)), file, start, end);
     }
     let ok = unify_key(state.1, state.2, state.6, l, r);
     if lhs_bad {
         // The primary already implicates both operands and the rhs was
         // still checked (its own diagnostics surface); the operands-differ
         // error below would be a cascade, so the expression recovers
-        // instead (Single-Fact recovery rule).
+        // instead.
         return recover_ty(state, expr, expected);
     }
     if !ok {
         if key_kind(state.1, l) != TYD_UNKNOWN && key_kind(state.1, r) != TYD_UNKNOWN {
-            push_error(state.3, &format!("binary operator '{}' requires operands of the same type", op_text(op)), file, start, end);
+            push_type_error(state.3, &format!("binary operator '{}' requires operands of the same type", op_text(op)), file, start, end);
         }
         return recover_ty(state, expr, expected);
     }
@@ -3234,7 +3146,7 @@ fn check_array(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
             expr_set_ty(state.1, expr, expected);
             return expected;
         }
-        push_error(state.3, "cannot infer the element type of an empty array", file, start, end);
+        push_type_error(state.3, "cannot infer the element type of an empty array", file, start, end);
         return recover_ty(state, expr, expected);
     }
     let elem_expected = if expected != NONE {
@@ -3258,21 +3170,13 @@ fn check_array(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
         let key = check_expr(state, list_get(state.2, elems, idx), first, ret, impure, self_key);
         let ok = unify_key(state.1, state.2, state.6, key, first);
         if !ok && key_kind(state.1, key) != TYD_UNKNOWN && key_kind(state.1, first) != TYD_UNKNOWN {
-            push_error(state.3, "array elements must have the same type", file, start, end);
+            push_type_error(state.3, "array elements must have the same type", file, start, end);
         }
         idx += 1;
     }
     let key = canon_tyinfo(state.1, state.2, TYD_ARRAY, NONE, NONE, first, count);
     expr_set_ty(state.1, expr, key);
     key
-}
-
-fn key_is_linear_now(state: &mut State, key: i64) -> bool {
-    if key == NONE {
-        return false;
-    }
-    let mut seen: Vec<i64> = Vec::new();
-    linear_of(state.1, state.2, key, &mut seen) == 1
 }
 
 fn index_result_key(state: &mut State, payload: i64) -> i64 {
@@ -3297,12 +3201,12 @@ fn check_index(state: &mut State, expr: i64, borrow: i64, expected: i64, ret: i6
     let file = node_file(state.1, expr);
     let start = node_start(state.1, expr);
     let end = node_end(state.1, expr);
-    let usize_key = builtin_key_of(state.1, BUILTIN_USIZE);
+    let usize_key = builtin_key_of(state.20, BUILTIN_USIZE);
     let base_key = check_expr(state, base, NONE, ret, impure, self_key);
     let idx_key = check_expr(state, index, usize_key, ret, impure, self_key);
     let idx_ok = unify_key(state.1, state.2, state.6, usize_key, idx_key);
     if !idx_ok && key_kind(state.1, idx_key) != TYD_UNKNOWN {
-        push_error(state.3, "array index must be Usize", file, start, end);
+        push_type_error(state.3, "array index must be Usize", file, start, end);
     }
     let base_kind = key_kind(state.1, base_key);
     let (elem_key, fixed_len) = if base_kind == TYD_ARRAY {
@@ -3315,16 +3219,16 @@ fn check_index(state: &mut State, expr: i64, borrow: i64, expected: i64, ret: i6
             NONE
         };
         if slice_elem == NONE {
-            push_error(state.3, "cannot index a value that is not an array or slice", file, start, end);
+            push_type_error(state.3, "cannot index a value that is not an array or slice", file, start, end);
             return recover_ty(state, expr, expected);
         }
         (slice_elem, NONE)
     } else {
-        push_error(state.3, "cannot index a value that is not an array or slice", file, start, end);
+        push_type_error(state.3, "cannot index a value that is not an array or slice", file, start, end);
         return recover_ty(state, expr, expected);
     };
-    if elem_key != NONE && borrow == 0 && key_is_linear_now(state, elem_key) {
-        push_error(state.3, "cannot move linear element out of array by index: borrow with & or &mut instead", file, start, end);
+    if elem_key != NONE && borrow == 0 && tyinfo_is_linear(state.1, elem_key) == 1 {
+        push_type_error(state.3, "cannot move linear element out of array by index: borrow with & or &mut instead", file, start, end);
     }
     let payload = if borrow == 1 {
         canon_tyinfo(state.1, state.2, TYD_REF, NONE, NONE, elem_key, NONE)
@@ -3337,7 +3241,7 @@ fn check_index(state: &mut State, expr: i64, borrow: i64, expected: i64, ret: i6
         let (value, ckey) = fold_const(state, index, NONE, 1);
         if key_kind(state.1, ckey) != TYD_UNKNOWN {
             if value < 0 || value >= fixed_len {
-                push_error(state.3, &format!("array index out of bounds: index is {} but array length is {}", value, fixed_len), file, start, end);
+                push_type_error(state.3, &format!("array index out of bounds: index is {} but array length is {}", value, fixed_len), file, start, end);
             }
             expr_set_ty(state.1, expr, payload);
             node_set_d(state.1, expr, INDEX_INFALLIBLE);
@@ -3373,13 +3277,13 @@ fn check_assign_target(state: &mut State, target: i64, ret: i64, impure: i64, se
         let first = list_get(state.2, segs, 0);
         let found = lookup(state.4, first);
         if found.0 == NONE {
-            push_error(state.3, &format!("unknown symbol '{}'", name_text(state.0, first)), file, start, end);
+            push_type_error(state.3, &format!("unknown symbol '{}'", name_text(state.0, first)), file, start, end);
             suggest_value_name(state, target, first);
             return recover_ty(state, target, NONE);
         }
         if count == 1 {
             if found.1 == 0 {
-                push_error(state.3, &format!("cannot assign to '{}': assignment requires var", name_text(state.0, first)), file, start, end);
+                push_type_error(state.3, &format!("cannot assign to '{}': assignment requires var", name_text(state.0, first)), file, start, end);
                 let decl = lookup_full(state.4, first).2;
                 if decl != NONE && node_file(state.1, decl) != NO_FILE {
                     push_note_for_last(
@@ -3413,7 +3317,7 @@ fn check_assign_target(state: &mut State, target: i64, ret: i64, impure: i64, se
         let base_key = check_expr(state, base, NONE, ret, impure, self_key);
         let bkind = key_kind(state.1, base_key);
         if bkind == TYD_REF {
-            push_error(state.3, &format!("cannot assign to field '{}' through shared reference '{}': assignment requires &mut", name_text(state.0, field), render_key(state.0, state.1, state.2, state.6, state.7, base_key)), file, start, end);
+            push_type_error(state.3, &format!("cannot assign to field '{}' through shared reference '{}': assignment requires &mut", name_text(state.0, field), render_key(state.0, state.1, state.2, state.6, state.7, base_key)), file, start, end);
         } else if bkind == TYD_REF_MUT {
 
         } else if node_tag(state.1, base) == NODE_EXPR && node_a(state.1, base) == EXPR_PATH {
@@ -3421,10 +3325,10 @@ fn check_assign_target(state: &mut State, target: i64, ret: i64, impure: i64, se
             let first = list_get(state.2, segs, 0);
             let found = lookup(state.4, first);
             if found.0 == NONE {
-                push_error(state.3, &format!("unknown symbol '{}'", name_text(state.0, first)), file, start, end);
+                push_type_error(state.3, &format!("unknown symbol '{}'", name_text(state.0, first)), file, start, end);
                 suggest_value_name(state, base, first);
             } else if found.1 == 0 {
-                push_error(state.3, &format!("cannot assign to field '{}' of '{}': assignment requires var", name_text(state.0, field), name_text(state.0, first)), file, start, end);
+                push_type_error(state.3, &format!("cannot assign to field '{}' of '{}': assignment requires var", name_text(state.0, field), name_text(state.0, first)), file, start, end);
                 let decl = lookup_full(state.4, first).2;
                 if decl != NONE && node_file(state.1, decl) != NO_FILE {
                     push_note_for_last(
@@ -3439,22 +3343,22 @@ fn check_assign_target(state: &mut State, target: i64, ret: i64, impure: i64, se
                 }
             }
         } else {
-            push_error(state.3, &format!("cannot assign to field '{}': the target is not a mutable place", name_text(state.0, field)), file, start, end);
+            push_type_error(state.3, &format!("cannot assign to field '{}': the target is not a mutable place", name_text(state.0, field)), file, start, end);
         }
         let key = field_access_key(state, target, base_key, field, NONE);
         expr_set_ty(state.1, target, key);
         return key;
     }
-    push_error(state.3, "invalid assignment target", file, start, end);
+    push_type_error(state.3, "invalid assignment target", file, start, end);
     recover_ty(state, target, NONE)
 }
 
 fn check_field_target_base(state: &mut State, found: (i64, i64), name: i64, file: i64, start: i64, end: i64) {
     let bkind = key_kind(state.1, found.0);
     if bkind == TYD_REF {
-        push_error(state.3, &format!("cannot assign to a field through shared reference '{}': assignment requires &mut", render_key(state.0, state.1, state.2, state.6, state.7, found.0)), file, start, end);
+        push_type_error(state.3, &format!("cannot assign to a field through shared reference '{}': assignment requires &mut", render_key(state.0, state.1, state.2, state.6, state.7, found.0)), file, start, end);
     } else if bkind != TYD_REF_MUT && found.1 == 0 {
-        push_error(state.3, &format!("cannot assign to field of '{}': assignment requires var", name_text(state.0, name)), file, start, end);
+        push_type_error(state.3, &format!("cannot assign to field of '{}': assignment requires var", name_text(state.0, name)), file, start, end);
     }
 }
 
@@ -3467,7 +3371,7 @@ fn check_try(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64,
     let result;
     if is_result_key(state.1, key) {
         if !is_result_key(state.1, ret) {
-            push_error(state.3, "try on Result requires the enclosing function to return Result", file, start, end);
+            push_type_error(state.3, "try on Result requires the enclosing function to return Result", file, start, end);
             result = recover_ty(state, expr, expected);
         } else {
             let args = key_args(state.1, key);
@@ -3476,20 +3380,20 @@ fn check_try(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64,
             let ret_err = list_get(state.2, ret_args, 1);
             let err_ok = unify_key(state.1, state.2, state.6, err_key, ret_err);
             if !err_ok && key_kind(state.1, err_key) != TYD_UNKNOWN && key_kind(state.1, ret_err) != TYD_UNKNOWN {
-                push_error(state.3, "try error type does not match the function's return type", file, start, end);
+                push_type_error(state.3, "try error type does not match the function's return type", file, start, end);
             }
             result = list_get(state.2, args, 0);
         }
     } else if is_option_key(state.1, key) {
         if !is_option_key(state.1, ret) {
-            push_error(state.3, "try on Option requires the enclosing function to return Option", file, start, end);
+            push_type_error(state.3, "try on Option requires the enclosing function to return Option", file, start, end);
             result = recover_ty(state, expr, expected);
         } else {
             let args = key_args(state.1, key);
             result = list_get(state.2, args, 0);
         }
     } else {
-        push_error(state.3, "try requires a Result or Option operand", file, start, end);
+        push_type_error(state.3, "try requires a Result or Option operand", file, start, end);
         result = recover_ty(state, expr, expected);
     }
     expr_set_ty(state.1, expr, result);
@@ -3519,9 +3423,9 @@ fn check_path_sym(state: &mut State, expr: i64, expected: i64, sym: i64) -> i64 
         return variant_value_key(state, expr, expected, sym);
     }
     if kind == SYM_FUN || kind == SYM_NATIVE_FUN || kind == SYM_TRAIT_METHOD || kind == SYM_IMPL_METHOD {
-        push_error(state.3, "function used as a value", file, start, end);
+        push_type_error(state.3, "function used as a value", file, start, end);
     } else {
-        push_error(state.3, "type or module used as a value", file, start, end);
+        push_type_error(state.3, "type or module used as a value", file, start, end);
     }
     recover_ty(state, expr, expected)
 }
@@ -3537,7 +3441,7 @@ fn variant_value_key(state: &mut State, expr: i64, expected: i64, sym: i64) -> i
     } else {
         let enum_sym = enum_sym_of_variant(state.1, sym);
         if enum_sym == NONE {
-            push_error(state.3, "cannot find the enum of this variant", file, start, end);
+            push_type_error(state.3, "cannot find the enum of this variant", file, start, end);
             key = recover_ty(state, expr, expected);
         } else {
             let item = sym_decl(state.1, enum_sym);
@@ -3547,14 +3451,14 @@ fn variant_value_key(state: &mut State, expr: i64, expected: i64, sym: i64) -> i
             // codegen would lower an enum with an uninitialised payload.
             let payload_decl = node_b(state.1, decl);
             if list_len(state.2, payload_decl) > 0 {
-                push_error(state.3, &format!("variant '{}' requires payload values", name_text(state.0, node_a(state.1, decl))), file, start, end);
+                push_type_error(state.3, &format!("variant '{}' requires payload values", name_text(state.0, node_a(state.1, decl))), file, start, end);
             }
         }
     }
     if expected != NONE {
         let ok = unify_key(state.1, state.2, state.6, key, expected);
         if !ok && key_kind(state.1, key) != TYD_UNKNOWN && key_kind(state.1, expected) != TYD_UNKNOWN {
-            push_error(state.3, "variant value type mismatch", file, start, end);
+            push_type_error(state.3, "variant value type mismatch", file, start, end);
         }
     }
     expr_set_ty(state.1, expr, key);
@@ -3570,7 +3474,7 @@ fn check_local_chain(state: &mut State, expr: i64, expected: i64) -> i64 {
     let first = list_get(state.2, segs, 0);
     let found = lookup(state.4, first);
     if found.0 == NONE {
-        push_error(state.3, &format!("unknown symbol '{}'", name_text(state.0, first)), file, start, end);
+        push_type_error(state.3, &format!("unknown symbol '{}'", name_text(state.0, first)), file, start, end);
         suggest_value_name(state, expr, first);
         return recover_ty(state, expr, expected);
     }
@@ -3594,20 +3498,20 @@ fn field_access_key(state: &mut State, expr: i64, base: i64, field: i64, expecte
         eff = key_elem(state.1, eff);
     }
     if key_kind(state.1, eff) != TYD_STRUCT {
-        push_error(state.3, &format!("cannot access field '{}' of a non-struct type", name_text(state.0, field)), file, start, end);
+        push_type_error(state.3, &format!("cannot access field '{}' of a non-struct type", name_text(state.0, field)), file, start, end);
         return recover_ty(state, expr, expected);
     }
     let item = sym_decl(state.1, key_sym(state.1, eff));
     let (found_idx, declared_key) = struct_field_of(state.1, state.2, item, field);
     if found_idx == NONE {
-        push_error(state.3, &format!("no field '{}' on type '{}'", name_text(state.0, field), render_key(state.0, state.1, state.2, state.6, state.7, eff)), file, start, end);
+        push_type_error(state.3, &format!("no field '{}' on type '{}'", name_text(state.0, field), render_key(state.0, state.1, state.2, state.6, state.7, eff)), file, start, end);
         return recover_ty(state, expr, expected);
     }
     // Fields are private to their declaring module unless marked `pub`; the
     // resolver attached the declaring scope to the field row (slot d).
     let fnode = struct_field_node(state.1, state.2, item, field);
     if fnode != NONE && node_c(state.1, fnode) == 0 && node_d(state.1, fnode) != state.13 {
-        push_error(state.3, &format!("field '{}' of type '{}' is private to its module", name_text(state.0, field), render_key(state.0, state.1, state.2, state.6, state.7, eff)), file, start, end);
+        push_type_error(state.3, &format!("field '{}' of type '{}' is private to its module", name_text(state.0, field), render_key(state.0, state.1, state.2, state.6, state.7, eff)), file, start, end);
     }
     let from = declared_param_keys(state.1, state.2, item);
     let to = list_to_vec(state.2, key_args(state.1, eff));
@@ -3727,17 +3631,17 @@ fn check_call(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64
             } else if kind == SYM_TRAIT_METHOD {
                 result = check_trait_call(state, expr, expected, sym, ret, impure, self_key);
             } else if kind == SYM_IMPL_METHOD {
-                push_error(state.3, "impl methods cannot be called directly", file, start, end);
+                push_type_error(state.3, "impl methods cannot be called directly", file, start, end);
                 result = recover_ty(state, expr, expected);
             } else {
-                push_error(state.3, "cannot call this symbol", file, start, end);
+                push_type_error(state.3, "cannot call this symbol", file, start, end);
                 result = recover_ty(state, expr, expected);
             }
         } else {
             result = check_unresolved_callee(state, expr, expected);
         }
     } else {
-        push_error(state.3, "cannot call this expression", file, start, end);
+        push_type_error(state.3, "cannot call this expression", file, start, end);
         result = recover_ty(state, expr, expected);
     }
     if expected != NONE {
@@ -3747,7 +3651,7 @@ fn check_call(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64
             && key_kind(state.1, result) != TYD_UNKNOWN
             && key_kind(state.1, expected) != TYD_UNKNOWN
         {
-            push_error(state.3, &format!("call result type mismatch: expected '{}', found '{}'", render_key(state.0, state.1, state.2, state.6, state.7, expected), render_key(state.0, state.1, state.2, state.6, state.7, result)), file, start, end);
+            push_type_error(state.3, &format!("call result type mismatch: expected '{}', found '{}'", render_key(state.0, state.1, state.2, state.6, state.7, expected), render_key(state.0, state.1, state.2, state.6, state.7, result)), file, start, end);
         }
     }
     attach_extraction_binding(state, expr, sym);
@@ -3756,19 +3660,19 @@ fn check_call(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64
     result
 }
 
-// The container binding of an extraction call (NAT_VEC_POP or
-// NAT_HASH_MAP_REMOVE), attached to the call's type-argument slot (node_c)
-// so the borrow checker reads the binding without re-walking the argument
-// list (Single-Fact Rule).  For every other call the slot is cleared to
-// NONE: the parser's type-argument list is dead once the call is checked,
-// and borrow treats a non-NONE slot as an attached binding.
+// The container binding of an extract-mode call, written to the call's
+// dedicated fact row (`NODE_CALLFACT`, slot d) so the borrow checker
+// reads the binding without re-walking the argument list (Single-Fact
+// Rule).  The parse tree is never mutated: `EXPR_CALL` slots keep what
+// the parser wrote.  The mode comes from the resolver's registry row, not
+// from a NAT_* opcode.
 fn attach_extraction_binding(state: &mut State, expr: i64, sym: i64) {
-    let op = if sym != NONE && node_tag(state.1, sym) == NODE_SYM && sym_kind(state.1, sym) == SYM_NATIVE_FUN {
-        sym_native_op(state.1, sym)
+    let mode = if sym != NONE && node_tag(state.1, sym) == NODE_SYM && sym_kind(state.1, sym) == SYM_NATIVE_FUN {
+        sym_native_mode(state.1, sym)
     } else {
-        NAT_NONE
+        NAT_MODE_NONE
     };
-    if op == NAT_VEC_POP || op == NAT_HASH_MAP_REMOVE {
+    if mode == NAT_MODE_EXTRACT {
         let first = list_first(state.2, node_d(state.1, expr));
         let mut container_name = NONE;
         if first != NONE && node_tag(state.1, first) == NODE_EXPR {
@@ -3785,9 +3689,15 @@ fn attach_extraction_binding(state: &mut State, expr: i64, sym: i64) {
                 container_name = list_first(state.2, node_b(state.1, cur));
             }
         }
-        node_set_c(state.1, expr, container_name);
-    } else {
-        node_set_c(state.1, expr, NONE);
+        if container_name != NONE {
+            let row = callfact_row_of(state.1, expr);
+            let row = if row == NONE {
+                alloc_callfact(state.1, expr, 0, NONE)
+            } else {
+                row
+            };
+            node_set_d(state.1, row, container_name);
+        }
     }
 }
 
@@ -3802,20 +3712,20 @@ fn check_unresolved_callee(state: &mut State, expr: i64, expected: i64) -> i64 {
         let first = list_get(state.2, segs, 0);
         let found = lookup(state.4, first);
         if found.0 == NONE {
-            push_error(state.3, &format!("unknown symbol '{}'", name_text(state.0, first)), file, start, end);
+            push_type_error(state.3, &format!("unknown symbol '{}'", name_text(state.0, first)), file, start, end);
             suggest_value_name(state, expr, first);
         } else {
-            push_error(state.3, "cannot call a field", file, start, end);
+            push_type_error(state.3, "cannot call a field", file, start, end);
         }
     } else {
         let first = list_get(state.2, segs, 0);
-        push_error(state.3, &format!("unknown function '{}'", name_text(state.0, first)), file, start, end);
+        push_type_error(state.3, &format!("unknown function '{}'", name_text(state.0, first)), file, start, end);
         suggest_value_name(state, expr, first);
     }
     // The callee could not be resolved and an error was already reported;
     // the call recovers to the expected key (or TYD_UNKNOWN) so the
     // surrounding unification succeeds and no cascading "found '?'"
-    // secondary follows the primary diagnostic (Single-Fact recovery rule).
+    // secondary follows the primary diagnostic.
     recover_ty(state, expr, expected)
 }
 
@@ -3830,7 +3740,7 @@ fn check_direct_call(state: &mut State, expr: i64, expected: i64, sym: i64, ret:
     // native (MANIFESTO).  The enclosing purity flag is threaded down from
     // the current function's declaration.
     if node_e(state.1, fn_node) == 1 && impure == 0 {
-        push_error(state.3, &format!("impure function '{}' cannot be called from a pure context", name_text(state.0, node_a(state.1, fn_node))), node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
+        push_type_error(state.3, &format!("impure function '{}' cannot be called from a pure context", name_text(state.0, node_a(state.1, fn_node))), node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
     }
     let from = fn_declared_param_keys(state.1, state.2, fn_node);
     let (args_list, to) = call_type_args(state, expr, fn_node, &from);
@@ -3839,7 +3749,7 @@ fn check_direct_call(state: &mut State, expr: i64, expected: i64, sym: i64, ret:
     let pcount = list_len(state.2, params);
     let acount = list_len(state.2, arg_exprs);
     if pcount != acount {
-        push_error(state.3, &format!("function '{}' expects {} arguments, found {}", name_text(state.0, node_a(state.1, fn_node)), pcount, acount), node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
+        push_type_error(state.3, &format!("function '{}' expects {} arguments, found {}", name_text(state.0, node_a(state.1, fn_node)), pcount, acount), node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
     }
     let param_keys = alloc_list(state.2);
     let mut inferred_ok = true;
@@ -3864,16 +3774,13 @@ fn check_direct_call(state: &mut State, expr: i64, expected: i64, sym: i64, ret:
                 && key_kind(state.1, concrete) != TYD_UNKNOWN
                 && key_kind(state.1, akey) != TYD_UNKNOWN
             {
-                push_error(state.3, &format!("argument {} of '{}' has type '{}', expected '{}'", idx + 1, name_text(state.0, node_a(state.1, fn_node)), render_key(state.0, state.1, state.2, state.6, state.7, akey), render_key(state.0, state.1, state.2, state.6, state.7, concrete)), node_file(state.1, arg), node_start(state.1, arg), node_end(state.1, arg));
+                push_type_error(state.3, &format!("argument {} of '{}' has type '{}', expected '{}'", idx + 1, name_text(state.0, node_a(state.1, fn_node)), render_key(state.0, state.1, state.2, state.6, state.7, akey), render_key(state.0, state.1, state.2, state.6, state.7, concrete)), node_file(state.1, arg), node_start(state.1, arg), node_end(state.1, arg));
             }
         }
         idx += 1;
     }
-    if kind == SYM_NATIVE_FUN {
-        let op = sym_native_op(state.1, sym);
-        if op == NAT_VEC_PUSH || op == NAT_HASH_MAP_INSERT {
-            check_container_resolvability(state, expr, param_keys);
-        }
+    if kind == SYM_NATIVE_FUN && sym_native_mode(state.1, sym) == NAT_MODE_MUTATE {
+        check_container_resolvability(state, expr, param_keys);
     }
     if !inferred_ok {
         let mut t_idx = 0i64;
@@ -3883,7 +3790,7 @@ fn check_direct_call(state: &mut State, expr: i64, expected: i64, sym: i64, ret:
                 let name = var_origin_name(state.7, targ);
                 let tname = if name == NONE { String::from("?") } else { name_text(state.0, name) };
                 let fname = name_text(state.0, node_a(state.1, fn_node));
-                push_error(state.3, &format!("cannot infer type parameter '{}' for '{}': specify type arguments explicitly (e.g. {}[U8](...))", tname, fname, fname), node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
+                push_type_error(state.3, &format!("cannot infer type parameter '{}' for '{}': specify type arguments explicitly (e.g. {}[U8](...))", tname, fname, fname), node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
                 break;
             }
             t_idx += 1;
@@ -3902,36 +3809,34 @@ fn check_direct_call(state: &mut State, expr: i64, expected: i64, sym: i64, ret:
     result
 }
 
-// The Resolvability Rule (MANIFESTO): a native container type C(T) may hold
-// linear elements only if its native surface provides a by-value extraction
-// function.  At every insertion call (vec_push, hash_map_insert) the element
-// key is the container's last type argument; if it is linear, the container's
-// type symbol must carry the extraction flag the resolver attached.
+// A native container type C(T) may hold linear elements only if its native
+// surface provides a by-value extraction function.  On every mutate-mode
+// call, each container-typed argument's element key is checked against the
+// extraction flag the resolver attached.
 fn check_container_resolvability(state: &mut State, expr: i64, param_keys: i64) {
     let count = list_len(state.2, param_keys);
     let mut idx = 0i64;
     while idx < count {
         let key = deref_key(state.1, list_get(state.2, param_keys, idx));
         if key_kind(state.1, key) == TYD_NATIVE {
-            let args = key_args(state.1, key);
-            if args != NONE {
-                // Any linear type argument is a linear obligation living
-                // inside the container: for HashMap(K, V) both the key and
-                // the value count, not just the value.
-                let acount = list_len(state.2, args);
-                let mut ai = 0i64;
-                let mut has_linear = 0;
-                let mut seen: Vec<i64> = Vec::new();
-                while ai < acount {
-                    if linear_of(state.1, state.2, list_get(state.2, args, ai), &mut seen) == 1 {
-                        has_linear = 1;
+            let cty_sym = key_sym_of(state.1, key);
+            if cty_sym != NONE && nattype_is_container(state.1, cty_sym) == 1 {
+                let args = key_args(state.1, key);
+                if args != NONE {
+                    // Any linear type argument is a linear obligation
+                    // living inside the container: for HashMap(K, V) both
+                    // the key and the value count, not just the value.
+                    let acount = list_len(state.2, args);
+                    let mut ai = 0i64;
+                    let mut has_linear = 0;
+                    while ai < acount {
+                        if tyinfo_is_linear(state.1, list_get(state.2, args, ai)) == 1 {
+                            has_linear = 1;
+                        }
+                        ai += 1;
                     }
-                    ai += 1;
-                }
-                if has_linear == 1 {
-                    let cty_sym = key_sym_of(state.1, key);
-                    if cty_sym == NONE || node_f(state.1, cty_sym) == NONE {
-                        push_error(
+                    if has_linear == 1 && node_f(state.1, sym_decl(state.1, cty_sym)) == NONE {
+                        push_type_error(
                             state.3,
                             "cannot store linear element in container: its native API provides no by-value extraction operation",
                             node_file(state.1, expr),
@@ -3981,7 +3886,7 @@ fn fn_node_of(nodes: &[i64], decl: i64) -> i64 {
     }
 }
 
-fn fn_declared_param_keys(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], fn_node: i64) -> Vec<i64> {
+fn fn_declared_param_keys(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, fn_node: i64) -> Vec<i64> {
     let tparams = node_b(nodes, fn_node);
     let count = list_len(lists, tparams);
     let mut keys: Vec<i64> = Vec::new();
@@ -4012,7 +3917,7 @@ fn call_type_args(state: &mut State, expr: i64, fn_node: i64, from: &[i64]) -> (
         let explicit = canon_ty_list(state, targs_expr, NONE, 1);
         let ec = list_len(state.2, explicit);
         if ec != tcount {
-            push_error(state.3, &format!("type arguments: expected {}, found {}", tcount, ec), file, start, end);
+            push_type_error(state.3, &format!("type arguments: expected {}, found {}", tcount, ec), file, start, end);
         }
         let mut idx = 0i64;
         while idx < ec && idx < tcount {
@@ -4046,25 +3951,25 @@ fn check_int_from(state: &mut State, expr: i64, expected: i64, sym: i64, ret: i6
     let start = node_start(state.1, expr);
     let end = node_end(state.1, expr);
     if receiver_sym == NONE {
-        push_error(state.3, "cannot resolve the receiver type of 'from'", file, start, end);
+        push_type_error(state.3, "cannot resolve the receiver type of 'from'", file, start, end);
         return recover_ty(state, expr, expected);
     }
-    let receiver_key = builtin_key_of_sym(state.1, receiver_sym);
+    let receiver_key = builtin_key_of_sym(state.18, state.20, receiver_sym);
     if !is_int_key(state.1, receiver_key) {
-        push_error(state.3, &format!("'from' is only defined for integer types, not '{}'", render_key(state.0, state.1, state.2, state.6, state.7, receiver_key)), file, start, end);
+        push_type_error(state.3, &format!("'from' is only defined for integer types, not '{}'", render_key(state.0, state.1, state.2, state.6, state.7, receiver_key)), file, start, end);
         return recover_ty(state, expr, expected);
     }
     let arg_exprs = node_d(state.1, expr);
     let acount = list_len(state.2, arg_exprs);
     if acount != 1 {
-        push_error(state.3, "'from' expects exactly one argument", file, start, end);
+        push_type_error(state.3, "'from' expects exactly one argument", file, start, end);
     }
     // The conversion accepts any integer scalar; codegen selects the LLVM
     // cast from the source and destination width/signedness metadata.
     let arg = list_get(state.2, arg_exprs, 0);
     let akey = check_expr(state, arg, NONE, ret, impure, self_key);
     if !is_int_key(state.1, akey) {
-        push_error(state.3, &format!("'from' argument must be an integer, found '{}'", render_key(state.0, state.1, state.2, state.6, state.7, akey)), node_file(state.1, arg), node_start(state.1, arg), node_end(state.1, arg));
+        push_type_error(state.3, &format!("'from' argument must be an integer, found '{}'", render_key(state.0, state.1, state.2, state.6, state.7, akey)), node_file(state.1, arg), node_start(state.1, arg), node_end(state.1, arg));
     }
     let args_list = alloc_list(state.2);
     list_push(state.2, args_list, receiver_key);
@@ -4089,7 +3994,14 @@ fn check_int_from(state: &mut State, expr: i64, expected: i64, sym: i64, ret: i6
 fn builtin_type_of_scope(nodes: &[i64], scope: i64) -> i64 {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_SYM && node_a(nodes, idx) == SYM_TYPE && node_e(nodes, idx) == scope {
+        // A declared native type's slot e is its container role (0/1), not
+        // a scope; only a seeded builtin type (decl == NONE) keeps its
+        // sub-scope there.
+        if node_tag(nodes, idx) == NODE_SYM
+            && node_a(nodes, idx) == SYM_TYPE
+            && sym_decl(nodes, idx) == NONE
+            && node_e(nodes, idx) == scope
+        {
             return idx;
         }
         idx += 1;
@@ -4103,20 +4015,20 @@ fn check_trait_call(state: &mut State, expr: i64, expected: i64, sym: i64, ret: 
     let start = node_start(state.1, expr);
     let end = node_end(state.1, expr);
     if trait_sym == NONE {
-        push_error(state.3, "cannot find the trait of this method", file, start, end);
+        push_type_error(state.3, "cannot find the trait of this method", file, start, end);
         return recover_ty(state, expr, expected);
     }
     let trait_item = sym_decl(state.1, trait_sym);
     let method_name = node_a(state.1, sym_decl(state.1, sym));
     let trait_method = find_method_by_name(state.1, state.2, node_e(state.1, trait_item), method_name);
     if trait_method == NONE {
-        push_error(state.3, "trait method not found", file, start, end);
+        push_type_error(state.3, "trait method not found", file, start, end);
         return recover_ty(state, expr, expected);
     }
     let arg_exprs = node_d(state.1, expr);
     let acount = list_len(state.2, arg_exprs);
     if acount == 0 {
-        push_error(state.3, "trait method call requires a receiver argument", file, start, end);
+        push_type_error(state.3, "trait method call requires a receiver argument", file, start, end);
     }
     let receiver = list_get(state.2, arg_exprs, 0);
     let rkey = check_expr(state, receiver, NONE, ret, impure, self_key);
@@ -4137,18 +4049,18 @@ fn trait_call_concrete(state: &mut State, expr: i64, trait_sym: i64, trait_metho
     let end = node_end(state.1, expr);
     let impl_idx = impl_find(state.5, trait_sym, recv);
     if impl_idx == NONE {
-        push_error(state.3, &format!("type '{}' does not implement trait '{}'", render_key(state.0, state.1, state.2, state.6, state.7, recv), name_text(state.0, sym_name(state.1, trait_sym))), file, start, end);
+        push_type_error(state.3, &format!("type '{}' does not implement trait '{}'", render_key(state.0, state.1, state.2, state.6, state.7, recv), name_text(state.0, sym_name(state.1, trait_sym))), file, start, end);
         return recover_ty(state, expr, expected);
     }
     let methods = impl_methods(state.5, impl_idx);
     let method_name = node_a(state.1, trait_method);
     let method = find_method_by_name(state.1, state.2, methods, method_name);
     if method == NONE {
-        push_error(state.3, "impl method not found", file, start, end);
+        push_type_error(state.3, "impl method not found", file, start, end);
         return recover_ty(state, expr, expected);
     }
     if node_e(state.1, method) == 1 && impure == 0 {
-        push_error(state.3, &format!("impure trait method '{}' cannot be called from a pure context", name_text(state.0, node_a(state.1, method))), file, start, end);
+        push_type_error(state.3, &format!("impure trait method '{}' cannot be called from a pure context", name_text(state.0, node_a(state.1, method))), file, start, end);
     }
     let fn_node = method;
     let params = node_c(state.1, fn_node);
@@ -4163,7 +4075,7 @@ fn trait_call_concrete(state: &mut State, expr: i64, trait_sym: i64, trait_metho
         let akey = check_expr(state, arg, key, ret, impure, self_key);
         let ok = unify_key(state.1, state.2, state.6, akey, key);
         if !ok && key_kind(state.1, akey) != TYD_UNKNOWN && key_kind(state.1, key) != TYD_UNKNOWN {
-            push_error(state.3, &format!("argument {} has type '{}', expected '{}'", idx + 1, render_key(state.0, state.1, state.2, state.6, state.7, akey), render_key(state.0, state.1, state.2, state.6, state.7, key)), node_file(state.1, arg), node_start(state.1, arg), node_end(state.1, arg));
+            push_type_error(state.3, &format!("argument {} has type '{}', expected '{}'", idx + 1, render_key(state.0, state.1, state.2, state.6, state.7, akey), render_key(state.0, state.1, state.2, state.6, state.7, key)), node_file(state.1, arg), node_start(state.1, arg), node_end(state.1, arg));
         }
         idx += 1;
     }
@@ -4185,12 +4097,12 @@ fn trait_call_deferred(state: &mut State, expr: i64, trait_sym: i64, trait_metho
     let start = node_start(state.1, expr);
     let end = node_end(state.1, expr);
     if !param_has_bound(state.1, recv, trait_sym) {
-        push_error(state.3, &format!("type parameter '{}' does not implement trait '{}'", name_text(state.0, key_sym(state.1, recv)), name_text(state.0, sym_name(state.1, trait_sym))), file, start, end);
+        push_type_error(state.3, &format!("type parameter '{}' does not implement trait '{}'", name_text(state.0, key_sym(state.1, recv)), name_text(state.0, sym_name(state.1, trait_sym))), file, start, end);
     }
     // A trait method not declared `impure` may not be called from a pure
     // context (MANIFESTO); the enclosing purity flag is threaded down.
     if node_e(state.1, trait_method) == 1 && impure == 0 {
-        push_error(state.3, &format!("impure trait method '{}' cannot be called from a pure context", name_text(state.0, node_a(state.1, trait_method))), file, start, end);
+        push_type_error(state.3, &format!("impure trait method '{}' cannot be called from a pure context", name_text(state.0, node_a(state.1, trait_method))), file, start, end);
     }
     push_scope(state.4);
     let tparams = node_b(state.1, trait_method);
@@ -4206,7 +4118,7 @@ fn trait_call_deferred(state: &mut State, expr: i64, trait_sym: i64, trait_metho
         let akey = check_expr(state, arg, key, ret, impure, self_key);
         let ok = unify_key(state.1, state.2, state.6, akey, key);
         if !ok && key_kind(state.1, akey) != TYD_UNKNOWN && key_kind(state.1, key) != TYD_UNKNOWN {
-            push_error(state.3, &format!("argument {} has type '{}', expected '{}'", idx + 1, render_key(state.0, state.1, state.2, state.6, state.7, akey), render_key(state.0, state.1, state.2, state.6, state.7, key)), node_file(state.1, arg), node_start(state.1, arg), node_end(state.1, arg));
+            push_type_error(state.3, &format!("argument {} has type '{}', expected '{}'", idx + 1, render_key(state.0, state.1, state.2, state.6, state.7, akey), render_key(state.0, state.1, state.2, state.6, state.7, key)), node_file(state.1, arg), node_start(state.1, arg), node_end(state.1, arg));
         }
         idx += 1;
     }
@@ -4245,7 +4157,7 @@ fn check_struct_lit(state: &mut State, expr: i64, expected: i64, ret: i64, impur
     let end = node_end(state.1, expr);
     let result;
     if sym == NONE {
-        push_error(state.3, "cannot resolve the type of this literal", file, start, end);
+        push_type_error(state.3, "cannot resolve the type of this literal", file, start, end);
         result = recover_ty(state, expr, expected);
     } else {
         let kind = sym_kind(state.1, sym);
@@ -4254,14 +4166,14 @@ fn check_struct_lit(state: &mut State, expr: i64, expected: i64, ret: i64, impur
         } else if kind == SYM_VARIANT {
             result = check_variant_construct(state, expr, expected, sym, ret, impure, self_key);
         } else {
-            push_error(state.3, "cannot construct a value of this symbol", file, start, end);
+            push_type_error(state.3, "cannot construct a value of this symbol", file, start, end);
             result = recover_ty(state, expr, expected);
         }
     }
     if expected != NONE {
         let ok = unify_key(state.1, state.2, state.6, result, expected);
         if !ok && key_kind(state.1, result) != TYD_UNKNOWN && key_kind(state.1, expected) != TYD_UNKNOWN {
-            push_error(state.3, &format!("constructed value type mismatch: expected '{}', found '{}'", render_key(state.0, state.1, state.2, state.6, state.7, expected), render_key(state.0, state.1, state.2, state.6, state.7, result)), file, start, end);
+            push_type_error(state.3, &format!("constructed value type mismatch: expected '{}', found '{}'", render_key(state.0, state.1, state.2, state.6, state.7, expected), render_key(state.0, state.1, state.2, state.6, state.7, result)), file, start, end);
         }
     }
     expr_set_ty(state.1, expr, result);
@@ -4282,14 +4194,14 @@ fn check_struct_construct(state: &mut State, expr: i64, sym: i64, ret: i64, impu
     let fcount = list_len(state.2, field_names);
     let vcount = list_len(state.2, values);
     if fcount != vcount {
-        push_error(state.3, "struct literal field/value count mismatch", file, start, end);
+        push_type_error(state.3, "struct literal field/value count mismatch", file, start, end);
     }
     let mut idx = 0i64;
     while idx < fcount {
         let name = list_get(state.2, field_names, idx);
         let (found_idx, declared) = struct_field_of(state.1, state.2, item, name);
         if found_idx == NONE {
-            push_error(state.3, &format!("no field '{}' on struct '{}'", name_text(state.0, name), name_text(state.0, sym_name(state.1, sym))), file, start, end);
+            push_type_error(state.3, &format!("no field '{}' on struct '{}'", name_text(state.0, name), name_text(state.0, sym_name(state.1, sym))), file, start, end);
         } else {
             let concrete = subst_key(state.1, state.2, declared, &from, &to);
             let value = list_get(state.2, values, idx);
@@ -4301,7 +4213,7 @@ fn check_struct_construct(state: &mut State, expr: i64, sym: i64, ret: i64, impu
             let vkey = check_expr(state, value, concrete, ret, impure, self_key);
             let ok = unify_key(state.1, state.2, state.6, vkey, concrete);
             if !ok && key_kind(state.1, vkey) != TYD_UNKNOWN && key_kind(state.1, concrete) != TYD_UNKNOWN {
-                push_error(state.3, &format!("field '{}' has type '{}', expected '{}'", name_text(state.0, name), render_key(state.0, state.1, state.2, state.6, state.7, vkey), render_key(state.0, state.1, state.2, state.6, state.7, concrete)), node_file(state.1, value), node_start(state.1, value), node_end(state.1, value));
+                push_type_error(state.3, &format!("field '{}' has type '{}', expected '{}'", name_text(state.0, name), render_key(state.0, state.1, state.2, state.6, state.7, vkey), render_key(state.0, state.1, state.2, state.6, state.7, concrete)), node_file(state.1, value), node_start(state.1, value), node_end(state.1, value));
             }
         }
         idx += 1;
@@ -4325,7 +4237,7 @@ fn check_struct_construct(state: &mut State, expr: i64, sym: i64, ret: i64, impu
                 pidx += 1;
             }
             if present == 0 {
-                push_error(state.3, &format!("struct literal is missing field '{}'", name_text(state.0, dname)), file, start, end);
+                push_type_error(state.3, &format!("struct literal is missing field '{}'", name_text(state.0, dname)), file, start, end);
             }
             didx += 1;
         }
@@ -4344,7 +4256,7 @@ fn check_variant_construct(state: &mut State, expr: i64, expected: i64, sym: i64
     }
     let enum_sym = enum_sym_of_variant(state.1, sym);
     if enum_sym == NONE {
-        push_error(state.3, "cannot find the enum of this variant", file, start, end);
+        push_type_error(state.3, "cannot find the enum of this variant", file, start, end);
         return recover_ty(state, expr, expected);
     }
     let enum_item = sym_decl(state.1, enum_sym);
@@ -4357,7 +4269,7 @@ fn check_variant_construct(state: &mut State, expr: i64, expected: i64, sym: i64
     let values = node_d(state.1, expr);
     let vcount = list_len(state.2, values);
     if pcount != vcount {
-        push_error(state.3, &format!("variant '{}' expects {} payload values, found {}", name_text(state.0, node_a(state.1, decl)), pcount, vcount), file, start, end);
+        push_type_error(state.3, &format!("variant '{}' expects {} payload values, found {}", name_text(state.0, node_a(state.1, decl)), pcount, vcount), file, start, end);
     }
     let mut idx = 0i64;
     while idx < pcount {
@@ -4372,7 +4284,7 @@ fn check_variant_construct(state: &mut State, expr: i64, expected: i64, sym: i64
         let vkey = check_expr(state, value, concrete, ret, impure, self_key);
         let ok = unify_key(state.1, state.2, state.6, vkey, concrete);
         if !ok && key_kind(state.1, vkey) != TYD_UNKNOWN && key_kind(state.1, concrete) != TYD_UNKNOWN {
-            push_error(state.3, &format!("payload {} of '{}' has type '{}', expected '{}'", idx + 1, name_text(state.0, node_a(state.1, decl)), render_key(state.0, state.1, state.2, state.6, state.7, vkey), render_key(state.0, state.1, state.2, state.6, state.7, concrete)), node_file(state.1, value), node_start(state.1, value), node_end(state.1, value));
+            push_type_error(state.3, &format!("payload {} of '{}' has type '{}', expected '{}'", idx + 1, name_text(state.0, node_a(state.1, decl)), render_key(state.0, state.1, state.2, state.6, state.7, vkey), render_key(state.0, state.1, state.2, state.6, state.7, concrete)), node_file(state.1, value), node_start(state.1, value), node_end(state.1, value));
         }
         idx += 1;
     }
@@ -4404,7 +4316,7 @@ fn check_match(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
                 if !ok {
                     arms_ok = false;
                     if key_kind(state.1, merged) != TYD_UNKNOWN && key_kind(state.1, arm_key) != TYD_UNKNOWN {
-                        push_error(state.3, &format!("match arms have different types: '{}' and '{}'", render_key(state.0, state.1, state.2, state.6, state.7, merged), render_key(state.0, state.1, state.2, state.6, state.7, arm_key)), node_file(state.1, arm), node_start(state.1, arm), node_end(state.1, arm));
+                        push_type_error(state.3, &format!("match arms have different types: '{}' and '{}'", render_key(state.0, state.1, state.2, state.6, state.7, merged), render_key(state.0, state.1, state.2, state.6, state.7, arm_key)), node_file(state.1, arm), node_start(state.1, arm), node_end(state.1, arm));
                     }
                 }
             }
@@ -4465,9 +4377,9 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64, scrutinee: i64) -> i64
         let lit = node_b(state.1, pat);
         let is_bool = lit == LIT_TRUE || lit == LIT_FALSE;
         let mut key = if is_bool {
-            builtin_key_of(state.1, BUILTIN_BOOL)
+            builtin_key_of(state.20, BUILTIN_BOOL)
         } else {
-            builtin_key_of(state.1, BUILTIN_I64)
+            builtin_key_of(state.20, BUILTIN_I64)
         };
         // A literal pattern carries the scrutinee's own scalar type when that
         // type is a primitive integer or Bool, so `5` matches a U8 scrutinee
@@ -4489,7 +4401,7 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64, scrutinee: i64) -> i64
         }
         let ok = unify_key(state.1, state.2, state.6, key, s_key);
         if !ok {
-            push_error(state.3, &format!("literal pattern type mismatch: expected '{}'", render_key(state.0, state.1, state.2, state.6, state.7, s_key)), file, start, end);
+            push_type_error(state.3, &format!("literal pattern type mismatch: expected '{}'", render_key(state.0, state.1, state.2, state.6, state.7, s_key)), file, start, end);
         }
         pat_set_ty(state.1, pat, key);
         return key;
@@ -4497,11 +4409,11 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64, scrutinee: i64) -> i64
     if kind == PAT_PATH || kind == PAT_VARIANT {
         let sym = pat_sym_of(state.1, pat);
         if sym == NONE {
-            push_error(state.3, "cannot resolve pattern", file, start, end);
+            push_type_error(state.3, "cannot resolve pattern", file, start, end);
             return recover_ty(state, pat, NONE);
         }
         if !variant_matches(state.1, s_key, sym) {
-            push_error(state.3, "this pattern does not match the scrutinee type", file, start, end);
+            push_type_error(state.3, "this pattern does not match the scrutinee type", file, start, end);
         }
         if kind == PAT_VARIANT {
             let decl = sym_decl(state.1, sym);
@@ -4515,7 +4427,7 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64, scrutinee: i64) -> i64
             let payload_pats = node_c(state.1, pat);
             let pc = list_len(state.2, payload_pats);
             if pcount != pc {
-                push_error(state.3, &format!("variant pattern '{}' expects {} payload patterns, found {}", name_text(state.0, node_a(state.1, decl)), pcount, pc), file, start, end);
+                push_type_error(state.3, &format!("variant pattern '{}' expects {} payload patterns, found {}", name_text(state.0, node_a(state.1, decl)), pcount, pc), file, start, end);
             }
             let mut idx = 0i64;
             while idx < pcount {
@@ -4531,7 +4443,7 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64, scrutinee: i64) -> i64
     let inner = deref_key(state.1, s_key);
     let inner_kind = key_kind(state.1, inner);
     if inner_kind != TYD_SLICE && inner_kind != TYD_ARRAY {
-        push_error(state.3, "array pattern requires a slice or array scrutinee", file, start, end);
+        push_type_error(state.3, "array pattern requires a slice or array scrutinee", file, start, end);
         return recover_ty(state, pat, NONE);
     }
     let elem = key_elem(state.1, inner);
@@ -4556,7 +4468,7 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64, scrutinee: i64) -> i64
     s_key
 }
 
-fn rest_type_of(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], s_key: i64, inner: i64) -> i64 {
+fn rest_type_of(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, s_key: i64, inner: i64) -> i64 {
     let is_mut = key_kind(nodes, s_key) == TYD_REF_MUT;
     let rest = canon_tyinfo(nodes, lists, TYD_SLICE, NONE, NONE, key_elem(nodes, inner), NONE);
     let kind_of = if is_mut { TYD_REF_MUT } else { TYD_REF };
@@ -4600,21 +4512,21 @@ fn check_exhaustive(state: &mut State, s_key: i64, arms: i64, file: i64, start: 
         while v_idx < vcount {
             let variant = list_get(state.2, variants, v_idx);
             if !variant_covered(state.1, state.2, arms, variant) {
-                push_error(state.3, &format!("non-exhaustive match: missing variant '{}'", name_text(state.0, node_a(state.1, variant))), file, start, end);
+                push_type_error(state.3, &format!("non-exhaustive match: missing variant '{}'", name_text(state.0, node_a(state.1, variant))), file, start, end);
             }
             v_idx += 1;
         }
     } else if kind == TYD_ARRAY {
         let n = key_len(state.1, inner);
         if !array_covers_len(state.1, state.2, arms, n) {
-            push_error(state.3, "non-exhaustive match: no arm covers this array length", file, start, end);
+            push_type_error(state.3, "non-exhaustive match: no arm covers this array length", file, start, end);
         }
     } else if kind == TYD_SLICE {
         if !slice_exhaustive(state.1, state.2, arms) {
-            push_error(state.3, "non-exhaustive match: a rest pattern must cover the remaining elements", file, start, end);
+            push_type_error(state.3, "non-exhaustive match: a rest pattern must cover the remaining elements", file, start, end);
         }
     } else if kind != TYD_UNKNOWN {
-        push_error(state.3, &format!("non-exhaustive match on '{}': add a binding arm", render_key(state.0, state.1, state.2, state.6, state.7, inner)), file, start, end);
+        push_type_error(state.3, &format!("non-exhaustive match on '{}': add a binding arm", render_key(state.0, state.1, state.2, state.6, state.7, inner)), file, start, end);
     }
 }
 
@@ -4796,7 +4708,7 @@ fn report_unbound(names: &[String], nodes: &mut [i64], errors: &mut Vec<Diag>, v
                     if origin.1 == NONE {
                         push_internal(errors, &format!("cannot infer {}", what));
                     } else {
-                        push_error(errors, &format!("cannot infer {}", what), node_file(nodes, origin.1), node_start(nodes, origin.1), node_end(nodes, origin.1));
+                        push_type_error(errors, &format!("cannot infer {}", what), node_file(nodes, origin.1), node_start(nodes, origin.1), node_end(nodes, origin.1));
                     }
                 }
             }
@@ -4830,8 +4742,8 @@ mod tests {
     // toolchain `cargo test`'s fixture-linked suites need.
     fn errors_for(source: &str) -> Vec<String> {
         let overlay = [("scratch.cnb".to_string(), source.to_string())];
-        let result = crate::analysis::analyze("scratch.cnb", &overlay);
-        result.errors.iter().map(|d| d.0.clone()).collect()
+        let result = crate::analysis::analyze("scratch.cnb", &overlay, &crate::target::Target::host());
+        result.errors.iter().map(|d| d.message.clone()).collect()
     }
 
     // An `impl` that leaves one of the trait's methods out used to be

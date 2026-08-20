@@ -86,7 +86,7 @@ the program exited 0, and non-zero otherwise
 
 ### -O, --opt-level <LEVEL>
 
-LLVM optimization level: 0, 1, 2, 3, s, z (default 2)
+LLVM optimization level: 0, 1, 2, 3 (default 2)
 
 <!-- @project-heading -->
 

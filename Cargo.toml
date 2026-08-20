@@ -63,3 +63,11 @@ match_wildcard_for_single_variants = "deny"
 match_wild_err_arm = "deny"
 rest_pat_in_fully_bound_structs = "deny"
 ignored_unit_patterns = "deny"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+

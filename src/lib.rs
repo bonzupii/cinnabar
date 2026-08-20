@@ -9,8 +9,7 @@
 //! **Invariants:**
 //! - There is exactly one implementation of each stage. A second entry
 //!   point that re-ran resolution or inference for tooling's convenience
-//!   would be the Single-Fact Rule broken at the largest available scale —
-//!   an editor and a build disagreeing about the same program.
+//!   would let an editor and a build disagree about the same program.
 
 pub mod analysis;
 pub mod advanced_tools;
@@ -30,4 +29,5 @@ pub mod project;
 pub mod resolver;
 pub mod snapshot_review;
 pub mod suggest;
+pub mod target;
 pub mod typecheck;

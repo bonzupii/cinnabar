@@ -1,3 +1,15 @@
+#! Every native surface exercised end to end, in one program.
+#!
+#! A smoke test for the full runtime: `Runtime.self_check` (through its
+#! `gate` helper), `Memory` allocate/write/read/deallocate, `String`
+#! build/measure/free, `HashMap` insert/get/free, and `Vec` push/view/
+#! measure/free.  Each surface consumes its linear handles exactly once on
+#! every path, and every failure carries a distinct exit code so a single
+#! broken surface cannot masquerade as another.
+#!
+#! Exit code 0 means every check passed; a non-zero code names the failing
+#! check (see `main`).
+
 pub mod Runtime
   pub type Error
     pub NotReady
@@ -28,12 +40,6 @@ pub mod Memory
   pub nat fun deallocate(block: Block) impure Unit
   pub nat fun write_u8(block: &Block, offset: Usize, value: U8) impure Result(Unit, Error)
   pub nat fun read_u8(block: &Block, offset: Usize) impure Result(U8, Error)
-end
-
-pub mod Binary
-  pub type Error
-    pub MagicMismatch(U32)
-  end
 end
 
 pub mod Slice
@@ -84,6 +90,31 @@ use Collections.hash_map_insert
 use Collections.hash_map_get
 use Collections.hash_map_free
 
+const BYTE_A: U8 = 0x41
+const KEY: I64 = 10
+const VALUE: I64 = 100
+const WORD: &[U8] = "hello"
+
+fun fail_block(block: Memory.Block, code: I64) impure I64
+  deallocate(block)
+  return code
+end
+
+fun fail_string(text: Collections.String, code: I64) impure I64
+  string_free(text)
+  return code
+end
+
+fun fail_map(map: Collections.HashMap(I64, I64), code: I64) impure I64
+  hash_map_free(map)
+  return code
+end
+
+fun fail_vec(vec: Collections.Vec(I64), code: I64) impure I64
+  vec_free(vec)
+  return code
+end
+
 fun fill_squares(vec: &mut Collections.Vec(I64)) impure Result(Unit, Collections.Error)
   var i: I64 = 0
   while i < 5
@@ -93,25 +124,68 @@ fun fill_squares(vec: &mut Collections.Vec(I64)) impure Result(Unit, Collections
   return Ok(Unit)
 end
 
-fun fail_vec<T>(vec: Collections.Vec(T)) impure I64
-  vec_free(vec)
-  return 2
-end
-
 pub fun main() impure I64
-  val vec = match vec_new[I64]()
-    Ok(v) => v
+  match gate()
+    Ok(Unit) => Unit
     Err(error) => return 1
   end
 
-  val fill_result = fill_squares(&mut vec)
-  match fill_result
+  val block = match allocate(1)
+    Ok(value) => value
+    Err(error) => return 2
+  end
+  match write_u8(&block, 0, BYTE_A)
     Ok(Unit) => Unit
-    Err(error) => return fail_vec(vec)
+    Err(error) => return fail_block(block, 3)
+  end
+  val byte = match read_u8(&block, 0)
+    Ok(value) => value
+    Err(error) => return fail_block(block, 4)
+  end
+  deallocate(block)
+  if byte != BYTE_A
+    return 5
   end
 
+  val text = match string_from_slice(WORD)
+    Ok(value) => value
+    Err(error) => return 6
+  end
+  if string_len(&text) != 5
+    return fail_string(text, 7)
+  end
+  string_free(text)
+
+  val map = match hash_map_new[I64, I64]()
+    Ok(value) => value
+    Err(error) => return 8
+  end
+  match hash_map_insert(&mut map, KEY, VALUE)
+    Ok(Unit) => Unit
+    Err(error) => return fail_map(map, 9)
+  end
+  val got = match hash_map_get(&map, KEY)
+    Ok(value) => value
+    Err(error) => return fail_map(map, 10)
+  end
+  if got != VALUE
+    return fail_map(map, 11)
+  end
+  hash_map_free(map)
+
+  val vec = match vec_new[I64]()
+    Ok(value) => value
+    Err(error) => return 12
+  end
+  match fill_squares(&mut vec)
+    Ok(Unit) => Unit
+    Err(error) => return fail_vec(vec, 13)
+  end
   val view = vec_view(&vec)
-  val n = slice_len(view)
+  if slice_len(view) != 5
+    return fail_vec(vec, 14)
+  end
   vec_free(vec)
+
   return 0
 end

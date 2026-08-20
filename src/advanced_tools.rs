@@ -27,7 +27,7 @@
 //!   above `initialize_mushlings` on discard patterns.
 
 use crate::ast::{node_tag, NODE_EXPR, NODE_INST, NODE_STRIDE, NODE_TRAIT, NODE_TY};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -35,20 +35,22 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+// The host's name as `arch-os`, derived from the structured target
+// descriptor so the driver and the tooling never assemble a platform from
+// separate `std::env` constants.
 pub fn host_target() -> String {
-    format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
-}
-
-pub fn validate_target(requested: &str) -> Result<(), String> {
-    let host = host_target();
-    if requested == "host" || requested == host || requested == "linux" || requested == "darwin" || requested == "bsd" || requested == "windows" {
-        Ok(())
-    } else {
-        Err(format!(
-            "unknown target '{}'; choose host, linux, darwin, bsd, or windows (host is {})",
-            requested, host
-        ))
-    }
+    let host = crate::target::Target::host();
+    let arch = match host.arch {
+        crate::target::TargetArch::X86_64 => "x86_64",
+        crate::target::TargetArch::AArch64 => "aarch64",
+    };
+    let os = match host.os {
+        crate::target::TargetOs::Linux => "linux",
+        crate::target::TargetOs::Darwin => "darwin",
+        crate::target::TargetOs::Bsd => "bsd",
+        crate::target::TargetOs::Windows => "windows",
+    };
+    format!("{}-{}", arch, os)
 }
 
 fn run_capture(program: &str, args: &[&str]) -> Result<String, String> {
@@ -81,20 +83,25 @@ struct Exercise {
     file: &'static str,
     lesson: &'static str,
     source: &'static str,
+    // The diagnostic category the exercise must still produce when unsolved.
     expected: &'static str,
+    // The invariant the lesson teaches; the unsolved diagnostic's message
+    // must name it, so a same-category error for a different rule never
+    // counts as the expected failure.
+    topic: &'static str,
 }
 
 fn exercises() -> Vec<Exercise> {
     vec![
-        Exercise { file: "01_mixed_type.cnb", lesson: "A declaration is either a struct or an enum, never both.", source: include_str!("../tests/fixtures/invalid_mixed_type.cnb"), expected: "mix" },
-        Exercise { file: "02_linear_paths.cnb", lesson: "A linear handle must be consumed exactly once on every path.", source: include_str!("../tests/fixtures/explain_leak.cnb"), expected: "consumed" },
-        Exercise { file: "03_unhandled_result.cnb", lesson: "A Result must be handled with try or match.", source: include_str!("../tests/fixtures/mushling_unhandled_result.cnb"), expected: "unhandled result" },
-        Exercise { file: "04_ambiguous_borrow.cnb", lesson: "A returned borrow must have one unambiguous input origin.", source: include_str!("../tests/fixtures/repro/ret_borrow_ambiguous.cnb"), expected: "ambiguous" },
-        Exercise { file: "05_const_division.cnb", lesson: "Compile-time division by zero is rejected.", source: include_str!("../tests/fixtures/repro/div_zero_const.cnb"), expected: "division by zero" },
-        Exercise { file: "06_integer_range.cnb", lesson: "Integer literals must fit their declared type.", source: include_str!("../tests/fixtures/repro/int_literal_range.cnb"), expected: "out of range" },
-        Exercise { file: "07_recursion.cnb", lesson: "Recursion must be tail-recursive.", source: include_str!("../tests/fixtures/repro/non_tail_recursion.cnb"), expected: "tail" },
-        Exercise { file: "08_dropped_pub.cnb", lesson: "An item that is not public cannot be used from outside the module that declares it.", source: include_str!("../tests/fixtures/08_dropped_pub.cnb"), expected: "cannot call" },
-        Exercise { file: "09_discard_patterns.cnb", lesson: "A value is bound with a real name and used; there is no discard.", source: include_str!("../tests/fixtures/09_discard_patterns.cnb"), expected: "discard pattern" },
+        Exercise { file: "01_mixed_type.cnb", lesson: "A declaration is either a struct or an enum, never both.", source: include_str!("../tests/fixtures/invalid_mixed_type.cnb"), expected: "syntax", topic: "mix struct fields" },
+        Exercise { file: "02_linear_paths.cnb", lesson: "A linear handle must be consumed exactly once on every path.", source: include_str!("../tests/fixtures/explain_leak.cnb"), expected: "linear", topic: "consumed on some paths" },
+        Exercise { file: "03_unhandled_result.cnb", lesson: "A Result must be handled with try or match.", source: include_str!("../tests/fixtures/mushling_unhandled_result.cnb"), expected: "type_error", topic: "unhandled Result" },
+        Exercise { file: "04_ambiguous_borrow.cnb", lesson: "A returned borrow must have one unambiguous input origin.", source: include_str!("../tests/fixtures/repro/ret_borrow_ambiguous.cnb"), expected: "linear", topic: "ambiguous returned borrow" },
+        Exercise { file: "05_const_division.cnb", lesson: "Compile-time division by zero is rejected.", source: include_str!("../tests/fixtures/repro/div_zero_const.cnb"), expected: "type_error", topic: "division by zero" },
+        Exercise { file: "06_integer_range.cnb", lesson: "Integer literals must fit their declared type.", source: include_str!("../tests/fixtures/repro/int_literal_range.cnb"), expected: "type_error", topic: "out of range" },
+        Exercise { file: "07_recursion.cnb", lesson: "Recursion must be tail-recursive.", source: include_str!("../tests/fixtures/repro/non_tail_recursion.cnb"), expected: "type_error", topic: "non-tail recursive" },
+        Exercise { file: "08_dropped_pub.cnb", lesson: "An item that is not public cannot be used from outside the module that declares it.", source: include_str!("../tests/fixtures/08_dropped_pub.cnb"), expected: "private_access", topic: "cannot call" },
+        Exercise { file: "09_discard_patterns.cnb", lesson: "A value is bound with a real name and used; there is no discard.", source: include_str!("../tests/fixtures/09_discard_patterns.cnb"), expected: "syntax", topic: "discard pattern" },
     ]
 }
 
@@ -126,6 +133,61 @@ fn combined_output(output: &Output) -> String {
     format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
 }
 
+// One `--check-only --emit-json` run, returned as the parsed envelope and
+// the pass/fail status, so tooling reads diagnostic categories from
+// structured fields instead of scraping rendered text.
+fn compiler_json(executable: &Path, source: &Path) -> Result<(bool, Value), String> {
+    let output = Command::new(executable)
+        .arg(source)
+        .arg("--check-only")
+        .arg("--emit-json")
+        .output()
+        .map_err(|run_error| format!("cannot launch compiler: {}", run_error))?;
+    let report: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|parse_error| format!("compiler emitted invalid JSON: {}", parse_error))?;
+    Ok((output.status.success(), report))
+}
+
+// The ordered diagnostic category names in a `cinnabar.diagnostics.v1`
+// envelope.
+fn categories_of(report: &Value) -> Vec<String> {
+    let mut categories: Vec<String> = Vec::new();
+    let diagnostics = match report.get("diagnostics").and_then(|entry| entry.as_array()) {
+        Some(value) => value,
+        None => return categories,
+    };
+    for diagnostic in diagnostics {
+        if let Some(category) = diagnostic.get("category").and_then(|entry| entry.as_str()) {
+            categories.push(category.to_string());
+        }
+    }
+    categories
+}
+
+// Whether any diagnostic in the envelope carries the expected category and
+// its rendered message names the lesson's invariant, so a same-category
+// error for a different rule never counts as the expected failure.
+fn diagnostic_matches(report: &Value, category: &str, topic: &str) -> bool {
+    let diagnostics = match report.get("diagnostics").and_then(|entry| entry.as_array()) {
+        Some(value) => value,
+        None => return false,
+    };
+    for diagnostic in diagnostics {
+        let cat = match diagnostic.get("category").and_then(|entry| entry.as_str()) {
+            Some(value) => value,
+            None => continue,
+        };
+        if cat != category {
+            continue;
+        }
+        let message = diagnostic.get("message").and_then(|entry| entry.as_str()).unwrap_or_default();
+        if message.contains(topic) {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn verify_mushlings(directory: &Path, executable: &Path) -> Result<(usize, usize, Vec<String>), String> {
     let mut solved = 0usize;
     let mut pending = 0usize;
@@ -135,18 +197,16 @@ pub fn verify_mushlings(directory: &Path, executable: &Path) -> Result<(usize, u
         if !path.exists() {
             return Err(format!("missing exercise '{}'; run mushlings init", path.display()));
         }
-        let output = compiler_output(executable, &path)?;
-        if output.status.success() {
+        let (passed, report) = compiler_json(executable, &path)?;
+        if passed {
             progress.push(format!("solved  {}", exercise.file));
             solved += 1;
+        } else if diagnostic_matches(&report, exercise.expected, exercise.topic) {
+            progress.push(format!("pending {} — {}", exercise.file, exercise.lesson));
+            pending += 1;
         } else {
-            let diagnostic = combined_output(&output).to_lowercase();
-            if diagnostic.contains(&exercise.expected.to_lowercase()) {
-                progress.push(format!("pending {} — {}", exercise.file, exercise.lesson));
-                pending += 1;
-            } else {
-                return Err(format!("{} now fails for an unexpected reason:\n{}", exercise.file, diagnostic));
-            }
+            let categories = categories_of(&report);
+            return Err(format!("{} now fails for an unexpected reason: {:?}", exercise.file, categories));
         }
     }
     Ok((solved, pending, progress))
@@ -157,24 +217,28 @@ pub fn replay_fuzz(executable: &Path, source: &Path) -> Result<(bool, String), S
     Ok((output.status.success(), combined_output(&output)))
 }
 
-fn failure_signature(text: &str) -> Option<String> {
-    for line in text.lines() {
-        let lowered = line.to_lowercase();
-        if lowered.contains("error") {
-            return Some(lowered.trim().to_string());
-        }
+fn failure_signature(report: &Value) -> Option<String> {
+    let diagnostics = report.get("diagnostics")?.as_array()?;
+    if diagnostics.is_empty() {
+        return None;
     }
-    None
+    let mut parts: Vec<String> = Vec::new();
+    for diagnostic in diagnostics {
+        let category = diagnostic.get("category").and_then(|entry| entry.as_str()).unwrap_or("diagnostic");
+        let message = diagnostic.get("message").and_then(|entry| entry.as_str()).unwrap_or_default();
+        parts.push(format!("{}: {}", category, message));
+    }
+    Some(parts.join("\n"))
 }
 
 pub fn minimize_fuzz(executable: &Path, source: &Path, destination: &Path) -> Result<usize, String> {
     let original = std::fs::read_to_string(source)
         .map_err(|read_error| format!("cannot read '{}': {}", source.display(), read_error))?;
-    let baseline = compiler_output(executable, source)?;
-    if baseline.status.success() {
+    let (baseline_passed, baseline_report) = compiler_json(executable, source)?;
+    if baseline_passed {
         return Err("the supplied fuzz artifact does not reproduce a compiler failure".to_string());
     }
-    let signature = failure_signature(&combined_output(&baseline))
+    let signature = failure_signature(&baseline_report)
         .ok_or_else(|| "the failing artifact produced no stable error signature".to_string())?;
     let scratch = std::env::temp_dir().join(format!("cinnabar-fuzz-minimize-{}.cnb", std::process::id()));
     let mut lines: Vec<String> = original.lines().map(str::to_string).collect();
@@ -185,9 +249,9 @@ pub fn minimize_fuzz(executable: &Path, source: &Path, destination: &Path) -> Re
         let candidate_text = format!("{}\n", candidate.join("\n"));
         std::fs::write(&scratch, candidate_text)
             .map_err(|write_error| format!("cannot write minimization scratch file: {}", write_error))?;
-        let trial = compiler_output(executable, &scratch)?;
-        let trial_signature = failure_signature(&combined_output(&trial));
-        if !trial.status.success() && trial_signature.as_deref() == Some(signature.as_str()) {
+        let (trial_passed, trial_report) = compiler_json(executable, &scratch)?;
+        let trial_signature = failure_signature(&trial_report);
+        if !trial_passed && trial_signature.as_deref() == Some(signature.as_str()) {
             lines = candidate;
         } else {
             cursor += 1;

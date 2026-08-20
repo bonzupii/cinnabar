@@ -1,27 +1,15 @@
 pub mod Collections
   pub nat type Vec(T)
-  pub nat type String
-  pub nat type HashMap(K, V)
 
   pub type Error
     pub AllocationFailed(Usize)
-    pub IndexOutOfBounds(Usize)
-    pub KeyNotFound
-    pub EmptySlice
-    pub InvalidUtf8
+    pub IndexOutOfBounds(Usize, Usize)
   end
 
   pub nat fun vec_new<T>() impure Result(Vec(T), Error)
   pub nat fun vec_push<T>(vec: &mut Vec(T), value: T) impure Result(Unit, Error)
   pub nat fun vec_view<T>(vec: &Vec(T)) &[T]
   pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
-  pub nat fun string_from_slice(view: &[U8]) impure Result(String, Error)
-  pub nat fun string_len(value: &String) Usize
-  pub nat fun string_free(value: String) impure Unit
-  pub nat fun hash_map_new<K, V>() impure Result(HashMap(K, V), Error)
-  pub nat fun hash_map_insert<K, V>(map: &mut HashMap(K, V), key: K, value: V) impure Result(Unit, Error)
-  pub nat fun hash_map_get<K, V>(map: &HashMap(K, V), key: K) impure Result(V, Error)
-  pub nat fun hash_map_free<K, V>(map: HashMap(K, V)) impure Unit
 end
 
 use Collections.vec_new
@@ -38,7 +26,7 @@ use Slice.len as slice_len
 const BAD_NEW: I64 = 1
 const BAD_PUSH: I64 = 2
 
-fun fail_vec<T>(vec: Collections.Vec(T)) impure I64
+fun fail_vec(vec: Collections.Vec(I64)) impure I64
   vec_free(vec)
   return BAD_PUSH
 end

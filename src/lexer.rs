@@ -246,11 +246,11 @@ fn is_block_close(bytes: &[u8], pos: usize) -> bool {
 }
 
 fn report_nested_comment(file: i64, pos: usize, errors: &mut Vec<Diag>) {
-    push_error(errors, "nested block comment is not allowed", file, pos as i64, pos as i64 + 2);
+    push_syntax(errors, "nested block comment is not allowed", file, pos as i64, pos as i64 + 2);
 }
 
 fn report_unterminated_comment(file: i64, start: usize, errors: &mut Vec<Diag>) {
-    push_error(errors, "unterminated block comment", file, start as i64, start as i64 + 2);
+    push_syntax(errors, "unterminated block comment", file, start as i64, start as i64 + 2);
 }
 
 fn lex_ident(
@@ -284,7 +284,7 @@ fn lex_ident(
                 } else {
                     format!("'{}' begins with an underscore, which marks a value as deliberately unused; bind it with a real name and use it", text)
                 };
-                push_error(errors, &message, file, pos as i64, end as i64);
+                push_syntax(errors, &message, file, pos as i64, end as i64);
                 return end;
             }
             let name = intern(names, text);
@@ -325,7 +325,7 @@ fn lex_decimal(nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, file: i64, errors
     let end = scan_digits(bytes, pos);
     if let Some(value) = decimal_value(bytes, start, end, file, errors) {
         if is_ident_char(byte_at(bytes, end)) {
-            push_error(errors, "invalid character in integer literal", file, start as i64, end as i64 + 1);
+            push_syntax(errors, "invalid character in integer literal", file, start as i64, end as i64 + 1);
         } else {
             push_token(nodes, TOK_INT, NONE, value, start as i64, end as i64, file);
         }
@@ -362,11 +362,11 @@ fn lex_hex(nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, file: i64, errors: &m
     let start = pos;
     let end = scan_hex_digits(bytes, pos + 2);
     if end == start + 2 {
-        push_error(errors, "expected hexadecimal digits after 0x", file, start as i64, end as i64);
+        push_syntax(errors, "expected hexadecimal digits after 0x", file, start as i64, end as i64);
         return end;
     }
     if is_ident_char(byte_at(bytes, end)) {
-        push_error(errors, "invalid digit in hexadecimal literal", file, start as i64, end as i64 + 1);
+        push_syntax(errors, "invalid digit in hexadecimal literal", file, start as i64, end as i64 + 1);
         return end;
     }
     if let Some(value) = hex_value(bytes, start + 2, end, file, errors) { push_token(nodes, TOK_HEX, NONE, value, start as i64, end as i64, file) }
@@ -417,7 +417,7 @@ fn accumulate_digit(
     match value.checked_mul(radix).and_then(|v| v.checked_add(digit)) {
         Some(next) => Some(next),
         None => {
-            push_error(errors, message, file, start, end);
+            push_syntax(errors, message, file, start, end);
             None
         }
     }
@@ -461,7 +461,7 @@ fn lex_string(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: 
             return end;
         }
         if byte == b'\n' {
-            push_error(errors, "unterminated string literal", file, start as i64, cursor as i64);
+            push_syntax(errors, "unterminated string literal", file, start as i64, cursor as i64);
             return cursor;
         }
         if byte == b'\\' {
@@ -483,7 +483,7 @@ fn lex_string(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: 
             // own copy of that diagnostic and every span stays in range.
             let body = byte_at(bytes, cursor + 1);
             if cursor + 1 >= bytes.len() || body == b'\n' {
-                push_error(errors, "incomplete escape in string literal", file, cursor as i64, (cursor + 1) as i64);
+                push_syntax(errors, "incomplete escape in string literal", file, cursor as i64, (cursor + 1) as i64);
                 cursor += 1;
                 run = cursor;
                 continue;
@@ -515,7 +515,7 @@ fn lex_string(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: 
                         None => 1,
                     };
                     let escape_end = cursor + 1 + body_width;
-                    push_error(errors, "unknown escape in string literal", file, cursor as i64, escape_end as i64);
+                    push_syntax(errors, "unknown escape in string literal", file, cursor as i64, escape_end as i64);
                     cursor = escape_end;
                 }
             }
@@ -524,7 +524,7 @@ fn lex_string(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: 
         }
         cursor += 1;
     }
-    push_error(errors, "unterminated string literal", file, start as i64, cursor as i64);
+    push_syntax(errors, "unterminated string literal", file, start as i64, cursor as i64);
     cursor
 }
 
@@ -595,7 +595,7 @@ fn char_len_at(source: &str, pos: usize) -> usize {
 
 fn report_unexpected(source: &str, pos: usize, file: i64, errors: &mut Vec<Diag>) -> usize {
     let width = char_len_at(source, pos);
-    push_error(errors, "unexpected character", file, pos as i64, (pos + width) as i64);
+    push_syntax(errors, "unexpected character", file, pos as i64, (pos + width) as i64);
     pos + width
 }
 
@@ -806,7 +806,7 @@ mod tests {
         let errors = lex_errors("#| outer #| inner |# |#\n");
         assert_eq!(errors.len(), 1);
         match errors.get(0) {
-            Some(diag) => assert!(diag.0.contains("nested")),
+            Some(diag) => assert!(diag.message.contains("nested")),
             None => assert!(false),
         }
     }
@@ -816,7 +816,7 @@ mod tests {
         let (kinds, errors) = lex_all("#| outer #| inner |# val x = 1 |#\nval y = 2\n");
         assert_eq!(errors.len(), 1);
         match errors.get(0) {
-            Some(diag) => assert!(diag.0.contains("nested")),
+            Some(diag) => assert!(diag.message.contains("nested")),
             None => assert!(false),
         }
         // The nested block's `|#` must not terminate the outer comment:
@@ -833,7 +833,7 @@ mod tests {
         let errors = lex_errors("0xG123\n");
         assert_eq!(errors.len(), 1);
         match errors.get(0) {
-            Some(diag) => assert!(diag.0.contains("hex")),
+            Some(diag) => assert!(diag.message.contains("hex")),
             None => assert!(false),
         }
     }
@@ -843,7 +843,7 @@ mod tests {
         let errors = lex_errors("$100\n");
         assert_eq!(errors.len(), 1);
         match errors.get(0) {
-            Some(diag) => assert!(diag.0.contains("unexpected")),
+            Some(diag) => assert!(diag.message.contains("unexpected")),
             None => assert!(false),
         }
     }
@@ -853,7 +853,7 @@ mod tests {
         let errors = lex_errors("#| never closed\n");
         assert_eq!(errors.len(), 1);
         match errors.get(0) {
-            Some(diag) => assert!(diag.0.contains("unterminated")),
+            Some(diag) => assert!(diag.message.contains("unterminated")),
             None => assert!(false),
         }
     }
@@ -935,7 +935,7 @@ mod tests {
         let errors = lex_errors("val x = \"bad \\q escape\"\n");
         assert_eq!(errors.len(), 1);
         match errors.get(0) {
-            Some(diag) => assert!(diag.0.contains("unknown escape")),
+            Some(diag) => assert!(diag.message.contains("unknown escape")),
             None => assert!(false),
         }
     }
@@ -947,7 +947,7 @@ mod tests {
         let errors = lex_errors("val x = \"no closing quote\nval y = 1\n");
         assert_eq!(errors.len(), 1);
         match errors.get(0) {
-            Some(diag) => assert!(diag.0.contains("unterminated string")),
+            Some(diag) => assert!(diag.message.contains("unterminated string")),
             None => assert!(false),
         }
     }
@@ -957,7 +957,7 @@ mod tests {
         let errors = lex_errors("val x = \"runs to the end");
         assert_eq!(errors.len(), 1);
         match errors.get(0) {
-            Some(diag) => assert!(diag.0.contains("unterminated string")),
+            Some(diag) => assert!(diag.message.contains("unterminated string")),
             None => assert!(false),
         }
     }
@@ -972,11 +972,11 @@ mod tests {
             match errors.get(idx) {
                 Some(diag) => {
                     assert!(
-                        diag.2 >= 0 && diag.3 >= diag.2 && diag.3 <= source.len() as i64,
+                        diag.start >= 0 && diag.end >= diag.start && diag.end <= source.len() as i64,
                         "span {}..{} of '{}' leaves a {}-byte source",
-                        diag.2,
-                        diag.3,
-                        diag.0,
+                        diag.start,
+                        diag.end,
+                        diag.message,
                         source.len()
                     );
                 }
@@ -1010,14 +1010,14 @@ mod tests {
         match errors.first() {
             Some(diag) => {
                 assert!(
-                    diag.0.contains("unknown escape"),
+                    diag.message.contains("unknown escape"),
                     "reported something other than the escape: {}",
-                    diag.0
+                    diag.message
                 );
                 assert!(
-                    !diag.0.contains("character boundary"),
+                    !diag.message.contains("character boundary"),
                     "a user typo produced an internal invariant diagnostic: {}",
-                    diag.0
+                    diag.message
                 );
             }
             None => assert!(false, "no diagnostic reported"),

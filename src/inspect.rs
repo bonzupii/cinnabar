@@ -392,17 +392,6 @@ fn row_detail(names: &[String], nodes: &[i64], lists: &[Vec<i64>], id: i64, tag:
             ],
         );
     }
-    if tag == NODE_VARFACT {
-        return row(
-            "varfact",
-            "",
-            vec![
-                renamed("enum_key", "enum-key", DetailValue::Int(node_a(nodes, id))),
-                keyed("variant", DetailValue::Name(name_text(names, node_b(nodes, id)))),
-                keyed("tag", DetailValue::Int(node_d(nodes, id))),
-            ],
-        );
-    }
     if tag == NODE_FIELDKEY {
         return row(
             "fieldkey",
@@ -412,6 +401,18 @@ fn row_detail(names: &[String], nodes: &[i64], lists: &[Vec<i64>], id: i64, tag:
                 keyed("field", DetailValue::Name(name_text(names, node_b(nodes, id)))),
                 renamed("field_key", "field-key", DetailValue::Int(fieldkey_key_of(nodes, id))),
                 renamed("decl_index", "decl-idx", DetailValue::Int(fieldkey_idx_of(nodes, id))),
+            ],
+        );
+    }
+    if tag == NODE_PAYLOADKEY {
+        return row(
+            "payloadkey",
+            "",
+            vec![
+                renamed("enum_key", "enum-key", DetailValue::Int(node_a(nodes, id))),
+                renamed("variant_index", "variant-idx", DetailValue::Int(node_b(nodes, id))),
+                renamed("payload_key", "payload-key", DetailValue::Int(payloadkey_key_of(nodes, id))),
+                renamed("field_index", "field-idx", DetailValue::Int(payloadkey_idx_of(nodes, id))),
             ],
         );
     }
@@ -583,10 +584,10 @@ fn tag_name(tag: i64) -> &'static str {
         "DOC"
     } else if tag == NODE_TRAIT {
         "TRAIT"
-    } else if tag == NODE_VARFACT {
-        "VARFACT"
     } else if tag == NODE_FIELDKEY {
         "FIELDKEY"
+    } else if tag == NODE_PAYLOADKEY {
+        "PAYLOADKEY"
     } else {
         "?TAG"
     }

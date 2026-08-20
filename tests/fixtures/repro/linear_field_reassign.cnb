@@ -1,19 +1,39 @@
+#! Reassigning a linear field of a struct moves the field's old value out
+#! of the binding, and the assignment discards it — a use of the moved
+#! handle.  The blocks come from the registry's `Memory.allocate` so the
+#! rejection is the borrow checker's, not the native surface's.
+
 pub mod Memory
   pub nat type Block
-  pub nat fun make() impure Memory.Block
+
+  pub type Error
+    pub AllocationFailed(Usize)
+  end
+
+  pub nat fun allocate(size: Usize) impure Result(Block, Error)
 end
 
-use Memory.make
+use Memory.allocate
 
 pub type Holder
   pub block: Memory.Block
   pub tag: I64
 end
 
+fun make_block() impure Result(Memory.Block, Memory.Error)
+  return allocate(8)
+end
+
 pub fun main() impure I64
-  val first = make()
+  val first = match make_block()
+    Ok(block) => block
+    Err(error) => return 1
+  end
   var holder = Holder(block: first, tag: 7)
-  val second = make()
+  val second = match make_block()
+    Ok(block) => block
+    Err(error) => return 1
+  end
   holder.block = second
   return 0
 end

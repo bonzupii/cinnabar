@@ -1,15 +1,13 @@
-#! vec_pop is the Vec extraction surface (the Resolvability Rule): a
-#! linear element pushed into the Vec is popped back out by value and its
-#! linear obligation transfers to the caller, where deallocate consumes
-#! it.  A `while true` drain loop exits only through vec_pop's
-#! Err(IndexOutOfBounds) arm, which proves the container drained, so
-#! vec_free after the loop is legal.  Error paths consume the Vec through
-#! the fail_vec_free helper, which drains whatever the Vec holds before
-#! freeing (MANIFESTO: error paths must free linear values before
-#! returning).
+#! vec_pop is the Vec extraction surface: a linear element pushed into the
+#! Vec is popped back out by value and its linear obligation transfers to
+#! the caller.  The block's byte is written from the runtime argument
+#! count and read back through the popped element, so the heap buffer
+#! carries a runtime value that -O2 dead-allocation elimination cannot
+#! fold away.
 
 pub mod Collections
   pub nat type Vec(T)
+  pub nat type String
 
   pub type Error
     pub AllocationFailed(Usize)
@@ -26,9 +24,20 @@ pub mod Memory
   pub nat type Block
   pub type Error
     pub AllocationFailed(Usize)
+    pub AccessOutOfBounds(Usize, Usize)
   end
   pub nat fun allocate(size: Usize) impure Result(Block, Error)
   pub nat fun deallocate(block: Block) impure Unit
+  pub nat fun write_u8(block: &Block, offset: Usize, value: U8) impure Result(Unit, Error)
+  pub nat fun read_u8(block: &Block, offset: Usize) impure Result(U8, Error)
+end
+
+pub mod Runtime
+  pub nat fun args() &[Collections.String]
+end
+
+pub mod Slice
+  pub nat fun len<T>(view: &[T]) Usize
 end
 
 use Collections.vec_new
@@ -37,6 +46,15 @@ use Collections.vec_pop
 use Collections.vec_free
 use Memory.allocate
 use Memory.deallocate
+use Memory.write_u8
+use Memory.read_u8
+use Runtime.args
+use Slice.len as slice_len
+
+fun fail_block(block: Memory.Block) impure I64
+  deallocate(block)
+  return 1
+end
 
 fun fail_vec_free(vec: Collections.Vec(Memory.Block)) impure I64
   while true
@@ -49,15 +67,33 @@ fun fail_vec_free(vec: Collections.Vec(Memory.Block)) impure I64
   return 1
 end
 
+fun observe(block: Memory.Block, want: U8) impure I64
+  val byte = match read_u8(&block, 0)
+    Ok(value) => value
+    Err(error) => 0xFF
+  end
+  deallocate(block)
+  if byte == want
+    return 0
+  end
+  return 1
+end
+
 pub fun main() impure I64
-  val vec = match vec_new[Memory.Block]()
-    Ok(v) => v
+  val want: U8 = U8.from(slice_len(args()))
+  val block = match allocate(1)
+    Ok(b) => b
     Err(error) => return 1
   end
 
-  val block = match allocate(64)
-    Ok(b) => b
-    Err(error) => return fail_vec_free(vec)
+  match write_u8(&block, 0, want)
+    Ok(v) => v
+    Err(error) => return fail_block(block)
+  end
+
+  val vec = match vec_new[Memory.Block]()
+    Ok(v) => v
+    Err(error) => return fail_block(block)
   end
 
   match vec_push(&mut vec, block)
@@ -65,13 +101,14 @@ pub fun main() impure I64
     Err(error) => return fail_vec_free(vec)
   end
 
+  var result: I64 = 1
   while true
     match vec_pop(&mut vec)
-      Ok(elem) => deallocate(elem)
+      Ok(elem) => result = observe(elem, want)
       Err(error) => break
     end
   end
 
   vec_free(vec)
-  return 0
+  return result
 end

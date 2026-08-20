@@ -209,7 +209,7 @@ Collections.hash_map_remove<K,V>(map: &mut HashMap(K,V), key: K)
 
 ### Native Surface: Operating System
 
-`Memory`, `Terminal`, and `File` issue Linux system calls directly rather than calling libc. The instruction that leaves user space is visible in the emitted IR, with nothing between the Cinnabar declaration and the kernel. `Collections` and `Net` keep the statically linked musl, because an allocator and a `sockaddr` marshaller are real code rather than thin syscall shims — this is the "where a target genuinely cannot avoid libc" case, and it is never a dynamic link.
+`Memory`, `Terminal`, `File`, `Net`, `Process`, `Runtime`, and `Collections` form one native surface on every platform. Each native lowers to the platform's C ABI through a closed, compiler-authored runtime — the boundary is the target's own C library (glibc on Linux, the platform libc on Darwin/BSD, the C runtime and Winsock on Windows), never user code and never a hardcoded operating system. What differs between platforms is the compiler's business: open and mmap flags, errno accessors, and link modes are structured static data in the target tables, applied at code generation, never conditional grammar and never visible to a Cinnabar program. A Linux compiler built with the `static-musl` feature can additionally link `-static -nostdlib` against a staged musl archive embedded in the compiler; static linking is an option, not the default — the default link is dynamic against the platform's own C library.
 
 `File.Handle` is linear, like every other native handle: an open descriptor must be closed exactly once on every path. A leaked descriptor is a compile error, and so is closing one twice — which would release a number the kernel may since have handed back out, making a later read touch the wrong file.
 
@@ -269,7 +269,7 @@ At most one `impl` of a given trait may exist for a given type. A duplicate `imp
 ### Runtime Guarantees
 The O(1) call-stack guarantee: recursion cannot exhaust the stack because exhaustion is prevented at compile time, not detected at runtime. The typechecker verifies that every self-recursive call occupies a strict tail position — the direct expression value of a `return` statement, or the non-diverging result expression of a tail-positioned match/if — and rejects any other self-recursive call with a source-located error. There is no runtime stack guard in any compiled binary: no per-entry stack checks, no `RLIMIT_STACK` measurement, no `getrlimit`, no stack-overflow message, and no `exit(70)` termination.
 
-All valid recursive functions therefore execute in O(1) call-stack memory via tail-call elimination. Codegen marks a call in tail position `tail`: tailness propagates through the value expression of a tail-positioned match arm and is cleared in every other position, so argument subexpressions and scrutinees are never marked (`return x + f(y)` does not treat `f` as a tail call). LLVM's tail-call elimination turns self-tail-recursive calls into jumps at `-O2`. Algorithms requiring O(N) depth must use explicit accumulators or explicit, user-managed linear work stacks (`Collections.Vec`, fixed-size arrays).
+All valid recursive functions therefore execute in O(1) call-stack memory. The typechecker attaches a tail-position fact to every call; codegen lowers a certified self-recursive call (tail position, no frame-rooted borrow arguments) to a loop jump over the function's own parameter slots, so the guarantee holds at every optimization level with no dependence on the optimizer. Algorithms requiring O(N) depth must use explicit accumulators or explicit, user-managed linear work stacks (`Collections.Vec`, fixed-size arrays).
 
 ## What Is NOT Cinnabar
 Semicolons as statement separators
@@ -281,6 +281,13 @@ Everything listed under Anti-Principles below
 
 ### Self-Hosting
 Cinnabar must be able to compile itself. The language's own data structures, control flow, and resource management patterns must be sufficient to express a complete compiler frontend and codegen backend. Every language feature exists because the compiler needs it.
+
+### One Language, Every Platform
+A Cinnabar program that compiles on one platform compiles to its binary equivalent on every supported platform — Linux, macOS, BSD, and Windows. The native surface is universal: the same verbs, types, and runtime contracts exist on every supported target, and a program's behavior is defined by the language, never by the operating system it links against. No program is written "for Linux" or "for Windows"; it is written for Cinnabar, and the compiler produces each platform's binary equivalent from the same source.
+
+Platform differences a program cannot express in the language — open flags, mmap flags, errno accessors, socket entry points, link modes — are the compiler's concern, carried as structured static data in target tables and applied at code generation. They are never conditional grammar, never frontend capability splits, and never a branch a Cinnabar program can see. An unsupported target is a compile error that names the target; a supported one is identical from the language's point of view.
+
+The native surface is sealed on every platform. Natives lower to the platform's C ABI through a closed, compiler-authored runtime; the boundary is the target's own C library, never user code. No Cinnabar program ever names a syscall or a foreign symbol — the entry points a program can reach are exactly the sealed registry.
 
 ### Systems Programming Without Unsafety
 Memory safety without garbage collection. Resource safety without RAII magic. Concurrency safety without mutexes (message passing and linear handles). The language must be suitable for writing kernels, embedded firmware, network stacks, and compilers — domains where GC pauses, implicit allocations, and runtime overhead are unacceptable.

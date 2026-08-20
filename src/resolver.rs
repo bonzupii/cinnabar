@@ -12,23 +12,28 @@
 //! declaration rather than at every use: a mis-cased identifier is one
 //! resolver error and never reaches the typechecker.
 //!
-//! Two tags are assigned at this point precisely so that no later stage has
-//! to recognize something by its name — the program's entry point
-//! (`SYM_FUN_MAIN`) and each native operation's `NAT_*` opcode.
+//! Three tags are assigned at this point precisely so that no later stage
+//! has to recognize something by its name — the program's entry point
+//! (`SYM_FUN_MAIN`), each native operation's `NAT_*` verb, and each native
+//! function's ownership mode (`sym_native_mode`), derived once by the
+//! signature classifier from the seeded registry.  The registry tables are
+//! the single declaration of the native surface: a native outside them is
+//! a resolution error naming the function.
 //!
 //! **Invariants:**
 //! - The symbol a name resolves to is decided here and nowhere else. A
 //!   later stage that needs it reads the attached `NODE_SYM`; it does not
 //!   re-walk the path and re-match segments with parallel logic.
-//! - Downstream semantics key off `SYM_FUN_MAIN` and the `NAT_*` opcodes,
-//!   never off a string comparison against `"main"` or a native function's
-//!   name. Attaching the tag here is what makes that rule keepable.
+//! - Downstream semantics key off `SYM_FUN_MAIN`, the `NAT_*` verbs, and
+//!   the attached ownership modes, never off a string comparison against
+//!   `"main"` or a native function's name. Attaching the tags here is
+//!   what makes that rule keepable.
 //! - A name that does not resolve produces a diagnostic at the use site's
 //!   real span, optionally carrying a hedged suggestion. It never quietly
 //!   resolves to a plausible neighbour.
-
 use crate::ast::*;
 use crate::suggest;
+use crate::target::{NativeSubsystem, Target};
 
 pub const NS_TYPE: i64 = 0;
 pub const NS_VALUE: i64 = 1;
@@ -54,6 +59,11 @@ type State<'a> = (
     // walk over these from `main`, not a "was this name mentioned anywhere"
     // flag — two dead functions that call each other are still dead.
     &'a mut Vec<(i64, i64)>,
+    // Seeded builtin names and symbols, filled during resolution.
+    &'a mut Seeds,
+    // The platform a build is for, so resolution can reject an operation a
+    // target does not support before code generation begins.
+    &'a Target,
 );
 
 /// The owner of references that belong to no nameable item.
@@ -62,10 +72,6 @@ type State<'a> = (
 /// calls by name, and trait methods are reached by dispatch rather than by a
 /// resolved path. Attributing their references here — and treating this as
 /// permanently reached — keeps everything they mention alive.
-///
-/// That is deliberately conservative. Rejecting a program that is actually
-/// correct is far worse than missing one dead impl, so the analysis errs
-/// toward keeping things.
 const ROOT_OWNER: i64 = -2;
 
 /// Resolves names, and separately reports which items nothing reaches.
@@ -86,6 +92,7 @@ pub struct Diagnostics<'a> {
     pub notes: &'a mut Vec<Note>,
     /// Reported by the caller once the later stages have run, not here.
     pub deferred: &'a mut Vec<Diag>,
+    pub target: &'a Target,
 }
 
 pub fn resolve(
@@ -95,8 +102,9 @@ pub fn resolve(
     diagnostics: Diagnostics,
     root: i64,
     ext_mods: &[(i64, i64)],
+    seeds: &mut Seeds,
 ) -> bool {
-    let Diagnostics { errors, notes, deferred } = diagnostics;
+    let Diagnostics { errors, notes, deferred, target } = diagnostics;
     let mut scopes: Vec<Vec<i64>> = Vec::new();
     let mut parents: Vec<i64> = Vec::new();
     let mut pubs: Vec<i64> = Vec::new();
@@ -121,6 +129,8 @@ pub fn resolve(
         notes,
         &mut owners,
         &mut edges,
+        seeds,
+        target,
     );
     seed_builtins(&mut state, root_scope, root);
 
@@ -171,7 +181,7 @@ pub fn resolve(
         idx += 1;
     }
 
-    classify_native_views(&mut state);
+    classify_native_modes(&mut state);
     link_extraction_surfaces(&mut state);
 
     // Deferred, for the same reason reachability is: "nothing names this
@@ -438,7 +448,18 @@ fn sym_home_of(nodes: &[i64], sym: i64) -> i64 {
 }
 
 fn sym_sub_of(nodes: &[i64], sym: i64) -> i64 {
-    node_e(nodes, sym)
+    // Slot e is a child scope only for namespace kinds and for seeded
+    // builtin types (no declaration item), whose `.from` surface lives
+    // there. A declared native type's slot e holds its container role
+    // (0/1); role 0 must not be read as the root scope.
+    let kind = sym_kind_of(nodes, sym);
+    let is_namespace = kind == SYM_MODULE || kind == SYM_STRUCT || kind == SYM_ENUM || kind == SYM_TRAIT;
+    let is_seeded_builtin = kind == SYM_TYPE && sym_decl_of(nodes, sym) == NONE;
+    if is_namespace || is_seeded_builtin {
+        node_e(nodes, sym)
+    } else {
+        NONE
+    }
 }
 
 fn sym_is_pub(nodes: &[i64], sym: i64) -> i64 {
@@ -586,14 +607,14 @@ fn casing_ok(names: &[String], name: i64, casing: i64) -> i64 {
 
 fn report_casing(names: &[String], name: i64, casing: i64, errors: &mut Vec<Diag>, file: i64, start: i64, end: i64) {
     if casing_ok(names, name, casing) == 0 {
-        let rule = if casing == 1 {
-            "snake_case"
-        } else if casing == 2 {
-            "PascalCase"
-        } else {
-            "SCREAMING_SNAKE_CASE"
-        };
-        push_error(errors, &format!("'{}' violates casing rule: expected {}", name_text(names, name), rule), file, start, end);
+        push_error_kind(
+            errors,
+            &format!("'{}' violates casing rule: expected {}", name_text(names, name), casing_rule_name(casing)),
+            file,
+            start,
+            end,
+            DiagKind::CasingViolation { name, expected: casing },
+        );
     }
 }
 
@@ -692,7 +713,19 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
         let name = node_d(state.1, item);
         let full = qualified_name(state.0, state.2, prefix, name);
         let sym = alloc_sym(state.1, SYM_ENUM, full, item, scope, NONE);
-        sym_set_prim_kind(state.1, sym, prim_kind_of(state.0, full));
+        let prim = prim_kind_of(state.0, full);
+        sym_set_prim_kind(state.1, sym, prim);
+        if prim == PRIM_UNIT {
+            state.13.set_sym(SEED_SYM_UNIT, sym);
+        } else if prim == PRIM_RESULT {
+            state.13.set_sym(SEED_SYM_RESULT, sym);
+        } else if prim == PRIM_OPTION {
+            state.13.set_sym(SEED_SYM_OPTION, sym);
+        } else if prim == PRIM_DIV_ERROR {
+            state.13.set_sym(SEED_SYM_DIV_ERROR, sym);
+        } else if prim == PRIM_INDEX_ERROR {
+            state.13.set_sym(SEED_SYM_INDEX_ERROR, sym);
+        }
         let declared = insert_decl(state, scope, name, sym, NS_TYPE, 2, (file, start, end));
         item_set_sym(state.1, item, sym);
         let sub = alloc_scope(state.4, state.5, state.6, state.7, scope, prefix, 1);
@@ -723,7 +756,20 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
         insert_decl(state, scope, name, sym, NS_VALUE, 1, (file, start, end));
         item_set_sym(state.1, item, sym);
         if kind == ITEM_NATIVE_FUN {
-            sym_set_native_op(state.1, sym, native_opcode_of(state.0, full));
+            let row = native_fun_row_of(state.0, full);
+            if row == usize::MAX {
+                // A native outside the registry is a resolution error,
+                // never a panic or a later-stage surprise.
+                push_error(
+                    state.3,
+                    &format!("unknown native function '{}'", name_text(state.0, full)),
+                    file,
+                    start,
+                    end,
+                );
+            } else {
+                sym_set_native_op(state.1, sym, native_fun_verb(row));
+            }
         } else if full == intern(state.0, "main") {
             node_set_f(state.1, sym, SYM_FUN_MAIN);
         }
@@ -740,9 +786,23 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
         insert_decl(state, scope, name, sym, NS_TYPE, 2, (file, start, end));
         item_set_sym(state.1, item, sym);
         let sub = alloc_scope(state.4, state.5, state.6, state.7, scope, prefix, 1);
-        node_set_e(state.1, sym, sub);
         state.8.push((item, sub));
         enter_type_params(state.1, state.2, state.4, sub, node_e(state.1, item));
+        // An unknown native type is a resolution error; a known one stores
+        // its container role and layout kind on its own symbol row.
+        let trow = native_type_row_of(state.0, full);
+        if trow == usize::MAX {
+            push_error(
+                state.3,
+                &format!("unknown native type '{}'", name_text(state.0, full)),
+                file,
+                start,
+                end,
+            );
+        } else {
+            sym_set_native_role(state.1, sym, native_type_role(trow));
+            sym_set_native_layout(state.1, sym, native_type_layout(trow));
+        }
     } else if kind == ITEM_USE {
         let segs = node_d(state.1, item);
         let last = list_last(state.2, segs);
@@ -785,6 +845,7 @@ fn enter_type_params(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], scopes: &mut 
 fn collect_variants(state: &mut State, hoist_scope: i64, sub: i64, enum_full: i64, item: i64) {
     let variants = node_e(state.1, item);
     let count = list_len(state.2, variants);
+    let prim = prim_kind_of(state.0, enum_full);
     let mut idx = 0i64;
     while idx < count {
         let variant = list_get(state.2, variants, idx);
@@ -796,7 +857,46 @@ fn collect_variants(state: &mut State, hoist_scope: i64, sub: i64, enum_full: i6
         variant_set_sym(state.1, variant, sym);
         push_entry(state.4, sub, var_name, sym, NS_VALUE, NONE);
         insert_hoisted(state, hoist_scope, var_name, sym, variant);
+        if let Some(slot) = seed_variant_slot(prim, idx) {
+            state.13.set_sym(slot, sym);
+        }
         idx += 1;
+    }
+}
+
+// The seeded symbol slot for a builtin primitive enum's variant at
+// declaration index `idx`, or none when the enum is not a builtin primitive.
+fn seed_variant_slot(prim: i64, idx: i64) -> Option<usize> {
+    if prim == PRIM_RESULT {
+        if idx == 0 {
+            Some(SEED_SYM_OK)
+        } else if idx == 1 {
+            Some(SEED_SYM_ERR)
+        } else {
+            None
+        }
+    } else if prim == PRIM_OPTION {
+        if idx == 0 {
+            Some(SEED_SYM_SOME)
+        } else if idx == 1 {
+            Some(SEED_SYM_NONE)
+        } else {
+            None
+        }
+    } else if prim == PRIM_DIV_ERROR {
+        if idx == 0 {
+            Some(SEED_SYM_DIV_BY_ZERO)
+        } else {
+            None
+        }
+    } else if prim == PRIM_INDEX_ERROR {
+        if idx == 0 {
+            Some(SEED_SYM_INDEX_OOB)
+        } else {
+            None
+        }
+    } else {
+        None
     }
 }
 
@@ -853,6 +953,35 @@ fn collect_trait_methods(state: &mut State, sub: i64, trait_full: i64, item: i64
 }
 
 fn seed_builtins(state: &mut State, root_scope: i64, root: i64) {
+    let seed_names: &[(&str, usize)] = &[
+        ("Ok", SEED_NAME_OK),
+        ("Err", SEED_NAME_ERR),
+        ("Some", SEED_NAME_SOME),
+        ("None", SEED_NAME_NONE),
+        ("DivByZero", SEED_NAME_DIV_BY_ZERO),
+        ("AllocationFailed", SEED_NAME_ALLOC_FAILED),
+        ("AccessOutOfBounds", SEED_NAME_ACCESS_OOB),
+        ("IndexOutOfBounds", SEED_NAME_INDEX_OOB),
+        ("KeyNotFound", SEED_NAME_KEY_NOT_FOUND),
+        ("InvalidUtf8", SEED_NAME_INVALID_UTF8),
+        ("ExitDiagnostic", SEED_NAME_EXIT_DIAG),
+        ("SystemFault", SEED_NAME_SYSTEM_FAULT),
+        ("ReadOnly", SEED_NAME_READ_ONLY),
+        ("WriteTruncate", SEED_NAME_WRITE_TRUNCATE),
+        ("EndOfInput", SEED_NAME_END_OF_INPUT),
+        ("ReadFailed", SEED_NAME_READ_FAILED),
+        ("Self", SEED_NAME_SELF),
+    ];
+    let mut nidx = 0usize;
+    while nidx < seed_names.len() {
+        let (text, slot) = match seed_names.get(nidx) {
+            Some(pair) => *pair,
+            None => break,
+        };
+        let name_id = intern(state.0, text);
+        state.13.set_name(slot, name_id);
+        nidx += 1;
+    }
     let ints = builtin_int_names(state.0);
     let mut idx = 0usize;
     while idx < ints.len() {
@@ -860,12 +989,14 @@ fn seed_builtins(state: &mut State, root_scope: i64, root: i64) {
             Some(id) => *id,
             None => break,
         };
-        let scope = seed_builtin_type(state, root_scope, name_id);
-        seed_int_from(state, scope, name_id);
+        let sym = seed_builtin_type(state, root_scope, name_id);
+        state.13.set_sym(SEED_SYM_I8 + idx, sym);
+        seed_int_from(state, node_e(state.1, sym), name_id);
         idx += 1;
     }
     let bool_name = intern(state.0, "Bool");
-    seed_builtin_type(state, root_scope, bool_name);
+    let bool_sym = seed_builtin_type(state, root_scope, bool_name);
+    state.13.set_sym(SEED_SYM_BOOL, bool_sym);
     seed_primitive(state, root, "Unit", &[], &[("Unit", &[])]);
     seed_primitive(state, root, "Result", &["T", "E"], &[("Ok", &["T"]), ("Err", &["E"])]);
     seed_primitive(state, root, "Option", &["T"], &[("Some", &["T"]), ("None", &[])]);
@@ -925,207 +1056,630 @@ fn seed_int_from(state: &mut State, scope: i64, name: i64) {
     list_push(state.2, prefix, name);
     let from_name = intern(state.0, "from");
     let method = qualified_name(state.0, state.2, prefix, from_name);
+    let row = native_fun_row_of(state.0, method);
+    if row == usize::MAX {
+        // The registry table is the declaration of the int `.from`
+        // surface; a row missing from it means the method simply does not
+        // exist, and a program calling it gets the ordinary unknown-
+        // function diagnostic.  The registry self-consistency test pins
+        // the table so this branch cannot silently go stale.
+        return;
+    }
     let from = alloc_sym(state.1, SYM_NATIVE_FUN, method, NONE, scope, NONE);
-    sym_set_native_op(state.1, from, native_opcode_of(state.0, method));
+    sym_set_native_op(state.1, from, native_fun_verb(row));
+    sym_set_native_mode(state.1, from, native_fun_mode(row));
     push_entry(state.4, scope, from_name, from, NS_VALUE, NONE);
 }
 
-fn native_opcode_of(names: &[String], full: i64) -> i64 {
-    if name_is(names, full, "I8.from")
-        || name_is(names, full, "I16.from")
-        || name_is(names, full, "I32.from")
-        || name_is(names, full, "I64.from")
-        || name_is(names, full, "Isize.from")
-        || name_is(names, full, "U8.from")
-        || name_is(names, full, "U16.from")
-        || name_is(names, full, "U32.from")
-        || name_is(names, full, "U64.from")
-        || name_is(names, full, "Usize.from")
-    {
-        return NAT_INT_FROM;
+// =====================================================================
+// The native registry: one seeded row per native function
+// — { qualified name, declared mode, verb } — and per native type —
+// { qualified name, layout kind, container role }.
+
+const NATIVE_FUN_ROWS: &[(&str, i64, i64)] = &[
+    ("I8.from", NAT_MODE_EFFECT, NAT_INT_FROM),
+    ("I16.from", NAT_MODE_EFFECT, NAT_INT_FROM),
+    ("I32.from", NAT_MODE_EFFECT, NAT_INT_FROM),
+    ("I64.from", NAT_MODE_EFFECT, NAT_INT_FROM),
+    ("Isize.from", NAT_MODE_EFFECT, NAT_INT_FROM),
+    ("U8.from", NAT_MODE_EFFECT, NAT_INT_FROM),
+    ("U16.from", NAT_MODE_EFFECT, NAT_INT_FROM),
+    ("U32.from", NAT_MODE_EFFECT, NAT_INT_FROM),
+    ("U64.from", NAT_MODE_EFFECT, NAT_INT_FROM),
+    ("Usize.from", NAT_MODE_EFFECT, NAT_INT_FROM),
+    ("Slice.len", NAT_MODE_EFFECT, NAT_SLICE_LEN),
+    ("Memory.allocate", NAT_MODE_CREATE, NAT_MEM_ALLOCATE),
+    ("Memory.deallocate", NAT_MODE_CONSUME, NAT_MEM_DEALLOCATE),
+    ("Memory.write_u8", NAT_MODE_BORROW, NAT_MEM_WRITE_U8),
+    ("Memory.read_u8", NAT_MODE_BORROW, NAT_MEM_READ_U8),
+    ("Memory.block_view", NAT_MODE_VIEW, NAT_SLICE_VIEW),
+    ("Collections.vec_new", NAT_MODE_CREATE, NAT_VEC_NEW),
+    ("Collections.vec_push", NAT_MODE_MUTATE, NAT_VEC_PUSH),
+    ("Collections.vec_pop", NAT_MODE_EXTRACT, NAT_VEC_POP),
+    ("Collections.vec_free", NAT_MODE_CONSUME, NAT_VEC_FREE),
+    ("Collections.vec_view", NAT_MODE_VIEW, NAT_SLICE_VIEW),
+    ("Collections.string_from_slice", NAT_MODE_CREATE, NAT_STRING_FROM_SLICE),
+    ("Collections.string_len", NAT_MODE_BORROW, NAT_STRING_LEN),
+    ("Collections.string_free", NAT_MODE_CONSUME, NAT_STRING_FREE),
+    ("Collections.string_view", NAT_MODE_VIEW, NAT_SLICE_VIEW),
+    ("Collections.hash_map_new", NAT_MODE_CREATE, NAT_HASH_MAP_NEW),
+    ("Collections.hash_map_insert", NAT_MODE_MUTATE, NAT_HASH_MAP_INSERT),
+    ("Collections.hash_map_get", NAT_MODE_BORROW, NAT_HASH_MAP_GET),
+    ("Collections.hash_map_free", NAT_MODE_CONSUME, NAT_HASH_MAP_FREE),
+    ("Collections.hash_map_remove", NAT_MODE_EXTRACT, NAT_HASH_MAP_REMOVE),
+    ("Runtime.self_check", NAT_MODE_EFFECT, NAT_SELF_CHECK),
+    ("Runtime.args", NAT_MODE_EFFECT, NAT_RUNTIME_ARGS),
+    ("Terminal.print", NAT_MODE_BORROW, NAT_TERM_PRINT),
+    ("Terminal.print_line", NAT_MODE_BORROW, NAT_TERM_PRINT_LINE),
+    ("Terminal.eprint", NAT_MODE_BORROW, NAT_TERM_EPRINT),
+    ("Terminal.read_line", NAT_MODE_CREATE, NAT_TERM_READ_LINE),
+    ("File.open", NAT_MODE_CREATE, NAT_FILE_OPEN),
+    ("File.read", NAT_MODE_BORROW, NAT_FILE_READ),
+    ("File.write", NAT_MODE_BORROW, NAT_FILE_WRITE),
+    ("File.close", NAT_MODE_CONSUME, NAT_FILE_CLOSE),
+    ("Net.socket", NAT_MODE_CREATE, NAT_NET_SOCKET),
+    ("Net.bind", NAT_MODE_BORROW, NAT_NET_BIND),
+    ("Net.listen", NAT_MODE_BORROW, NAT_NET_LISTEN),
+    ("Net.accept", NAT_MODE_CREATE, NAT_NET_ACCEPT),
+    ("Net.send", NAT_MODE_BORROW, NAT_NET_SEND),
+    ("Net.close", NAT_MODE_CONSUME, NAT_NET_CLOSE),
+    ("Process.spawn", NAT_MODE_CREATE, NAT_PROCESS_SPAWN),
+    ("Process.wait", NAT_MODE_CONSUME, NAT_PROCESS_WAIT),
+];
+
+// The modes each verb's codegen supports; a derived mode outside its
+// verb's set is an internal error.
+const NATIVE_VERB_MODES: &[(i64, &[i64])] = &[
+    (NAT_INT_FROM, &[NAT_MODE_EFFECT]),
+    (NAT_SLICE_LEN, &[NAT_MODE_EFFECT]),
+    (NAT_MEM_ALLOCATE, &[NAT_MODE_CREATE]),
+    (NAT_MEM_DEALLOCATE, &[NAT_MODE_CONSUME]),
+    (NAT_MEM_WRITE_U8, &[NAT_MODE_BORROW]),
+    (NAT_MEM_READ_U8, &[NAT_MODE_BORROW]),
+    (NAT_VEC_NEW, &[NAT_MODE_CREATE]),
+    (NAT_VEC_PUSH, &[NAT_MODE_MUTATE]),
+    (NAT_VEC_POP, &[NAT_MODE_EXTRACT]),
+    (NAT_VEC_FREE, &[NAT_MODE_CONSUME]),
+    (NAT_SLICE_VIEW, &[NAT_MODE_VIEW]),
+    (NAT_STRING_FROM_SLICE, &[NAT_MODE_CREATE]),
+    (NAT_STRING_LEN, &[NAT_MODE_BORROW]),
+    (NAT_STRING_FREE, &[NAT_MODE_CONSUME]),
+    (NAT_HASH_MAP_NEW, &[NAT_MODE_CREATE]),
+    (NAT_HASH_MAP_INSERT, &[NAT_MODE_MUTATE]),
+    (NAT_HASH_MAP_GET, &[NAT_MODE_BORROW]),
+    (NAT_HASH_MAP_FREE, &[NAT_MODE_CONSUME]),
+    (NAT_HASH_MAP_REMOVE, &[NAT_MODE_EXTRACT]),
+    (NAT_SELF_CHECK, &[NAT_MODE_EFFECT]),
+    (NAT_TERM_PRINT, &[NAT_MODE_BORROW, NAT_MODE_EFFECT]),
+    (NAT_TERM_PRINT_LINE, &[NAT_MODE_BORROW, NAT_MODE_EFFECT]),
+    (NAT_TERM_EPRINT, &[NAT_MODE_BORROW, NAT_MODE_EFFECT]),
+    (NAT_TERM_READ_LINE, &[NAT_MODE_CREATE]),
+    (NAT_FILE_OPEN, &[NAT_MODE_CREATE]),
+    (NAT_FILE_READ, &[NAT_MODE_BORROW, NAT_MODE_TRANSFER]),
+    (NAT_FILE_WRITE, &[NAT_MODE_BORROW, NAT_MODE_TRANSFER]),
+    (NAT_FILE_CLOSE, &[NAT_MODE_CONSUME]),
+    (NAT_RUNTIME_ARGS, &[NAT_MODE_EFFECT]),
+    (NAT_NET_SOCKET, &[NAT_MODE_CREATE]),
+    (NAT_NET_BIND, &[NAT_MODE_BORROW]),
+    (NAT_NET_LISTEN, &[NAT_MODE_BORROW]),
+    (NAT_NET_ACCEPT, &[NAT_MODE_CREATE]),
+    (NAT_NET_SEND, &[NAT_MODE_BORROW, NAT_MODE_TRANSFER]),
+    (NAT_NET_CLOSE, &[NAT_MODE_CONSUME]),
+    (NAT_PROCESS_SPAWN, &[NAT_MODE_CREATE]),
+    (NAT_PROCESS_WAIT, &[NAT_MODE_CONSUME]),
+];
+
+// (qualified name, layout kind, container role).  The role is the
+// declared fact borrow and typecheck read instead of inferring
+// "container" from the presence of type arguments at an instantiation.
+const NATIVE_TYPE_ROWS: &[(&str, i64, i64)] = &[
+    ("Memory.Block", NATIVE_LAYOUT_PAIR, 0),
+    ("Collections.Vec", NATIVE_LAYOUT_TRIPLE, 1),
+    ("Collections.String", NATIVE_LAYOUT_PAIR, 0),
+    ("Collections.HashMap", NATIVE_LAYOUT_TRIPLE, 1),
+    ("File.Handle", NATIVE_LAYOUT_SCALAR, 0),
+    ("Net.Socket", NATIVE_LAYOUT_SCALAR, 0),
+    ("Process.Child", NATIVE_LAYOUT_SCALAR, 0),
+];
+
+fn native_fun_row_of(names: &[String], full: i64) -> usize {
+    let mut idx = 0usize;
+    while idx < NATIVE_FUN_ROWS.len() {
+        match NATIVE_FUN_ROWS.get(idx) {
+            Some(row) => {
+                if name_is(names, full, row.0) {
+                    return idx;
+                }
+            }
+            None => break,
+        }
+        idx += 1;
     }
-    if name_is(names, full, "Slice.len") {
-        return NAT_SLICE_LEN;
-    }
-    if name_is(names, full, "Memory.allocate") {
-        return NAT_MEM_ALLOCATE;
-    }
-    if name_is(names, full, "Memory.deallocate") {
-        return NAT_MEM_DEALLOCATE;
-    }
-    if name_is(names, full, "Memory.write_u8") {
-        return NAT_MEM_WRITE_U8;
-    }
-    if name_is(names, full, "Memory.read_u8") {
-        return NAT_MEM_READ_U8;
-    }
-    if name_is(names, full, "Collections.vec_new") {
-        return NAT_VEC_NEW;
-    }
-    if name_is(names, full, "Collections.vec_push") {
-        return NAT_VEC_PUSH;
-    }
-    if name_is(names, full, "Collections.vec_free") {
-        return NAT_VEC_FREE;
-    }
-    if name_is(names, full, "Collections.vec_pop") {
-        return NAT_VEC_POP;
-    }
-    if name_is(names, full, "Collections.string_from_slice") {
-        return NAT_STRING_FROM_SLICE;
-    }
-    if name_is(names, full, "Collections.string_len") {
-        return NAT_STRING_LEN;
-    }
-    if name_is(names, full, "Collections.string_free") {
-        return NAT_STRING_FREE;
-    }
-    if name_is(names, full, "Collections.hash_map_new") {
-        return NAT_HASH_MAP_NEW;
-    }
-    if name_is(names, full, "Collections.hash_map_insert") {
-        return NAT_HASH_MAP_INSERT;
-    }
-    if name_is(names, full, "Collections.hash_map_get") {
-        return NAT_HASH_MAP_GET;
-    }
-    if name_is(names, full, "Collections.hash_map_free") {
-        return NAT_HASH_MAP_FREE;
-    }
-    if name_is(names, full, "Collections.hash_map_remove") {
-        return NAT_HASH_MAP_REMOVE;
-    }
-    if name_is(names, full, "Runtime.self_check") {
-        return NAT_SELF_CHECK;
-    }
-    if name_is(names, full, "Terminal.print") {
-        return NAT_TERM_PRINT;
-    }
-    if name_is(names, full, "Terminal.print_line") {
-        return NAT_TERM_PRINT_LINE;
-    }
-    if name_is(names, full, "Terminal.eprint") {
-        return NAT_TERM_EPRINT;
-    }
-    if name_is(names, full, "Terminal.read_line") {
-        return NAT_TERM_READ_LINE;
-    }
-    if name_is(names, full, "File.open") {
-        return NAT_FILE_OPEN;
-    }
-    if name_is(names, full, "File.read") {
-        return NAT_FILE_READ;
-    }
-    if name_is(names, full, "File.write") {
-        return NAT_FILE_WRITE;
-    }
-    if name_is(names, full, "File.close") {
-        return NAT_FILE_CLOSE;
-    }
-    if name_is(names, full, "Runtime.args") {
-        return NAT_RUNTIME_ARGS;
-    }
-    if name_is(names, full, "Net.socket") {
-        return NAT_NET_SOCKET;
-    }
-    if name_is(names, full, "Net.bind") {
-        return NAT_NET_BIND;
-    }
-    if name_is(names, full, "Net.listen") {
-        return NAT_NET_LISTEN;
-    }
-    if name_is(names, full, "Net.accept") {
-        return NAT_NET_ACCEPT;
-    }
-    if name_is(names, full, "Net.send") {
-        return NAT_NET_SEND;
-    }
-    if name_is(names, full, "Net.close") {
-        return NAT_NET_CLOSE;
-    }
-    if name_is(names, full, "Process.spawn") {
-        return NAT_PROCESS_SPAWN;
-    }
-    if name_is(names, full, "Process.wait") {
-        return NAT_PROCESS_WAIT;
-    }
-    NAT_NONE
+    usize::MAX
 }
 
-// Classifies native view functions from their resolved signature rather than
-// their spelling.  A view is any native function whose first parameter is a
-// reference to a native handle and whose return type is a slice (written as
-// either `[T]` internally or `&[T]` in source).  The opcode is the only fact
-// later stages need to select the uniform handle-to-slice lowering.
-fn classify_native_views(state: &mut State) {
+fn native_fun_verb(row: usize) -> i64 {
+    NATIVE_FUN_ROWS[row].2
+}
+
+fn native_fun_mode(row: usize) -> i64 {
+    NATIVE_FUN_ROWS[row].1
+}
+
+fn native_type_row_of(names: &[String], full: i64) -> usize {
+    let mut idx = 0usize;
+    while idx < NATIVE_TYPE_ROWS.len() {
+        match NATIVE_TYPE_ROWS.get(idx) {
+            Some(row) => {
+                if name_is(names, full, row.0) {
+                    return idx;
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    usize::MAX
+}
+
+fn native_type_role(row: usize) -> i64 {
+    NATIVE_TYPE_ROWS[row].2
+}
+
+fn native_type_layout(row: usize) -> i64 {
+    NATIVE_TYPE_ROWS[row].1
+}
+
+fn verb_supports_mode(verb: i64, mode: i64) -> bool {
+    let mut idx = 0usize;
+    while idx < NATIVE_VERB_MODES.len() {
+        match NATIVE_VERB_MODES.get(idx) {
+            Some(row) => {
+                if row.0 == verb {
+                    let mut m = 0usize;
+                    while m < row.1.len() {
+                        if row.1[m] == mode {
+                            return true;
+                        }
+                        m += 1;
+                    }
+                    return false;
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    false
+}
+
+// The native subsystem a verb belongs to, so the resolver can check the
+// declared surface against the target's capabilities before typechecking.
+fn native_subsystem_of(verb: i64) -> NativeSubsystem {
+    if verb == NAT_MEM_ALLOCATE
+        || verb == NAT_MEM_DEALLOCATE
+        || verb == NAT_MEM_WRITE_U8
+        || verb == NAT_MEM_READ_U8
+    {
+        NativeSubsystem::Memory
+    } else if verb == NAT_FILE_OPEN
+        || verb == NAT_FILE_READ
+        || verb == NAT_FILE_WRITE
+        || verb == NAT_FILE_CLOSE
+    {
+        NativeSubsystem::File
+    } else if verb == NAT_NET_SOCKET
+        || verb == NAT_NET_BIND
+        || verb == NAT_NET_LISTEN
+        || verb == NAT_NET_ACCEPT
+        || verb == NAT_NET_SEND
+        || verb == NAT_NET_CLOSE
+    {
+        NativeSubsystem::Network
+    } else if verb == NAT_PROCESS_SPAWN || verb == NAT_PROCESS_WAIT {
+        NativeSubsystem::Process
+    } else {
+        NativeSubsystem::Core
+    }
+}
+
+// Derives an ownership mode from a native function's signature and
+// attaches it to the symbol's natfact row; typecheck and borrow read it.
+// A signature matching no predicate, or a mode its verb does not support,
+// is an internal error.
+fn classify_native_modes(state: &mut State) {
     let count = state.1.len() as i64 / NODE_STRIDE;
     let mut idx = 0i64;
     while idx < count {
-        if node_tag(state.1, idx) == NODE_SYM
-            && sym_kind_of(state.1, idx) == SYM_NATIVE_FUN
-            && native_view_signature(state.1, state.2, idx)
-        {
-            sym_set_native_op(state.1, idx, NAT_SLICE_VIEW);
+        if node_tag(state.1, idx) == NODE_SYM && sym_kind_of(state.1, idx) == SYM_NATIVE_FUN {
+            let decl = sym_decl_of(state.1, idx);
+            let derived;
+            let span;
+            if decl == NONE || node_tag(state.1, decl) != NODE_ITEM || node_a(state.1, decl) != ITEM_NATIVE_FUN {
+                // Seeded surface (the int `.from` methods): there is no
+                // declared signature to classify, so the table's declared
+                // mode is the mode.
+                derived = sym_native_mode(state.1, idx);
+                span = (NONE, NONE, NONE);
+            } else {
+                span = (node_file(state.1, decl), node_start(state.1, decl), node_end(state.1, decl));
+                let fn_node = node_d(state.1, decl);
+                derived = if fn_node == NONE {
+                    NAT_MODE_NONE
+                } else {
+                    native_mode_of_signature(state.1, state.2, fn_node)
+                };
+                sym_set_native_mode(state.1, idx, derived);
+            }
+            let verb = sym_native_op(state.1, idx);
+            if verb != NAT_NONE && span.0 != NONE {
+                let subsystem = native_subsystem_of(verb);
+                if !state.14.supports_subsystem(subsystem) {
+                    push_error_kind(
+                        state.3,
+                        &format!(
+                            "native operation '{}' requires {}, which target '{}' does not support",
+                            name_text(state.0, sym_name_of(state.1, idx)),
+                            subsystem.name(),
+                            state.14.os.name()
+                        ),
+                        span.0,
+                        span.1,
+                        span.2,
+                        DiagKind::Resolve,
+                    );
+                }
+            }
+            if derived != NAT_MODE_NONE && verb != NAT_NONE && !verb_supports_mode(verb, derived) && span.0 != NONE {
+                push_error(
+                    state.3,
+                    &format!(
+                        "internal error: native function '{}' has mode {}, which its verb does not support",
+                        name_text(state.0, sym_name_of(state.1, idx)),
+                        mode_name_of(derived)
+                    ),
+                    span.0,
+                    span.1,
+                    span.2,
+                );
+            } else if derived == NAT_MODE_NONE && span.0 != NONE {
+                push_error(
+                    state.3,
+                    &format!(
+                        "internal error: native function '{}' has a signature matching no ownership mode",
+                        name_text(state.0, sym_name_of(state.1, idx))
+                    ),
+                    span.0,
+                    span.1,
+                    span.2,
+                );
+            }
         }
         idx += 1;
     }
 }
 
-fn native_view_signature(nodes: &[i64], lists: &[Vec<i64>], sym: i64) -> bool {
-    let decl = sym_decl_of(nodes, sym);
-    if decl == NONE || node_tag(nodes, decl) != NODE_ITEM || node_a(nodes, decl) != ITEM_NATIVE_FUN {
-        return false;
+fn mode_name_of(mode: i64) -> String {
+    if mode == NAT_MODE_VIEW {
+        String::from("view")
+    } else if mode == NAT_MODE_EXTRACT {
+        String::from("extract")
+    } else if mode == NAT_MODE_TRANSFER {
+        String::from("transfer")
+    } else if mode == NAT_MODE_CREATE {
+        String::from("create")
+    } else if mode == NAT_MODE_CONSUME {
+        String::from("consume")
+    } else if mode == NAT_MODE_MUTATE {
+        String::from("mutate")
+    } else if mode == NAT_MODE_BORROW {
+        String::from("borrow")
+    } else {
+        String::from("effect")
     }
-    let fn_node = node_d(nodes, decl);
-    let params = node_c(nodes, fn_node);
-    if list_len(lists, params) == 0 {
-        return false;
-    }
-    let first = list_first(lists, params);
-    if first == NONE {
-        return false;
-    }
-    let param_ty = node_b(nodes, first);
-    let param_kind = node_a(nodes, param_ty);
-    if param_kind != TY_REF && param_kind != TY_REF_MUT {
-        return false;
-    }
-    let handle_ty = node_b(nodes, param_ty);
-    let handle_sym = ty_sym_of(nodes, handle_ty);
-    if handle_sym == NONE || node_tag(nodes, handle_sym) != NODE_SYM || sym_kind_of(nodes, handle_sym) != SYM_TYPE {
-        return false;
-    }
-    let handle_decl = sym_decl_of(nodes, handle_sym);
-    if handle_decl == NONE || node_tag(nodes, handle_decl) != NODE_ITEM || node_a(nodes, handle_decl) != ITEM_NATIVE_TYPE {
-        return false;
-    }
-    let mut return_ty = node_d(nodes, fn_node);
-    if node_a(nodes, return_ty) == TY_REF || node_a(nodes, return_ty) == TY_REF_MUT {
-        return_ty = node_b(nodes, return_ty);
-    }
-    node_a(nodes, return_ty) == TY_SLICE
 }
 
-// Every native function with an extraction opcode (vec_pop, hash_map_remove)
-// marks the container type its first parameter names as having an extraction
-// surface: the typechecker's Resolvability Rule reads this flag at insertion
-// sites, so the fact is computed here once, from the declared signature.
+// The signature classifier proper.  Reads only the declared signature
+// (parameter and return type nodes with their resolved symbols); this is
+// the one place a native's ownership mode is derived.
+fn native_mode_of_signature(nodes: &[i64], lists: &[Vec<i64>], fn_node: i64) -> i64 {
+    let params = node_c(nodes, fn_node);
+    let ret = node_d(nodes, fn_node);
+    let pcount = list_len(lists, params);
+    let first_ty = if pcount > 0 {
+        let first = list_first(lists, params);
+        if first == NONE {
+            NONE
+        } else {
+            node_b(nodes, first)
+        }
+    } else {
+        NONE
+    };
+
+    // 1. view — first parameter `&H` (opaque handle), returns `&[T]`.
+    if first_ty != NONE
+        && node_a(nodes, first_ty) == TY_REF
+        && type_is_handle_value(nodes, node_b(nodes, first_ty))
+        && type_is_slice_ref(nodes, ret)
+    {
+        return NAT_MODE_VIEW;
+    }
+
+    // 2. extract — first parameter `&mut C` (declared container type),
+    //    returns the container's element type (Result-wrapped or direct).
+    if first_ty != NONE && node_a(nodes, first_ty) == TY_REF_MUT {
+        let inner = node_b(nodes, first_ty);
+        if type_is_container(nodes, inner) {
+            let elem = container_element_of(nodes, lists, inner);
+            if elem != NONE && ty_nodes_equal(nodes, lists, result_payload_of(nodes, lists, ret), elem) {
+                return NAT_MODE_EXTRACT;
+            }
+        }
+    }
+
+    // 3. transfer — a handle (by value or `&mut`) alongside a slice.  A
+    //    `&mut [U8]` buffer is caller memory, not a handle resource.
+    if pcount > 0 {
+        let mut io_resource = false;
+        let mut has_slice = false;
+        let mut idx = 0i64;
+        while idx < pcount {
+            let pty = node_b(nodes, list_get(lists, params, idx));
+            let resource = type_is_handle_value(nodes, pty)
+                || (node_a(nodes, pty) == TY_REF_MUT && type_is_handle_value(nodes, node_b(nodes, pty)));
+            if resource {
+                io_resource = true;
+            }
+            if type_is_slice(nodes, pty) {
+                has_slice = true;
+            }
+            idx += 1;
+        }
+        if io_resource && has_slice {
+            return NAT_MODE_TRANSFER;
+        }
+    }
+
+    // 4. create — returns a handle by value, consumes no handle by value.
+    if type_is_handle_value(nodes, result_payload_of(nodes, lists, ret))
+        && !signature_has_handle_value_param(nodes, lists, params, pcount)
+    {
+        return NAT_MODE_CREATE;
+    }
+
+    // 5. consume — takes a handle by value; returns Unit or Result.
+    if first_ty != NONE
+        && type_is_handle_value(nodes, first_ty)
+        && (type_is_unit(nodes, ret) || type_is_result(nodes, ret))
+    {
+        return NAT_MODE_CONSUME;
+    }
+
+    // 6. mutate — takes `&mut H` (opaque handle); returns a non-slice.
+    if first_ty != NONE
+        && node_a(nodes, first_ty) == TY_REF_MUT
+        && type_is_handle_value(nodes, node_b(nodes, first_ty))
+        && !type_is_slice_ref(nodes, ret)
+    {
+        return NAT_MODE_MUTATE;
+    }
+
+    // 7. borrow — takes `&H`; returns a non-slice value that is not
+    //    provably a fresh handle (a concrete native type by value; a type
+    //    parameter return like `Result(V, Error)` is not provably fresh,
+    //    so a lookup lands here).
+    if first_ty != NONE
+        && node_a(nodes, first_ty) == TY_REF
+        && type_is_handle_value(nodes, node_b(nodes, first_ty))
+        && !type_is_slice_ref(nodes, ret)
+        && !type_is_handle_value(nodes, result_payload_of(nodes, lists, ret))
+    {
+        return NAT_MODE_BORROW;
+    }
+
+    // 8. effect — no native handle anywhere in the signature.
+    if !signature_mentions_handle(nodes, lists, params, pcount, ret) {
+        return NAT_MODE_EFFECT;
+    }
+
+    NAT_MODE_NONE
+}
+
+// The resolved symbol of a type node that names a declared native type,
+// NONE otherwise.  A type parameter is not a native type: its symbol's
+// declaration is a parameter-list entry, not a `nat type` item.
+fn ty_native_sym(nodes: &[i64], ty: i64) -> i64 {
+    let sym = ty_sym_of(nodes, ty);
+    if sym == NONE || node_tag(nodes, sym) != NODE_SYM || node_a(nodes, sym) != SYM_TYPE {
+        return NONE;
+    }
+    let decl = sym_decl_of(nodes, sym);
+    if decl == NONE || node_tag(nodes, decl) != NODE_ITEM || node_a(nodes, decl) != ITEM_NATIVE_TYPE {
+        return NONE;
+    }
+    sym
+}
+
+// A by-value opaque handle: the type itself is a declared native type,
+// with no reference layer.  `Vec(T)` counts; `&Vec(T)` does not.
+fn type_is_handle_value(nodes: &[i64], ty: i64) -> bool {
+    let kind = node_a(nodes, ty);
+    (kind == TY_NAMED || kind == TY_GENERIC || kind == TY_PATH) && ty_native_sym(nodes, ty) != NONE
+}
+
+// A slice type, behind any reference layer.
+fn type_is_slice(nodes: &[i64], ty: i64) -> bool {
+    let kind = node_a(nodes, ty);
+    if kind == TY_REF || kind == TY_REF_MUT {
+        return node_a(nodes, node_b(nodes, ty)) == TY_SLICE;
+    }
+    kind == TY_SLICE
+}
+
+// A reference to a slice, as a `&[T]` return is written.
+fn type_is_slice_ref(nodes: &[i64], ty: i64) -> bool {
+    let kind = node_a(nodes, ty);
+    (kind == TY_REF || kind == TY_REF_MUT) && node_a(nodes, node_b(nodes, ty)) == TY_SLICE
+}
+
+// A declared container: a native type whose registry row says so.
+fn type_is_container(nodes: &[i64], ty: i64) -> bool {
+    let sym = ty_native_sym(nodes, ty);
+    sym != NONE && nattype_is_container(nodes, sym) == 1
+}
+
+// The element type of a container type application: its last type
+// argument.  A container used without arguments has no element (the
+// typechecker rejects the arity later; the classifier has nothing to
+// compare and the signature falls through to `mutate`).
+fn container_element_of(nodes: &[i64], lists: &[Vec<i64>], ty: i64) -> i64 {
+    let args = node_c(nodes, ty);
+    let count = list_len(lists, args);
+    if count == 0 {
+        NONE
+    } else {
+        list_get(lists, args, count - 1)
+    }
+}
+
+// The payload of a Result-wrapped return, or the return type itself.
+// The wrapper is recognized by the attached primitive kind, never by name.
+fn result_payload_of(nodes: &[i64], lists: &[Vec<i64>], ty: i64) -> i64 {
+    if type_is_result(nodes, ty) {
+        let args = node_c(nodes, ty);
+        let first = list_first(lists, args);
+        if first != NONE {
+            return first;
+        }
+    }
+    ty
+}
+
+fn type_is_result(nodes: &[i64], ty: i64) -> bool {
+    // The primitive kind is the fact: `Result` is a seeded *enum* symbol
+    // (SYM_ENUM), and only the seeded primitives carry a PRIM_* kind, so
+    // the kind check alone identifies the wrapper.
+    let sym = ty_sym_of(nodes, ty);
+    sym != NONE && node_tag(nodes, sym) == NODE_SYM && node_f(nodes, sym) == PRIM_RESULT
+}
+
+fn type_is_unit(nodes: &[i64], ty: i64) -> bool {
+    let sym = ty_sym_of(nodes, ty);
+    sym != NONE && node_tag(nodes, sym) == NODE_SYM && node_f(nodes, sym) == PRIM_UNIT
+}
+
+// Whether the signature mentions a native handle anywhere: any parameter
+// or the return type, through reference layers.
+fn signature_mentions_handle(nodes: &[i64], lists: &[Vec<i64>], params: i64, pcount: i64, ret: i64) -> bool {
+    let mut idx = 0i64;
+    while idx < pcount {
+        if type_mentions_handle(nodes, node_b(nodes, list_get(lists, params, idx))) {
+            return true;
+        }
+        idx += 1;
+    }
+    type_mentions_handle(nodes, ret)
+}
+
+fn signature_has_handle_value_param(nodes: &[i64], lists: &[Vec<i64>], params: i64, pcount: i64) -> bool {
+    let mut idx = 0i64;
+    while idx < pcount {
+        if type_is_handle_value(nodes, node_b(nodes, list_get(lists, params, idx))) {
+            return true;
+        }
+        idx += 1;
+    }
+    false
+}
+
+fn type_mentions_handle(nodes: &[i64], ty: i64) -> bool {
+    let kind = node_a(nodes, ty);
+    if kind == TY_REF || kind == TY_REF_MUT {
+        return type_is_handle_value(nodes, node_b(nodes, ty));
+    }
+    type_is_handle_value(nodes, ty)
+}
+
+// Structural equality of two parse-level type nodes: same shape, same
+// name ids at named leaves.  Used by the extract predicate to compare the
+// container's element type against the return payload — two occurrences of
+// the same declared type parameter are the same syntactic entity.
+fn ty_nodes_equal(nodes: &[i64], lists: &[Vec<i64>], a: i64, b: i64) -> bool {
+    if a == NONE || b == NONE || node_tag(nodes, a) != NODE_TY || node_tag(nodes, b) != NODE_TY {
+        return false;
+    }
+    let ka = node_a(nodes, a);
+    if ka != node_a(nodes, b) {
+        return false;
+    }
+    if ka == TY_NAMED || ka == TY_PARAM {
+        return node_b(nodes, a) == node_b(nodes, b);
+    }
+    if ka == TY_SELF {
+        return true;
+    }
+    if ka == TY_REF || ka == TY_REF_MUT || ka == TY_SLICE {
+        return ty_nodes_equal(nodes, lists, node_b(nodes, a), node_b(nodes, b));
+    }
+    if ka == TY_ARRAY {
+        return node_c(nodes, a) == node_c(nodes, b)
+            && ty_nodes_equal(nodes, lists, node_b(nodes, a), node_b(nodes, b));
+    }
+    if ka == TY_GENERIC || ka == TY_PATH {
+        let sa = node_b(nodes, a);
+        let sb = node_b(nodes, b);
+        let scount = list_len(lists, sa);
+        if scount != list_len(lists, sb) {
+            return false;
+        }
+        let mut idx = 0i64;
+        while idx < scount {
+            if list_get(lists, sa, idx) != list_get(lists, sb, idx) {
+                return false;
+            }
+            idx += 1;
+        }
+        let aa = node_c(nodes, a);
+        let ab = node_c(nodes, b);
+        let acount = list_len(lists, aa);
+        if acount != list_len(lists, ab) {
+            return false;
+        }
+        let mut ai = 0i64;
+        while ai < acount {
+            if !ty_nodes_equal(nodes, lists, list_get(lists, aa, ai), list_get(lists, ab, ai)) {
+                return false;
+            }
+            ai += 1;
+        }
+        return true;
+    }
+    true
+}
+
+// Every native function whose derived mode is `extract` marks the
+// container type its first parameter names as having an extraction
+// surface: the typechecker's Resolvability Rule reads this flag at
+// insertion sites, so the fact is computed here once, from the declared
+// signature, never from a NAT_* opcode.
 fn link_extraction_surfaces(state: &mut State) {
     let count = state.1.len() as i64 / NODE_STRIDE;
     let mut idx = 0i64;
     while idx < count {
-        if node_tag(state.1, idx) == NODE_SYM && node_a(state.1, idx) == SYM_NATIVE_FUN {
-            let op = sym_native_op(state.1, idx);
-            if op == NAT_VEC_POP || op == NAT_HASH_MAP_REMOVE {
-                let decl = sym_decl_of(state.1, idx);
-                if decl != NONE && node_tag(state.1, decl) == NODE_ITEM {
-                    let fn_node = node_d(state.1, decl);
-                    let first = list_first(state.2, node_c(state.1, fn_node));
-                    if first != NONE {
-                        let cty_sym = container_type_sym(state.1, node_b(state.1, first));
-                        if cty_sym != NONE {
-                            node_set_f(state.1, cty_sym, idx);
-                        }
+        if node_tag(state.1, idx) == NODE_SYM
+            && node_a(state.1, idx) == SYM_NATIVE_FUN
+            && sym_native_mode(state.1, idx) == NAT_MODE_EXTRACT
+        {
+            let decl = sym_decl_of(state.1, idx);
+            if decl != NONE && node_tag(state.1, decl) == NODE_ITEM {
+                let fn_node = node_d(state.1, decl);
+                let first = list_first(state.2, node_c(state.1, fn_node));
+                if first != NONE {
+                    let cty_sym = container_type_sym(state.1, node_b(state.1, first));
+                    if cty_sym != NONE {
+                        let cty_decl = sym_decl_of(state.1, cty_sym);
+                        node_set_f(state.1, cty_decl, idx);
                     }
                 }
             }
@@ -1138,15 +1692,10 @@ fn link_extraction_surfaces(state: &mut State) {
 // reference layers so `&mut Vec(T)` resolves to the Vec type symbol.
 fn container_type_sym(nodes: &[i64], ty_node: i64) -> i64 {
     let mut node = ty_node;
-    let mut guard = 0i64;
     loop {
         let kind = node_a(nodes, node);
         if kind == TY_REF || kind == TY_REF_MUT {
             node = node_b(nodes, node);
-            guard += 1;
-            if guard > 4 {
-                return NONE;
-            }
             continue;
         }
         break;
@@ -1191,7 +1740,7 @@ fn seed_builtin_type(state: &mut State, root_scope: i64, name: i64) -> i64 {
     let sub = alloc_scope(state.4, state.5, state.6, state.7, root_scope, prefix, 1);
     let sym = alloc_sym(state.1, SYM_TYPE, name, NONE, sub, sub);
     push_entry(state.4, root_scope, name, sym, NS_TYPE, NONE);
-    sub
+    sym
 }
 
 fn resolve_imports(state: &mut State, scope: i64, list: i64) {
@@ -1242,7 +1791,7 @@ fn resolve_import(state: &mut State, scope: i64, item: i64) {
 
 fn finish_import(state: &mut State, scope: i64, item: i64, sym: i64, target_ns: i64, span: (i64, i64, i64)) {
     if !is_visible(state.5, state.6, state.1, scope, sym) {
-        push_error(state.3, &format!("cannot import private item '{}'", name_text(state.0, sym_name_of(state.1, sym))), span.0, span.1, span.2);
+        push_error_kind(state.3, &format!("cannot import private item '{}'", name_text(state.0, sym_name_of(state.1, sym))), span.0, span.1, span.2, DiagKind::PrivateAccess { sym });
         return;
     }
     let segs = node_d(state.1, item);
@@ -1505,12 +2054,13 @@ fn report_unreachable(state: &mut State, list: i64, reached: &[i64], deferred: &
             node_d(state.1, item)
         };
         let text = format!("unused {} '{}'", label, name_text(state.0, name));
-        push_error(
+        push_error_kind(
             deferred,
             &text,
             node_file(state.1, item),
             node_start(state.1, item),
             node_end(state.1, item),
+            DiagKind::UnusedDeclaration(sym),
         );
     }
 }
@@ -1684,7 +2234,7 @@ fn resolve_param_bound(state: &mut State, scope: i64, param: i64) {
         return;
     }
     if !is_visible(state.5, state.6, state.1, scope, sym) {
-        push_error(state.3, &format!("cannot access trait '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, param), node_start(state.1, param), node_end(state.1, param));
+        push_error_kind(state.3, &format!("cannot access trait '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, param), node_start(state.1, param), node_end(state.1, param), DiagKind::PrivateAccess { sym });
         return;
     }
     node_set_c(state.1, param, sym);
@@ -1708,7 +2258,7 @@ fn resolve_impl(state: &mut State, scope: i64, item: i64) {
         push_error(state.3, "'impl' target is not a trait", node_file(state.1, item), node_start(state.1, item), node_end(state.1, item));
     } else {
         if !is_visible(state.5, state.6, state.1, scope, trait_sym) {
-            push_error(state.3, &format!("cannot access trait '{}' here", name_text(state.0, sym_name_of(state.1, trait_sym))), node_file(state.1, item), node_start(state.1, item), node_end(state.1, item));
+            push_error_kind(state.3, &format!("cannot access trait '{}' here", name_text(state.0, sym_name_of(state.1, trait_sym))), node_file(state.1, item), node_start(state.1, item), node_end(state.1, item), DiagKind::PrivateAccess { sym: trait_sym });
         }
         item_set_sym(state.1, item, trait_sym);
     }
@@ -1846,7 +2396,7 @@ fn resolve_expr_path(state: &mut State, scope: i64, expr: i64) {
         return;
     }
     if !is_visible(state.5, state.6, state.1, scope, sym) {
-        push_error(state.3, &format!("cannot access '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
+        push_error_kind(state.3, &format!("cannot access '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr), DiagKind::PrivateAccess { sym });
         return;
     }
     expr_set_sym(state.1, expr, sym);
@@ -1868,7 +2418,7 @@ fn walk_call(state: &mut State, scope: i64, expr: i64) {
                 return;
             }
             if !is_visible(state.5, state.6, state.1, scope, sym) {
-                push_error(state.3, &format!("cannot call '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
+                push_error_kind(state.3, &format!("cannot call '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr), DiagKind::PrivateAccess { sym });
             } else {
                 expr_set_sym(state.1, callee, sym);
             }
@@ -1899,7 +2449,7 @@ fn walk_struct_lit(state: &mut State, scope: i64, expr: i64) {
         return;
     }
     if !is_visible(state.5, state.6, state.1, scope, sym) {
-        push_error(state.3, &format!("cannot access type '{}' here", name_text(state.0, sym_name_of(state.1, sym))), file, start, end);
+        push_error_kind(state.3, &format!("cannot access type '{}' here", name_text(state.0, sym_name_of(state.1, sym))), file, start, end, DiagKind::PrivateAccess { sym });
         return;
     }
     expr_set_sym(state.1, expr, sym);
@@ -1947,7 +2497,7 @@ fn resolve_pat_path(state: &mut State, scope: i64, pat: i64) {
         return;
     }
     if !is_visible(state.5, state.6, state.1, scope, sym) {
-        push_error(state.3, &format!("cannot access '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, pat), node_start(state.1, pat), node_end(state.1, pat));
+        push_error_kind(state.3, &format!("cannot access '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, pat), node_start(state.1, pat), node_end(state.1, pat), DiagKind::PrivateAccess { sym });
         return;
     }
     pat_set_sym(state.1, pat, sym);
@@ -1996,7 +2546,7 @@ fn resolve_type_name(state: &mut State, scope: i64, ty: i64, name: i64) {
     // `ExitCode` as unused.
     record_dependency(state, sym);
     if !is_visible(state.5, state.6, state.1, scope, sym) {
-        push_error(state.3, &format!("cannot access type '{}' here", name_text(state.0, name)), node_file(state.1, ty), node_start(state.1, ty), node_end(state.1, ty));
+        push_error_kind(state.3, &format!("cannot access type '{}' here", name_text(state.0, name)), node_file(state.1, ty), node_start(state.1, ty), node_end(state.1, ty), DiagKind::PrivateAccess { sym });
         return;
     }
     ty_set_sym(state.1, ty, sym);
@@ -2016,7 +2566,7 @@ fn resolve_type_path(state: &mut State, scope: i64, ty: i64) {
         return;
     }
     if !is_visible(state.5, state.6, state.1, scope, sym) {
-        push_error(state.3, &format!("cannot access type '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, ty), node_start(state.1, ty), node_end(state.1, ty));
+        push_error_kind(state.3, &format!("cannot access type '{}' here", name_text(state.0, sym_name_of(state.1, sym))), node_file(state.1, ty), node_start(state.1, ty), node_end(state.1, ty), DiagKind::PrivateAccess { sym });
         return;
     }
     ty_set_sym(state.1, ty, sym);
@@ -2067,12 +2617,13 @@ fn check_unused(names: &[String], nodes: &[i64], lists: &[Vec<i64>], deferred: &
     let segs = node_d(nodes, item);
     let alias = node_e(nodes, item);
     let name = if alias != NONE { alias } else { list_last(lists, segs) };
-    push_error(
+    push_error_kind(
         deferred,
         &format!("unused import '{}'", name_text(names, name)),
         node_file(nodes, item),
         node_start(nodes, item),
         node_end(nodes, item),
+        DiagKind::UnusedImport(item),
     );
 }
 
@@ -2152,6 +2703,8 @@ fn suggest_type_name(state: &mut State, scope: i64, misspelled: i64) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     // Drives the real front end (module loading through borrow checking,
     // the same path `analysis::analyze` gives the LSP and the playground)
     // over an in-memory source, with no LLVM dependency — the only way to
@@ -2159,8 +2712,57 @@ mod tests {
     // toolchain `cargo test`'s fixture-linked suites need.
     fn errors_for(source: &str) -> Vec<String> {
         let overlay = [("scratch.cnb".to_string(), source.to_string())];
-        let result = crate::analysis::analyze("scratch.cnb", &overlay);
-        result.errors.iter().map(|d| d.0.clone()).collect()
+        let result = crate::analysis::analyze("scratch.cnb", &overlay, &crate::target::Target::host());
+        result.errors.iter().map(|d| d.message.clone()).collect()
+    }
+
+    #[test]
+    fn seeded_identity_table_fills_every_slot() {
+        let mut names: Vec<String> = Vec::new();
+        let mut nodes: Vec<i64> = Vec::new();
+        let mut lists: Vec<Vec<i64>> = Vec::new();
+        let mut errors: Vec<Diag> = Vec::new();
+        let mut notes: Vec<Note> = Vec::new();
+        let mut deferred: Vec<Diag> = Vec::new();
+        let source = "pub fun main() I32\n  return 0\nend\n";
+        let overlay = [("scratch.cnb".to_string(), source.to_string())];
+        let (loaded, files) = crate::module_loader::load_with_overlay(
+            &mut names,
+            &mut nodes,
+            &mut lists,
+            &mut errors,
+            "scratch.cnb",
+            &overlay,
+        );
+        let (root, ext_mods) = match loaded {
+            Some(program) => program,
+            None => {
+                assert!(false, "module load failed: {:?}", errors);
+                return;
+            }
+        };
+        assert_eq!(files.len(), 1, "overlay source was not loaded");
+        let mut seeds = Seeds::new();
+        let resolved = resolve(
+            &mut names,
+            &mut nodes,
+            &mut lists,
+            Diagnostics { errors: &mut errors, notes: &mut notes, deferred: &mut deferred, target: &crate::target::Target::host() },
+            root,
+            &ext_mods,
+            &mut seeds,
+        );
+        assert!(resolved, "resolve failed: {:?}", errors);
+        let mut nidx = 0usize;
+        while nidx < SEED_NAME_COUNT {
+            assert_ne!(seeds.name(nidx), NONE, "seed name slot {} left empty", nidx);
+            nidx += 1;
+        }
+        let mut sidx = 0usize;
+        while sidx < SEED_SYM_COUNT {
+            assert_ne!(seeds.sym(sidx), NONE, "seed symbol slot {} left empty", sidx);
+            sidx += 1;
+        }
     }
 
     // An import nothing names is an error (Manifesto, "Compile-Time
@@ -2457,8 +3059,8 @@ end
             "tests/fixtures/repro/head.cnb",
         ];
         for path in paths {
-            let result = crate::analysis::analyze(path, &[]);
-            let errors: Vec<String> = result.errors.iter().map(|d| d.0.clone()).collect();
+            let result = crate::analysis::analyze(path, &[], &crate::target::Target::host());
+            let errors: Vec<String> = result.errors.iter().map(|d| d.message.clone()).collect();
             assert!(errors.is_empty(), "{}: {:?}", path, errors);
         }
     }
@@ -2512,6 +3114,172 @@ end
 "#;
         let errors = errors_for(source);
         assert!(errors.iter().any(|m| m.contains("cannot resolve import")), "{:?}", errors);
+    }    // A native function whose name has no registry row is a resolution
+    // error naming the function: it has no verb, no mode, and no codegen,
+    // and letting it reach the backend would be a valid-looking program
+    // failing there.  The rejection is truthful and immediate, never a
+    // panic.  The signature uses only builtins so the test pins exactly
+    // this one rejection, not a second "unknown native type" one.
+    #[test]
+    fn unknown_native_function_is_rejected() {
+        let source = r#"
+pub mod Widget
+  pub nat fun touch() impure Unit
+end
+
+use Widget.touch
+
+pub fun main() impure I64
+  touch()
+  return 0
+end
+"#;
+        let errors = errors_for(source);
+        assert!(
+            errors.iter().any(|m| m.contains("unknown native function 'Widget.touch'")),
+            "{:?}",
+            errors
+        );
+    }
+
+    // A native type whose name has no registry row is the same truthful
+    // rejection, naming the type: it has no layout kind, so a handle of it
+    // cannot be lowered.  The program is otherwise valid, and reachability
+    // is only ever reported when nothing else failed, so this is the single
+    // diagnostic.
+    #[test]
+    fn unknown_native_type_is_rejected() {
+        let source = r#"
+pub mod Widget
+  pub nat type Gadget
+end
+
+pub fun main() I64
+  return 0
+end
+"#;
+        let errors = errors_for(source);
+        assert!(
+            errors.iter().any(|m| m.contains("unknown native type 'Widget.Gadget'")),
+            "{:?}",
+            errors
+        );
+    }    // The registry tables are the single declaration of the native
+    // surface; a row whose verb does not support its declared mode, or a
+    // type row with an unknown layout kind, would be a table bug.  The
+    // completeness law makes drift between a declaration and its verb an
+    // internal error at compile time; this test pins the tables themselves
+    // so the law has nothing to catch.
+    #[test]
+    fn registry_tables_are_self_consistent() {
+        let mut idx = 0usize;
+        while idx < NATIVE_FUN_ROWS.len() {
+            let mode = NATIVE_FUN_ROWS[idx].1;
+            let verb = NATIVE_FUN_ROWS[idx].2;
+            assert!(
+                verb_supports_mode(verb, mode),
+                "row {}: verb {} does not support its declared mode {}",
+                idx,
+                verb,
+                mode
+            );
+            idx += 1;
+        }
+        let mut tidx = 0usize;
+        while tidx < NATIVE_TYPE_ROWS.len() {
+            let layout = NATIVE_TYPE_ROWS[tidx].1;
+            assert!(
+                layout == NATIVE_LAYOUT_SCALAR
+                    || layout == NATIVE_LAYOUT_PAIR
+                    || layout == NATIVE_LAYOUT_TRIPLE,
+                "type row {}: unknown layout kind {}",
+                tidx,
+                layout
+            );
+            tidx += 1;
+        }
+    }
+
+    // The extraction binding of an extract-mode call is a fact row, not a
+    // mutated parse slot: after the front end runs on a vec_pop program,
+    // the call's type-argument slot still holds what the parser wrote, and
+    // the NODE_CALLFACT row carries the container binding the borrow
+    // checker reads.  Pins the fix for the AST clobbering: parse tree
+    // slots are never overwritten to pass facts between stages.
+    #[test]
+    fn extraction_binding_is_a_fact_row_not_a_mutated_parse_slot() {
+        let source = r#"
+pub mod Collections
+  pub nat type Vec(T)
+
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize, Usize)
+  end
+
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_push<T>(vec: &mut Vec(T), value: T) impure Result(Unit, Error)
+  pub nat fun vec_pop<T>(vec: &mut Vec(T)) impure Result(T, Error)
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
+end
+
+use Collections.vec_new
+use Collections.vec_push
+use Collections.vec_pop
+use Collections.vec_free
+
+fun fail(vec: Collections.Vec(I64), code: I64) impure I64
+  vec_free(vec)
+  return code
+end
+
+pub fun main() impure I64
+  val vec = match vec_new[I64]()
+    Ok(v) => v
+    Err(error) => return 1
+  end
+
+  match vec_push[I64](&mut vec, 7)
+    Ok(Unit) => Unit
+    Err(error) => return fail(vec, 2)
+  end
+
+  val popped = match vec_pop[I64](&mut vec)
+    Ok(value) => value
+    Err(error) => return fail(vec, 3)
+  end
+  if popped != 7
+    return fail(vec, 4)
+  end
+
+  vec_free(vec)
+  return 0
+end
+"#;
+        let overlay = [("scratch.cnb".to_string(), source.to_string())];
+        let result = crate::analysis::analyze("scratch.cnb", &overlay, &crate::target::Target::host());
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        // Exactly one extraction binding: the vec_pop call's call-fact row.
+        let mut call = NONE;
+        let mut row = 0i64;
+        while row < result.nodes.len() as i64 / NODE_STRIDE {
+            if node_tag(&result.nodes, row) == NODE_CALLFACT && node_d(&result.nodes, row) != NONE {
+                call = node_a(&result.nodes, row);
+            }
+            row += 1;
+        }
+        assert!(call != NONE, "no extraction call-fact row was attached");
+        assert_eq!(node_tag(&result.nodes, call), NODE_EXPR);
+        assert_eq!(node_a(&result.nodes, call), EXPR_CALL);
+        // The parse slot the old code clobbered still holds the type-arg
+        // list the parser wrote (vec_pop[I64] has one explicit argument).
+        assert!(
+            node_c(&result.nodes, call) != NONE,
+            "EXPR_CALL type-argument slot was clobbered"
+        );
+        // The row names the container the borrow checker drains.
+        let name = node_d(&result.nodes, callfact_row_of(&result.nodes, call));
+        assert_eq!(name_text(&result.names, name), "vec");
     }
 }
 

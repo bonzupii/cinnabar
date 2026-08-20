@@ -25,9 +25,9 @@
 //!
 //! **Invariants:**
 //! - A fact with nowhere of its own to live goes in an otherwise-unused
-//!   payload slot of the row it describes, never in a new side table. That
-//!   is what keeps the Single-Fact Rule cheap enough to actually follow as
-//!   the language grows.
+//!   payload slot of the row it describes, never in a new side table; a
+//!   fact is recorded once by the stage that owns it and read, not
+//!   recomputed, by every later stage.
 //! - `NO_FILE` marks a genuinely source-less fact. Every other span is the
 //!   real origin of the thing it describes, carried unmodified from lexing
 //!   through codegen; no stage may substitute a placeholder.
@@ -35,17 +35,95 @@
 //!   binding site, a path's last move, a branch exit — never one invented
 //!   to have something to point at.
 
-pub type Diag = (String, i64, i64, i64);
+/// The structured category of a diagnostic, decided by the pass that
+/// detected the violation. Specific variants carry the arena fact a
+/// consumer needs (the offending symbol, the mis-cased name, the casing
+/// rule); the general variants name the pipeline stage whose rule was
+/// broken. A tool branches on this value, never on the rendered message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DiagKind {
+    /// An import no name in the file reached; the import's `NODE_ITEM`.
+    UnusedImport(i64),
+    /// A declared item nothing reachable from `main` needs; its symbol id.
+    UnusedDeclaration(i64),
+    /// A name that breaks the casing law; the interned name id and the
+    /// expected casing code (1 = snake_case, 2 = PascalCase,
+    /// 3 = SCREAMING_SNAKE_CASE).
+    CasingViolation { name: i64, expected: i64 },
+    /// Use of a private item from outside its module; the target symbol id.
+    PrivateAccess { sym: i64 },
+    /// A public item nothing consumes; its symbol id.
+    UnnecessaryPub { sym: i64 },
+    /// A public struct field nothing consumes; the field node index.
+    UnnecessaryFieldPub { field: i64 },
+    /// A lexer or parser rejection.
+    Syntax,
+    /// A name-resolution rejection (unknown names, duplicate symbols,
+    /// unresolved imports).
+    Resolve,
+    /// A type mismatch or other typecheck rejection.
+    TypeError,
+    /// A borrow or linear-ownership rejection.
+    Linear,
+    /// A source-less compiler failure.
+    Internal,
+}
 
-// A secondary explanatory note attached to a primary diagnostic:
-// (index of the diagnostic in the errors vec at attach time, message,
-// file, start, end, kind).  Notes carry real source spans of facts the
-// checker already computed (a binding site, a path's last move, a branch
-// exit) — never fabricated locations.  Rendering is the consumer's choice:
-// the CLI shows them as secondary labels under --explain-borrow, the
-// language server as related information.
+/// One diagnostic: the rendered message, the exact source span of the
+/// offending fact, and the structured kind a tool consumes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Diag {
+    pub message: String,
+    pub file: i64,
+    pub start: i64,
+    pub end: i64,
+    pub kind: DiagKind,
+}
+
+/// The symbolic name of a diagnostic kind, for the JSON envelope and the
+/// tooling that reads it. Compared by variant discriminant so the payload
+/// slots are never destructured-and-dropped here.
+pub fn diag_kind_name(kind: &DiagKind) -> &'static str {
+    use std::mem::discriminant;
+    if discriminant(kind) == discriminant(&DiagKind::UnusedImport(0)) {
+        "unused_import"
+    } else if discriminant(kind) == discriminant(&DiagKind::UnusedDeclaration(0)) {
+        "unused_declaration"
+    } else if discriminant(kind) == discriminant(&DiagKind::CasingViolation { name: 0, expected: 0 }) {
+        "casing_violation"
+    } else if discriminant(kind) == discriminant(&DiagKind::PrivateAccess { sym: 0 }) {
+        "private_access"
+    } else if discriminant(kind) == discriminant(&DiagKind::UnnecessaryPub { sym: 0 }) {
+        "unnecessary_pub"
+    } else if discriminant(kind) == discriminant(&DiagKind::UnnecessaryFieldPub { field: 0 }) {
+        "unnecessary_field_pub"
+    } else if discriminant(kind) == discriminant(&DiagKind::Syntax) {
+        "syntax"
+    } else if discriminant(kind) == discriminant(&DiagKind::Resolve) {
+        "resolve"
+    } else if discriminant(kind) == discriminant(&DiagKind::TypeError) {
+        "type_error"
+    } else if discriminant(kind) == discriminant(&DiagKind::Linear) {
+        "linear"
+    } else {
+        "internal"
+    }
+}
+
+/// The rule name a casing code stands for, so the diagnostic message and
+/// the casing code action share one mapping.
+pub fn casing_rule_name(casing: i64) -> &'static str {
+    if casing == 1 {
+        "snake_case"
+    } else if casing == 2 {
+        "PascalCase"
+    } else {
+        "SCREAMING_SNAKE_CASE"
+    }
+}
+
+// (diagnostic index, message, file, start, end, kind)
 pub type Note = (i64, String, i64, i64, i64, i64);
-
 // What role a note plays in the explanation, assigned by the stage that
 // raised it.  The message is prose meant for a reader and is free to be
 // reworded; the kind is what a tool may branch on, so an editor drawing a
@@ -103,13 +181,13 @@ pub const NODE_E: i64 = 8;
 pub const NODE_F: i64 = 9;
 
 pub const NODE_TOKEN: i64 = 0;
-pub const NODE_ITEM: i64 = 1;
-pub const NODE_FN: i64 = 2;
-pub const NODE_PARAM: i64 = 3;
-pub const NODE_FIELD: i64 = 4;
-pub const NODE_VARIANT: i64 = 5;
-pub const NODE_ARM: i64 = 6;
-pub const NODE_TY: i64 = 7;
+pub const NODE_ITEM: i64 = 1; // a: kind, b: is_pub, c: sym, d..f kind-specific
+pub const NODE_FN: i64 = 2; // a: name, b: type-param list, c: param list, d: ret ty, e: is_impure, f: body stmt list
+pub const NODE_PARAM: i64 = 3; // a: name, b: ty
+pub const NODE_FIELD: i64 = 4; // a: name, b: ty, c: is_pub
+pub const NODE_VARIANT: i64 = 5; // a: name, b: payload-type list, c: is_pub
+pub const NODE_ARM: i64 = 6; // a: pattern, b: body stmt list
+pub const NODE_TY: i64 = 7; // a: kind, b..c kind-specific
 pub const NODE_EXPR: i64 = 8;
 pub const NODE_STMT: i64 = 9;
 pub const NODE_PAT: i64 = 10;
@@ -117,7 +195,7 @@ pub const NODE_SYM: i64 = 11;
 pub const NODE_TYINFO: i64 = 12;
 pub const NODE_INST: i64 = 13;
 pub const NODE_CONSTVAL: i64 = 14;
-pub const NODE_DOC: i64 = 20;
+pub const NODE_DOC: i64 = 20; // a: target node, b: doc name-id list
 
 // Token rows.  (tag=NODE_TOKEN, a=kind, b=name, c=value).
 
@@ -129,10 +207,6 @@ pub const TOK_NL: i64 = 4; // newline (statement boundary)
 pub const TOK_SYM: i64 = 5; // operator or punctuation symbol, by interned name
 pub const TOK_DOC: i64 = 6; // documentation comment body, by interned name
 pub const TOK_STRING: i64 = 7; // string literal, escapes decoded, by interned name
-
-// Documentation attachment rows. (tag=NODE_DOC, a=target node, b=doc name-id list).
-// The lexer records comment bodies once and the parser attaches each consecutive
-// group to the declaration it precedes. Consumers never rescan source comments.
 
 // Item rows.  (tag=NODE_ITEM, a=kind, b=is_pub, c=sym, d..f kind-specific).
 
@@ -146,13 +220,6 @@ pub const ITEM_FUN: i64 = 6; // d: fn id
 pub const ITEM_NATIVE_FUN: i64 = 7; // d: fn id
 pub const ITEM_CONST: i64 = 8; // d: name, e: type id, f: value expr id
 pub const ITEM_NATIVE_TYPE: i64 = 9; // d: name, e: type param name-id list
-
-// Function rows.  (tag=NODE_FN, a=name, b=type_param_list, c=param_list, d=ret_ty, e=is_impure, f=body_stmt_list).
-// Parameter rows.  (tag=NODE_PARAM, a=name, b=ty).
-// Struct-field rows.  (tag=NODE_FIELD, a=name, b=ty, c=is_pub).
-// Enum-variant rows.  (tag=NODE_VARIANT, a=name, b=payload_type_list, c=is_pub).
-// Match-arm rows.  (tag=NODE_ARM, a=pattern, b=body_stmt_list).
-// Type rows.  (tag=NODE_TY, a=kind, b..c kind-specific).
 
 pub const TY_NAMED: i64 = 0; // b: name id
 pub const TY_PATH: i64 = 1; // b: segments name-id list
@@ -569,6 +636,14 @@ pub fn sym_set_prim_kind(nodes: &mut [i64], sym: i64, kind: i64) -> bool {
     node_set_f(nodes, sym, kind)
 }
 
+pub fn sym_variant_tag_of(nodes: &[i64], sym: i64) -> i64 {
+    node_f(nodes, sym)
+}
+
+pub fn sym_set_variant_tag(nodes: &mut [i64], sym: i64, tag: i64) -> bool {
+    node_set_f(nodes, sym, tag)
+}
+
 pub fn ty_key_of(nodes: &[i64], id: i64) -> i64 {
     node_d(nodes, id)
 }
@@ -585,7 +660,8 @@ pub fn ty_set_sym(nodes: &mut [i64], id: i64, sym: i64) -> bool {
     node_set_e(nodes, id, sym)
 }
 
-// Type-descriptor rows.  (tag=NODE_TYINFO, a=key, b=kind, c=sym, d=args list, e=element key, f=len/bound/sub-kind).
+// Type-descriptor rows. (tag=NODE_TYINFO, a=key, b=kind, c=sym, d=args
+// list, e=element key, f=len/bound/sub-kind).
 // Native rows carry the has_linear_elements flag (0/1) in the start slot,
 // attached by the typechecker's linearity pass into a slot the canonical-key
 // lookup never compares.
@@ -704,6 +780,25 @@ pub const NAT_RUNTIME_ARGS: i64 = 35;
 pub const NAT_PROCESS_SPAWN: i64 = 37;
 pub const NAT_PROCESS_WAIT: i64 = 38;
 
+// Native ownership modes, attached per native function by the resolver;
+// typecheck and borrow read them via `sym_native_mode`.
+
+pub const NAT_MODE_NONE: i64 = 0;
+pub const NAT_MODE_VIEW: i64 = 1;
+pub const NAT_MODE_EXTRACT: i64 = 2;
+pub const NAT_MODE_TRANSFER: i64 = 3;
+pub const NAT_MODE_CREATE: i64 = 4;
+pub const NAT_MODE_CONSUME: i64 = 5;
+pub const NAT_MODE_MUTATE: i64 = 6;
+pub const NAT_MODE_BORROW: i64 = 7;
+pub const NAT_MODE_EFFECT: i64 = 8;
+
+// Native-type layout kinds, declared per type and lowered from by codegen.
+
+pub const NATIVE_LAYOUT_SCALAR: i64 = 1;
+pub const NATIVE_LAYOUT_PAIR: i64 = 2;
+pub const NATIVE_LAYOUT_TRIPLE: i64 = 3;
+
 /// The source spelling of a binary operator opcode.  Every stage that names
 /// an operator in a diagnostic reads it from here, so a message from the
 /// typechecker and one from codegen cannot disagree about what `BIN_SHL` is
@@ -755,6 +850,109 @@ pub const PRIM_OPTION: i64 = 3;
 pub const PRIM_DIV_ERROR: i64 = 4;
 pub const PRIM_INDEX_ERROR: i64 = 5;
 
+pub const SEED_NAME_OK: usize = 0;
+pub const SEED_NAME_ERR: usize = 1;
+pub const SEED_NAME_SOME: usize = 2;
+pub const SEED_NAME_NONE: usize = 3;
+pub const SEED_NAME_DIV_BY_ZERO: usize = 4;
+pub const SEED_NAME_ALLOC_FAILED: usize = 5;
+pub const SEED_NAME_ACCESS_OOB: usize = 6;
+pub const SEED_NAME_INDEX_OOB: usize = 7;
+pub const SEED_NAME_KEY_NOT_FOUND: usize = 8;
+pub const SEED_NAME_INVALID_UTF8: usize = 9;
+pub const SEED_NAME_EXIT_DIAG: usize = 10;
+pub const SEED_NAME_SYSTEM_FAULT: usize = 11;
+pub const SEED_NAME_READ_ONLY: usize = 12;
+pub const SEED_NAME_WRITE_TRUNCATE: usize = 13;
+pub const SEED_NAME_END_OF_INPUT: usize = 14;
+pub const SEED_NAME_READ_FAILED: usize = 15;
+pub const SEED_NAME_SELF: usize = 16;
+pub const SEED_NAME_COUNT: usize = 17;
+
+pub const SEED_SYM_UNIT: usize = 0;
+pub const SEED_SYM_RESULT: usize = 1;
+pub const SEED_SYM_OPTION: usize = 2;
+pub const SEED_SYM_DIV_ERROR: usize = 3;
+pub const SEED_SYM_INDEX_ERROR: usize = 4;
+// SEED_SYM_I8..SEED_SYM_BOOL follow BUILTIN order.
+pub const SEED_SYM_I8: usize = 5;
+pub const SEED_SYM_BOOL: usize = SEED_SYM_I8 + BUILTIN_BOOL as usize;
+pub const SEED_SYM_OK: usize = SEED_SYM_BOOL + 1;
+pub const SEED_SYM_ERR: usize = SEED_SYM_OK + 1;
+pub const SEED_SYM_SOME: usize = SEED_SYM_ERR + 1;
+pub const SEED_SYM_NONE: usize = SEED_SYM_SOME + 1;
+pub const SEED_SYM_DIV_BY_ZERO: usize = SEED_SYM_NONE + 1;
+pub const SEED_SYM_INDEX_OOB: usize = SEED_SYM_DIV_BY_ZERO + 1;
+pub const SEED_SYM_COUNT: usize = SEED_SYM_INDEX_OOB + 1;
+
+/// Fixed slots the resolver fills; later stages read instead of re-deriving.
+#[derive(Clone, Copy)]
+pub struct Seeds {
+    names: [i64; SEED_NAME_COUNT],
+    syms: [i64; SEED_SYM_COUNT],
+}
+
+impl Default for Seeds {
+    fn default() -> Seeds {
+        Seeds::new()
+    }
+}
+
+impl Seeds {
+    pub fn new() -> Seeds {
+        Seeds {
+            names: [NONE; SEED_NAME_COUNT],
+            syms: [NONE; SEED_SYM_COUNT],
+        }
+    }
+
+    pub fn name(&self, slot: usize) -> i64 {
+        match self.names.get(slot) {
+            Some(id) => *id,
+            None => NONE,
+        }
+    }
+
+    pub fn sym(&self, slot: usize) -> i64 {
+        match self.syms.get(slot) {
+            Some(id) => *id,
+            None => NONE,
+        }
+    }
+
+    pub fn set_name(&mut self, slot: usize, id: i64) {
+        if let Some(cell) = self.names.get_mut(slot) {
+            *cell = id;
+        }
+    }
+
+    pub fn set_sym(&mut self, slot: usize, id: i64) {
+        if let Some(cell) = self.syms.get_mut(slot) {
+            *cell = id;
+        }
+    }
+}
+
+use crate::target::Target;
+
+/// Diagnostics, resolver-seeded identities, and the build target shared by
+/// frontend passes.
+pub struct CheckContext<'a> {
+    pub errors: &'a mut Vec<Diag>,
+    pub notes: &'a mut Vec<Note>,
+    pub seeds: &'a Seeds,
+    pub target: &'a Target,
+}
+
+// Declaration-order indices of the seeded Result/Option/DivError/IndexError enums.
+pub const BUILTIN_RESULT_OK: i64 = 0;
+pub const BUILTIN_RESULT_ERR: i64 = 1;
+pub const BUILTIN_OPTION_SOME: i64 = 0;
+pub const BUILTIN_OPTION_NONE: i64 = 1;
+pub const BUILTIN_DIV_ERROR_DIV_BY_ZERO: i64 = 0;
+pub const BUILTIN_INDEX_ERROR_INDEX_OOB: i64 = 0;
+pub const EXIT_DIAG_VARIANT_INDEX: i64 = 2;
+
 pub fn alloc_tyinfo(nodes: &mut Vec<i64>, key: i64, kind: i64, sym: i64, args: i64, elem: i64, len: i64) -> i64 {
     alloc_node(nodes, &[NODE_TYINFO, NO_FILE, NO_FILE, NO_FILE, key, kind, sym, args, elem, len])
 }
@@ -772,6 +970,16 @@ pub fn tyinfo_is_linear(nodes: &[i64], key: i64) -> i64 {
         NONE
     } else {
         node_get(nodes, row, NODE_FILE)
+    }
+}
+
+/// The resolved type symbol of a canonical type descriptor, or NONE.
+pub fn tyinfo_sym_of(nodes: &[i64], key: i64) -> i64 {
+    let row = find_tyinfo(nodes, key);
+    if row == NONE {
+        NONE
+    } else {
+        node_c(nodes, row)
     }
 }
 
@@ -900,7 +1108,7 @@ pub fn find_const_value(nodes: &[i64], sym: i64) -> i64 {
 // c=trait symbol, d=method name id, e=method fn node).  The method fn node
 // is attached by the typechecker at dispatch-row creation so the borrow
 // checker reads the signature directly instead of re-searching the trait's
-// method list (Single-Fact Rule).
+// method list.
 
 pub const NODE_TRAIT: i64 = 15;
 
@@ -935,47 +1143,13 @@ pub fn find_trait_call(nodes: &[i64], expr: i64) -> i64 {
     NONE
 }
 
-// Variant-fact rows.  (tag=NODE_VARFACT, a=enum key, b=variant name id,
-// c=variant symbol, d=declared-order tag).  The tag is assigned by the
-// typechecker from the enum's declared variant order, once, and read by
-// codegen instead of re-searching the enum's variant list (Single-Fact
-// Rule).
-
-pub const NODE_VARFACT: i64 = 16;
-
-pub fn alloc_varfact(nodes: &mut Vec<i64>, key: i64, name: i64, sym: i64, tag: i64) -> i64 {
-    alloc_node(nodes, &[NODE_VARFACT, NO_FILE, NO_FILE, NO_FILE, key, name, sym, tag, NONE, NONE])
-}
-
-pub fn find_varfact(nodes: &[i64], key: i64, name: i64) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_VARFACT && node_a(nodes, idx) == key && node_b(nodes, idx) == name {
-            return node_c(nodes, idx);
-        }
-        idx += 1;
-    }
-    NONE
-}
-
-// The declared-order tag of `name` in the enum at `key`, or NONE.
-pub fn varfact_index_of(nodes: &[i64], key: i64, name: i64) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_VARFACT && node_a(nodes, idx) == key && node_b(nodes, idx) == name {
-            return node_d(nodes, idx);
-        }
-        idx += 1;
-    }
-    NONE
-}
 
 // Struct-field-fact rows.  (tag=NODE_FIELDKEY, a=struct key, b=field name
 // id, c=substituted field key, d=declared-order index).  One row per
 // (canonical struct key, field) pair, filled by the typechecker from the
 // declared field types and the key's own type arguments; the borrow
 // checker and codegen read these rows instead of re-walking ITEM_STRUCT
-// lists and re-running generic substitution (Single-Fact Rule).
+// lists and re-running generic substitution.
 
 pub const NODE_FIELDKEY: i64 = 17;
 
@@ -1087,19 +1261,33 @@ pub fn alloc_localfact(nodes: &mut Vec<i64>, source: i64, name: i64, key: i64, i
     )
 }
 
-// Tail-safety-fact rows.  (tag=NODE_CALLFACT, a=call expr id, b=tail-safe
-// flag, c=frame-local root name id or NONE).  The typechecker computes, for
-// every call, whether any argument carries a reference rooted in the
-// current function's frame — which is what would make LLVM's `tail` marker
-// a false promise that the callee never touches the caller's frame — and
-// attaches the result so codegen marks a call `tail` only when it is safe
-// (Single-Fact Rule).  Slot `c` names the offending frame-local binding for
-// the self-recursion rejection diagnostic; it is NONE when the call is
-// tail-safe.
+// Call-fact rows: a=call expr id, b=tail-safe flag, c=frame-local root
+// name id or NONE, d=extraction container binding name id or NONE,
+// e=tail-position flag.  One row per call, shared by the tail-safety,
+// tail-position, and extraction writers.
 
 pub const NODE_CALLFACT: i64 = 21;
 
+pub fn callfact_row_of(nodes: &[i64], call: i64) -> i64 {
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_CALLFACT && node_a(nodes, idx) == call {
+            return idx;
+        }
+        idx += 1;
+    }
+    NONE
+}
+
+// Find-or-allocate: the row is per call, and both fact writers (tail
+// safety and extraction) target the same row, whichever runs first.
 pub fn alloc_callfact(nodes: &mut Vec<i64>, call: i64, tail_safe: i64, root_name: i64) -> i64 {
+    let existing = callfact_row_of(nodes, call);
+    if existing != NONE {
+        node_set_b(nodes, existing, tail_safe);
+        node_set_c(nodes, existing, root_name);
+        return existing;
+    }
     alloc_node(
         nodes,
         &[NODE_CALLFACT, NO_FILE, NO_FILE, NO_FILE, call, tail_safe, root_name, NONE, NONE, NONE],
@@ -1107,37 +1295,91 @@ pub fn alloc_callfact(nodes: &mut Vec<i64>, call: i64, tail_safe: i64, root_name
 }
 
 pub fn callfact_tail_safe_of(nodes: &[i64], call: i64) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_CALLFACT && node_a(nodes, idx) == call {
-            return node_b(nodes, idx);
-        }
-        idx += 1;
+    let row = callfact_row_of(nodes, call);
+    if row == NONE {
+        0
+    } else {
+        node_b(nodes, row)
     }
-    0
 }
 
 pub fn callfact_root_name_of(nodes: &[i64], call: i64) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_CALLFACT && node_a(nodes, idx) == call {
-            return node_c(nodes, idx);
-        }
-        idx += 1;
+    let row = callfact_row_of(nodes, call);
+    if row == NONE {
+        NONE
+    } else {
+        node_c(nodes, row)
     }
-    NONE
 }
 
-// Pattern-binding-fact rows.  (tag=NODE_PATFACT, a=pattern node, b=match
-// scrutinee expr id).  The typechecker attaches one per binding pattern
-// (PAT_BIND and the rest binder of PAT_ARRAY) so the tail-safety trace can
-// resolve a match-arm binding's origin to the scrutinee it destructures
-// without re-walking the arm list (Single-Fact Rule).
+// The container binding of an extract-mode call, attached by the
+// typechecker; NONE for every other call.
+pub fn callfact_extraction_of(nodes: &[i64], call: i64) -> i64 {
+    let row = callfact_row_of(nodes, call);
+    if row == NONE {
+        NONE
+    } else {
+        node_d(nodes, row)
+    }
+}
+
+pub fn callfact_tail_of(nodes: &[i64], call: i64) -> i64 {
+    let row = callfact_row_of(nodes, call);
+    if row == NONE {
+        0
+    } else {
+        node_e(nodes, row)
+    }
+}
+
+pub fn callfact_set_tail(nodes: &mut Vec<i64>, call: i64, tail: i64) {
+    let row = callfact_row_of(nodes, call);
+    let row = if row == NONE {
+        alloc_callfact(nodes, call, 0, NONE)
+    } else {
+        row
+    };
+    node_set_e(nodes, row, tail);
+}
+
+// Pattern-binding-fact rows: a=pattern node, b=match scrutinee expr.
 
 pub const NODE_PATFACT: i64 = 22;
 
 pub fn alloc_patfact(nodes: &mut Vec<i64>, pat: i64, scrutinee: i64) -> i64 {
     alloc_node(nodes, &[NODE_PATFACT, NO_FILE, NO_FILE, NO_FILE, pat, scrutinee, NONE, NONE, NONE, NONE])
+}
+
+// The ownership mode a native function was classified into at resolution;
+// stored in slot e of the SYM_NATIVE_FUN symbol row so it reads in constant
+// time. NAT_MODE_NONE when the symbol has no registry row or classification
+// never ran.
+pub fn sym_native_mode(nodes: &[i64], sym: i64) -> i64 {
+    node_e(nodes, sym)
+}
+
+pub fn sym_set_native_mode(nodes: &mut [i64], sym: i64, mode: i64) -> bool {
+    node_set_e(nodes, sym, mode)
+}
+
+// The container role (0 or 1) of a native type, stored in slot e of its
+// SYM_TYPE symbol row.
+pub fn nattype_is_container(nodes: &[i64], sym: i64) -> i64 {
+    node_e(nodes, sym)
+}
+
+pub fn sym_set_native_role(nodes: &mut [i64], sym: i64, role: i64) -> bool {
+    node_set_e(nodes, sym, role)
+}
+
+// The layout kind (NATIVE_LAYOUT_*) of a native type, stored in slot f of
+// its SYM_TYPE symbol row.
+pub fn nattype_layout_of(nodes: &[i64], sym: i64) -> i64 {
+    node_f(nodes, sym)
+}
+
+pub fn sym_set_native_layout(nodes: &mut [i64], sym: i64, layout: i64) -> bool {
+    node_set_f(nodes, sym, layout)
 }
 
 pub fn patfact_scrutinee_of(nodes: &[i64], pat: i64) -> i64 {
@@ -1174,6 +1416,171 @@ pub fn fieldkey_idx_of(nodes: &[i64], row: i64) -> i64 {
     node_d(nodes, row)
 }
 
+// Variant-payload-fact rows.  (tag=NODE_PAYLOADKEY, a=enum key, b=variant
+// declaration index, c=substituted payload type key, d=payload field
+// index).  One row per (enum key, variant, payload field) triple, filled
+// by the typechecker from declared payload types and the key's own type
+// arguments; the emitter reads these rows instead of re-walking
+// ITEM_ENUM lists and re-running generic substitution.
+
+pub const NODE_PAYLOADKEY: i64 = 25;
+
+pub fn alloc_payloadkey(nodes: &mut Vec<i64>, enum_key: i64, variant: i64, pkey: i64, field: i64) -> i64 {
+    alloc_node(nodes, &[NODE_PAYLOADKEY, NO_FILE, NO_FILE, NO_FILE, enum_key, variant, pkey, field, NONE, NONE])
+}
+
+pub fn find_payloadkey(nodes: &[i64], enum_key: i64, variant: i64, field: i64) -> i64 {
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_PAYLOADKEY && node_a(nodes, idx) == enum_key && node_b(nodes, idx) == variant && node_d(nodes, idx) == field {
+            return idx;
+        }
+        idx += 1;
+    }
+    NONE
+}
+
+pub fn payloadkey_key_of(nodes: &[i64], row: i64) -> i64 {
+    node_c(nodes, row)
+}
+
+pub fn payloadkey_idx_of(nodes: &[i64], row: i64) -> i64 {
+    node_d(nodes, row)
+}
+
+// Every (field name, substituted field key, declared-order index) fact row
+// attached to a canonical struct key, in declared field order (the attach
+// order is the declaration order).
+pub fn fieldkey_rows_of(nodes: &[i64], key: i64) -> Vec<(i64, i64, i64)> {
+    let mut rows: Vec<(i64, i64, i64)> = Vec::new();
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_FIELDKEY && node_a(nodes, idx) == key {
+            rows.push((node_b(nodes, idx), node_c(nodes, idx), node_d(nodes, idx)));
+        }
+        idx += 1;
+    }
+    rows
+}
+
+// Every (variant index, substituted payload key, field index) fact row
+// attached to a canonical enum key, in declared order.
+pub fn payloadkey_rows_of(nodes: &[i64], key: i64) -> Vec<(i64, i64, i64)> {
+    let mut rows: Vec<(i64, i64, i64)> = Vec::new();
+    let mut idx = 0i64;
+    while idx < nodes.len() as i64 / NODE_STRIDE {
+        if node_tag(nodes, idx) == NODE_PAYLOADKEY && node_a(nodes, idx) == key {
+            rows.push((node_b(nodes, idx), node_c(nodes, idx), node_d(nodes, idx)));
+        }
+        idx += 1;
+    }
+    rows
+}
+
+// The declared type-parameter keys of a struct or enum item, in order.
+fn declared_ty_param_keys(nodes: &[i64], lists: &[Vec<i64>], decl: i64) -> Vec<i64> {
+    let params = node_f(nodes, decl);
+    let mut keys: Vec<i64> = Vec::new();
+    let count = list_len(lists, params);
+    let mut idx = 0i64;
+    while idx < count {
+        let param = list_get(lists, params, idx);
+        if node_tag(nodes, param) == NODE_TY && node_a(nodes, param) == TY_PARAM {
+            keys.push(ty_key_of(nodes, param));
+        }
+        idx += 1;
+    }
+    keys
+}
+
+fn list_to_key_vec(lists: &[Vec<i64>], id: i64) -> Vec<i64> {
+    let mut keys: Vec<i64> = Vec::new();
+    let count = list_len(lists, id);
+    let mut idx = 0i64;
+    while idx < count {
+        keys.push(list_get(lists, id, idx));
+        idx += 1;
+    }
+    keys
+}
+
+// The member-type facts of a canonical struct or enum descriptor: one
+// NODE_FIELDKEY row per declared field and one NODE_PAYLOADKEY row per
+// declared payload field, each carrying the declared type substituted with
+// the descriptor's own type arguments.  Idempotent: rows that already
+// exist for a key are left untouched, so both descriptor creation in
+// `canon_tyinfo` and the typechecker's post-resolution sweep may call it.
+// Kinds other than struct/enum and symbols without a matching declaration
+// do nothing.
+pub fn attach_member_facts(
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    key: i64,
+    kind: i64,
+    sym: i64,
+    args: i64,
+) {
+    if sym == NONE {
+        return;
+    }
+    let decl = node_c(nodes, sym);
+    if decl == NONE || node_tag(nodes, decl) != NODE_ITEM {
+        return;
+    }
+    let decl_kind = node_a(nodes, decl);
+    if kind == TYD_STRUCT && decl_kind == ITEM_STRUCT {
+        let from = declared_ty_param_keys(nodes, lists, decl);
+        let to = list_to_key_vec(lists, args);
+        let fields = node_e(nodes, decl);
+        let count = list_len(lists, fields);
+        let mut f = 0i64;
+        while f < count {
+            let field = list_get(lists, fields, f);
+            let name = node_a(nodes, field);
+            let declared = ty_key_of(nodes, node_b(nodes, field));
+            let row = find_fieldkey(nodes, key, name);
+            if row != NONE {
+                // Refill a row allocated before the member key resolved.
+                if declared != NONE && fieldkey_key_of(nodes, row) == NONE {
+                    let fkey = subst_key(nodes, lists, declared, &from, &to);
+                    node_set_c(nodes, row, fkey);
+                }
+            } else if declared != NONE {
+                // Unresolved member keys are skipped; a later sweep attaches them.
+                let fkey = subst_key(nodes, lists, declared, &from, &to);
+                alloc_fieldkey(nodes, key, name, fkey, f);
+            }
+            f += 1;
+        }
+    } else if kind == TYD_ENUM && decl_kind == ITEM_ENUM {
+        let from = declared_ty_param_keys(nodes, lists, decl);
+        let to = list_to_key_vec(lists, args);
+        let variants = node_e(nodes, decl);
+        let vcount = list_len(lists, variants);
+        let mut v = 0i64;
+        while v < vcount {
+            let payload = node_b(nodes, list_get(lists, variants, v));
+            let pcount = list_len(lists, payload);
+            let mut p = 0i64;
+            while p < pcount {
+                let declared = ty_key_of(nodes, list_get(lists, payload, p));
+                let row = find_payloadkey(nodes, key, v, p);
+                if row != NONE {
+                    if declared != NONE && payloadkey_key_of(nodes, row) == NONE {
+                        let pkey = subst_key(nodes, lists, declared, &from, &to);
+                        node_set_c(nodes, row, pkey);
+                    }
+                } else if declared != NONE {
+                    let pkey = subst_key(nodes, lists, declared, &from, &to);
+                    alloc_payloadkey(nodes, key, v, pkey, p);
+                }
+                p += 1;
+            }
+            v += 1;
+        }
+    }
+}
+
 fn list_eq(lists: &[Vec<i64>], a: i64, b: i64) -> bool {
     let na = list_len(lists, a);
     let nb = list_len(lists, b);
@@ -1207,13 +1614,34 @@ pub fn find_tyinfo_by(nodes: &[i64], lists: &[Vec<i64>], kind: i64, sym: i64, ar
     NONE
 }
 
-pub fn canon_tyinfo(nodes: &mut Vec<i64>, lists: &mut [Vec<i64>], kind: i64, sym: i64, args: i64, elem: i64, len: i64) -> i64 {
+pub fn canon_tyinfo(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, kind: i64, sym: i64, args: i64, elem: i64, len: i64) -> i64 {
     let existing = find_tyinfo_by(nodes, lists, kind, sym, args, elem, len);
     if existing != NONE {
         return node_a(nodes, existing);
     }
     let key = nodes.len() as i64 / NODE_STRIDE;
     alloc_tyinfo(nodes, key, kind, sym, args, elem, len);
+    // Facts and the linearity flag are attached at creation when members are
+    // resolved; a forward-referenced descriptor defers both to the
+    // typechecker's settle pass.
+    attach_member_facts(nodes, lists, key, kind, sym, args);
+    let mut seen: Vec<i64> = Vec::new();
+    let flag = linear_flag_of(nodes, lists, key, &mut seen);
+    if flag != 2 {
+        node_set(nodes, key, NODE_FILE, flag);
+    }
+    if kind == TYD_NATIVE {
+        let mut has = 0;
+        let count = list_len(lists, args);
+        let mut ai = 0i64;
+        while ai < count {
+            if linear_flag_of(nodes, lists, list_get(lists, args, ai), &mut seen) == 1 {
+                has = 1;
+            }
+            ai += 1;
+        }
+        node_set(nodes, key, NODE_START, has);
+    }
     key
 }
 
@@ -1277,6 +1705,149 @@ pub fn subst_key(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, key: i64, from
         return key;
     }
     canon_tyinfo(nodes, lists, kind, sym, new_args, new_elem, len)
+}
+
+fn has_value(list: &[i64], value: i64) -> bool {
+    let mut idx = 0usize;
+    while idx < list.len() {
+        match list.get(idx) {
+            Some(cell) => {
+                if *cell == value {
+                    return true;
+                }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    false
+}
+
+// A declared member key substituted with the descriptor's type arguments;
+// `declared` passes through unchanged when the declaration is generic-free.
+// The member walk reports 2 when a member key is unresolved, deferring
+// memoization.
+fn member_key_of(
+    nodes: &mut Vec<i64>,
+    lists: &mut Vec<Vec<i64>>,
+    decl: i64,
+    args: i64,
+    declared: i64,
+) -> i64 {
+    if declared == NONE || node_tag(nodes, decl) != NODE_ITEM {
+        return declared;
+    }
+    let from = declared_ty_param_keys(nodes, lists, decl);
+    if from.is_empty() {
+        return declared;
+    }
+    let to = list_to_key_vec(lists, args);
+    subst_key(nodes, lists, declared, &from, &to)
+}
+
+fn linear_members_flag_of(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, sym: i64, args: i64, seen: &mut Vec<i64>) -> i64 {
+    if sym == NONE {
+        return 0;
+    }
+    let decl = node_c(nodes, sym);
+    if decl == NONE || node_tag(nodes, decl) != NODE_ITEM {
+        return 0;
+    }
+    let kind = node_a(nodes, decl);
+    if kind == ITEM_STRUCT {
+        let fields = node_e(nodes, decl);
+        let count = list_len(lists, fields);
+        let mut idx = 0i64;
+        while idx < count {
+            let declared = ty_key_of(nodes, node_b(nodes, list_get(lists, fields, idx)));
+            if declared == NONE {
+                return 2;
+            }
+            let fty = member_key_of(nodes, lists, decl, args, declared);
+            let lin = linear_flag_of(nodes, lists, fty, seen);
+            if lin == 2 {
+                return 2;
+            }
+            if lin == 1 {
+                return 1;
+            }
+            idx += 1;
+        }
+    } else if kind == ITEM_ENUM {
+        let variants = node_e(nodes, decl);
+        let count = list_len(lists, variants);
+        let mut idx = 0i64;
+        while idx < count {
+            let payload = node_b(nodes, list_get(lists, variants, idx));
+            let pcount = list_len(lists, payload);
+            let mut pidx = 0i64;
+            while pidx < pcount {
+                let declared = ty_key_of(nodes, list_get(lists, payload, pidx));
+                if declared == NONE {
+                    return 2;
+                }
+                let pty = member_key_of(nodes, lists, decl, args, declared);
+                let lin = linear_flag_of(nodes, lists, pty, seen);
+                if lin == 2 {
+                    return 2;
+                }
+                if lin == 1 {
+                    return 1;
+                }
+                pidx += 1;
+            }
+            idx += 1;
+        }
+    }
+    0
+}
+
+// The linearity flag (0 or 1) of a canonical type key, memoized in the
+// descriptor's own slot so every later read is a single O(1) access.  A
+// key currently being expanded is not linear, which terminates recursive
+// and composite types deterministically; native handles and type
+// parameters are linear, arrays inherit their element, and struct/enum
+// descriptors inherit any linear member.  Returns 2 without memoizing
+// when a forward-referenced member key is not resolved yet, so the
+// typechecker's settle pass computes the flag once every declaration is
+// collected; `canon_tyinfo` computes it for every descriptor whose members
+// are already resolved.
+pub fn linear_flag_of(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, key: i64, seen: &mut Vec<i64>) -> i64 {
+    if key < 0 {
+        return 0;
+    }
+    let row = find_tyinfo(nodes, key);
+    if row == NONE {
+        return 0;
+    }
+    let stored = node_get(nodes, row, NODE_FILE);
+    if stored == 0 || stored == 1 {
+        return stored;
+    }
+    if has_value(seen, key) {
+        return 0;
+    }
+    seen.push(key);
+    let kind = node_b(nodes, row);
+    let sym = node_c(nodes, row);
+    let args = node_d(nodes, row);
+    let flag = if kind == TYD_NATIVE {
+        1
+    } else if kind == TYD_ARRAY {
+        linear_flag_of(nodes, lists, node_e(nodes, row), seen)
+    } else if kind == TYD_STRUCT || kind == TYD_ENUM {
+        linear_members_flag_of(nodes, lists, sym, args, seen)
+    } else if kind == TYD_PARAM {
+        1
+    } else {
+        0
+    };
+    // 2 means a member key is unresolved; leave the flag unmarked.
+    if flag == 2 {
+        return 2;
+    }
+    node_set(nodes, row, NODE_FILE, flag);
+    flag
 }
 
 pub fn expr_diverges(nodes: &[i64], lists: &[Vec<i64>], expr: i64) -> i64 {
@@ -1367,12 +1938,28 @@ pub fn list_get(lists: &[Vec<i64>], id: i64, idx: i64) -> i64 {
     }
 }
 
-pub fn push_internal(errors: &mut Vec<Diag>, message: &str) {
-    errors.push((message.to_string(), NO_FILE, 0, 0));
+pub fn push_error_kind(errors: &mut Vec<Diag>, message: &str, file: i64, start: i64, end: i64, kind: DiagKind) {
+    errors.push(Diag { message: message.to_string(), file, start, end, kind });
 }
 
 pub fn push_error(errors: &mut Vec<Diag>, message: &str, file: i64, start: i64, end: i64) {
-    errors.push((message.to_string(), file, start, end));
+    push_error_kind(errors, message, file, start, end, DiagKind::Resolve);
+}
+
+pub fn push_syntax(errors: &mut Vec<Diag>, message: &str, file: i64, start: i64, end: i64) {
+    push_error_kind(errors, message, file, start, end, DiagKind::Syntax);
+}
+
+pub fn push_type_error(errors: &mut Vec<Diag>, message: &str, file: i64, start: i64, end: i64) {
+    push_error_kind(errors, message, file, start, end, DiagKind::TypeError);
+}
+
+pub fn push_linear(errors: &mut Vec<Diag>, message: &str, file: i64, start: i64, end: i64) {
+    push_error_kind(errors, message, file, start, end, DiagKind::Linear);
+}
+
+pub fn push_internal(errors: &mut Vec<Diag>, message: &str) {
+    push_error_kind(errors, message, NO_FILE, 0, 0, DiagKind::Internal);
 }
 
 #[cfg(test)]

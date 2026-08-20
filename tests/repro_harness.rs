@@ -24,11 +24,14 @@ mod test_controls;
 mod repro_corpus;
 #[path = "support/stream_cases.rs"]
 mod stream_cases;
+#[path = "support/recursion_corpus.rs"]
+mod recursion_corpus;
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use repro_corpus::EXPECT_OK;
+use recursion_corpus::EXPECT_RECURSION;
 use stream_cases::{StreamCase, STREAM_CASES};
 use test_controls::{
     evenly_selected, profile_name, profile_usize, reduced_usize_control, test_profile,
@@ -78,6 +81,8 @@ const EXPECT_REJECTED: &[&str] = &[
     "hash_map_linear_key_undrained_free",
     "hash_map_ref_handle_key",
     "hash_map_ref_vec_key",
+    "unknown_native",
+    "unknown_native_type",
     "unresolved_call_cascade",
     "non_struct_field_cascade",
     "undeclared_const_cascade",
@@ -85,20 +90,15 @@ const EXPECT_REJECTED: &[&str] = &[
     "malformed_type_cascade",
 ];
 
-const RECORD_ONLY: &[&str] = &[
-    "full_rt",
-    "mem_test",
-    "rt1",
-    "vec_test",
-    "vm5",
-    "vm10",
-];
-
 // Compile-only fixtures: the binary must build, but is never executed.
-// http_server.cnb is a blocking network server loop, so running it would
-// hang the harness; compiling it proves the Net native surface lowers and
-// links (per the zero-execution rule for that fixture).
-const EXPECT_COMPILE: &[(&str, &str)] = &[("http_server", "tests/fixtures/http_server.cnb")];
+// http_server.cnb is a blocking server loop; vm5.cnb and vm10.cnb loop
+// forever (their JMP never reaches HALT), so none has an exit code to
+// assert.
+const EXPECT_COMPILE: &[(&str, &str)] = &[
+    ("http_server", "tests/fixtures/http_server.cnb"),
+    ("vm5", "tests/fixtures/repro/vm5.cnb"),
+    ("vm10", "tests/fixtures/repro/vm10.cnb"),
+];
 
 fn fixture_path(name: &str) -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -142,16 +142,13 @@ fn compile_to_llvm(cinnabar: &str, fixture: &Path, ir: &Path) -> i32 {
 
 const DEFAULT_RUN_TIMEOUT_SECS: usize = 10;
 const BALANCED_RUN_CASES: usize = 10;
-const BALANCED_RECORD_CASES: usize = 2;
 const SMOKE_RUN_CASES: usize = 4;
-const SMOKE_RECORD_CASES: usize = 0;
 
 const TIMEOUT_CODE: i32 = 124;
 
 struct ReproConfig {
     profile: test_controls::TestProfile,
     run_cases: usize,
-    record_cases: usize,
     link_compile_only: bool,
     run_timeout_secs: u64,
 }
@@ -189,27 +186,13 @@ fn repro_config() -> ReproConfig {
         BALANCED_RUN_CASES,
         SMOKE_RUN_CASES,
     );
-    let record_default = profile_usize(
-        profile,
-        RECORD_ONLY.len(),
-        BALANCED_RECORD_CASES,
-        SMOKE_RECORD_CASES,
-    );
     let run_cases =
         reduced_usize_control(profile, "CINNABAR_REPRO_RUN_CASES", run_default);
-    let record_cases =
-        reduced_usize_control(profile, "CINNABAR_REPRO_RECORD_CASES", record_default);
     assert!(
         run_cases <= EXPECT_OK.len(),
         "CINNABAR_REPRO_RUN_CASES ({}) cannot exceed the {} expected-success fixtures",
         run_cases,
         EXPECT_OK.len()
-    );
-    assert!(
-        record_cases <= RECORD_ONLY.len(),
-        "CINNABAR_REPRO_RECORD_CASES ({}) cannot exceed the {} record-only fixtures",
-        record_cases,
-        RECORD_ONLY.len()
     );
     let link_default = match profile {
         test_controls::TestProfile::Full => true,
@@ -234,7 +217,6 @@ fn repro_config() -> ReproConfig {
     ReproConfig {
         profile,
         run_cases,
-        record_cases,
         link_compile_only,
         run_timeout_secs: run_timeout as u64,
     }
@@ -487,11 +469,10 @@ fn repro_corpus_baseline() {
     let cinnabar = env!("CARGO_BIN_EXE_cinnabar");
     let config = repro_config();
     eprintln!(
-        "repro profile: {} (link+run expected-success={}, LLVM-only expected-success={}, record-only={}, link compile-only={})",
+        "repro profile: {} (link+run expected-success={}, LLVM-only expected-success={}, link compile-only={})",
         profile_name(config.profile),
         config.run_cases,
         EXPECT_OK.len() - config.run_cases,
-        config.record_cases,
         config.link_compile_only
     );
     let dir = temp_dir("baseline");
@@ -503,7 +484,6 @@ fn repro_corpus_baseline() {
         }
     }
     let guard = TempDirGuard(dir.clone());
-
     let mut idx = 0usize;
     while idx < EXPECT_OK.len() {
         let (name, want) = match EXPECT_OK.get(idx) {
@@ -538,25 +518,6 @@ fn repro_corpus_baseline() {
         ridx += 1;
     }
 
-    let mut oidx = 0usize;
-    while oidx < RECORD_ONLY.len() {
-        let name = match RECORD_ONLY.get(oidx) {
-            Some(name) => *name,
-            None => break,
-        };
-        if evenly_selected(oidx, RECORD_ONLY.len(), config.record_cases) {
-            let bin = dir.join(format!("{}_bin", name));
-            let compile_code = compile_and_link(cinnabar, &fixture_path(name), &bin);
-            if compile_code == 0 {
-                let run_code = run_binary(&bin, config.run_timeout_secs);
-                println!("RECORD {}: compile=OK run={}", name, run_code);
-            } else {
-                println!("RECORD {}: compile=FAIL({})", name, compile_code);
-            }
-        }
-        oidx += 1;
-    }
-
     let mut cidx = 0usize;
     while cidx < EXPECT_COMPILE.len() {
         let (name, rel) = match EXPECT_COMPILE.get(cidx) {
@@ -574,5 +535,59 @@ fn repro_corpus_baseline() {
         cidx += 1;
     }
 
+    drop(guard);
+}
+
+#[test]
+fn recursion_runs_in_o1_stack_at_every_opt_level() {
+    let cinnabar = env!("CARGO_BIN_EXE_cinnabar");
+    let config = repro_config();
+    let dir = temp_dir("opt_tiers");
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => {}
+        Err(err) => {
+            assert!(false, "cannot create temp dir: {}", err);
+            return;
+        }
+    }
+    let guard = TempDirGuard(dir.clone());
+    let levels = ["0", "1", "2", "3"];
+    let recursive = EXPECT_RECURSION;
+    let mut lidx = 0usize;
+    while lidx < levels.len() {
+        let level = match levels.get(lidx) {
+            Some(level) => *level,
+            None => break,
+        };
+        let mut fidx = 0usize;
+        while fidx < recursive.len() {
+            let (name, want) = match recursive.get(fidx) {
+                Some(pair) => *pair,
+                None => break,
+            };
+            let bin = dir.join(format!("{}_o{}_bin", name, level));
+            let compile_code = exit_code(
+                Command::new(cinnabar)
+                    .arg(fixture_path(name))
+                    .arg("--opt-level")
+                    .arg(level)
+                    .arg("-o")
+                    .arg(&bin),
+            );
+            assert_eq!(
+                compile_code, 0,
+                "{} at -O{} failed to compile (code {})",
+                name, level, compile_code
+            );
+            let run_code = run_binary(&bin, config.run_timeout_secs);
+            assert_eq!(
+                run_code, want,
+                "{} at -O{} ran with exit {} (want {})",
+                name, level, run_code, want
+            );
+            fidx += 1;
+        }
+        lidx += 1;
+    }
     drop(guard);
 }
