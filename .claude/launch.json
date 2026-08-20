@@ -6,6 +6,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "site", "run", "dev"],
       "port": 3000
+    },
+    {
+      "name": "playground-web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "playground/web", "run", "dev"],
+      "port": 5173
     }
   ]
 }
