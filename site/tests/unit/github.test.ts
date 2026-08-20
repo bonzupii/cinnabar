@@ -4,7 +4,12 @@ import {
   CACHE_KEY,
   CACHE_TTL_MS,
   COMMITS_ENDPOINT,
+  activeDays,
+  activityAreas,
+  cadence,
+  describeSubject,
   fetchCommits,
+  groupByDay,
   parseCommits,
   readCachedCommits,
   writeCachedCommits,
@@ -58,12 +63,14 @@ describe("the endpoint", () => {
 });
 
 describe("parsing a response", () => {
-  it("reduces a commit to the four fields the feed renders", () => {
+  it("reduces a commit to the fields the feed renders", () => {
     expect(parseCommits([payload()])).toEqual([
       {
         sha: "945928227fee394929097e547c0e66f2b7558e1e",
         abbrev: "9459282",
         subject: "feat: unify native slice views under a signature-classified opcode",
+        areas: ["feat"],
+        title: "unify native slice views under a signature-classified opcode",
         date: "2026-08-14",
         url:
           "https://github.com/bonzupii/cinnabar/commit/" +
@@ -97,8 +104,9 @@ describe("parsing a response", () => {
     expect(parsed.date).toBe("2026-08-14");
   });
 
-  it("never returns more than the feed has room for", () => {
-    const many = Array.from({ length: 30 }, (_, index) =>
+  it("never returns more than the window, whatever the endpoint sends", () => {
+    // `per_page` asks for the window; nothing obliges the answer to honour it.
+    const many = Array.from({ length: ACTIVITY_COUNT * 2 }, (_, index) =>
       payload({ sha: index.toString(16).padStart(40, "0") }),
     );
     expect(parseCommits(many)).toHaveLength(ACTIVITY_COUNT);
@@ -131,6 +139,130 @@ describe("parsing a response", () => {
   it("keeps the good entries in a partly malformed list", () => {
     const commits = parseCommits([payload({ sha: "nope" }), payload()]);
     expect(commits.map((commit) => commit.abbrev)).toEqual(["9459282"]);
+  });
+});
+
+describe("reading the area out of a subject", () => {
+  /*
+   * Two conventions live in this log. `AGENTS.md` mandates `area: Subject` and
+   * that is what recent commits use; the earlier ones — and everything
+   * dependabot still opens — are conventional-commits. Both have to land on
+   * the same area, or the filter offers `codegen` and `fix(codegen)` as two
+   * different subsystems.
+   */
+  it.each([
+    ["vscode: Correct the launch default", ["vscode"]],
+    ["resolver, codegen: Implement a sealed native registry", ["resolver", "codegen"]],
+    ["fix(codegen): struct keys through HashMap", ["codegen"]],
+    ["build(deps): bump inkwell to 0.10.0", ["deps"]],
+    ["style(parser): re-wrap the token table", ["parser"]],
+    ["tree-sitter: Regenerate the grammar", ["tree-sitter"]],
+    // No parenthesised scope to prefer, so the type itself is the area. It is
+    // what the commit said about where it landed, which is nothing.
+    ["feat: make the backend cross-platform", ["feat"]],
+    ["fix(lsp), lsp: Fold the duplicate", ["lsp"]],
+  ])("reads %s", (subject, areas) => {
+    expect(describeSubject(subject).areas).toEqual(areas);
+  });
+
+  it("strips the prefix from the title but keeps the whole subject", () => {
+    const { title } = describeSubject("docs: Record WSL2 as the default");
+    expect(title).toBe("Record WSL2 as the default");
+    expect(parseCommits([payload({ commit: { ...payload().commit,
+      message: "docs: Record WSL2 as the default" } })])[0].subject)
+      .toBe("docs: Record WSL2 as the default");
+  });
+
+  it.each([
+    // A merge commit, which has no prefix at all.
+    "Merge pull request #9 from bonzupii/dependabot/cargo/inkwell-0.10.0",
+    "Address OpenSSF Scorecard findings",
+    // A real subject from this log: the colon is punctuation in a sentence,
+    // and the 32-character cap is what tells the two apart.
+    "amendment to commit message style rule: no AI attribution.",
+    // Prose that happens to be short enough, but is not an area token.
+    "See also: the note in ARCHITECTURE.md",
+    'Revert "docs: record the collision"',
+  ])("leaves %s whole", (subject) => {
+    expect(describeSubject(subject)).toEqual({ areas: [], title: subject });
+  });
+
+  it("refuses a prefix listing more areas than a prefix plausibly lists", () => {
+    const subject = "a, b, c, d: something";
+    expect(describeSubject(subject).areas).toEqual([]);
+  });
+});
+
+describe("summarising a window", () => {
+  /** A commit, from just the parts these functions read. */
+  function commit(sha: string, subject: string, date: string): Commit {
+    const [parsed] = parseCommits([
+      { sha: sha.padStart(40, "0"), commit: { message: subject, author: { date } } },
+    ]);
+    return parsed;
+  }
+
+  const window = [
+    commit("1", "tools: Emit JSON documents", "2026-08-16T10:00:00Z"),
+    commit("2", "docs: Record a gap", "2026-08-16T09:00:00Z"),
+    commit("3", "resolver, codegen: Seal the registry", "2026-08-14T09:00:00Z"),
+    commit("4", "Merge pull request #18", "2026-08-14T08:00:00Z"),
+    commit("5", "docs: Record WSL2", "2026-08-10T08:00:00Z"),
+  ];
+
+  it("counts the areas, busiest first and ties broken by name", () => {
+    expect(activityAreas(window)).toEqual([
+      { area: "docs", count: 2 },
+      { area: "codegen", count: 1 },
+      { area: "resolver", count: 1 },
+      { area: "tools", count: 1 },
+    ]);
+  });
+
+  it("counts a commit once for each area it names", () => {
+    // The filter answers "what touched the resolver", and a commit that
+    // touched the resolver and the backend is an answer to it.
+    const areas = activityAreas([window[2]]).map((entry) => entry.area);
+    expect(areas).toEqual(["codegen", "resolver"]);
+  });
+
+  it("counts days the repository moved, not commits", () => {
+    expect(activeDays(window)).toBe(3);
+  });
+
+  it("groups by day in the order the commits arrived", () => {
+    expect(groupByDay(window).map((day) => [day.date, day.commits.length])).toEqual([
+      ["2026-08-16", 2],
+      ["2026-08-14", 2],
+      ["2026-08-10", 1],
+    ]);
+  });
+
+  describe("the cadence chart", () => {
+    it("draws one column per day, ending on the newest commit", () => {
+      const series = cadence(window, 7);
+      expect(series).toHaveLength(7);
+      expect(series[0].date).toBe("2026-08-10");
+      expect(series[6].date).toBe("2026-08-16");
+    });
+
+    it("keeps the quiet days, which are the point of the chart", () => {
+      expect(cadence(window, 7).map((day) => day.count)).toEqual([1, 0, 0, 0, 2, 0, 2]);
+    });
+
+    it("ends on the newest date even when the list is not sorted", () => {
+      // The endpoint returns newest first and this does not re-sort, so the
+      // anchor is found rather than assumed.
+      const shuffled = [window[4], window[0], window[2]];
+      expect(cadence(shuffled, 3).at(-1)?.date).toBe("2026-08-16");
+    });
+
+    it("is empty rather than anchored to today when there is nothing to draw", () => {
+      // A chart anchored to `Date.now()` would be one string on the server and
+      // another in the browser — the hydration mismatch the absolute dates
+      // exist to avoid.
+      expect(cadence([], 7)).toEqual([]);
+    });
   });
 });
 
