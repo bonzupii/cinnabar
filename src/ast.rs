@@ -769,6 +769,7 @@ pub const NAT_NET_LISTEN: i64 = 24;
 pub const NAT_NET_ACCEPT: i64 = 25;
 pub const NAT_NET_SEND: i64 = 26;
 pub const NAT_NET_CLOSE: i64 = 27;
+pub const NAT_NET_RECV: i64 = 39;
 pub const NAT_VEC_POP: i64 = 28;
 pub const NAT_HASH_MAP_REMOVE: i64 = 29;
 pub const NAT_FILE_OPEN: i64 = 30;

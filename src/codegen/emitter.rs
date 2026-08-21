@@ -2228,6 +2228,17 @@ fn extern_send<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
     )
 }
 
+fn extern_recv<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
+    let i32_ty = sess.0.i32_type();
+    let socket_ty = if sess.13.abi().socket_handle_is_64 { sess.0.i64_type() } else { i32_ty };
+    let result = if sess.13.abi().io_result_is_32 { i32_ty } else { sess.0.i64_type() };
+    extern_fn(
+        sess,
+        sess.13.abi().socket_recv,
+        result.fn_type(&[socket_ty.into(), ptr_ty(sess).into(), sess.0.i64_type().into(), i32_ty.into()], false),
+    )
+}
+
 fn extern_close<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
     let i32_ty = sess.0.i32_type();
     extern_fn(sess, sess.13.abi().file_close, i32_ty.fn_type(&[i32_ty.into()], false))
@@ -2501,6 +2512,7 @@ fn dispatch_native<'ctx>(
         }
         NAT_NET_ACCEPT => native_net_accept(sess, f, locals, ret_key, out, span),
         NAT_NET_SEND => native_net_send(sess, f, locals, ret_key, out, span),
+        NAT_NET_RECV => native_net_recv(sess, f, locals, ret_key, out, span),
         NAT_NET_CLOSE => {
             native_net_close(sess, locals, ret_key, out, span)?;
             Ok(out)
@@ -4691,6 +4703,49 @@ fn native_net_send<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     copy_to_out(sess, ret_key, out, ok_result, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
     sess.2.position_at_end(after);
+    Ok(out)
+}
+
+fn native_net_recv<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
+    let p0 = get_local(locals, 0, span)?;
+    let p1 = get_local(locals, 1, span)?;
+    let handle = load_ptr(sess, p0)?;
+    let fd = net_fd_of_handle(sess, handle)?;
+    let data = slice_data(sess, p1)?;
+    let len = slice_len_of(sess, p1)?;
+    let flags = sess.0.i32_type().const_zero();
+    let fd_arg = socket_argument(sess, fd)?;
+    let attempt = new_block(sess, f, "net_recv_attempt");
+    let retry = new_block(sess, f, "net_recv_retry");
+    let failed = new_block(sess, f, "net_recv_failed");
+    sess.2.build_unconditional_branch(attempt).map_err(builder_fail)?;
+    sess.2.position_at_end(attempt);
+    let call = sess.2.build_call(extern_recv(sess), &[fd_arg, into_meta(data.into()), into_meta(len.into()), into_meta(flags.into())], "").map_err(builder_fail)?;
+    let raw = socket_result(sess, call, span)?;
+    // `recv` reports failure with -1, the same convention as `send`; a zero
+    // count is the peer's orderly close of its send side, returned as the
+    // byte count so the caller can distinguish it from a fault.
+    let raw_failed = sess.2.build_int_compare(IntPredicate::EQ, raw, raw.get_type().const_all_ones(), "").map_err(builder_fail)?;
+    let success = new_block(sess, f, "net_recv_success");
+    let decide_failure = new_block(sess, f, "net_recv_decide_failure");
+    sess.2.build_conditional_branch(raw_failed, decide_failure, success).map_err(builder_fail)?;
+    sess.2.position_at_end(decide_failure);
+    let interrupted = is_eintr(sess, raw, span)?;
+    sess.2.build_conditional_branch(interrupted, retry, failed).map_err(builder_fail)?;
+    sess.2.position_at_end(retry);
+    sess.2.build_unconditional_branch(attempt).map_err(builder_fail)?;
+    sess.2.position_at_end(failed);
+    net_fault_result(sess, ret_key, out, span)?;
+    let join = new_block(sess, f, "net_recv_after");
+    sess.2.build_unconditional_branch(join).map_err(builder_fail)?;
+    sess.2.position_at_end(success);
+    let count_key = result_arg_key(sess, ret_key, 0);
+    let count = declare_local(sess, count_key, "received", span)?;
+    store_key(sess, count, raw.into())?;
+    let ok_result = build_result_ok(sess, ret_key, count_key, count, span)?;
+    copy_to_out(sess, ret_key, out, ok_result, span)?;
+    sess.2.build_unconditional_branch(join).map_err(builder_fail)?;
+    sess.2.position_at_end(join);
     Ok(out)
 }
 

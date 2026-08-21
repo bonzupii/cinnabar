@@ -1176,6 +1176,7 @@ const NATIVE_FUN_ROWS: &[(&str, i64, i64)] = &[
     ("Net.listen", NAT_MODE_BORROW, NAT_NET_LISTEN),
     ("Net.accept", NAT_MODE_CREATE, NAT_NET_ACCEPT),
     ("Net.send", NAT_MODE_BORROW, NAT_NET_SEND),
+    ("Net.recv", NAT_MODE_BORROW, NAT_NET_RECV),
     ("Net.close", NAT_MODE_CONSUME, NAT_NET_CLOSE),
     ("Process.spawn", NAT_MODE_CREATE, NAT_PROCESS_SPAWN),
     ("Process.wait", NAT_MODE_CONSUME, NAT_PROCESS_WAIT),
@@ -1218,6 +1219,7 @@ const NATIVE_VERB_MODES: &[(i64, &[i64])] = &[
     (NAT_NET_LISTEN, &[NAT_MODE_BORROW]),
     (NAT_NET_ACCEPT, &[NAT_MODE_CREATE]),
     (NAT_NET_SEND, &[NAT_MODE_BORROW, NAT_MODE_TRANSFER]),
+    (NAT_NET_RECV, &[NAT_MODE_BORROW, NAT_MODE_TRANSFER]),
     (NAT_NET_CLOSE, &[NAT_MODE_CONSUME]),
     (NAT_PROCESS_SPAWN, &[NAT_MODE_CREATE]),
     (NAT_PROCESS_WAIT, &[NAT_MODE_CONSUME]),
@@ -1327,6 +1329,7 @@ fn native_subsystem_of(verb: i64) -> NativeSubsystem {
         || verb == NAT_NET_LISTEN
         || verb == NAT_NET_ACCEPT
         || verb == NAT_NET_SEND
+        || verb == NAT_NET_RECV
         || verb == NAT_NET_CLOSE
     {
         NativeSubsystem::Network

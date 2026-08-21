@@ -287,6 +287,8 @@ pub struct Abi {
     pub socket_accept: &'static str,
     /// The socket send entry point.
     pub socket_send: &'static str,
+    /// The socket receive entry point.
+    pub socket_recv: &'static str,
     /// The C function used to retrieve a socket error.
     pub socket_error_accessor: &'static str,
     /// True when the socket error accessor returns a value rather than an
@@ -335,6 +337,7 @@ impl TargetOs {
                 socket_listen: "listen",
                 socket_accept: "accept",
                 socket_send: "send",
+                socket_recv: "recv",
                 socket_error_accessor: "__errno_location",
                 socket_error_is_value: false,
                 socket_close: "close",
@@ -366,6 +369,7 @@ impl TargetOs {
                 socket_listen: "listen",
                 socket_accept: "accept",
                 socket_send: "send",
+                socket_recv: "recv",
                 socket_error_accessor: "__error",
                 socket_error_is_value: false,
                 socket_close: "close",
@@ -397,6 +401,7 @@ impl TargetOs {
                 socket_listen: "listen",
                 socket_accept: "accept",
                 socket_send: "send",
+                socket_recv: "recv",
                 socket_error_accessor: "__error",
                 socket_error_is_value: false,
                 socket_close: "close",
@@ -428,6 +433,7 @@ impl TargetOs {
                 socket_listen: "listen",
                 socket_accept: "accept",
                 socket_send: "send",
+                socket_recv: "recv",
                 socket_error_accessor: "WSAGetLastError",
                 socket_error_is_value: true,
                 socket_close: "closesocket",
