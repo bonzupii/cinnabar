@@ -35,10 +35,10 @@
     "deploy:preview": "netlify deploy"
   },
   "dependencies": {
-    "@codemirror/commands": "^6.10.4",
+    "@codemirror/commands": "^6.11.0",
     "@codemirror/language": "^6.12.4",
     "@codemirror/state": "^6.7.1",
-    "@codemirror/view": "^6.43.8",
+    "@codemirror/view": "^6.43.9",
     "@fontsource/ibm-plex-mono": "^5.3.0",
     "@fontsource/schibsted-grotesk": "^5.3.0",
     "@uiw/react-codemirror": "^4.25.11",
@@ -63,7 +63,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.3.1",
     "eslint-plugin-better-tailwindcss": "^4.7.0",
-    "linkinator": "^8.0.1",
+    "linkinator": "^8.0.4",
     "netlify-cli": "^27.1.1",
     "serve": "^14.2.6",
     "start-server-and-test": "^3.0.11",
