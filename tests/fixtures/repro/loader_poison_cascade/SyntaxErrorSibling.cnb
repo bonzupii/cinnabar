@@ -1,4 +1,5 @@
-pub fun broken_helper() I64
+# [EXPECT REJECTION]
+fun broken_helper() I64
   val x: I64
   return x
 end

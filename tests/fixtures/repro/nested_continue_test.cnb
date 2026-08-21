@@ -1,4 +1,4 @@
-pub fun main() I64
+fun main() I64
   var total: I64 = 0
   var i: I64 = 0
   while i < 6

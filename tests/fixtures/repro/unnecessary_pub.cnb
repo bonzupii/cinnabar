@@ -1,0 +1,13 @@
+# [EXPECT REJECTION]
+#! Unconsumed item visibility: three reached root-scope items carry `pub`
+#! with no caller in another module.  `pub` is permitted only when a live
+#! cross-module edge demands it.  (EXPECT_REJECTED.)
+pub fun helper() I64
+  return 1
+end
+
+pub const LIMIT: I64 = 2
+
+pub fun main() I64
+  return helper() + LIMIT
+end

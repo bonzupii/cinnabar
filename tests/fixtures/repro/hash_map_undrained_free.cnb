@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! Drain-before-free (MANIFESTO): freeing a native container that may
 #! hold linear elements is a compile error.  The HashMap gains a linear
 #! Block via hash_map_insert but is freed without removing it, so
@@ -8,7 +9,7 @@
 #! through fail_map_free (which drains before freeing), so the only
 #! diagnostic is the drain error.
 
-pub const MAP_KEY: I64 = 7
+const MAP_KEY: I64 = 7
 
 pub mod Collections
   pub nat type HashMap(K, V)
@@ -52,7 +53,7 @@ fun fail_map_free(map: Collections.HashMap(I64, Memory.Block)) impure I64
   return 1
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val map = match hash_map_new[I64, Memory.Block]()
     Ok(m) => m
     Err(error) => return 1

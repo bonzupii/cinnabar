@@ -803,7 +803,8 @@ fn main() -> ExitCode {
         deferred: &mut deferred,
         target: &target,
     };
-    if !resolver::resolve(&mut names, &mut nodes, &mut lists, resolver_diagnostics, root, &ext_mods, &mut seeds) {
+    let resolved = resolver::resolve(&mut names, &mut nodes, &mut lists, resolver_diagnostics, root, &ext_mods, &mut seeds);
+    if !resolved {
         return report_diagnostics(json_out, &errors, &notes, &files);
     }
     let mut check = CheckContext { errors: &mut errors, notes: &mut notes, seeds: &seeds, target: &target };
@@ -826,10 +827,6 @@ fn main() -> ExitCode {
         };
         return finish_with_diagnostics(&errors, shown_notes, &files);
     }
-    // Unused items are reported here rather than from the resolver. A file
-    // with a type or borrow error is told about that error; reporting
-    // reachability first would stop the pipeline and answer a broken program
-    // with a list of things nothing calls.
     if !deferred.is_empty() {
         return report_diagnostics(json_out, &deferred, &[], &files);
     }

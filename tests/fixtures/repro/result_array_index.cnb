@@ -6,7 +6,7 @@
 # fallible-index path and looks for IndexOutOfBounds inside DivError.
 # (EXPECT_OK 0.)
 
-pub fun main() I64
+fun main() I64
   val results: [Result(I64, DivError); 2] = [Ok(1), Err(DivByZero)]
 
   val first = match results[0]

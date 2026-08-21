@@ -1,5 +1,5 @@
-pub const MAGIC_BYTE_0: U8 = 0x0D
-pub const MAGIC_BYTE_1: U8 = 0xF0
+const MAGIC_BYTE_0: U8 = 0x0D
+const MAGIC_BYTE_1: U8 = 0xF0
 
 fun array_probe() I64
   val bytes: [U8; 2] = [MAGIC_BYTE_0, MAGIC_BYTE_1]
@@ -7,6 +7,6 @@ fun array_probe() I64
   return 0
 end
 
-pub fun main() I64
+fun main() I64
   return array_probe()
 end

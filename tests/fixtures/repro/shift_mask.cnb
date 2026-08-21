@@ -7,12 +7,12 @@
 
 #! Constant-folder path: both operands are literals, so fold_bin applies
 #! the mask (rv % int_bit_width).
-pub const SHIFT_64: I64 = 1 << 64
-pub const SHIFT_70: I64 = 1 << 70
-pub const SHIFT_63: I64 = 1 << 63
-pub const SHR_65: I64 = 8 >> 65
+const SHIFT_64: I64 = 1 << 64
+const SHIFT_70: I64 = 1 << 70
+const SHIFT_63: I64 = 1 << 63
+const SHR_65: I64 = 8 >> 65
 
-pub fun main() I64
+fun main() I64
   #! Runtime path: both operands are variables, so emit_binary applies the
   #! mask (rhs & (bit_width - 1)) and must produce the identical values.
   var one: I64 = 1

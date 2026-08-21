@@ -28,8 +28,8 @@ use Memory.read_u8
 # The harness asserts EXPECT_OK("mem_probe", 0).
 const PROBE_RECURSE_DEPTH: I64 = 500000
 
-pub const PROBE_BYTE: U8 = 0x42
-pub const PROBE_FAIL_BYTE: U8 = 0xFF
+const PROBE_BYTE: U8 = 0x42
+const PROBE_FAIL_BYTE: U8 = 0xFF
 
 const ZERO_USIZE: Usize = 0
 
@@ -103,7 +103,7 @@ fun memory_roundtrip() impure Result(U8, Memory.Error)
   return Ok(value)
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val block = match allocate(1)
     Ok(value) => value
     Err(error) => return 1

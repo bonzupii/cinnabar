@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! A native type outside the registry is a resolution error naming the
 #! type: `unknown native type 'Widget.Gadget'`.  A handle type with no
 #! registry row has no layout kind for codegen to lower, so the rejection
@@ -7,6 +8,6 @@ pub mod Widget
   pub nat type Gadget
 end
 
-pub fun main() I64
+fun main() I64
   return 0
 end

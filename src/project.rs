@@ -539,9 +539,9 @@ pub fn initialize(directory: &Path) -> Result<(), ManifestError> {
     );
     fs::write(&manifest, manifest_source)
         .map_err(|write_error| format!("cannot write '{}': {}", manifest.display(), write_error))?;
-    fs::write(&main, "pub fun main() I64\n  return 0\nend\n")
+    fs::write(&main, "fun main() I64\n  return 0\nend\n")
         .map_err(|write_error| format!("cannot write '{}': {}", main.display(), write_error))?;
-    fs::write(&smoke, "pub fun main() I64\n  return 0\nend\n")
+    fs::write(&smoke, "fun main() I64\n  return 0\nend\n")
         .map_err(|write_error| format!("cannot write '{}': {}", smoke.display(), write_error))?;
     Ok(())
 }
@@ -954,7 +954,7 @@ mod tests {
 
     fn write_project(root: &Path, manifest_source: &str) {
         assert!(fs::create_dir_all(root).is_ok());
-        assert!(fs::write(root.join("main.cnb"), "pub fun main() I64\n  return 0\nend\n").is_ok());
+        assert!(fs::write(root.join("main.cnb"), "fun main() I64\n  return 0\nend\n").is_ok());
         assert!(fs::write(root.join(MANIFEST_FILE), manifest_source).is_ok());
     }
 
@@ -1172,8 +1172,8 @@ mod tests {
         let outside = test_directory("test_symlink_outside");
         assert!(fs::create_dir_all(&root).is_ok());
         assert!(fs::create_dir_all(&outside).is_ok());
-        assert!(fs::write(root.join("main.cnb"), "pub fun main() I64\n  return 0\nend\n").is_ok());
-        assert!(fs::write(outside.join("escape.cnb"), "pub fun main() I64\n  return 0\nend\n").is_ok());
+        assert!(fs::write(root.join("main.cnb"), "fun main() I64\n  return 0\nend\n").is_ok());
+        assert!(fs::write(outside.join("escape.cnb"), "fun main() I64\n  return 0\nend\n").is_ok());
         assert!(symlink(&outside, root.join("tests")).is_ok());
         assert!(fs::write(
             root.join(MANIFEST_FILE),

@@ -96,7 +96,7 @@ fun expect_end() impure I64
   end
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val first = take_line(5)
   if first != 0
     return first

@@ -530,8 +530,8 @@ fn stdio_hover_during_http_server_diagnostics_responds_without_duplicate_analysi
         // old Usize fact during that gap; after the matching generation
         // completes, the same hover must expose the edited I64 fact.
         let edited_source = source.replacen(
-            "pub const SERVER_PORT: Usize = 4067",
-            "pub const SERVER_PORT: I64 = 4067",
+            "const SERVER_PORT: Usize = 4067",
+            "const SERVER_PORT: I64 = 4067",
             1,
         ).replacen(
             "val bind_result = bind(&listener, SERVER_PORT)",
@@ -647,7 +647,7 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
 
     let entry = fixture("multi_file/main.cnb");
     let uri = file_uri(&entry);
-    let overlay = "use Math.add\n\npub fun main() I64\n  return add(30, 40)\nend\n";
+    let overlay = "use Math.add\n\nfun main() I64\n  return add(30, 40)\nend\n";
     send_message(
         &mut writer,
         &json!({
@@ -776,7 +776,7 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
 
     // Rapid edits coalesce: the superseded broken generation must never be
     // published after the immediately-following valid generation.
-    let broken_entry = "use Math.add\n\npub fun main() I64\n  return add(30)\nend\n";
+    let broken_entry = "use Math.add\n\nfun main() I64\n  return add(30)\nend\n";
     send_message(
         &mut writer,
         &json!({

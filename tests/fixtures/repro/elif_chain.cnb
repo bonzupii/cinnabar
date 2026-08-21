@@ -1,4 +1,4 @@
-pub fun main() I64
+fun main() I64
   var x: I64 = 7
   if x < 3
     return 1

@@ -1,9 +1,9 @@
-pub const PROG: I64 = (
+const PROG: I64 = (
   0x01
   | (0x70 << 8)
 )
 
-pub fun main() I64
+fun main() I64
   if PROG == (0x01 | (0x70 << 8))
     return 30
   end

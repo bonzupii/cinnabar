@@ -79,7 +79,7 @@ fun observe(block: Memory.Block, want: U8) impure I64
   return 1
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val want: U8 = U8.from(slice_len(args()))
   val block = match allocate(1)
     Ok(b) => b

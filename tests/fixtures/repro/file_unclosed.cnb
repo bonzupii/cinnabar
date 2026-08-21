@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! `File.Handle` is linear, so an open descriptor is an obligation the
 #! compiler tracks. Every item below must be rejected.
 #!
@@ -36,8 +37,8 @@ use File.read
 use File.write
 use File.close
 
-pub const PATH: &[U8] = "/tmp/cinnabar_unclosed.txt"
-pub const CONTENT: &[U8] = "x"
+const PATH: &[U8] = "/tmp/cinnabar_unclosed.txt"
+const CONTENT: &[U8] = "x"
 
 fun leaked() impure I64
   val handle = match open(PATH, File.ReadOnly)
@@ -81,6 +82,6 @@ fun used_after_close() impure I64
   end
 end
 
-pub fun main() impure I64
+fun main() impure I64
   return leaked() + closed_on_one_path_only(true) + closed_twice() + used_after_close()
 end

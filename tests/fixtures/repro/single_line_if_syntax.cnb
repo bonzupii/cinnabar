@@ -1,8 +1,9 @@
-pub fun test_branch(x: I64) I64
+# [EXPECT REJECTION]
+fun test_branch(x: I64) I64
   if x == 0 return 1 end
   return 0
 end
 
-pub fun main() I64
+fun main() I64
   return test_branch(0)
 end

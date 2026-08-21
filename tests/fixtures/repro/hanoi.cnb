@@ -10,10 +10,10 @@
 #! acc -> acc*2 + 1, so hanoi_moves(n) = hanoi_acc(n, 0) = 2^n - 1 in
 #! O(1) stack.
 
-pub const DISKS: I64 = 8
+const DISKS: I64 = 8
 
-pub type MoveCount
-  pub moves: I64
+type MoveCount
+  moves: I64
 end
 
 fun hanoi_acc(n: I64, acc: I64) I64
@@ -31,7 +31,7 @@ fun hanoi(n: I64) MoveCount
   return MoveCount(moves: hanoi_moves(n))
 end
 
-pub fun main() I64
+fun main() I64
   val result = hanoi(DISKS)
   return result.moves
 end

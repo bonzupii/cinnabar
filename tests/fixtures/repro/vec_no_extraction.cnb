@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! The Resolvability Rule (MANIFESTO Principle 7): a native container may
 #! hold linear elements only when its surface provides a by-value
 #! extraction function.  This Collections declares vec_push but no
@@ -32,7 +33,7 @@ use Collections.vec_free
 use Collections.Vec
 use Memory.allocate
 
-pub fun main() impure I64
+fun main() impure I64
   val vec = match vec_new[Memory.Block]()
     Ok(v) => v
     Err(error) => return 1

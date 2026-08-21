@@ -213,7 +213,7 @@ fn completions_exclude_symbols_the_resolver_hides() {
 #[test]
 fn completions_exclude_locals_from_sibling_branches() {
     let entry = fixture("multi_file/main.cnb");
-    let source = "pub fun main() I64\n  if true\n    val only_then: I64 = 1\n    return only_then\n  else\n    val only_else: I64 = 2\n    return only_else\n  end\nend\n";
+    let source = "fun main() I64\n  if true\n    val only_then: I64 = 1\n    return only_then\n  else\n    val only_else: I64 = 2\n    return only_else\n  end\nend\n";
     let overlay = [(entry.clone(), source.to_string())];
     let analysis = analyze(&entry, &overlay, &Target::host());
     assert!(analysis.errors.is_empty(), "unexpected errors: {:?}", analysis.errors);
@@ -337,7 +337,7 @@ fn borrow_explanations_have_a_stable_json_surface() -> Result<(), Box<dyn Error>
 #[test]
 fn overlay_buffers_shadow_the_file_system() {
     let entry = fixture("multi_file/main.cnb");
-    let broken = "use Math.add\n\npub fun main() I64\n  return add(10)\nend\n";
+    let broken = "use Math.add\n\nfun main() I64\n  return add(10)\nend\n";
     let overlay = [(entry.clone(), broken.to_string())];
     let analysis = analyze(&entry, &overlay, &Target::host());
     assert!(
@@ -388,7 +388,7 @@ fn project_and_documentation_commands_work_end_to_end() -> Result<(), Box<dyn Er
 
     std::fs::write(
         project.join("main.cnb"),
-        "#! Project entry documentation\npub fun main() I64\n  return 0\nend\n",
+        "#! Project entry documentation\nfun main() I64\n  return 0\nend\n",
     )?;
     let checked = Command::new(compiler).arg("check").arg(&project).output()?;
     assert!(checked.status.success(), "check failed: {}", String::from_utf8_lossy(&checked.stderr));
@@ -410,7 +410,7 @@ fn project_and_documentation_commands_work_end_to_end() -> Result<(), Box<dyn Er
 
     std::fs::write(
         project.join("tests").join("invalid.reject.cnb"),
-        "pub fun main() I64\n  return unknown_value\nend\n",
+        "fun main() I64\n  return unknown_value\nend\n",
     )?;
     let updated = Command::new(compiler)
         .arg("test")
@@ -568,7 +568,7 @@ fn inlay_hints_report_inferred_type_for_unannotated_bindings() {
 
 #[test]
 fn code_actions_remove_an_unused_import() {
-    let source = "pub mod Tools\n  pub fun visible() I64\n    return 1\n  end\nend\n\nuse Tools.visible\n\npub fun main() I64\n  return Tools.visible()\nend\n";
+    let source = "pub mod Tools\n  pub fun visible() I64\n    return 1\n  end\nend\n\nuse Tools.visible\n\nfun main() I64\n  return Tools.visible()\nend\n";
     let path = fixture("synthetic_unused_import.cnb");
     let overlay = vec![(path.clone(), source.to_string())];
     let analysis = analyze(&path, &overlay, &Target::host());

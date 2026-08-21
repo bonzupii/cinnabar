@@ -2154,11 +2154,11 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
             fields.push(g.fresh_snake());
             f += 1;
         }
-        g.push(&format!("pub type {}", sname));
+        g.push(&format!("type {}", sname));
         let mut f = 0usize;
         while f < fields.len() {
             match fields.get(f) {
-                Some(fname) => g.push(&format!("  pub {}: I64", fname)),
+                Some(fname) => g.push(&format!("  {}: I64", fname)),
                 None => {}
             }
             f += 1;
@@ -2181,7 +2181,7 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
             variants.push((vname, pcount));
             v += 1;
         }
-        g.push(&format!("pub type {}", ename));
+        g.push(&format!("type {}", ename));
         let mut v = 0usize;
         while v < variants.len() {
             match variants.get(v) {
@@ -2226,11 +2226,16 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
     };
     let trait_name = g.fresh_pascal();
     let trait_method = g.fresh_snake();
-    g.push(&format!("pub trait {}", trait_name));
-    g.push(&format!("  pub fun {}(value: &Self) I64", trait_method));
+    let trait_mod = g.fresh_pascal();
+    g.push(&format!("pub mod {}", trait_mod));
+    g.push(&format!("  pub trait {}", trait_name));
+    g.push(&format!("    pub fun {}(value: &Self) I64", trait_method));
+    g.push("  end");
     g.push("end");
     g.push("");
-    g.push(&format!("pub impl {} for {}", trait_name, sdef0.name));
+    g.push(&format!("use {}.{}", trait_mod, trait_name));
+    g.push("");
+    g.push(&format!("impl {} for {}", trait_name, sdef0.name));
     g.push(&format!("  pub fun {}(value: &{}) I64", trait_method, sdef0.name));
     g.push(&format!("    return value.{}", f0name));
     g.push("  end");
@@ -2286,8 +2291,8 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
         let k1 = g.rng.range(0, 7);
         let a = g.rng.range(0, 11);
         let b = g.rng.range(0, 11);
-        g.push(&format!("pub const {}: Usize = {}", c0, k0));
-        g.push(&format!("pub const {}: Usize = {}", c1, k1));
+        g.push(&format!("const {}: Usize = {}", c0, k0));
+        g.push(&format!("const {}: Usize = {}", c1, k1));
         g.push("");
         g.push(&format!("fun {}(index: Usize, length: Usize) I64", oob_name));
         g.push(&format!("  if index == {} && length == {}", c0, c1));
@@ -2340,7 +2345,7 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
         g.finish = Some(finish_name);
         g.arr_len = arr_n;
     }
-    g.push("pub fun main() I64");
+    g.push("fun main() I64");
     g.indent = "  ".to_string();
     let total = g.fresh_snake();
     g.push(&format!("var {}: I64 = 0", total));
@@ -2481,7 +2486,7 @@ fn generate_negative(rng: &mut Rng, shape: usize) -> (String, &'static str) {
         push("use Memory.deallocate");
     }
     push("");
-    push("pub fun main() impure I64");
+    push("fun main() impure I64");
     push(&format!("  val {} = match allocate(8)", h1));
     push("    Ok(value) => value");
     push("    Err(error) => return 0");

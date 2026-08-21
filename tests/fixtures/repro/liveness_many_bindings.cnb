@@ -9,7 +9,7 @@
   is read inside the loop body, so live sets grow across sweeps and the
   analysis must converge within the binding-derived bound.
 |#
-pub fun main() I64
+fun main() I64
   var a0: I64 = 0
   var a1: I64 = 1
   var a2: I64 = 2

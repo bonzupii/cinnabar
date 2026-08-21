@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! A callee must not consume a caller's linear handle through a `&mut`
 #! parameter and return without restoring it: the caller's bookkeeping
 #! would still believe the handle is live, so the caller's later use of it
@@ -15,9 +16,9 @@ end
 use Memory.allocate
 use Memory.deallocate
 
-pub type Holder
-  pub block: Memory.Block
-  pub tag: I64
+type Holder
+  block: Memory.Block
+  tag: I64
 end
 
 fun steal_block(r: &mut Holder) impure I64
@@ -25,7 +26,7 @@ fun steal_block(r: &mut Holder) impure I64
   return 0
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val block = match allocate(1)
     Ok(value) => value
     Err(error) => return 1

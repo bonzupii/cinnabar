@@ -15,6 +15,6 @@ fun fact(n: I64) I64
   return fact_acc(n, 1)
 end
 
-pub fun main() I64
+fun main() I64
   return fact(5)
 end

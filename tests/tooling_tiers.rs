@@ -151,7 +151,7 @@ fn attached_fact_and_formatter_cli_surfaces_work_end_to_end() -> Result<(), Box<
     let directory = unique_directory("attached_fact_tools");
     std::fs::create_dir_all(&directory)?;
     let source = directory.join("main.cnb");
-    std::fs::write(&source, "pub type Pair\n  pub left: I64\n  pub right: I64\nend\n\nfun main() I32\n  val pair = Pair(left: 1, right: 2)\n  if pair.left == 1\n  return 0\n  else\n  return 1\n  end\nend\n")?;
+    std::fs::write(&source, "type Pair\n  left: I64\n  right: I64\nend\n\nfun main() I32\n  val pair = Pair(left: 1, right: 2)\n  if pair.left == 1\n  return 0\n  else\n  return 1\n  end\nend\n")?;
 
     let format_check_before = run(compiler, &["fmt", "--check", &path_text(&source)])?;
     assert!(!format_check_before.status.success());
@@ -187,7 +187,7 @@ fn documentation_and_playground_servers_work_over_http() -> Result<(), Box<dyn E
     let directory = unique_directory("http_tools");
     std::fs::create_dir_all(&directory)?;
     let fixture_path = directory.join("main.cnb");
-    std::fs::write(&fixture_path, "#! Playground documentation\npub fun main() I32\n  return 0\nend\n")?;
+    std::fs::write(&fixture_path, "#! Playground documentation\nfun main() I32\n  return 0\nend\n")?;
     let fixture = path_text(&fixture_path);
 
     let burn_address = free_address()?;

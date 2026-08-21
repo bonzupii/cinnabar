@@ -57,9 +57,14 @@ fn declarations_json(
     let mut idx = 0i64;
     while idx < list_len(lists, item_list) {
         let item = list_get(lists, item_list, idx);
-        // The same visibility test the page makes, read off the parsed item
-        // rather than decided again here.
-        if node_tag(nodes, item) == NODE_ITEM && node_b(nodes, item) == 1 {
+        // A visible item is one that is pub, or the program entry point
+        // (whose symbol carries the SYM_FUN_MAIN tag).  The entry point
+        // does not need pub — it is always reachable.
+        let is_item = node_tag(nodes, item) == NODE_ITEM;
+        let is_pub = node_b(nodes, item) == 1;
+        let sym = if is_item { item_sym_of(nodes, item) } else { NONE };
+        let is_entry = sym != NONE && node_f(nodes, sym) == SYM_FUN_MAIN;
+        if is_item && (is_pub || is_entry) {
             out.push(declaration_json(names, nodes, lists, item, files));
         }
         idx += 1;
@@ -259,7 +264,11 @@ fn render_item_list(
     let mut idx = 0i64;
     while idx < list_len(lists, item_list) {
         let item = list_get(lists, item_list, idx);
-        if node_tag(nodes, item) == NODE_ITEM && node_b(nodes, item) == 1 {
+        let is_item = node_tag(nodes, item) == NODE_ITEM;
+        let is_pub = node_b(nodes, item) == 1;
+        let sym = if is_item { item_sym_of(nodes, item) } else { NONE };
+        let is_entry = sym != NONE && node_f(nodes, sym) == SYM_FUN_MAIN;
+        if is_item && (is_pub || is_entry) {
             render_item(names, nodes, lists, item, depth, output);
         }
         idx += 1;

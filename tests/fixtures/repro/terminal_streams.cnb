@@ -24,7 +24,7 @@ use Terminal.print
 use Terminal.print_line
 use Terminal.eprint
 
-pub fun main() impure I64
+fun main() impure I64
   print("out-a")
   eprint("err-a")
   print_line("out-b")

@@ -120,7 +120,7 @@ fun consume_and_fail(line: Collections.String) impure I64
   return 30
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val arguments = check_args()
   if arguments != 0
     return arguments

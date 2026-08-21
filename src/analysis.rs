@@ -905,12 +905,18 @@ fn field_completions(analysis: &Analysis, file: i64, dot: i64) -> Vec<(String, i
         }
         break;
     }
-    let mut id2 = 0i64;
-    while id2 < count {
-        if node_tag(&analysis.nodes, id2) == NODE_FIELDKEY && node_a(&analysis.nodes, id2) == key {
+    if key < 0 || node_tag(&analysis.nodes, key) != NODE_TYINFO {
+        return out;
+    }
+    // The member-fact rows of a struct key are chained from the descriptor
+    // (slot e of each row is the next), so completions walk only this
+    // key's rows instead of the whole arena.
+    let mut id2 = node_start(&analysis.nodes, key);
+    while id2 != NONE {
+        if node_tag(&analysis.nodes, id2) == NODE_FIELDKEY {
             out.push((name_text(&analysis.names, node_b(&analysis.nodes, id2)), COMPLETE_FIELD));
         }
-        id2 += 1;
+        id2 = node_e(&analysis.nodes, id2);
     }
     out
 }
@@ -1154,6 +1160,9 @@ fn locate_name(analysis: &Analysis, file: i64, start: i64, end: i64, name: &str)
 // (the `hover`/`sym_kind_label` name can read `Memory.allocate`; the source
 // token at every use site is always just `allocate`).
 fn short_name_of_sym(analysis: &Analysis, sym: i64) -> Option<String> {
+    if node_tag(&analysis.nodes, sym) == NODE_FN {
+        return Some(name_text(&analysis.names, node_a(&analysis.nodes, sym)));
+    }
     let decl = node_c(&analysis.nodes, sym);
     if decl == NONE {
         return None;
@@ -1765,6 +1774,38 @@ fn delete_span_with_newline(analysis: &Analysis, file: i64, start: i64, end: i64
     (file, start, extended_end, String::new())
 }
 
+// The exact deletion span of the `pub` token and its trailing whitespace,
+// located by walking backward from the declaration's `node_start`.
+fn remove_pub_fix(analysis: &Analysis, decl: i64) -> Option<(i64, i64, i64, String)> {
+    if decl == NONE {
+        return None;
+    }
+    let file = node_file(&analysis.nodes, decl);
+    let start = node_start(&analysis.nodes, decl);
+    let bytes = file_text_of(analysis, file).into_bytes();
+    let mut cursor = start;
+    while cursor > 0 {
+        let prev = cursor - 1;
+        let byte = bytes.get(prev as usize);
+        if byte == Some(&b' ') || byte == Some(&b'\t') {
+            cursor = prev;
+        } else {
+            break;
+        }
+    }
+    let kw_start = cursor - 3;
+    if kw_start < 0 {
+        return None;
+    }
+    if bytes.get(kw_start as usize) != Some(&b'p')
+        || bytes.get((kw_start + 1) as usize) != Some(&b'u')
+        || bytes.get((kw_start + 2) as usize) != Some(&b'b')
+    {
+        return None;
+    }
+    Some((file, kw_start, start, String::new()))
+}
+
 // The declaring `NODE_ITEM` a use site's symbol resolves to, if any -- only
 // item-kind declarations carry an `is_pub` flag (a bare method's `NODE_FN`
 // row does not), so a private *method* offers no "make public" fix here.
@@ -1834,6 +1875,21 @@ pub fn code_actions(analysis: &Analysis, file: i64, range_start: i64, range_end:
         {
             let name = short_name_of_sym(analysis, *sym).unwrap_or_default();
             out.push(CodeFix { title: format!("Make '{}' public", name), edits: vec![edit] });
+        }
+        if let DiagKind::UnnecessaryPub { sym } = &diag.kind {
+            let decl = node_c(&analysis.nodes, *sym);
+            if let Some(edit) = remove_pub_fix(analysis, decl) {
+                let name = short_name_of_sym(analysis, *sym).unwrap_or_default();
+                out.push(CodeFix { title: format!("Remove 'pub' from '{}'", name), edits: vec![edit] });
+            }
+            continue;
+        }
+        if let DiagKind::UnnecessaryFieldPub { field } = &diag.kind {
+            if let Some(edit) = remove_pub_fix(analysis, *field) {
+                let name = name_text(&analysis.names, node_a(&analysis.nodes, *field));
+                out.push(CodeFix { title: format!("Remove 'pub' from field '{}'", name), edits: vec![edit] });
+            }
+            continue;
         }
     }
     out

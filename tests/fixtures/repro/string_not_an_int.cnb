@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! A string literal has exactly one type, `&[U8]`, and adopts nothing from
 #! its context.
 #!
@@ -22,9 +23,9 @@
 #!      no comparison to lower. Comparing string *contents* is a loop over
 #!      the bytes, written explicitly.
 
-pub const NOT_AN_INT: I64 = "eight"
-pub const NOT_A_SLICE: &[U8] = 8
-pub const SUM: I64 = "one" + 1
+const NOT_AN_INT: I64 = "eight"
+const NOT_A_SLICE: &[U8] = 8
+const SUM: I64 = "one" + 1
 
 fun takes_int(value: I64) I64
   return value
@@ -42,7 +43,7 @@ fun compares() Bool
   return false
 end
 
-pub fun main() I64
+fun main() I64
   if compares()
     return 1
   end

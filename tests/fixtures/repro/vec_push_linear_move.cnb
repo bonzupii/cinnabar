@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! A generic linear element moved into a container is consumed by the
 #! insertion (MANIFESTO: inserting a value into a container moves it; a
 #! linear element is consumed by the insertion and cannot be reused).
@@ -28,6 +29,6 @@ fun push_twice<T>(vec: &mut Vec(T), element: T) impure Result(Unit, Collections.
   try vec_push(vec, element)
 end
 
-pub fun main() impure I64
+fun main() impure I64
   return 0
 end

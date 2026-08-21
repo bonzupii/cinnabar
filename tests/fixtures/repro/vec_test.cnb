@@ -40,7 +40,7 @@ fun fill_squares(vec: &mut Collections.Vec(I64)) impure Result(Unit, Collections
   return Ok(Unit)
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val vec = match vec_new[I64]()
     Ok(v) => v
     Err(error) => return BAD_NEW

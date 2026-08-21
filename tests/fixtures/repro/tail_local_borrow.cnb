@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! A self-tail-recursive call that passes a borrow of a local of the current
 #! function.  Marking such a call `tail` would promise the callee never
 #! touches the caller's frame while handing it a pointer into that frame,
@@ -13,7 +14,7 @@ fun recurse(n: I64, last: &I64) I64
   return recurse(n - 1, &current)
 end
 
-pub fun main() I64
+fun main() I64
   val root = 0
   return recurse(5, &root)
 end

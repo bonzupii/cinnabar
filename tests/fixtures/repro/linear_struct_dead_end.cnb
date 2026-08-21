@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! Bug-report 2a dead-end lock: a struct containing a linear value is
 #! constructible, but extracting the handle and leaving it unconsumed must
 #! be rejected -- the moved-out handle still must be consumed.
@@ -12,8 +13,8 @@ pub mod Collections
   pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
 end
 
-pub type Holder
-  pub vec: Collections.Vec(I64)
+type Holder
+  vec: Collections.Vec(I64)
 end
 
 use Collections.vec_new
@@ -27,7 +28,7 @@ fun make_holder() impure Result(Holder, Collections.Error)
   return Ok(Holder(vec: v))
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val h = match make_holder()
     Ok(value) => value
     Err(error) => return 1

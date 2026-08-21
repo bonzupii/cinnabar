@@ -55,20 +55,20 @@ use Memory.deallocate
 use Memory.write_u8
 use Memory.read_u8
 
-pub const BLOCK_LEN: Usize = 16
-pub const FIRST_OFFSET: Usize = 0
-pub const MID_OFFSET: Usize = 8
-pub const LAST_OFFSET: Usize = 15
+const BLOCK_LEN: Usize = 16
+const FIRST_OFFSET: Usize = 0
+const MID_OFFSET: Usize = 8
+const LAST_OFFSET: Usize = 15
 
 #! A byte that shares no set bit with any fill value (1..16, all below
 #! 0x11), so a neighbouring byte overwritten by a wide store cannot
 #! coincidentally still compare equal to what it should hold.
-pub const PROBE_BYTE: U8 = 0xA5
-pub const PROBE_VALUE: I64 = 0xA5
+const PROBE_BYTE: U8 = 0xA5
+const PROBE_VALUE: I64 = 0xA5
 
 #! `read_u8` returns a byte; -1 is outside a byte's range and so signals
 #! "the read itself failed" without colliding with any real value.
-pub const READ_FAILED: I64 = -1
+const READ_FAILED: I64 = -1
 
 #! Fill value for an offset: 1..BLOCK_LEN, distinct and never zero, so a
 #! clobbered neighbour cannot pass by holding a leftover zero.
@@ -223,7 +223,7 @@ fun run_checks(block: &Memory.Block) impure I64
   return 0
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val block = match allocate(BLOCK_LEN)
     Ok(value) => value
     Err(error) => return 1

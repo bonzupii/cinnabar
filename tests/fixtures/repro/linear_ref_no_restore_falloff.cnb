@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! Same rule as linear_ref_no_restore, exercised on the REACHABLE
 #! fall-off-end exit (this callee has no return statement): a callee that
 #! consumes a caller's linear handle through a `&mut` parameter must
@@ -16,16 +17,16 @@ end
 use Memory.allocate
 use Memory.deallocate
 
-pub type Holder
-  pub block: Memory.Block
-  pub tag: I64
+type Holder
+  block: Memory.Block
+  tag: I64
 end
 
 fun steal_block_falloff(r: &mut Holder) impure Unit
   deallocate(r.block)
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val block = match allocate(1)
     Ok(value) => value
     Err(error) => return 1

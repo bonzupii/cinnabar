@@ -29,7 +29,7 @@ fun fail_read(block: Memory.Block) impure I64
   return 3
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val block = match allocate(1)
     Ok(b) => b
     Err(error) => return fail_alloc()

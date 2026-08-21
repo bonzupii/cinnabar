@@ -6,15 +6,15 @@
 #!
 #! Exit code 0 means every check passed; 41..44 name the check that failed.
 
-pub const INT_MIN: I64 = -9223372036854775807 - 1
-pub const NEG_ONE: I64 = -1
+const INT_MIN: I64 = -9223372036854775807 - 1
+const NEG_ONE: I64 = -1
 
 #! Constant-folder path: INT_MIN / -1 folds to INT_MIN, INT_MIN % -1 folds
 #! to 0 (wrapping is the defined semantics; there is no panic or trap).
-pub const FOLD_MIN_DIV: I64 = INT_MIN / NEG_ONE
-pub const FOLD_MIN_MOD: I64 = INT_MIN % NEG_ONE
+const FOLD_MIN_DIV: I64 = INT_MIN / NEG_ONE
+const FOLD_MIN_MOD: I64 = INT_MIN % NEG_ONE
 
-pub fun main() I64
+fun main() I64
   #! Runtime path: both operands are variables, so the codegen div_neg1
   #! block runs and must produce the identical wrapped values.
   var a: I64 = INT_MIN

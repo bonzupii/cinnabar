@@ -23,6 +23,6 @@ end
 
 const UNUSED_CONST: I64 = 5
 
-pub fun main() I64
+fun main() I64
   return 0
 end

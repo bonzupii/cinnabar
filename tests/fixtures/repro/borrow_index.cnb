@@ -1,9 +1,9 @@
-pub const OOB_INDEX: Usize = 9
-pub const ONE_USIZE: Usize = 1
+const OOB_INDEX: Usize = 9
+const ONE_USIZE: Usize = 1
 
-pub type Pair
-  pub x: I64
-  pub y: I64
+type Pair
+  x: I64
+  y: I64
 end
 
 fun pair_sum(value: &Pair) I64
@@ -43,7 +43,7 @@ fun check_borrowed(p0: Pair, rest: &[Pair], shared_sum: I64, mut_sum: I64) I64
   return 1
 end
 
-pub fun main() I64
+fun main() I64
   val arr = [Pair(x: 1, y: 2), Pair(x: 3, y: 4)]
 
   # Constant in-range indices: &arr[i] and &mut arr[i] borrow the element.

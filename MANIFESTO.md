@@ -264,6 +264,8 @@ Private by default. `pub` exposes.
 
 Struct fields have independent visibility. A field is private by default; `pub` on the field exposes it. Reading or writing a field from outside its declaring module requires the field to be `pub`.
 
+Visibility is binary and strict: `pub` is permitted if and only if it is required to expose an item or struct field across a module boundary. An unconsumed `pub` annotation — including on `main`, on a root-file declaration only ever reached by callers in the same module, on an internal module helper, or on an item of an un-exported private module — is a hard compile-time error (`unnecessary_pub` on items, `unnecessary_field_pub` on struct fields).
+
 ### Generics
 Type constructors: `Vec(T)`, `Result(T, E)`.
 Function type parameters: `fun f<T>(...)`.
@@ -318,7 +320,7 @@ Enforced in the lexer, where casing is. One rule covers every position at once, 
 
 Every declared item must be reachable from `main`: functions, constants, structs, enums, traits, and native declarations alike. An item nothing reachable needs is a compile error, not a warning and not a lint.
 
-`pub` is not an exemption. It describes who may name a thing, not whether anything does — and exempting it would make one word the way to silence this diagnostic, which is the suppression mechanism this language does not have. A public function nobody calls is dead in exactly the way a private one is.
+`pub` is not an exemption from reachability: a public item nobody reaches is dead in exactly the way a private one is. Nor is `pub` itself free — visibility must be proven by a live cross-module access in the reachability graph, and an item declared `pub` with no incoming edge from a caller in a different module is an unconsumed visibility, a compile error reported exactly as an unreachable item is.
 
 Two consequences follow. A compilation unit with no `main` — a module on its own, or a `build.cnb` manifest — is not a whole program, so the rule does not apply to it; nothing that can be built into a binary escapes that way. And a diagnostic about reachability is reported only after type and borrow checking have run, because a program that does not type-check should be told what is wrong with it rather than which of its functions nothing calls.
 

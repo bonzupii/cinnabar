@@ -570,7 +570,15 @@ fn variant_payload_key(sess: &mut Session, enum_key: i64, variant_idx: i64, fiel
 
 fn enum_payload_ptr<'ctx>(sess: &mut Session<'ctx, '_, '_>, ptr: PointerValue<'ctx>, enum_key: i64, variant_idx: i64, span: (i64, i64, i64)) -> Result<(PointerValue<'ctx>, BasicTypeEnum<'ctx>), CodegenError> {
     let enum_ty = llvm_of(sess, enum_key, span)?;
-    let region = sess.2.build_struct_gep(enum_ty, ptr, 1, "").map_err(builder_fail)?;
+    // A discriminant-only enum (no variant carries a payload) lowers to a
+    // single-field struct; there is no index-1 field to point into, so the
+    // region is the enum pointer itself.  Only unit variants reach here in
+    // that case, and their callers never dereference the returned pointer.
+    let region = if payloadkey_rows_of(sess.5, enum_key).is_empty() {
+        ptr
+    } else {
+        sess.2.build_struct_gep(enum_ty, ptr, 1, "").map_err(builder_fail)?
+    };
     let pty = payload_struct_of(&mut ty_env(sess), enum_key, variant_idx, span)?;
     Ok((region, pty))
 }

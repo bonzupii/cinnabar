@@ -46,14 +46,14 @@
 #!   sdiv       I8   -10 / 3                   Euclidean: -4
 #!   srem       I8   -10 % 3                   2
 
-pub const MINUS: U8 = 0x2D
-pub const ZERO_DIGIT: U8 = 0x30
-pub const EQUALS: U8 = 0x3D
+const MINUS: U8 = 0x2D
+const ZERO_DIGIT: U8 = 0x30
+const EQUALS: U8 = 0x3D
 
-pub type ExitCode
-  pub ExitSuccess
-  pub ExitFailure
-  pub ExitDiagnostic(I64)
+type ExitCode
+  ExitSuccess
+  ExitFailure
+  ExitDiagnostic(I64)
 end
 
 pub mod Collections
@@ -561,7 +561,7 @@ fun run_all() impure Result(Unit, Collections.Error)
   return Ok(Unit)
 end
 
-pub fun main() impure ExitCode
+fun main() impure ExitCode
   match run_all()
     Ok(Unit) => return ExitSuccess
     Err(error) => return ExitFailure

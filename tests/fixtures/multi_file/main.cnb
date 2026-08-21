@@ -1,5 +1,5 @@
 use Math.add
 
-pub fun main() I64
+fun main() I64
   return add(10, 20)
 end

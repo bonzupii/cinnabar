@@ -1,6 +1,7 @@
-pub type Pair
-  pub x: I64
-  pub y: I64
+# [EXPECT REJECTION]
+type Pair
+  x: I64
+  y: I64
 end
 
 fun tamper(value: &Pair) I64
@@ -8,7 +9,7 @@ fun tamper(value: &Pair) I64
   return value.x
 end
 
-pub fun main() I64
+fun main() I64
   val p = Pair(x: 1, y: 2)
   return tamper(&p)
 end

@@ -30,6 +30,6 @@ fun sum_even_fib_below(cap: I64) I64
   return sum
 end
 
-pub fun main() I64
+fun main() I64
   return fib(TEN) + sum_even_fib_below(4000000)
 end

@@ -1,8 +1,9 @@
+# [EXPECT REJECTION]
 # idx10g_element_double_move (bug-report 1e control): two `&mut hs[0]`
 # borrows of the same element, then moving the linear field out through
 # each alias.  The second extraction reads a moved field, so the program
 # is rejected by the linearity rules even if the borrow checker were to
-# accept the aliasing element borrows.  (EXPECT_REJECTED.)
+# accept the aliasing element borrows.
 pub mod Collections
   pub nat type Vec(T)
   pub type Error
@@ -13,11 +14,11 @@ pub mod Collections
   pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
 end
 
-pub type Holder
-  pub vec: Collections.Vec(U8)
+type Holder
+  vec: Collections.Vec(U8)
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val v = match Collections.vec_new[U8]()
     Ok(value) => value
     Err(error) => return 1

@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! A linear element extracted by vec_pop introduces a new Live linear
 #! handle into the caller's linear context and must be explicitly
 #! consumed.  Dropping the popped Block is rejected exactly as dropping
@@ -47,7 +48,7 @@ fun fail_vec_free(vec: Collections.Vec(Memory.Block)) impure I64
   return 1
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val vec = match vec_new[Memory.Block]()
     Ok(v) => v
     Err(error) => return 1

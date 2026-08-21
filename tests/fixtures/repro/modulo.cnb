@@ -1,5 +1,5 @@
 #! % returns Result(I64, DivError); a non-zero divisor at runtime is Ok.
-pub fun main() I64
+fun main() I64
   var x: I64 = 17
   var y: I64 = 5
   val rem = match x % y

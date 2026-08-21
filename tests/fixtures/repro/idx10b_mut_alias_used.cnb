@@ -1,14 +1,15 @@
+# [EXPECT REJECTION]
 # idx10b_mut_alias_used (bug-report 1a): two `&mut` borrows of the SAME
 # array element, both live and both used, alias at runtime.  The second
 # exclusive borrow must be rejected: element borrows carry their index,
 # so a second exclusive borrow of element 0 while the first is live is a
-# conflict.  (EXPECT_REJECTED.)
-pub type P
-  pub x: I64
-  pub y: I64
+# conflict.
+type P
+  x: I64
+  y: I64
 end
 
-pub fun main() I64
+fun main() I64
   var pts: [P; 2] = [P(x: 1, y: 2), P(x: 3, y: 4)]
   val a = &mut pts[0]
   val b = &mut pts[0]

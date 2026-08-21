@@ -31,138 +31,138 @@
 #! +11 narrowing conversion.
 
 #! ---------------------------------------------------------------- U8 --
-pub const U8_MAX: U8 = 255
-pub const U8_MIN: U8 = 0
-pub const U8_WRAP_HI: U8 = U8_MAX + 1
-pub const U8_WRAP_LO: U8 = U8_MIN - 1
-pub const U8_SHL: U8 = 1 << 8
-pub const U8_SHR: U8 = 255 >> 9
-pub const U8_BAND: U8 = 0xF0 & 0x0F
-pub const U8_BOR: U8 = 0xF0 | 0x0F
-pub const U8_BXOR: U8 = 0xFF ^ 0x0F
-pub const U8_DIV: U8 = 250 / 3
-pub const U8_MOD: U8 = 250 % 3
+const U8_MAX: U8 = 255
+const U8_MIN: U8 = 0
+const U8_WRAP_HI: U8 = U8_MAX + 1
+const U8_WRAP_LO: U8 = U8_MIN - 1
+const U8_SHL: U8 = 1 << 8
+const U8_SHR: U8 = 255 >> 9
+const U8_BAND: U8 = 0xF0 & 0x0F
+const U8_BOR: U8 = 0xF0 | 0x0F
+const U8_BXOR: U8 = 0xFF ^ 0x0F
+const U8_DIV: U8 = 250 / 3
+const U8_MOD: U8 = 250 % 3
 
 #! ---------------------------------------------------------------- I8 --
-pub const I8_MAX: I8 = 127
-pub const I8_MIN: I8 = -128
-pub const I8_WRAP_HI: I8 = I8_MAX + 1
-pub const I8_WRAP_LO: I8 = I8_MIN - 1
-pub const I8_SHL: I8 = 1 << 8
-pub const I8_SHR: I8 = -128 >> 9
-pub const I8_BAND: I8 = 0x70 & 0x0F
-pub const I8_BOR: I8 = 0x70 | 0x0F
-pub const I8_BXOR: I8 = 0x7F ^ 0x0F
-pub const I8_DIV: I8 = -10 / 3
-pub const I8_MOD: I8 = -10 % 3
-pub const I8_NEG_ONE: I8 = -1
+const I8_MAX: I8 = 127
+const I8_MIN: I8 = -128
+const I8_WRAP_HI: I8 = I8_MAX + 1
+const I8_WRAP_LO: I8 = I8_MIN - 1
+const I8_SHL: I8 = 1 << 8
+const I8_SHR: I8 = -128 >> 9
+const I8_BAND: I8 = 0x70 & 0x0F
+const I8_BOR: I8 = 0x70 | 0x0F
+const I8_BXOR: I8 = 0x7F ^ 0x0F
+const I8_DIV: I8 = -10 / 3
+const I8_MOD: I8 = -10 % 3
+const I8_NEG_ONE: I8 = -1
 
 #! --------------------------------------------------------------- U16 --
-pub const U16_MAX: U16 = 65535
-pub const U16_MIN: U16 = 0
-pub const U16_WRAP_HI: U16 = U16_MAX + 1
-pub const U16_WRAP_LO: U16 = U16_MIN - 1
-pub const U16_SHL: U16 = 1 << 16
-pub const U16_SHR: U16 = 65535 >> 17
-pub const U16_BAND: U16 = 0xFF00 & 0x00FF
-pub const U16_BOR: U16 = 0xFF00 | 0x00FF
-pub const U16_BXOR: U16 = 0xFFFF ^ 0x00FF
-pub const U16_DIV: U16 = 60000 / 7
-pub const U16_MOD: U16 = 60000 % 7
-pub const U16_LOW_BYTE: U16 = 255
+const U16_MAX: U16 = 65535
+const U16_MIN: U16 = 0
+const U16_WRAP_HI: U16 = U16_MAX + 1
+const U16_WRAP_LO: U16 = U16_MIN - 1
+const U16_SHL: U16 = 1 << 16
+const U16_SHR: U16 = 65535 >> 17
+const U16_BAND: U16 = 0xFF00 & 0x00FF
+const U16_BOR: U16 = 0xFF00 | 0x00FF
+const U16_BXOR: U16 = 0xFFFF ^ 0x00FF
+const U16_DIV: U16 = 60000 / 7
+const U16_MOD: U16 = 60000 % 7
+const U16_LOW_BYTE: U16 = 255
 
 #! --------------------------------------------------------------- I16 --
-pub const I16_MAX: I16 = 32767
-pub const I16_MIN: I16 = -32768
-pub const I16_WRAP_HI: I16 = I16_MAX + 1
-pub const I16_WRAP_LO: I16 = I16_MIN - 1
-pub const I16_SHL: I16 = 1 << 16
-pub const I16_SHR: I16 = -32768 >> 17
-pub const I16_BAND: I16 = 0x7F00 & 0x00FF
-pub const I16_BOR: I16 = 0x7F00 | 0x00FF
-pub const I16_BXOR: I16 = 0x7FFF ^ 0x00FF
-pub const I16_DIV: I16 = -10 / 3
-pub const I16_MOD: I16 = -10 % 3
-pub const I16_NEG_ONE: I16 = -1
+const I16_MAX: I16 = 32767
+const I16_MIN: I16 = -32768
+const I16_WRAP_HI: I16 = I16_MAX + 1
+const I16_WRAP_LO: I16 = I16_MIN - 1
+const I16_SHL: I16 = 1 << 16
+const I16_SHR: I16 = -32768 >> 17
+const I16_BAND: I16 = 0x7F00 & 0x00FF
+const I16_BOR: I16 = 0x7F00 | 0x00FF
+const I16_BXOR: I16 = 0x7FFF ^ 0x00FF
+const I16_DIV: I16 = -10 / 3
+const I16_MOD: I16 = -10 % 3
+const I16_NEG_ONE: I16 = -1
 
 #! --------------------------------------------------------------- U32 --
-pub const U32_MAX: U32 = 0xFFFFFFFF
-pub const U32_MIN: U32 = 0
-pub const U32_WRAP_HI: U32 = U32_MAX + 1
-pub const U32_WRAP_LO: U32 = U32_MIN - 1
-pub const U32_SHL: U32 = 1 << 32
-pub const U32_SHR: U32 = 0xFFFFFFFF >> 33
-pub const U32_BAND: U32 = 0xFFFF0000 & 0x0000FFFF
-pub const U32_BOR: U32 = 0xFFFF0000 | 0x0000FFFF
-pub const U32_BXOR: U32 = 0xFFFFFFFF ^ 0x0000FFFF
-pub const U32_DIV: U32 = 4000000000 / 7
-pub const U32_MOD: U32 = 4000000000 % 7
+const U32_MAX: U32 = 0xFFFFFFFF
+const U32_MIN: U32 = 0
+const U32_WRAP_HI: U32 = U32_MAX + 1
+const U32_WRAP_LO: U32 = U32_MIN - 1
+const U32_SHL: U32 = 1 << 32
+const U32_SHR: U32 = 0xFFFFFFFF >> 33
+const U32_BAND: U32 = 0xFFFF0000 & 0x0000FFFF
+const U32_BOR: U32 = 0xFFFF0000 | 0x0000FFFF
+const U32_BXOR: U32 = 0xFFFFFFFF ^ 0x0000FFFF
+const U32_DIV: U32 = 4000000000 / 7
+const U32_MOD: U32 = 4000000000 % 7
 
 #! --------------------------------------------------------------- I32 --
-pub const I32_MAX: I32 = 2147483647
-pub const I32_MIN: I32 = -2147483648
-pub const I32_WRAP_HI: I32 = I32_MAX + 1
-pub const I32_WRAP_LO: I32 = I32_MIN - 1
-pub const I32_SHL: I32 = 1 << 32
-pub const I32_SHR: I32 = -2147483648 >> 33
-pub const I32_BAND: I32 = 0x7FFF0000 & 0x0000FFFF
-pub const I32_BOR: I32 = 0x7FFF0000 | 0x0000FFFF
-pub const I32_BXOR: I32 = 0x7FFFFFFF ^ 0x0000FFFF
-pub const I32_DIV: I32 = -10 / 3
-pub const I32_MOD: I32 = -10 % 3
-pub const I32_NEG_ONE: I32 = -1
+const I32_MAX: I32 = 2147483647
+const I32_MIN: I32 = -2147483648
+const I32_WRAP_HI: I32 = I32_MAX + 1
+const I32_WRAP_LO: I32 = I32_MIN - 1
+const I32_SHL: I32 = 1 << 32
+const I32_SHR: I32 = -2147483648 >> 33
+const I32_BAND: I32 = 0x7FFF0000 & 0x0000FFFF
+const I32_BOR: I32 = 0x7FFF0000 | 0x0000FFFF
+const I32_BXOR: I32 = 0x7FFFFFFF ^ 0x0000FFFF
+const I32_DIV: I32 = -10 / 3
+const I32_MOD: I32 = -10 % 3
+const I32_NEG_ONE: I32 = -1
 
 #! --------------------------------------------------------------- U64 --
-pub const U64_MAX: U64 = 0xFFFFFFFFFFFFFFFF
-pub const U64_MIN: U64 = 0
-pub const U64_WRAP_HI: U64 = U64_MAX + 1
-pub const U64_WRAP_LO: U64 = U64_MIN - 1
-pub const U64_SHL: U64 = 1 << 64
-pub const U64_SHR: U64 = 0xFFFFFFFFFFFFFFFF >> 65
-pub const U64_BAND: U64 = 0xFFFFFFFF00000000 & 0x00000000FFFFFFFF
-pub const U64_BOR: U64 = 0xFFFFFFFF00000000 | 0x00000000FFFFFFFF
-pub const U64_BXOR: U64 = 0xFFFFFFFFFFFFFFFF ^ 0x00000000FFFFFFFF
-pub const U64_DIV: U64 = 0xFFFFFFFFFFFFFFFF / 3
-pub const U64_MOD: U64 = 0xFFFFFFFFFFFFFFFF % 3
+const U64_MAX: U64 = 0xFFFFFFFFFFFFFFFF
+const U64_MIN: U64 = 0
+const U64_WRAP_HI: U64 = U64_MAX + 1
+const U64_WRAP_LO: U64 = U64_MIN - 1
+const U64_SHL: U64 = 1 << 64
+const U64_SHR: U64 = 0xFFFFFFFFFFFFFFFF >> 65
+const U64_BAND: U64 = 0xFFFFFFFF00000000 & 0x00000000FFFFFFFF
+const U64_BOR: U64 = 0xFFFFFFFF00000000 | 0x00000000FFFFFFFF
+const U64_BXOR: U64 = 0xFFFFFFFFFFFFFFFF ^ 0x00000000FFFFFFFF
+const U64_DIV: U64 = 0xFFFFFFFFFFFFFFFF / 3
+const U64_MOD: U64 = 0xFFFFFFFFFFFFFFFF % 3
 
 #! ------------------------------------------------------------- Usize --
-pub const USIZE_MAX: Usize = 0xFFFFFFFFFFFFFFFF
-pub const USIZE_MIN: Usize = 0
-pub const USIZE_WRAP_HI: Usize = USIZE_MAX + 1
-pub const USIZE_WRAP_LO: Usize = USIZE_MIN - 1
-pub const USIZE_SHL: Usize = 1 << 64
-pub const USIZE_SHR: Usize = 0xFFFFFFFFFFFFFFFF >> 65
-pub const USIZE_BAND: Usize = 0xFFFFFFFF00000000 & 0x00000000FFFFFFFF
-pub const USIZE_BOR: Usize = 0xFFFFFFFF00000000 | 0x00000000FFFFFFFF
-pub const USIZE_BXOR: Usize = 0xFFFFFFFFFFFFFFFF ^ 0x00000000FFFFFFFF
-pub const USIZE_DIV: Usize = 0xFFFFFFFFFFFFFFFF / 3
-pub const USIZE_MOD: Usize = 0xFFFFFFFFFFFFFFFF % 3
+const USIZE_MAX: Usize = 0xFFFFFFFFFFFFFFFF
+const USIZE_MIN: Usize = 0
+const USIZE_WRAP_HI: Usize = USIZE_MAX + 1
+const USIZE_WRAP_LO: Usize = USIZE_MIN - 1
+const USIZE_SHL: Usize = 1 << 64
+const USIZE_SHR: Usize = 0xFFFFFFFFFFFFFFFF >> 65
+const USIZE_BAND: Usize = 0xFFFFFFFF00000000 & 0x00000000FFFFFFFF
+const USIZE_BOR: Usize = 0xFFFFFFFF00000000 | 0x00000000FFFFFFFF
+const USIZE_BXOR: Usize = 0xFFFFFFFFFFFFFFFF ^ 0x00000000FFFFFFFF
+const USIZE_DIV: Usize = 0xFFFFFFFFFFFFFFFF / 3
+const USIZE_MOD: Usize = 0xFFFFFFFFFFFFFFFF % 3
 
 #! --------------------------------------------------------------- I64 --
-pub const I64_MAX: I64 = 9223372036854775807
-pub const I64_MIN: I64 = -9223372036854775807 - 1
-pub const I64_WRAP_HI: I64 = I64_MAX + 1
-pub const I64_WRAP_LO: I64 = I64_MIN - 1
-pub const I64_SHL: I64 = 1 << 64
-pub const I64_SHR: I64 = I64_MIN >> 65
-pub const I64_BAND: I64 = 0x7FFFFFFF00000000 & 0x00000000FFFFFFFF
-pub const I64_BOR: I64 = 0x7FFFFFFF00000000 | 0x00000000FFFFFFFF
-pub const I64_BXOR: I64 = 0x7FFFFFFFFFFFFFFF ^ 0x00000000FFFFFFFF
-pub const I64_DIV: I64 = -10 / 3
-pub const I64_MOD: I64 = -10 % 3
+const I64_MAX: I64 = 9223372036854775807
+const I64_MIN: I64 = -9223372036854775807 - 1
+const I64_WRAP_HI: I64 = I64_MAX + 1
+const I64_WRAP_LO: I64 = I64_MIN - 1
+const I64_SHL: I64 = 1 << 64
+const I64_SHR: I64 = I64_MIN >> 65
+const I64_BAND: I64 = 0x7FFFFFFF00000000 & 0x00000000FFFFFFFF
+const I64_BOR: I64 = 0x7FFFFFFF00000000 | 0x00000000FFFFFFFF
+const I64_BXOR: I64 = 0x7FFFFFFFFFFFFFFF ^ 0x00000000FFFFFFFF
+const I64_DIV: I64 = -10 / 3
+const I64_MOD: I64 = -10 % 3
 
 #! ------------------------------------------------------------- Isize --
-pub const ISIZE_MAX: Isize = 9223372036854775807
-pub const ISIZE_MIN: Isize = -9223372036854775807 - 1
-pub const ISIZE_WRAP_HI: Isize = ISIZE_MAX + 1
-pub const ISIZE_WRAP_LO: Isize = ISIZE_MIN - 1
-pub const ISIZE_SHL: Isize = 1 << 64
-pub const ISIZE_SHR: Isize = ISIZE_MIN >> 65
-pub const ISIZE_BAND: Isize = 0x7FFFFFFF00000000 & 0x00000000FFFFFFFF
-pub const ISIZE_BOR: Isize = 0x7FFFFFFF00000000 | 0x00000000FFFFFFFF
-pub const ISIZE_BXOR: Isize = 0x7FFFFFFFFFFFFFFF ^ 0x00000000FFFFFFFF
-pub const ISIZE_DIV: Isize = -10 / 3
-pub const ISIZE_MOD: Isize = -10 % 3
+const ISIZE_MAX: Isize = 9223372036854775807
+const ISIZE_MIN: Isize = -9223372036854775807 - 1
+const ISIZE_WRAP_HI: Isize = ISIZE_MAX + 1
+const ISIZE_WRAP_LO: Isize = ISIZE_MIN - 1
+const ISIZE_SHL: Isize = 1 << 64
+const ISIZE_SHR: Isize = ISIZE_MIN >> 65
+const ISIZE_BAND: Isize = 0x7FFFFFFF00000000 & 0x00000000FFFFFFFF
+const ISIZE_BOR: Isize = 0x7FFFFFFF00000000 | 0x00000000FFFFFFFF
+const ISIZE_BXOR: Isize = 0x7FFFFFFFFFFFFFFF ^ 0x00000000FFFFFFFF
+const ISIZE_DIV: Isize = -10 / 3
+const ISIZE_MOD: Isize = -10 % 3
 
 #! U8: unsigned 8-bit.  255 + 1 wraps to 0, 0 - 1 wraps to 255, shift
 #! counts mask by 7, and `>` is an unsigned compare (a signed compare
@@ -843,7 +843,7 @@ fun check_isize() I64
   return 0
 end
 
-pub fun main() I64
+fun main() I64
   val r_u8 = check_u8()
   if r_u8 != 0
     return r_u8

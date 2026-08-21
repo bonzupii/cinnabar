@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 # ret_borrow_sole_input (bug-report d4 control): a callee returns a view of
 # its sole input; freeing that input while the returned borrow is live must
 # be rejected.  This locks the sound single-input case that the multi-input
@@ -22,7 +23,7 @@ fun view_of(v: &Collections.Vec(I64)) &[I64]
   return vec_view(v)
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val x = match vec_new[I64]()
     Ok(v) => v
     Err(error) => return 1

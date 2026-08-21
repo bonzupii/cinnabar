@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! Consuming a linear field through a `&mut` to an untracked temporary
 #! (`&mut make_holder()`) would silently duplicate the handle: the
 #! referent must be a tracked local.
@@ -14,16 +15,16 @@ end
 use Memory.allocate
 use Memory.deallocate
 
-pub type Holder
-  pub block: Memory.Block
-  pub tag: I64
+type Holder
+  block: Memory.Block
+  tag: I64
 end
 
 fun make_holder(block: Memory.Block) Holder
   return Holder(block: block, tag: 7)
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val block = match allocate(1)
     Ok(value) => value
     Err(error) => return 1

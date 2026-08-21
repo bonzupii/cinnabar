@@ -49,7 +49,7 @@ fun accepted() impure I64
   return 0
 end
 
-pub fun main() impure I64
+fun main() impure I64
   match read_line()
     Ok(line) => return unexpected_line(line)
     Err(Collections.InvalidUtf8) => return accepted()

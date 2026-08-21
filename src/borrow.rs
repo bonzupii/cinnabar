@@ -149,6 +149,14 @@ type F = (
     Vec<Vec<i64>>,
     Vec<(i64, i64, i64)>,
     Vec<(i64, i64, Vec<Vec<i64>>)>,
+    // Lowering-time flow state, threaded as the CFG is built and consumed
+    // in place of flat backward scans over the op array: the extraction
+    // token most recently recorded per container binding, the (container,
+    // token) pair most recently linked per binding, and the referent owner
+    // resolved per binding at its most recent bind/assign-with-loans.
+    Vec<i64>,
+    Vec<(i64, i64)>,
+    Vec<(i64, i64)>,
 );
 
 type B = (
@@ -729,6 +737,7 @@ fn build_fn(f: &mut F, b: &mut B, ctx: &mut Ctx, fn_node: i64) -> bool {
             let loan = alloc_loan(f, binding, if ty_kind_of(ctx.1, key) == TYD_REF_MUT { L_MUT } else { L_SHARED }, 1, NONE);
             let loans = [loan];
             set_op_loans(f, op, &loans);
+            note_referent(f, binding, &loans);
         } else {
             emit_op(f, OP_BIND, binding, NONE, (0, 1, 0), span);
         }
@@ -840,8 +849,13 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         // A struct/array literal whose field initialisers borrow keeps those
         // loans against the new binding, so a later borrow of `s.f` resolves
         // back to the underlying owner instead of being dropped.
-        if has_init == 1 && (flags.1 == 1 || !prod.is_empty()) {
+        let loans_attached = has_init == 1 && (flags.1 == 1 || !prod.is_empty());
+        if loans_attached {
             set_op_loans(f, op, &prod);
+        }
+        let referent_loans: &[i64] = if loans_attached { &prod } else { &[] };
+        if flags.1 == 1 || loans_attached {
+            note_referent(f, binding, referent_loans);
         }
         if has_init == 1 && node_a(ctx.1, init) == EXPR_CALL {
             let container_name = callfact_extraction_of(ctx.1, init);
@@ -850,6 +864,10 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
                 let token = current_extraction_token(f, container);
                 if container >= 0 && token >= 0 {
                     emit_op(f, OP_CONT_LINK, binding, NONE, (container, token, 0), span);
+                    while f.13.len() <= binding as usize {
+                        f.13.push((NONE, NONE));
+                    }
+                    f.13[binding as usize] = (container, token);
                 }
             }
         }
@@ -876,8 +894,13 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         let (binding, path, tkind, owner) = assign_target_of(f, b, ctx, target);
         let is_ref = if tkind == 0 && binding >= 0 { binding_at(f, binding).3 } else { 0 };
         let op = emit_op(f, OP_ASSIGN, binding, path, (is_ref, tkind, owner), span);
-        if tkind == 0 && (is_ref == 1 || !prod.is_empty()) {
+        let loans_attached = tkind == 0 && (is_ref == 1 || !prod.is_empty());
+        if loans_attached {
             set_op_loans(f, op, &prod);
+        }
+        let referent_loans: &[i64] = if loans_attached { &prod } else { &[] };
+        if is_ref == 1 || loans_attached {
+            note_referent(f, binding, referent_loans);
         }
         if binding >= 0 && container_has_linear_elem(ctx, binding_at(f, binding).1) {
             if is_empty_container_expr(ctx, value) {
@@ -898,6 +921,10 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
                 let token = current_extraction_token(f, container);
                 if container >= 0 && token >= 0 {
                     emit_op(f, OP_CONT_LINK, binding, NONE, (container, token, 0), span);
+                    while f.13.len() <= binding as usize {
+                        f.13.push((NONE, NONE));
+                    }
+                    f.13[binding as usize] = (container, token);
                 }
             }
         }
@@ -1565,62 +1592,84 @@ fn referent_binding_of(f: &F, binding: i64) -> i64 {
     }
 }
 
+// Reads a binding's referent from the threaded flow state that
+// `note_referent` records at each bind/assign-with-loans emission, then
+// unifies it with the running owner.  The resolution itself happened once,
+// at the emission site; no op-array history is re-walked here.
 fn origin_owners_of(f: &F, binding: i64, owner: &mut i64, ok: &mut bool, visited: &mut Vec<i64>) {
-    if !*ok || list_has(visited, binding) {
+    if !*ok || binding < 0 || list_has(visited, binding) {
         return;
     }
     visited.push(binding);
-    // Backward scan: the most recent bind/assign of this binding determines
-    // its current referents.  A forward scan returns on the first
-    // (stale) re-initialisation and can resolve a reassigned &mut binding
-    // to its old referent.  Only loan-bearing ops carry referent facts;
-    // a plain value binding has no loans to contribute.
-    let mut op = f.4.len() as i64 - 1;
-    while op >= 0 {
-        let row = op_at(f, op);
-        // Loans are read for reference bindings and for any binding whose
-        // OP_BIND/OP_ASSIGN carries loans: a struct literal whose field
-        // initialisers borrow keeps those field loans on its own bind, so a
-        // later borrow of `s.f` resolves back to the underlying owner.
-        if row.1 == binding
-            && (row.0 == OP_BIND || row.0 == OP_ASSIGN)
-            && (row.3 == 1 || !op_loans_at(f, op).is_empty())
-        {
-            let loans = op_loans_at(f, op);
-            let mut idx = 0usize;
-            while idx < loans.len() {
-                let entry = match loans.get(idx) {
-                    Some(value) => *value,
-                    None => break,
-                };
-                if is_ref_origin(entry) {
-                    origin_owners_of(f, -1 - entry, owner, ok, visited);
-                } else {
-                    let lrow = loan_at(f, entry);
-                    let o = lrow.0;
-                    if o < 0 {
-                        idx += 1;
-                        continue;
-                    }
-                    let orow = binding_at(f, o);
-                    if orow.3 == 1 {
-                        if orow.4 == 1 {
-                            *ok = false;
-                        } else {
-                            origin_owners_of(f, o, owner, ok, visited);
-                        }
-                    } else if *owner == NONE {
-                        *owner = o;
-                    } else if *owner != o {
-                        *ok = false;
-                    }
-                }
-                idx += 1;
-            }
-            return;
-        }
-        op -= 1;
+    let entry = match f.14.get(binding as usize) {
+        Some(value) => *value,
+        None => (NONE, 1),
+    };
+    if entry.1 != 1 {
+        *ok = false;
+        return;
     }
+    let referent = entry.0;
+    if referent == NONE {
+        return;
+    }
+    if *owner == NONE {
+        *owner = referent;
+    } else if *owner != referent {
+        *ok = false;
+    }
+}
+
+// Resolves a bind/assign's loan list to the single underlying referent
+// owner at emission time and records it in the threaded flow state, so a
+// later query reads the fact instead of scanning the op array.  The loan
+// owners a bind references all predate the bind, so their own referent
+// entries are already resolved when this runs.
+fn note_referent(f: &mut F, binding: i64, loans: &[i64]) {
+    if binding < 0 {
+        return;
+    }
+    let mut owner = NONE;
+    let mut ok = true;
+    let mut visited: Vec<i64> = Vec::new();
+    // A ref-origin entry resolves through the referenced binding's own
+    // threaded entry, a loan entry through its owner binding, and a plain
+    // owner unifies with the running result.  This is the loan-following
+    // the old query-time scan performed, evaluated once here.
+    let mut idx = 0usize;
+    while idx < loans.len() {
+        let entry = match loans.get(idx) {
+            Some(value) => *value,
+            None => break,
+        };
+        if is_ref_origin(entry) {
+            origin_owners_of(f, -1 - entry, &mut owner, &mut ok, &mut visited);
+        } else {
+            let lrow = loan_at(f, entry);
+            let o = lrow.0;
+            if o < 0 {
+                idx += 1;
+                continue;
+            }
+            let orow = binding_at(f, o);
+            if orow.3 == 1 {
+                if orow.4 == 1 {
+                    ok = false;
+                } else {
+                    origin_owners_of(f, o, &mut owner, &mut ok, &mut visited);
+                }
+            } else if owner == NONE {
+                owner = o;
+            } else if owner != o {
+                ok = false;
+            }
+        }
+        idx += 1;
+    }
+    while f.14.len() <= binding as usize {
+        f.14.push((NONE, 1));
+    }
+    f.14[binding as usize] = (owner, if ok { 1 } else { 0 });
 }
 
 fn dotted_name_of(f: &F, ctx: &mut Ctx, binding: i64, path: i64) -> String {
@@ -1828,6 +1877,12 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
             if let Some(row) = f.4.get_mut(op as usize) {
                 row.3 = op;
             }
+            // Thread the fresh token into the lowering-time flow state so
+            // the match and link consumers read it without scanning.
+            while f.12.len() <= container as usize {
+                f.12.push(NONE);
+            }
+            f.12[container as usize] = op;
         }
     }
     if call_mode == NAT_MODE_CONSUME {
@@ -1881,29 +1936,30 @@ fn path_root_binding_of(ctx: &mut Ctx, b: &B, expr: i64) -> i64 {
     lookup_name(b, first)
 }
 
+// The extraction token most recently recorded for a container binding,
+// threaded by the OP_CONT_EXTRACT emission site into the flow state; a
+// container with no extraction on the current path reads NONE.
 fn current_extraction_token(f: &F, container: i64) -> i64 {
-    if f.4.is_empty() {
+    if container < 0 {
         return NONE;
     }
-    let op = f.4.len() as i64 - 1;
-    let row = op_at(f, op);
-    if row.0 == OP_CONT_EXTRACT && row.1 == container {
-        row.3
-    } else {
-        NONE
+    match f.12.get(container as usize) {
+        Some(token) => *token,
+        None => NONE,
     }
 }
 
+// The (container, token) pair most recently linked for a binding, threaded
+// by the OP_CONT_LINK emission sites; a binding with no link on the
+// current path reads (NONE, NONE).
 fn latest_extraction_link(f: &F, binding: i64) -> (i64, i64) {
-    let mut op = f.4.len() as i64;
-    while op > 0 {
-        op -= 1;
-        let row = op_at(f, op);
-        if row.0 == OP_CONT_LINK && row.1 == binding {
-            return (row.3, row.4);
-        }
+    if binding < 0 {
+        return (NONE, NONE);
     }
-    (NONE, NONE)
+    match f.13.get(binding as usize) {
+        Some(link) => *link,
+        None => (NONE, NONE),
+    }
 }
 
 fn wrap_stmt_list(lists: &mut Vec<Vec<i64>>, stmt: i64) -> i64 {
@@ -2015,6 +2071,7 @@ fn bind_pattern_name(f: &mut F, b: &mut B, ctx: &mut Ctx, binding: (i64, i64), s
             loans.push(loan);
         }
         set_op_loans(f, op, &loans);
+        note_referent(f, binding, &loans);
     }
     if container_has_linear_elem(ctx, key) {
         if known_empty == 1 {
@@ -2090,6 +2147,7 @@ fn empty_graph() -> F {
     (
         Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(),
         Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(),
+        Vec::new(), Vec::new(), Vec::new(),
     )
 }
 
@@ -3857,12 +3915,12 @@ use Memory.allocate
 use Memory.deallocate
 use Memory.read_u8
 
-pub type Holder
-  pub block: Memory.Block
-  pub tag: I64
+type Holder
+  block: Memory.Block
+  tag: I64
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val block = match allocate(1)
     Ok(value) => value
     Err(error) => return 1
@@ -3902,9 +3960,9 @@ use Memory.allocate
 use Memory.deallocate
 use Memory.read_u8
 
-pub type Holder
-  pub block: Memory.Block
-  pub tag: I64
+type Holder
+  block: Memory.Block
+  tag: I64
 end
 
 fun consume(holder: Holder) impure Unit
@@ -3912,7 +3970,7 @@ fun consume(holder: Holder) impure Unit
   return Unit
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val block = match allocate(1)
     Ok(value) => value
     Err(error) => return 1
@@ -3949,12 +4007,12 @@ use Memory.allocate
 use Memory.deallocate
 use Memory.read_u8
 
-pub type Holder
-  pub block: Memory.Block
-  pub tag: I64
+type Holder
+  block: Memory.Block
+  tag: I64
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val block = match allocate(1)
     Ok(value) => value
     Err(error) => return 1
@@ -4040,6 +4098,27 @@ pub mod Memory
 end
 
 pub mod Collections
+  nat type Vec(T)
+  pub type Error
+    pub AllocationFailed(Usize)
+    pub IndexOutOfBounds(Usize)
+  end
+  pub nat fun vec_new<T>() impure Result(Vec(T), Error)
+  pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
+end
+
+use Collections.vec_new
+use Collections.vec_free
+"#;
+
+    // The same surface with `Vec` kept public, for tests whose source names
+    // `Collections.Vec` in a signature across the module boundary.
+    const MINIMAL_CONTAINER_NATIVES_PUB_VEC: &str = r#"
+pub mod Memory
+  pub nat type Block
+end
+
+pub mod Collections
   pub nat type Vec(T)
   pub type Error
     pub AllocationFailed(Usize)
@@ -4062,7 +4141,7 @@ pub mod Memory
 end
 
 pub mod Collections
-  pub nat type Vec(T)
+  nat type Vec(T)
   pub type Error
     pub AllocationFailed(Usize)
     pub IndexOutOfBounds(Usize)
@@ -4145,7 +4224,7 @@ end
     fn freeing_a_container_that_was_never_refilled_is_still_accepted() {
         let source = format!(
             "{}
-pub fun main() impure I64
+fun main() impure I64
   var v = match vec_new[Memory.Block]()
     Ok(value) => value
     Err(error) => return 1
@@ -4181,12 +4260,12 @@ fun make_full_vec() impure Collections.Vec(Memory.Block)
   end
 end
 
-pub fun main() impure I64
+fun main() impure I64
   vec_free(make_full_vec())
   return 0
 end
 ",
-            MINIMAL_CONTAINER_NATIVES
+            MINIMAL_CONTAINER_NATIVES_PUB_VEC
         );
         let errors = errors_for(&source);
         assert!(errors.iter().any(|m| m.contains("cannot free container holding linear elements")), "{:?}", errors);
@@ -4197,7 +4276,7 @@ end
     fn freeing_a_directly_provably_fresh_container_is_still_accepted() {
         let source = format!(
             "{}
-pub fun main() impure I64
+fun main() impure I64
   match vec_new[Memory.Block]()
     Ok(v) => vec_free(v)
     Err(error) => Unit

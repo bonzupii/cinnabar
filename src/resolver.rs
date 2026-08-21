@@ -66,27 +66,15 @@ type State<'a> = (
     &'a Target,
 );
 
-/// The owner of references that belong to no nameable item.
-///
-/// An `impl` extends the type it is for rather than being something anyone
-/// calls by name, and trait methods are reached by dispatch rather than by a
-/// resolved path. Attributing their references here — and treating this as
-/// permanently reached — keeps everything they mention alive.
+/// The owner of references that belong to no nameable item: the permanent
+/// root the reachability fixpoint seeds with. A reference outside any item
+/// is attributed here so it can only keep something alive, never kill it.
 const ROOT_OWNER: i64 = -2;
 
-/// Resolves names, and separately reports which items nothing reaches.
+/// Resolves names and reports which items and imports nothing reaches.
 ///
 /// `deferred` receives the unused-item and unused-import diagnostics rather
-/// than `errors`. What nothing uses is a whole-program property, not a
-/// name-resolution one, and reporting it here would stop the pipeline before
-/// the type checker ran — so a file with a type error would be told its
-/// functions and imports are unused and never told what was actually wrong
-/// with them. The caller reports these once the later stages have had their
-/// say.
-/// Where this stage puts what it has to say.
-///
-/// The three travel together because they are one decision — what the user
-/// is told — split only by when it is said.
+/// than `errors`; the caller reports them once the later stages have run.
 pub struct Diagnostics<'a> {
     pub errors: &'a mut Vec<Diag>,
     pub notes: &'a mut Vec<Note>,
@@ -184,12 +172,8 @@ pub fn resolve(
     classify_native_modes(&mut state);
     link_extraction_surfaces(&mut state);
 
-    // Deferred, for the same reason reachability is: "nothing names this
-    // import" is a statement about the finished program, and reporting it
-    // from here would return `false` and stop the pipeline — so a file with
-    // a type or borrow error would be told which of its imports look idle
-    // and never told what was actually wrong with it. The two diagnostics
-    // are the same kind of fact and are reported at the same moment.
+    // Unused imports are whole-program facts; the diagnostic is deferred
+    // with the reachability set and reported after the later stages run.
     check_unused_imports(state.0, state.1, state.2, deferred, state.9, root);
     idx = 0;
     while idx < ext_mods.len() {
@@ -203,8 +187,8 @@ pub fn resolve(
     materialize_scope_facts(&mut state);
 
     // Reachability last, and only if nothing else failed. A program whose
-    // names do not resolve has no dependency graph worth walking, and
-    // reporting every item as unused on top of the real error would bury it.
+    // names do not resolve has no dependency graph worth walking; reporting
+    // every item as unused on top of the real error would bury it.
     if state.3.is_empty()
         && let Some(reached) = reachable_from_main(&state)
     {
@@ -471,6 +455,10 @@ fn sym_is_pub(nodes: &[i64], sym: i64) -> i64 {
         return item_is_pub(nodes, decl);
     }
     if node_tag(nodes, decl) == NODE_VARIANT {
+        let enum_item = node_e(nodes, decl);
+        if enum_item != NONE && node_tag(nodes, enum_item) == NODE_ITEM {
+            return item_is_pub(nodes, enum_item);
+        }
         return node_c(nodes, decl);
     }
     1
@@ -744,7 +732,7 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
         let sub = alloc_scope(state.4, state.5, state.6, state.7, scope, prefix, is_pub);
         node_set_e(state.1, sym, sub);
         state.8.push((item, sub));
-        collect_trait_methods(state, sub, full, item);
+        collect_trait_methods(state, scope, sub, full, item);
     } else if kind == ITEM_IMPL {
         item_set_sym(state.1, item, NONE);
     } else if kind == ITEM_FUN || kind == ITEM_NATIVE_FUN {
@@ -854,8 +842,20 @@ fn collect_variants(state: &mut State, hoist_scope: i64, sub: i64, enum_full: i6
         report_casing(state.0, var_name, 2, state.3, node_file(state.1, variant), node_start(state.1, variant), node_end(state.1, variant));
         let single = single_name_list(state.2, enum_full);
         let full = qualified_name(state.0, state.2, single, var_name);
-        let sym = alloc_sym(state.1, SYM_VARIANT, full, variant, sub, NONE);
+        let sym = alloc_sym(state.1, SYM_VARIANT, full, variant, hoist_scope, NONE);
         variant_set_sym(state.1, variant, sym);
+        // Slot e records the parent enum item so variant visibility can
+        // inherit the enum's `pub` flag without re-walking the module.
+        node_set_e(state.1, variant, item);
+        // A reached variant pulls its enclosing enum into the fixpoint:
+        // the edge (variant, enum) makes construction reach the type.
+        let enum_sym = item_sym_of(state.1, item);
+        if enum_sym != NONE
+            && enum_sym != sym
+            && !state.12.iter().any(|edge| edge.0 == sym && edge.1 == enum_sym)
+        {
+            state.12.push((sym, enum_sym));
+        }
         push_entry(state.4, sub, var_name, sym, NS_VALUE, NONE);
         insert_hoisted(state, hoist_scope, var_name, sym, variant);
         if let Some(slot) = seed_variant_slot(prim, idx) {
@@ -990,7 +990,7 @@ fn insert_hoisted(state: &mut State, scope: i64, name: i64, sym: i64, decl: i64)
     }
 }
 
-fn collect_trait_methods(state: &mut State, sub: i64, trait_full: i64, item: i64) {
+fn collect_trait_methods(state: &mut State, scope: i64, sub: i64, trait_full: i64, item: i64) {
     let methods = node_e(state.1, item);
     let count = list_len(state.2, methods);
     let mut idx = 0i64;
@@ -1000,7 +1000,10 @@ fn collect_trait_methods(state: &mut State, sub: i64, trait_full: i64, item: i64
         report_casing(state.0, name, 1, state.3, node_file(state.1, fn_node), node_start(state.1, fn_node), node_end(state.1, fn_node));
         let single = single_name_list(state.2, trait_full);
         let full = qualified_name(state.0, state.2, single, name);
-        let sym = alloc_sym(state.1, SYM_TRAIT_METHOD, full, fn_node, sub, NONE);
+        let sym = alloc_sym(state.1, SYM_TRAIT_METHOD, full, fn_node, scope, NONE);
+        // Slot e records the parent trait item so trait-method lookups can
+        // read the owning trait directly instead of matching scopes.
+        node_set_e(state.1, sym, item);
         push_entry(state.4, sub, name, sym, NS_VALUE, NONE);
         idx += 1;
     }
@@ -1920,6 +1923,16 @@ fn rewrite_import(scopes: &mut [Vec<i64>], scope: i64, use_item: i64, sym: i64, 
 }
 
 fn resolve_path(state: &mut State, scope: i64, segs: i64, final_ns: i64) -> i64 {
+    let sym = resolve_path_sym(state, scope, segs, final_ns);
+    record_dependency(state, sym);
+    sym
+}
+
+// The pure descent of `resolve_path`: find the symbol a path names without
+// recording a dependency edge.  An impl's target is resolved this way so
+// the impl cannot keep its own type alive; every ordinary reference goes
+// through `resolve_path`, which records.
+fn resolve_path_sym(state: &mut State, scope: i64, segs: i64, final_ns: i64) -> i64 {
     let count = list_len(state.2, segs);
     if count == 0 {
         return NONE;
@@ -1945,29 +1958,36 @@ fn resolve_path(state: &mut State, scope: i64, segs: i64, final_ns: i64) -> i64 
     if sym != NONE && src != NONE {
         mark_used(state.9, src);
     }
-    record_dependency(state, sym);
     sym
 }
 
-// Records that the item currently being resolved depends on `sym`.
+// Records that the items currently being resolved depend on `sym`.
 //
-// A reference outside any item — there are none today, but the stack is
-// empty before the first item and after the last — is attributed to the
-// permanent root rather than dropped, so it can only ever keep something
-// alive, never kill it.
+// Every owner on the stack gets an incoming edge: a plain item has one
+// owner, and an impl body has its implementing type pushed, so its
+// references keep a callee alive only while the type is reached. When
+// the stack is empty, the reference is attributed to the permanent root
+// owner.
 fn record_dependency(state: &mut State, sym: i64) {
     if sym == NONE {
         return;
     }
-    let owner = match state.11.last() {
-        Some(value) => *value,
-        None => ROOT_OWNER,
-    };
-    if owner == sym {
+    if state.11.is_empty() {
+        if !state.12.iter().any(|edge| edge.0 == ROOT_OWNER && edge.1 == sym) {
+            state.12.push((ROOT_OWNER, sym));
+        }
         return;
     }
-    if !state.12.iter().any(|edge| edge.0 == owner && edge.1 == sym) {
-        state.12.push((owner, sym));
+    let mut oidx = 0usize;
+    while oidx < state.11.len() {
+        let owner = match state.11.get(oidx) {
+            Some(value) => *value,
+            None => break,
+        };
+        if owner != sym && !state.12.iter().any(|edge| edge.0 == owner && edge.1 == sym) {
+            state.12.push((owner, sym));
+        }
+        oidx += 1;
     }
 }
 
@@ -2049,27 +2069,78 @@ fn unreachable_label(kind: i64) -> Option<&'static str> {
     }
 }
 
-/// Whether any variant of the enum declared by `item` is reached.
-fn enum_variant_reached(state: &State, item: i64, reached: &[i64]) -> bool {
-    let variants = node_e(state.1, item);
-    let count = list_len(state.2, variants);
-    let mut idx = 0i64;
-    while idx < count {
-        let variant = list_get(state.2, variants, idx);
-        if contains_i64(reached, variant_sym_of(state.1, variant)) {
-            return true;
+/// Whether the reached symbol `sym` has at least one live incoming edge from
+/// a caller declared in a different module scope, or is a type a reached
+/// public function of its own module exposes in its signature.
+fn has_live_cross_module_edge(state: &State, sym: i64, reached: &[i64]) -> bool {
+    let target_home = sym_home_of(state.1, sym);
+    let mut idx = 0usize;
+    while idx < state.12.len() {
+        match state.12.get(idx) {
+            Some(edge) => {
+                if edge.1 == sym && edge.0 >= 0 && contains_i64(reached, edge.0)
+                    && sym_home_of(state.1, edge.0) != target_home {
+                        return true;
+                    }
+            }
+            None => break,
+        }
+        idx += 1;
+    }
+    let kind = node_a(state.1, sym);
+    if kind != SYM_STRUCT && kind != SYM_ENUM {
+        return false;
+    }
+    let mut idx = 0usize;
+    while idx < state.12.len() {
+        match state.12.get(idx) {
+            Some(edge) => {
+                if edge.1 == sym && edge.0 >= 0 && contains_i64(reached, edge.0) {
+                    let from = edge.0;
+                    let from_kind = node_a(state.1, from);
+                    if (from_kind == SYM_FUN || from_kind == SYM_NATIVE_FUN) && sym_home_of(state.1, from) == target_home {
+                        let decl = node_c(state.1, from);
+                        if node_tag(state.1, decl) == NODE_ITEM && item_is_pub(state.1, decl) == 1 && has_live_cross_module_edge(state, from, reached) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            None => break,
         }
         idx += 1;
     }
     false
 }
 
-/// Reports every declared item that nothing reachable from `main` needs.
-///
-/// Public and private alike: `pub` describes who may name a thing, not
-/// whether anything does. Exempting it would make `pub` the one-word way to
-/// silence this diagnostic, which is the suppression mechanism the language
-/// does not have.
+/// Emits an unconsumed-visibility diagnostic for a reached item whose `pub`
+/// no live cross-module edge justifies.
+fn report_unnecessary_pub(state: &mut State, item: i64, sym: i64, reached: &[i64], deferred: &mut Vec<Diag>) {
+    if item_is_pub(state.1, item) != 1 {
+        return;
+    }
+    if has_live_cross_module_edge(state, sym, reached) {
+        return;
+    }
+    let kind = node_a(state.1, item);
+    let name = if kind == ITEM_FUN || kind == ITEM_NATIVE_FUN {
+        node_a(state.1, node_d(state.1, item))
+    } else {
+        node_d(state.1, item)
+    };
+    push_error_kind(
+        deferred,
+        &format!("pub on '{}' has no cross-module caller", name_text(state.0, name)),
+        node_file(state.1, item),
+        node_start(state.1, item),
+        node_end(state.1, item),
+        DiagKind::UnnecessaryPub { sym },
+    );
+}
+
+/// Reports every declared item that nothing reachable from `main` needs, the
+/// impl methods whose implementing type is dead, and every reached `pub`
+/// item whose visibility no live cross-module edge justifies.
 fn report_unreachable(state: &mut State, list: i64, reached: &[i64], deferred: &mut Vec<Diag>) {
     let count = list_len(state.2, list);
     let mut idx = 0i64;
@@ -2084,12 +2155,34 @@ fn report_unreachable(state: &mut State, list: i64, reached: &[i64], deferred: &
             report_unreachable(state, node_e(state.1, item), reached, deferred);
             continue;
         }
-        // A seeded builtin has no Cinnabar source behind it — `Result`,
-        // `Option`, `DivError` and `IndexError` are injected by the resolver,
-        // carry `NO_FILE`, and cannot be deleted by anyone. Telling a
-        // three-line program that `Result` is unused would be reporting the
-        // compiler's own declarations back at its user.
+        // A seeded builtin has no Cinnabar source behind it: `Result`,
+        // `Option`, `DivError` and `IndexError` are injected by the resolver
+        // and carry `NO_FILE`.
         if node_file(state.1, item) == NO_FILE {
+            continue;
+        }
+        // An impl is reached exactly when the type it extends is; its
+        // methods are the reportable units when that type is dead.
+        if kind == ITEM_IMPL {
+            let for_ty_sym = ty_sym_of(state.1, node_e(state.1, item));
+            if for_ty_sym == NONE || contains_i64(reached, for_ty_sym) {
+                continue;
+            }
+            let methods = node_f(state.1, item);
+            let mcount = list_len(state.2, methods);
+            let mut midx = 0i64;
+            while midx < mcount {
+                let method = list_get(state.2, methods, midx);
+                push_error_kind(
+                    deferred,
+                    &format!("unused method '{}'", name_text(state.0, node_a(state.1, method))),
+                    node_file(state.1, method),
+                    node_start(state.1, method),
+                    node_end(state.1, method),
+                    DiagKind::UnusedDeclaration(method),
+                );
+                midx += 1;
+            }
             continue;
         }
         let label = match unreachable_label(kind) {
@@ -2097,13 +2190,18 @@ fn report_unreachable(state: &mut State, list: i64, reached: &[i64], deferred: &
             None => continue,
         };
         let sym = item_sym_of(state.1, item);
-        if sym == NONE || contains_i64(reached, sym) {
+        if sym == NONE {
             continue;
         }
-        // Constructing a variant reaches the enum. `[T1(4), T2(3, 4), T0]`
-        // never names `Tag`, but an enum whose variants are in use is not
-        // dead — the type is exactly what those constructions produce.
-        if kind == ITEM_ENUM && enum_variant_reached(state, item, reached) {
+        if contains_i64(reached, sym) {
+            // A reached item's `pub` must be justified by a live incoming
+            // edge from a caller in a different module. A reached struct's
+            // symbol row carries the flag the typechecker's field-visibility
+            // pass reads once typechecking has marked cross-module accesses.
+            report_unnecessary_pub(state, item, sym, reached, deferred);
+            if kind == ITEM_STRUCT && sym != NONE {
+                node_set_f(state.1, sym, 1);
+            }
             continue;
         }
         if node_f(state.1, sym) == SYM_FUN_MAIN {
@@ -2197,7 +2295,10 @@ fn walk_item(state: &mut State, scope: i64, item: i64) {
     let owner = if kind == ITEM_MODULE {
         NONE
     } else if kind == ITEM_IMPL {
-        ROOT_OWNER
+        // `resolve_impl` owns the impl's attribution: it resolves the trait
+        // and for-type, then pushes the implementing type while walking the
+        // method bodies.
+        NONE
     } else {
         let sym = item_sym_of(state.1, item);
         if sym == NONE { ROOT_OWNER } else { sym }
@@ -2323,8 +2424,45 @@ fn resolve_impl(state: &mut State, scope: i64, item: i64) {
         }
         item_set_sym(state.1, item, trait_sym);
     }
-    walk_type(state, scope, node_e(state.1, item));
+    // The implementing type is the impl's owner for every reference the
+    // impl makes, found without recording a dependency: an impl must not
+    // keep its own target alive, or a dead type would never be reported
+    // for merely being implemented.
+    let for_ty = node_e(state.1, item);
+    let for_ty_sym = impl_target_sym(state, scope, for_ty);
+    if for_ty_sym != NONE {
+        state.11.push(for_ty_sym);
+    }
+    // The for-type's own resolution records the self-edge, which
+    // `record_dependency` drops; method bodies are attributed to the
+    // implementing type.
+    walk_type(state, scope, for_ty);
     walk_fn_list(state, scope, node_f(state.1, item));
+    if for_ty_sym != NONE {
+        state.11.pop();
+    }
+}
+
+// The symbol the impl extends, looked up without recording a dependency
+// edge: the impl's target is a declaration-level fact, and attributing it
+// to the root would keep a dead type alive.  The authoritative resolution
+// happens in the `walk_type` inside `resolve_impl`.
+fn impl_target_sym(state: &mut State, scope: i64, ty: i64) -> i64 {
+    if node_tag(state.1, ty) != NODE_TY {
+        return NONE;
+    }
+    let kind = node_a(state.1, ty);
+    if kind == TY_NAMED {
+        let (sym, src) = lookup_walk(state.4, state.5, scope, node_b(state.1, ty), NS_TYPE);
+        if sym != NONE && src != NONE {
+            mark_used(state.9, src);
+        }
+        sym
+    } else if kind == TY_PATH || kind == TY_GENERIC {
+        resolve_path_sym(state, scope, node_b(state.1, ty), NS_TYPE)
+    } else {
+        NONE
+    }
 }
 
 fn walk_fn_list(state: &mut State, scope: i64, list: i64) {
@@ -2832,8 +2970,7 @@ mod tests {
         // Pass two: declaring every sealed native module populates each
         // protocol slot with the variant symbol of the matching name, so
         // codegen's O(1) tag lookups are total for a program that uses the
-        // native surface.  `Terminal.Error` carries `ExitDiagnostic`, the
-        // one protocol variant the I/O modules own.
+        // native surface. `Terminal.Error` declares `ExitDiagnostic`.
         let mut names2: Vec<String> = Vec::new();
         let mut nodes2: Vec<i64> = Vec::new();
         let mut lists2: Vec<Vec<i64>> = Vec::new();
@@ -2944,7 +3081,7 @@ end
 
 use Other.helper
 
-pub fun main() I64
+fun main() I64
   return helper()
 end
 "#;
@@ -3002,7 +3139,7 @@ fun read(payload: &Payload) I64
   return payload.value
 end
 
-pub fun main() I64
+fun main() I64
   val payload = Payload(value: 4)
   return read(&payload)
 end
@@ -3132,15 +3269,15 @@ end
 
 use Other.Shape
 
-pub type Box
-  pub height: I64
+type Box
+  height: I64
 end
 
 fun widen(shape: &Shape) I64
   return shape.width
 end
 
-pub fun main() I64
+fun main() I64
   val shape = Shape(width: 2)
   val box = Box(height: 3)
   return widen(&shape) + box.height
@@ -3198,7 +3335,7 @@ pub mod Wrapper
   end
 end
 
-pub fun main() I64
+fun main() I64
   return Wrapper.call_helper()
 end
 "#;
@@ -3345,7 +3482,7 @@ fun fail(vec: Collections.Vec(I64), code: I64) impure I64
   return code
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val vec = match vec_new[I64]()
     Ok(v) => v
     Err(error) => return 1

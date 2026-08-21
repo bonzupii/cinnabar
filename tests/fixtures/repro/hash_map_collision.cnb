@@ -8,11 +8,11 @@
 #! forcing the linear probe past an occupied, non-equal slot. Both must come
 #! back with their own value; a missing key must still report KeyNotFound.
 
-pub const KEY_A: I64 = 1
-pub const KEY_B: I64 = 9
-pub const VALUE_A: I64 = 100
-pub const VALUE_B: I64 = 900
-pub const MISSING_KEY: I64 = 3
+const KEY_A: I64 = 1
+const KEY_B: I64 = 9
+const VALUE_A: I64 = 100
+const VALUE_B: I64 = 900
+const MISSING_KEY: I64 = 3
 
 pub mod Collections
   pub nat type HashMap(K, V)
@@ -38,7 +38,7 @@ fun fail_free_map(map: Collections.HashMap(I64, I64), code: I64) impure I64
   return code
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val map = match hash_map_new[I64, I64]()
     Ok(m) => m
     Err(error) => return 1

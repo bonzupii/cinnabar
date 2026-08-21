@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! Borrowing a linear value after it has been moved is a use-after-free.
 #!
 #! `MANIFESTO.md` principle 7 says a linear value cannot be used after
@@ -63,8 +64,8 @@ use Collections.vec_view
 use Collections.vec_free
 use Slice.len as slice_len
 
-pub const SIZE: Usize = 16
-pub const BYTE: U8 = 0x41
+const SIZE: Usize = 16
+const BYTE: U8 = 0x41
 
 fun read_after_free() impure I64
   val block = match allocate(SIZE)
@@ -115,6 +116,6 @@ fun borrow_after_handoff() impure I64
   end
 end
 
-pub fun main() impure I64
+fun main() impure I64
   return read_after_free() + write_after_free() + view_after_free() + borrow_after_handoff()
 end

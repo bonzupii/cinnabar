@@ -14,7 +14,7 @@
 #!
 #! Before this rule was stated, the two paths disagreed: `fold_const`
 #! pushed the declared type into a binary expression's operands, so
-#! `pub const ISIZE_MIN: Isize = -9223372036854775807 - 1` typed as Isize,
+#! `const ISIZE_MIN: Isize = -9223372036854775807 - 1` typed as Isize,
 #! while `check_binary` typed its operands with no expectation at all, so
 #! the same text in `var min: Isize = ...` defaulted both literals to I64
 #! and failed to unify against Isize.  For I64 locals it only ever worked
@@ -41,7 +41,7 @@
 #! Code 1 is the verbatim reproducer this rule was written for.
 
 #! -- The reported reproducer, verbatim ---------------------------------
-pub const ISIZE_MIN: Isize = -9223372036854775807 - 1
+const ISIZE_MIN: Isize = -9223372036854775807 - 1
 
 fun reported_case() I64
   var min: Isize = -9223372036854775807 - 1
@@ -52,8 +52,8 @@ fun reported_case() I64
 end
 
 #! ---------------------------------------------------------------- U8 --
-pub const U8_WRAP_HI: U8 = 255 + 1
-pub const U8_WRAP_LO: U8 = 0 - 1
+const U8_WRAP_HI: U8 = 255 + 1
+const U8_WRAP_LO: U8 = 0 - 1
 
 fun check_u8() I64
   var wrap_hi: U8 = 255 + 1
@@ -97,8 +97,8 @@ fun check_u8() I64
 end
 
 #! ---------------------------------------------------------------- I8 --
-pub const I8_WRAP_HI: I8 = 127 + 1
-pub const I8_MIN: I8 = -127 - 1
+const I8_WRAP_HI: I8 = 127 + 1
+const I8_MIN: I8 = -127 - 1
 
 fun check_i8() I64
   var wrap_hi: I8 = 127 + 1
@@ -142,8 +142,8 @@ fun check_i8() I64
 end
 
 #! --------------------------------------------------------------- U16 --
-pub const U16_WRAP_HI: U16 = 65535 + 1
-pub const U16_WRAP_LO: U16 = 0 - 1
+const U16_WRAP_HI: U16 = 65535 + 1
+const U16_WRAP_LO: U16 = 0 - 1
 
 fun check_u16() I64
   var wrap_hi: U16 = 65535 + 1
@@ -187,8 +187,8 @@ fun check_u16() I64
 end
 
 #! --------------------------------------------------------------- I16 --
-pub const I16_WRAP_HI: I16 = 32767 + 1
-pub const I16_MIN: I16 = -32767 - 1
+const I16_WRAP_HI: I16 = 32767 + 1
+const I16_MIN: I16 = -32767 - 1
 
 fun check_i16() I64
   var wrap_hi: I16 = 32767 + 1
@@ -232,8 +232,8 @@ fun check_i16() I64
 end
 
 #! --------------------------------------------------------------- U32 --
-pub const U32_WRAP_HI: U32 = 0xFFFFFFFF + 1
-pub const U32_WRAP_LO: U32 = 0 - 1
+const U32_WRAP_HI: U32 = 0xFFFFFFFF + 1
+const U32_WRAP_LO: U32 = 0 - 1
 
 fun check_u32() I64
   var wrap_hi: U32 = 0xFFFFFFFF + 1
@@ -277,8 +277,8 @@ fun check_u32() I64
 end
 
 #! --------------------------------------------------------------- I32 --
-pub const I32_WRAP_HI: I32 = 2147483647 + 1
-pub const I32_MIN: I32 = -2147483647 - 1
+const I32_WRAP_HI: I32 = 2147483647 + 1
+const I32_MIN: I32 = -2147483647 - 1
 
 fun check_i32() I64
   var wrap_hi: I32 = 2147483647 + 1
@@ -322,8 +322,8 @@ fun check_i32() I64
 end
 
 #! --------------------------------------------------------------- U64 --
-pub const U64_WRAP_HI: U64 = 0xFFFFFFFFFFFFFFFF + 1
-pub const U64_WRAP_LO: U64 = 0 - 1
+const U64_WRAP_HI: U64 = 0xFFFFFFFFFFFFFFFF + 1
+const U64_WRAP_LO: U64 = 0 - 1
 
 fun check_u64() I64
   var wrap_hi: U64 = 0xFFFFFFFFFFFFFFFF + 1
@@ -369,8 +369,8 @@ fun check_u64() I64
 end
 
 #! ------------------------------------------------------------- Usize --
-pub const USIZE_WRAP_HI: Usize = 0xFFFFFFFFFFFFFFFF + 1
-pub const USIZE_WRAP_LO: Usize = 0 - 1
+const USIZE_WRAP_HI: Usize = 0xFFFFFFFFFFFFFFFF + 1
+const USIZE_WRAP_LO: Usize = 0 - 1
 
 fun check_usize() I64
   var wrap_hi: Usize = 0xFFFFFFFFFFFFFFFF + 1
@@ -414,8 +414,8 @@ fun check_usize() I64
 end
 
 #! --------------------------------------------------------------- I64 --
-pub const I64_WRAP_HI: I64 = 9223372036854775807 + 1
-pub const I64_MIN: I64 = -9223372036854775807 - 1
+const I64_WRAP_HI: I64 = 9223372036854775807 + 1
+const I64_MIN: I64 = -9223372036854775807 - 1
 
 fun check_i64() I64
   var wrap_hi: I64 = 9223372036854775807 + 1
@@ -459,7 +459,7 @@ fun check_i64() I64
 end
 
 #! ------------------------------------------------------------- Isize --
-pub const ISIZE_WRAP_HI: Isize = 9223372036854775807 + 1
+const ISIZE_WRAP_HI: Isize = 9223372036854775807 + 1
 
 fun check_isize() I64
   var wrap_hi: Isize = 9223372036854775807 + 1
@@ -512,7 +512,7 @@ fun takes_u8(value: U8) I64
   return 0
 end
 
-pub fun main() I64
+fun main() I64
   val r_reported = reported_case()
   if r_reported != 0
     return r_reported

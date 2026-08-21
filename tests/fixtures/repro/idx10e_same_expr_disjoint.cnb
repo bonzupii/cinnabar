@@ -2,9 +2,9 @@
 # the SAME call must compile.  The same-expression pending check compares
 # element indices exactly like the cross-statement liveness check.
 # (EXPECT_OK 30.)
-pub type P
-  pub x: I64
-  pub y: I64
+type P
+  x: I64
+  y: I64
 end
 
 fun touch_both(a: &mut P, b: &mut P) I64
@@ -13,7 +13,7 @@ fun touch_both(a: &mut P, b: &mut P) I64
   return a.x + b.y
 end
 
-pub fun main() I64
+fun main() I64
   var pts: [P; 2] = [P(x: 1, y: 2), P(x: 3, y: 4)]
   return touch_both(&mut pts[0], &mut pts[1])
 end

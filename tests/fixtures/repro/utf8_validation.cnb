@@ -28,32 +28,32 @@ use Collections.string_from_slice
 use Collections.string_free
 
 #! Well-formed UTF-8 byte sequences.
-pub const B_43: U8 = 0x43  # 'C'
-pub const B_69: U8 = 0x69  # 'i'
-pub const B_6E: U8 = 0x6E  # 'n'
-pub const B_21: U8 = 0x21  # '!'
-pub const B_C2: U8 = 0xC2  # lead byte of the 2-byte U+00A9
-pub const B_A9: U8 = 0xA9
-pub const B_E2: U8 = 0xE2  # lead byte of the 3-byte U+20AC
-pub const B_82: U8 = 0x82
-pub const B_AC: U8 = 0xAC
-pub const B_F0: U8 = 0xF0  # lead byte of the 4-byte U+1F600
-pub const B_9F: U8 = 0x9F
-pub const B_98: U8 = 0x98
-pub const B_80: U8 = 0x80
+const B_43: U8 = 0x43  # 'C'
+const B_69: U8 = 0x69  # 'i'
+const B_6E: U8 = 0x6E  # 'n'
+const B_21: U8 = 0x21  # '!'
+const B_C2: U8 = 0xC2  # lead byte of the 2-byte U+00A9
+const B_A9: U8 = 0xA9
+const B_E2: U8 = 0xE2  # lead byte of the 3-byte U+20AC
+const B_82: U8 = 0x82
+const B_AC: U8 = 0xAC
+const B_F0: U8 = 0xF0  # lead byte of the 4-byte U+1F600
+const B_9F: U8 = 0x9F
+const B_98: U8 = 0x98
+const B_80: U8 = 0x80
 
 #! Malformed sequences: overlong leads, a surrogate lead, and a lead that
 #! can exceed U+10FFFF.
-pub const B_E0: U8 = 0xE0  # 3-byte lead; E0 80..9F would be overlong
-pub const B_ED: U8 = 0xED  # 3-byte lead; ED A0..BF encodes surrogates
-pub const B_A0: U8 = 0xA0  # first continuation of U+D800
-pub const B_90: U8 = 0x90  # continuation pushing 4-byte values over the limit
-pub const B_F4: U8 = 0xF4  # 4-byte lead; F4 90..BF exceeds U+10FFFF
+const B_E0: U8 = 0xE0  # 3-byte lead; E0 80..9F would be overlong
+const B_ED: U8 = 0xED  # 3-byte lead; ED A0..BF encodes surrogates
+const B_A0: U8 = 0xA0  # first continuation of U+D800
+const B_90: U8 = 0x90  # continuation pushing 4-byte values over the limit
+const B_F4: U8 = 0xF4  # 4-byte lead; F4 90..BF exceeds U+10FFFF
 
 #! A Usize-typed zero for comparing payloads against (a bare literal
 #! would infer as I64), and an impossible value for consuming the
 #! unreachable numeric payloads below.
-pub const SENTINEL_USIZE: Usize = 999999
+const SENTINEL_USIZE: Usize = 999999
 
 #! True when the error is exactly InvalidUtf8.  Every Error variant is
 #! bound and consumed: the numeric payloads of the unreachable failure
@@ -89,7 +89,7 @@ fun ok_and_free(string: Collections.String) impure Bool
   return true
 end
 
-pub fun main() impure I64
+fun main() impure I64
   #! Valid sequences must be accepted.
   val ascii = [B_43, B_69, B_6E, B_21]
   if !utf8_ok(&ascii)

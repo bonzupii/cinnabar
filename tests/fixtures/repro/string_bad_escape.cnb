@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! Lexical rejections for string literals.  Every line below must be an
 #! error.
 #!
@@ -16,10 +17,10 @@
 #! Recovery keeps scanning the same literal after a bad escape, so each
 #! line here reports exactly one diagnostic.
 
-pub const UNKNOWN_ESCAPE: &[U8] = "bad \q escape"
-pub const BYTE_ESCAPE: &[U8] = "no \x41 byte escape"
-pub const RUNS_OFF_THE_LINE: &[U8] = "missing the closing quote
+const UNKNOWN_ESCAPE: &[U8] = "bad \q escape"
+const BYTE_ESCAPE: &[U8] = "no \x41 byte escape"
+const RUNS_OFF_THE_LINE: &[U8] = "missing the closing quote
 
-pub fun main() I64
+fun main() I64
   return 0
 end

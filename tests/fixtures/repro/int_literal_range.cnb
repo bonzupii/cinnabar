@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! Integer literals are non-negative magnitudes that adopt the expected
 #! type in typed contexts and are range-checked against its width.  Every
 #! const below is out of range for its declared type and must be rejected:
@@ -8,13 +9,13 @@
 #!   0xFFFFFFFFFFFFFFFF does not fit I64  (max 0x7FFFFFFFFFFFFFFF)
 #!   -0xFFFFFFFFFFFFFF00 does not fit I8  (the negated value wraps to 256,
 #!   beyond I8's range of -128..=127)
-pub const TOO_BIG_U8: U8 = 300
-pub const TOO_BIG_HEX_U8: U8 = 0x100
-pub const TOO_BIG_I8: I8 = 128
-pub const TOO_BIG_I16: I16 = 40000
-pub const TOO_BIG_HEX_I64: I64 = 0xFFFFFFFFFFFFFFFF
-pub const BAD_NEG_HEX: I8 = -0xFFFFFFFFFFFFFF00
+const TOO_BIG_U8: U8 = 300
+const TOO_BIG_HEX_U8: U8 = 0x100
+const TOO_BIG_I8: I8 = 128
+const TOO_BIG_I16: I16 = 40000
+const TOO_BIG_HEX_I64: I64 = 0xFFFFFFFFFFFFFFFF
+const BAD_NEG_HEX: I8 = -0xFFFFFFFFFFFFFF00
 
-pub fun main() I64
+fun main() I64
   return 0
 end

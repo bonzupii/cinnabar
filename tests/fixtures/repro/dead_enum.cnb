@@ -1,0 +1,16 @@
+# [EXPECT REJECTION]
+#! Two enums nothing constructs, matches, or names: each is reported
+#! unused.  (EXPECT_REJECTED.)
+type Color
+  Red
+  Green
+end
+
+type Shape
+  Circle
+  Square
+end
+
+fun main() I64
+  return 0
+end

@@ -183,6 +183,7 @@ pub fn typecheck(
     pop_scope(state.4);
     resolve_all_vars(state.0, state.1, state.2, state.3, state.6, state.7);
     attach_type_facts(state.1, state.2);
+    enforce_field_visibility(state.0, state.1, state.2, state.3, root, ext_mods);
     (state.3.is_empty(), impls_list)
 }
 
@@ -3520,6 +3521,7 @@ fn field_access_key(state: &mut State, expr: i64, base: i64, field: i64, expecte
     if fnode != NONE && node_c(state.1, fnode) == 0 && node_d(state.1, fnode) != state.13 {
         push_type_error(state.3, &format!("field '{}' of type '{}' is private to its module", name_text(state.0, field), render_key(state.0, state.1, state.2, state.6, state.7, eff)), file, start, end);
     }
+    record_cross_scope_field(state, fnode);
     let from = declared_param_keys(state.1, state.2, item);
     let to = list_to_vec(state.2, key_args(state.1, eff));
     subst_key(state.1, state.2, declared_key, &from, &to)
@@ -3553,26 +3555,113 @@ fn struct_field_node(nodes: &[i64], lists: &[Vec<i64>], item: i64, name: i64) ->
     NONE
 }
 
-fn enum_sym_of_variant(nodes: &[i64], variant_sym: i64) -> i64 {
-    let home = sym_home(nodes, variant_sym);
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_SYM && node_a(nodes, idx) == SYM_ENUM && node_e(nodes, idx) == home {
-            return idx;
+// Marks the field row's `e` slot when the access comes from a module other
+// than the one the field was declared in. The resolver stored the declaring
+// module scope in the field row's `d` slot; `state.13` is the scope the
+// checker is walking. `enforce_field_visibility` reads the `e` flag at the
+// end of typechecking.
+fn record_cross_scope_field(state: &mut State, fnode: i64) {
+    if fnode == NONE {
+        return;
+    }
+    if node_d(state.1, fnode) == state.13 {
+        return;
+    }
+    node_set_e(state.1, fnode, 1);
+}
+
+// Emits `UnnecessaryFieldPub` for every `pub` field of a reached struct
+// whose field row's `e` slot no cross-module access marked during
+// typechecking.  The resolver marked the struct symbol's slot `f` with `1`
+// when reachability reached it from `main`; this pass reads that flag and
+// runs after every expression has been checked.  Module children are
+// visited through a worklist rather than a nested walker.
+fn enforce_field_visibility(
+    names: &[String],
+    nodes: &[i64],
+    lists: &[Vec<i64>],
+    errors: &mut Vec<Diag>,
+    root: i64,
+    ext_mods: &[(i64, i64)],
+) {
+    let mut pending: Vec<i64> = Vec::new();
+    pending.push(root);
+    let mut eidx = 0usize;
+    while eidx < ext_mods.len() {
+        match ext_mods.get(eidx) {
+            Some(pair) => pending.push(pair.1),
+            None => break,
         }
-        idx += 1;
+        eidx += 1;
+    }
+    let mut ridx = 0usize;
+    while ridx < pending.len() {
+        let list = match pending.get(ridx) {
+            Some(list) => *list,
+            None => break,
+        };
+        let count = list_len(lists, list);
+        let mut idx = 0i64;
+        while idx < count {
+            let item = list_get(lists, list, idx);
+            idx += 1;
+            if node_tag(nodes, item) != NODE_ITEM {
+                continue;
+            }
+            let kind = node_a(nodes, item);
+            if kind == ITEM_MODULE {
+                pending.push(node_e(nodes, item));
+                continue;
+            }
+            if kind != ITEM_STRUCT {
+                continue;
+            }
+            let sym = item_sym_of(nodes, item);
+            if sym == NONE || node_f(nodes, sym) != 1 {
+                continue;
+            }
+            let fields = node_e(nodes, item);
+            let fcount = list_len(lists, fields);
+            let mut fidx = 0i64;
+            while fidx < fcount {
+                let field = list_get(lists, fields, fidx);
+                if node_c(nodes, field) == 1 && node_e(nodes, field) != 1 {
+                    push_error_kind(
+                        errors,
+                        &format!("pub on field '{}' has no cross-module access", name_text(names, node_a(nodes, field))),
+                        node_file(nodes, field),
+                        node_start(nodes, field),
+                        node_end(nodes, field),
+                        DiagKind::UnnecessaryFieldPub { field },
+                    );
+                }
+                fidx += 1;
+            }
+        }
+        ridx += 1;
+    }
+}
+
+fn enum_sym_of_variant(nodes: &[i64], variant_sym: i64) -> i64 {
+    // The resolver recorded the parent enum item on the variant row's
+    // slot e; the enum symbol is that item's own symbol slot.  Matching
+    // scopes instead would re-derive the resolver's ownership fact.
+    let decl = sym_decl(nodes, variant_sym);
+    if decl != NONE && node_tag(nodes, decl) == NODE_VARIANT {
+        let enum_item = node_e(nodes, decl);
+        if enum_item != NONE && node_tag(nodes, enum_item) == NODE_ITEM {
+            return item_sym_of(nodes, enum_item);
+        }
     }
     NONE
 }
 
 fn trait_sym_of_method(nodes: &[i64], method_sym: i64) -> i64 {
-    let home = sym_home(nodes, method_sym);
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_SYM && node_a(nodes, idx) == SYM_TRAIT && node_e(nodes, idx) == home {
-            return idx;
-        }
-        idx += 1;
+    // The resolver recorded the parent trait item on the method symbol's
+    // slot e, mirroring the variant-to-enum link.
+    let trait_item = node_e(nodes, method_sym);
+    if trait_item != NONE && node_tag(nodes, trait_item) == NODE_ITEM {
+        return item_sym_of(nodes, trait_item);
     }
     NONE
 }
@@ -4210,6 +4299,7 @@ fn check_struct_construct(state: &mut State, expr: i64, sym: i64, ret: i64, impu
         if found_idx == NONE {
             push_type_error(state.3, &format!("no field '{}' on struct '{}'", name_text(state.0, name), name_text(state.0, sym_name(state.1, sym))), file, start, end);
         } else {
+            record_cross_scope_field(state, struct_field_node(state.1, state.2, item, name));
             let concrete = subst_key(state.1, state.2, declared, &from, &to);
             let value = list_get(state.2, values, idx);
             if value == NONE {
@@ -4490,8 +4580,15 @@ fn variant_matches(nodes: &[i64], s_key: i64, variant_sym: i64) -> bool {
     if s_kind != TYD_ENUM {
         return false;
     }
-    let enum_sym = key_sym(nodes, s_key);
-    node_e(nodes, enum_sym) == sym_home(nodes, variant_sym)
+    let decl = sym_decl(nodes, variant_sym);
+    if decl == NONE || node_tag(nodes, decl) != NODE_VARIANT {
+        return false;
+    }
+    let enum_item = node_e(nodes, decl);
+    if enum_item == NONE {
+        return false;
+    }
+    item_sym_of(nodes, enum_item) == key_sym(nodes, s_key)
 }
 
 fn check_exhaustive(state: &mut State, s_key: i64, arms: i64, file: i64, start: i64, end: i64) {
@@ -4833,16 +4930,20 @@ end
     #[test]
     fn complete_impl_is_accepted() {
         let source = r#"
-pub trait Measure
-  pub fun width(value: &Self) I64
-  pub fun height(value: &Self) I64
+pub mod Geometry
+  pub trait Measure
+    pub fun width(value: &Self) I64
+    pub fun height(value: &Self) I64
+  end
 end
 
-pub type Card
-  pub side: I64
+use Geometry.Measure
+
+type Card
+  side: I64
 end
 
-pub impl Measure for Card
+impl Measure for Card
   pub fun width(value: &Card) I64
     return value.side
   end
@@ -4859,7 +4960,7 @@ fun height_of<T: Measure>(value: &T) I64
   return Measure.height(value)
 end
 
-pub fun main() I64
+fun main() I64
   val card = Card(side: 3)
   return width_of(&card) + height_of(&card)
 end

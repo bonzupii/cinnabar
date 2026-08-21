@@ -16,9 +16,9 @@ end
 use Memory.allocate
 use Memory.deallocate
 
-pub type Holder
-  pub block: Memory.Block
-  pub tag: I64
+type Holder
+  block: Memory.Block
+  tag: I64
 end
 
 fun fail_alloc() I64
@@ -39,7 +39,7 @@ fun replace_block(holder: &mut Holder, replacement: Memory.Block) impure Unit
   return Unit
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val original = match allocate(1)
     Ok(value) => value
     Err(error) => return fail_alloc()

@@ -1,0 +1,20 @@
+# [EXPECT REJECTION]
+#! A dead implementing type: nothing reaches `DeadType`, so the type is
+#! reported unused and the impl's method with it.  (EXPECT_REJECTED.)
+type DeadType
+  x: I64
+end
+
+trait Greet
+  fun greet(value: &Self) I64
+end
+
+impl Greet for DeadType
+  fun greet(value: &DeadType) I64
+    return value.x
+  end
+end
+
+fun main() I64
+  return 0
+end

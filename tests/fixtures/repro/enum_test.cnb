@@ -1,9 +1,9 @@
-pub type ExitCode
-  pub ExitSuccess
-  pub ExitFailure
-  pub ExitDiagnostic(I64)
+type ExitCode
+  ExitSuccess
+  ExitFailure
+  ExitDiagnostic(I64)
 end
 
-pub fun main() ExitCode
+fun main() ExitCode
   return ExitSuccess
 end

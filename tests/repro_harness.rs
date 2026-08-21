@@ -91,6 +91,10 @@ const EXPECT_REJECTED: &[&str] = &[
     "match_arm_multiline_recovery",
     "nested_native_mod_ice",
     "single_line_if_syntax",
+    "unnecessary_pub",
+    "unnecessary_field_pub",
+    "dead_impl",
+    "dead_enum",
 ];
 
 const EXPECT_REJECTED_PATHS: &[&str] = &[

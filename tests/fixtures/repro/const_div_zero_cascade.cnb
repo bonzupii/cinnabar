@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! Bug proof: a constant expression dividing (or taking the remainder of
 #! division) by a statically-zero divisor folds through the width-aware
 #! constant folder, which reports the primary "division by zero in
@@ -5,9 +6,9 @@
 #! constant's type key to the declared type.  Each const below must
 #! produce exactly one diagnostic — no secondary "constant initializer
 #! type mismatch: expected 'I64', found '?'" cascade from a dropped key.
-pub const DIV_ZERO: I64 = 1 / 0
-pub const MOD_ZERO: I64 = 7 % 0
+const DIV_ZERO: I64 = 1 / 0
+const MOD_ZERO: I64 = 7 % 0
 
-pub fun main() I64
+fun main() I64
   return 0
 end

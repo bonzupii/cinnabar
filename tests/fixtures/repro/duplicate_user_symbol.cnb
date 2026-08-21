@@ -1,15 +1,16 @@
+# [EXPECT REJECTION]
 # duplicate_user_symbol (control): two user declarations of the same name
 # must still be rejected as a duplicate symbol — the builtin-redeclaration
 # diagnostic is reserved for collisions with the language's own builtins.
 
 pub type Foo
-  pub x: I64
+  x: I64
 end
 
 pub type Foo
-  pub y: I64
+  y: I64
 end
 
-pub fun main() I64
+fun main() I64
   return 0
 end

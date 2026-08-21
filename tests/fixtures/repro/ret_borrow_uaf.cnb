@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 # ret_borrow_uaf (bug-report d7b): the callee may return a view of either
 # input, so its returned borrow is ambiguous and the callee is rejected;
 # a caller that frees the possibly-aliased earlier input while the returned
@@ -39,7 +40,7 @@ fun fail_with_x(x: Collections.Vec(I64)) impure I64
   return 1
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val x = match vec_new[I64]()
     Ok(v) => v
     Err(error) => return 1

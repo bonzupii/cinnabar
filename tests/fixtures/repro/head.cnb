@@ -18,7 +18,7 @@
   - var: mutable local binding
 
   Generics:
-  - trait-based polymorphism: pub trait Checksum ... pub impl Checksum for T
+  - trait-based polymorphism: trait Checksum ... impl Checksum for T, dispatched through a bounded generic
 
   Control flow:
   - while supports break and continue
@@ -40,36 +40,42 @@
   This is a block documentation comment.
 |#
 
-pub const ZERO_INT: I64 = 0
+const ZERO_INT: I64 = 0
 
-pub const LOOP_LIMIT: I64 = 5
+const LOOP_LIMIT: I64 = 5
 
-pub const CHECKSUM_SALT: U32 = 0x0F
+const CHECKSUM_SALT: U32 = 0x0F
 
-pub type Header
-  pub kind: U32
-  pub flags: U32
+type Header
+  kind: U32
+  flags: U32
 end
 
-pub type Tag
-  pub value: U32
+type Tag
+  value: U32
 end
 
 # Trait-based polymorphism.
-pub trait Checksum
+trait Checksum
   pub fun checksum(value: &Self) U32
 end
 
-pub impl Checksum for Header
+impl Checksum for Header
   pub fun checksum(value: &Header) U32
     return ((value.kind << 16) ^ (value.flags << 8) ^ value.kind ^ value.flags)
   end
 end
 
-pub impl Checksum for Tag
+impl Checksum for Tag
   pub fun checksum(value: &Tag) U32
     return value.value ^ CHECKSUM_SALT
   end
+end
+
+#! Bounded generic function constrained by trait Checksum; the dispatch
+#! call reaches the impls for every concrete type main instantiates it with.
+fun checksum_value<T: Checksum>(value: &T) U32
+  return Checksum.checksum(value)
 end
 
 #! Demonstrates var for mutable local state.
@@ -86,6 +92,12 @@ fun sum_to(limit: I64) I64
   return total
 end
 
-pub fun main() I64
+fun main() I64
+  val h = Header(kind: 2, flags: 1)
+  val t = Tag(value: 3)
+  if checksum_value(&h) == checksum_value(&t)
+    return 1
+  end
+
   return sum_to(LOOP_LIMIT)
 end

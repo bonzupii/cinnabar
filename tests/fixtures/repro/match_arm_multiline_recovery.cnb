@@ -1,6 +1,7 @@
-pub type Msg
-  pub Ping
-  pub Quit
+# [EXPECT REJECTION]
+type Msg
+  Ping
+  Quit
 end
 
 fun log_step(code: I64) Unit
@@ -17,7 +18,7 @@ fun process(msg: Msg) Unit
   return Unit
 end
 
-pub fun main() I64
+fun main() I64
   process(Msg.Ping)
   return 0
 end

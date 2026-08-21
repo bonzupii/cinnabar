@@ -48,10 +48,10 @@ use File.read
 use File.write
 use File.close
 
-pub const PATH: &[U8] = "/tmp/cinnabar_file_roundtrip.txt"
-pub const CONTENT: &[U8] = "cinnabar"
-pub const CONTENT_LEN: Usize = 8
-pub const BUFFER_LEN: Usize = 32
+const PATH: &[U8] = "/tmp/cinnabar_file_roundtrip.txt"
+const CONTENT: &[U8] = "cinnabar"
+const CONTENT_LEN: Usize = 8
+const BUFFER_LEN: Usize = 32
 
 #! Truncating write, then read back, then verify byte for byte.
 fun write_content() impure I64
@@ -158,7 +158,7 @@ fun code_is_positive(code: I64) I64
   return 0
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val wrote = write_content()
   if wrote != 0
     return wrote

@@ -31,7 +31,7 @@ end
 use Memory.allocate
 use Memory.deallocate
 
-pub const SIZE: Usize = 16
+const SIZE: Usize = 16
 
 fun consume_both_arms(flag: Bool, block: Memory.Block) impure I64
   if flag
@@ -68,7 +68,7 @@ end
 # two live blocks across a fallible `match` would leak the first one on the
 # second one's `Err` path, which is a real linearity error and not what this
 # fixture is here to exercise.
-pub fun main() impure I64
+fun main() impure I64
   val first = match allocate(SIZE)
     Ok(value) => value
     Err(error) => return 1

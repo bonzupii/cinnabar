@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! Copying a linear field by value out of a shared `&T` reference would
 #! duplicate the handle.  The only sanctioned consumption of a linear
 #! field goes through `&mut`; this must be rejected.
@@ -14,12 +15,12 @@ end
 use Memory.allocate
 use Memory.deallocate
 
-pub type Holder
-  pub block: Memory.Block
-  pub tag: I64
+type Holder
+  block: Memory.Block
+  tag: I64
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val block = match allocate(1)
     Ok(value) => value
     Err(error) => return 1

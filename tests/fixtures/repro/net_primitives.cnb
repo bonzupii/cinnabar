@@ -5,8 +5,8 @@
   against musl.  Runs in milliseconds and exits 0 on success.
 |#
 
-pub const EPHEMERAL_PORT: Usize = 0
-pub const BACKLOG: Usize = 4
+const EPHEMERAL_PORT: Usize = 0
+const BACKLOG: Usize = 4
 
 pub mod Net
   pub type Error
@@ -31,7 +31,7 @@ fun fail_socket(sock: Net.Socket, code: I64) impure I64
   return code
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val sock = match socket()
     Ok(s) => s
     Err(Net.SystemFault(code)) => return code

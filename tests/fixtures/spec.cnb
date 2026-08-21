@@ -64,143 +64,143 @@
 |#
 
 #! Compile-time constant declarations enforcing SCREAMING_SNAKE_CASE.
-pub const SENTINEL_INT: I64 = 999999 # Trailing comments may follow any line of code.
-pub const ZERO_INT: I64 = 0
+const SENTINEL_INT: I64 = 999999 # Trailing comments may follow any line of code.
+const ZERO_INT: I64 = 0
 
-pub const GOOD_RANGE_INPUT: I64 = 21
-pub const SMALL_RANGE_INPUT: I64 = -1
-pub const LARGE_RANGE_INPUT: I64 = 101
-pub const GOOD_RANGE_OUTPUT: I64 = 42
-pub const MAX_RANGE: I64 = 100
+const GOOD_RANGE_INPUT: I64 = 21
+const SMALL_RANGE_INPUT: I64 = -1
+const LARGE_RANGE_INPUT: I64 = 101
+const GOOD_RANGE_OUTPUT: I64 = 42
+const MAX_RANGE: I64 = 100
 
-pub const GOOD_PORT: I64 = 8080
-pub const BAD_PORT: I64 = 0
-pub const MIN_PORT: I64 = 1
-pub const MAX_PORT: I64 = 65535
+const GOOD_PORT: I64 = 8080
+const BAD_PORT: I64 = 0
+const MIN_PORT: I64 = 1
+const MAX_PORT: I64 = 65535
 
-pub const EVEN_TWO: I64 = 2
-pub const EVEN_FOUR: I64 = 4
-pub const HALF_TWO: I64 = 1
-pub const HALF_FOUR: I64 = 2
+const EVEN_TWO: I64 = 2
+const EVEN_FOUR: I64 = 4
+const HALF_TWO: I64 = 1
+const HALF_FOUR: I64 = 2
 
-pub const LOOP_LIMIT: I64 = 5
-pub const LOOP_EXPECTED: I64 = 10
-pub const BREAK_CONTINUE_EXPECTED: I64 = 13
-pub const OPTION_TRY_EXPECTED: I64 = 3
+const LOOP_LIMIT: I64 = 5
+const LOOP_EXPECTED: I64 = 10
+const BREAK_CONTINUE_EXPECTED: I64 = 13
+const OPTION_TRY_EXPECTED: I64 = 3
 
-pub const POINT_DX: I64 = 3
-pub const POINT_DY: I64 = 4
+const POINT_DX: I64 = 3
+const POINT_DY: I64 = 4
 
-pub const FLAG_ACTIVE: I64 = 1
-pub const FLAG_ADMIN: I64 = 2
+const FLAG_ACTIVE: I64 = 1
+const FLAG_ADMIN: I64 = 2
 
-pub const MAGIC_U32: U32 = 0x0BADF00D
-pub const SENTINEL_U32: U32 = 0xFFFFFFFF
+const MAGIC_U32: U32 = 0x0BADF00D
+const SENTINEL_U32: U32 = 0xFFFFFFFF
 
-pub const MAGIC_BYTE_0: U8 = 0x0D
-pub const MAGIC_BYTE_1: U8 = 0xF0
-pub const MAGIC_BYTE_2: U8 = 0xAD
-pub const MAGIC_BYTE_3: U8 = 0x0B
+const MAGIC_BYTE_0: U8 = 0x0D
+const MAGIC_BYTE_1: U8 = 0xF0
+const MAGIC_BYTE_2: U8 = 0xAD
+const MAGIC_BYTE_3: U8 = 0x0B
 
-pub const STRING_BYTE_0: U8 = 0x48 # UTF-8 'H'
-pub const STRING_BYTE_1: U8 = 0x65 # UTF-8 'e'
-pub const STRING_BYTE_2: U8 = 0x6C # UTF-8 'l'
-pub const STRING_BYTE_3: U8 = 0x6C # UTF-8 'l'
-pub const STRING_BYTE_4: U8 = 0x6F # UTF-8 'o'
-pub const STRING_BYTE_5: U8 = 0x20 # UTF-8 ' '
-pub const STRING_BYTE_6: U8 = 0x43 # UTF-8 'C'
-pub const STRING_BYTE_7: U8 = 0x69 # UTF-8 'i'
-pub const STRING_BYTE_8: U8 = 0x6E # UTF-8 'n'
-pub const STRING_BYTE_9: U8 = 0x6E # UTF-8 'n'
-pub const STRING_BYTE_10: U8 = 0x61 # UTF-8 'a'
-pub const STRING_BYTE_11: U8 = 0x62 # UTF-8 'b'
-pub const STRING_BYTE_12: U8 = 0x61 # UTF-8 'a'
-pub const STRING_BYTE_13: U8 = 0x72 # UTF-8 'r'
-pub const STRING_BYTE_14: U8 = 0x21 # UTF-8 '!'
+const STRING_BYTE_0: U8 = 0x48 # UTF-8 'H'
+const STRING_BYTE_1: U8 = 0x65 # UTF-8 'e'
+const STRING_BYTE_2: U8 = 0x6C # UTF-8 'l'
+const STRING_BYTE_3: U8 = 0x6C # UTF-8 'l'
+const STRING_BYTE_4: U8 = 0x6F # UTF-8 'o'
+const STRING_BYTE_5: U8 = 0x20 # UTF-8 ' '
+const STRING_BYTE_6: U8 = 0x43 # UTF-8 'C'
+const STRING_BYTE_7: U8 = 0x69 # UTF-8 'i'
+const STRING_BYTE_8: U8 = 0x6E # UTF-8 'n'
+const STRING_BYTE_9: U8 = 0x6E # UTF-8 'n'
+const STRING_BYTE_10: U8 = 0x61 # UTF-8 'a'
+const STRING_BYTE_11: U8 = 0x62 # UTF-8 'b'
+const STRING_BYTE_12: U8 = 0x61 # UTF-8 'a'
+const STRING_BYTE_13: U8 = 0x72 # UTF-8 'r'
+const STRING_BYTE_14: U8 = 0x21 # UTF-8 '!'
 
-pub const MEMORY_BYTE: U8 = 0xA5
-pub const MEMORY_SIZE: Usize = 1
-pub const ZERO_USIZE: Usize = 0
-pub const ONE_USIZE: Usize = 1
-pub const SENTINEL_USIZE: Usize = 999999
+const MEMORY_BYTE: U8 = 0xA5
+const MEMORY_SIZE: Usize = 1
+const ZERO_USIZE: Usize = 0
+const ONE_USIZE: Usize = 1
+const SENTINEL_USIZE: Usize = 999999
 
-pub const EXPECTED_REST_LEN: Usize = 3
-pub const EXPECTED_STRING_LEN: Usize = 15
+const EXPECTED_REST_LEN: Usize = 3
+const EXPECTED_STRING_LEN: Usize = 15
 
-pub const OOB_INDEX: Usize = 99
+const OOB_INDEX: Usize = 99
 
-pub const HEADER_KIND: U32 = 7
-pub const HEADER_FLAGS: U32 = 3
-pub const TAG_VALUE: U32 = 0x5A
-pub const CHECKSUM_SALT: U32 = 0x0F
+const HEADER_KIND: U32 = 7
+const HEADER_FLAGS: U32 = 3
+const TAG_VALUE: U32 = 0x5A
+const CHECKSUM_SALT: U32 = 0x0F
 
-pub const EXPECTED_HEADER_CHECKSUM: U32 = 0x00070304
-pub const EXPECTED_TAG_CHECKSUM: U32 = 0x00000055
+const EXPECTED_HEADER_CHECKSUM: U32 = 0x00070304
+const EXPECTED_TAG_CHECKSUM: U32 = 0x00000055
 
 #! User-defined sum-type enum representing program exit statuses.
-pub type ExitCode
+type ExitCode
   pub ExitSuccess
   pub ExitFailure
   pub ExitDiagnostic(I64)
 end
 
 #! Enum variants demonstrating payload data.
-pub type RangeError
+type RangeError
   pub TooSmall(I64)
   pub TooLarge(I64)
 end
 
-pub type PortError
+type PortError
   pub PortInvalid(I64)
 end
 
 #! Nested sum type demonstrating error wrapping.
-pub type AppError
+type AppError
   pub AppRange(RangeError)
   pub AppPort(PortError)
 end
 
 #! Nominal single-payload struct wrapper.
-pub type Port
+type Port
   pub Port(I64)
 end
 
 #! Product type struct demonstrating named fields in PascalCase.
-pub type Point
-  pub x: I64
-  pub y: I64
+type Point
+  x: I64
+  y: I64
 end
 
-pub type Header
-  pub kind: U32
-  pub flags: U32
+type Header
+  kind: U32
+  flags: U32
 end
 
-pub type Tag
-  pub value: U32
+type Tag
+  value: U32
 end
 
 #! Groups fixed-size byte arrays with expected U32 magic digests.
 pub type MagicHeader
-  pub bytes: [U8; 4]
-  pub expected: U32
+  bytes: [U8; 4]
+  expected: U32
 end
 
 #! Groups memory test parameters.
-pub type MemoryPlan
-  pub size: Usize
-  pub byte: U8
+type MemoryPlan
+  size: Usize
+  byte: U8
 end
 
-pub type ChecksumExpectation
-  pub header: U32
-  pub tag: U32
+type ChecksumExpectation
+  header: U32
+  tag: U32
 end
 
 #! Demonstrates struct containing slice length metadata.
-pub type SplitFirst
-  pub first: U8
-  pub rest_len: Usize
+type SplitFirst
+  first: U8
+  rest_len: Usize
 end
 
 #! Demonstrates nested public module scoping.
@@ -211,7 +211,7 @@ pub mod Runtime
   end
 
   #! Opaque native runtime check surface.
-  pub nat fun self_check() impure Result(Unit, Error)
+  nat fun self_check() impure Result(Unit, Error)
 
   #! Internal private function.
   fun probe_twice() impure Result(Unit, Error)
@@ -368,17 +368,23 @@ use Terminal.print
 use Terminal.print_line
 use Terminal.eprint
 
-pub trait Checksum
-  pub fun checksum(value: &Self) U32
+#! The trait is declared in a module and imported, so its `pub` is
+#! justified by the cross-module dispatch calls from the root file.
+pub mod Digest
+  pub trait Checksum
+    pub fun checksum(value: &Self) U32
+  end
 end
 
-pub impl Checksum for Header
+use Digest.Checksum
+
+impl Checksum for Header
   pub fun checksum(value: &Header) U32
     return ((value.kind << 16) ^ (value.flags << 8) ^ value.kind ^ value.flags)
   end
 end
 
-pub impl Checksum for Tag
+impl Checksum for Tag
   pub fun checksum(value: &Tag) U32
     return value.value ^ CHECKSUM_SALT
   end
@@ -1029,7 +1035,7 @@ fun reference_checks() impure ExitCode
   return ExitFailure
 end
 
-pub fun main() impure ExitCode
+fun main() impure ExitCode
   match gate()
     Ok(Unit) => return reference_checks()
     Err(Runtime.NotReady) => return ExitFailure

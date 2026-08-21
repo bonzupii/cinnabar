@@ -1,6 +1,6 @@
-pub const ZERO_INT: I64 = 0
+const ZERO_INT: I64 = 0
 
-pub fun sum_to(limit: I64) I64
+fun sum_to(limit: I64) I64
   var total: I64 = ZERO_INT
   var i: I64 = ZERO_INT
   total = total + i
@@ -8,6 +8,6 @@ pub fun sum_to(limit: I64) I64
   return total
 end
 
-pub fun main() I64
+fun main() I64
   return sum_to(3)
 end

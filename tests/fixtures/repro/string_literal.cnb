@@ -11,24 +11,24 @@ end
 
 use Slice.len as slice_len
 
-pub const GREETING: &[U8] = "Cinnabar"
-pub const EMPTY: &[U8] = ""
+const GREETING: &[U8] = "Cinnabar"
+const EMPTY: &[U8] = ""
 
 #! Every escape the language defines, in one literal: newline, tab, NUL,
 #! an escaped quote, and an escaped backslash.  Five bytes.
-pub const ESCAPES: &[U8] = "\n\t\0\"\\"
+const ESCAPES: &[U8] = "\n\t\0\"\\"
 
 #! A literal is UTF-8 source text, so a multi-byte character occupies the
 #! bytes of its encoding: 'é' is two bytes, '€' is three, '𝄞' is four.
-pub const MULTIBYTE: &[U8] = "é€𝄞"
+const MULTIBYTE: &[U8] = "é€𝄞"
 
-pub const BYTE_C: U8 = 0x43
-pub const BYTE_I: U8 = 0x69
-pub const BYTE_TAB: U8 = 0x09
-pub const BYTE_NUL: U8 = 0x00
-pub const BYTE_QUOTE: U8 = 0x22
-pub const BYTE_BACKSLASH: U8 = 0x5C
-pub const BYTE_NEWLINE: U8 = 0x0A
+const BYTE_C: U8 = 0x43
+const BYTE_I: U8 = 0x69
+const BYTE_TAB: U8 = 0x09
+const BYTE_NUL: U8 = 0x00
+const BYTE_QUOTE: U8 = 0x22
+const BYTE_BACKSLASH: U8 = 0x5C
+const BYTE_NEWLINE: U8 = 0x0A
 
 fun byte_at(view: &[U8], index: Usize) I64
   match view[index]
@@ -102,7 +102,7 @@ fun check_inline_matches_const() I64
   return 0
 end
 
-pub fun main() I64
+fun main() I64
   val lengths = check_lengths()
   if lengths != 0
     return lengths

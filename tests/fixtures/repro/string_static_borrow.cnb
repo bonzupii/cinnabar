@@ -22,10 +22,10 @@ end
 
 use Slice.len as slice_len
 
-pub const CONST_MESSAGE: &[U8] = "constant"
+const CONST_MESSAGE: &[U8] = "constant"
 
-pub type Labelled
-  pub label: &[U8]
+type Labelled
+  label: &[U8]
 end
 
 #! Returned straight from a literal.
@@ -121,7 +121,7 @@ fun check_table(first: &[U8], second: &[U8], third: &[U8]) I64
   return 0
 end
 
-pub fun main() I64
+fun main() I64
   val returns = check_returns()
   if returns != 0
     return returns

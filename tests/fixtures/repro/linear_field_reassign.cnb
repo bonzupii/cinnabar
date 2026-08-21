@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! Reassigning a linear field of a struct moves the field's old value out
 #! of the binding, and the assignment discards it — a use of the moved
 #! handle.  The blocks come from the registry's `Memory.allocate` so the
@@ -15,16 +16,16 @@ end
 
 use Memory.allocate
 
-pub type Holder
-  pub block: Memory.Block
-  pub tag: I64
+type Holder
+  block: Memory.Block
+  tag: I64
 end
 
 fun make_block() impure Result(Memory.Block, Memory.Error)
   return allocate(8)
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val first = match make_block()
     Ok(block) => block
     Err(error) => return 1

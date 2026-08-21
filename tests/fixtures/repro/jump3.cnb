@@ -2,7 +2,7 @@ fun f(x: I64) I64
   return (x * 8) & 0xF
 end
 
-pub fun main() I64
+fun main() I64
   var pc: I64 = 0
   var running: Bool = true
   var count: I64 = 0

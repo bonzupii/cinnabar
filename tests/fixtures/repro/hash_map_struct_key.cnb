@@ -9,20 +9,20 @@
 #! as either the wrong value coming back or a real key going unrecognized
 #! -- not just a crash.
 
-pub const KEY_A_TAG: U8 = 1
-pub const KEY_A_ID: I64 = 100
-pub const KEY_A_VALUE: I64 = 1100
+const KEY_A_TAG: U8 = 1
+const KEY_A_ID: I64 = 100
+const KEY_A_VALUE: I64 = 1100
 
-pub const KEY_B_TAG: U8 = 2
-pub const KEY_B_ID: I64 = 200
-pub const KEY_B_VALUE: I64 = 1200
+const KEY_B_TAG: U8 = 2
+const KEY_B_ID: I64 = 200
+const KEY_B_VALUE: I64 = 1200
 
-pub const KEY_C_TAG: U8 = 3
-pub const KEY_C_ID: I64 = 300
-pub const KEY_C_VALUE: I64 = 1300
+const KEY_C_TAG: U8 = 3
+const KEY_C_ID: I64 = 300
+const KEY_C_VALUE: I64 = 1300
 
-pub const MISSING_TAG: U8 = 9
-pub const MISSING_ID: I64 = 900
+const MISSING_TAG: U8 = 9
+const MISSING_ID: I64 = 900
 
 pub mod Collections
   pub nat type HashMap(K, V)
@@ -43,9 +43,9 @@ use Collections.hash_map_insert
 use Collections.hash_map_get
 use Collections.hash_map_free
 
-pub type Rec
-  pub tag: U8
-  pub id: I64
+type Rec
+  tag: U8
+  id: I64
 end
 
 fun fail_free_map(map: Collections.HashMap(Rec, I64), code: I64) impure I64
@@ -53,7 +53,7 @@ fun fail_free_map(map: Collections.HashMap(Rec, I64), code: I64) impure I64
   return code
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val map = match hash_map_new[Rec, I64]()
     Ok(m) => m
     Err(error) => return 1

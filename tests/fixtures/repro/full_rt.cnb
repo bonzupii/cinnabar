@@ -16,7 +16,7 @@ pub mod Runtime
     pub ProbeFailed(I64)
   end
 
-  pub nat fun self_check() impure Result(Unit, Error)
+  nat fun self_check() impure Result(Unit, Error)
 
   fun probe_twice() impure Result(Unit, Error)
     try self_check()
@@ -124,7 +124,7 @@ fun fill_squares(vec: &mut Collections.Vec(I64)) impure Result(Unit, Collections
   return Ok(Unit)
 end
 
-pub fun main() impure I64
+fun main() impure I64
   match gate()
     Ok(Unit) => Unit
     Err(error) => return 1

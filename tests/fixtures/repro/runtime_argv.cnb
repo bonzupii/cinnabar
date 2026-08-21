@@ -52,7 +52,7 @@ fun arg_length(all: &[Collections.String], index: Usize, want: Usize) I64
   end
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val all = args()
   if slice_len(all) != 3
     return 10

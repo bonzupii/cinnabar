@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! The boundary of the literal-typing rule: only a bare literal adopts a
 #! type from its context.  A value that already has one never adopts
 #! another, and a literal that does adopt one is range-checked against it.
@@ -17,7 +18,7 @@
 #!   7. A U8 const and an I64 local compared: a const is a typed value, not
 #!      a literal, so it does not adopt either.
 
-pub const SOME_U8: U8 = 40
+const SOME_U8: U8 = 40
 
 fun typed_peers_never_adopt() Bool
   var narrow: U8 = 1
@@ -55,10 +56,10 @@ fun const_is_a_typed_value() Bool
   return false
 end
 
-pub const BAD_RANGE_CMP: Bool = SOME_U8 == 300
-pub const BAD_NEG_CMP: Bool = SOME_U8 == -1
+const BAD_RANGE_CMP: Bool = SOME_U8 == 300
+const BAD_NEG_CMP: Bool = SOME_U8 == -1
 
-pub fun main() I64
+fun main() I64
   if typed_peers_never_adopt()
     return 1
   end

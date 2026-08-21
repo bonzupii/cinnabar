@@ -1,13 +1,13 @@
+# [EXPECT REJECTION]
 # b3_two_mut (bug-report 1d control): two exclusive borrows of the SAME
 # whole variable, both live and both used, must be rejected.  This is the
 # variable analogue of idx10b — the element fix must not regress it.
-# (EXPECT_REJECTED.)
-pub type P
-  pub x: I64
-  pub y: I64
+type P
+  x: I64
+  y: I64
 end
 
-pub fun main() I64
+fun main() I64
   var p: P = P(x: 1, y: 2)
   val a = &mut p
   val b = &mut p

@@ -5,12 +5,12 @@
 #! identifier string.  This enum names its diagnostic variant `Code`
 #! instead of `ExitDiagnostic`; the process must still exit with 42.
 
-pub type Exit
+type Exit
   pub Success
   pub Failure
   pub Code(I64)
 end
 
-pub fun main() impure Exit
+fun main() impure Exit
   return Code(42)
 end

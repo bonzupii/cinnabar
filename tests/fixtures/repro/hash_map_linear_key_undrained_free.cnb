@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! Container linearity is keyed on every type argument, not just the
 #! value: HashMap(K, V) with a linear K holds linear elements too, so
 #! hash_map_free without draining must be rejected with "cannot free
@@ -7,7 +8,7 @@
 #! path; the secondary "must be consumed" diagnostics on the error paths
 #! are unavoidable noise from that same rejected free.
 
-pub const MAP_VALUE: I64 = 9
+const MAP_VALUE: I64 = 9
 
 pub mod Collections
   pub nat type HashMap(K, V)
@@ -44,7 +45,7 @@ fun fail_key_free(key: Memory.Block) impure I64
   return 1
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val key = match allocate(64)
     Ok(b) => b
     Err(error) => return 1

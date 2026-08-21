@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! Bug-report 2b lock: extracting the same linear field twice must be a
 #! compile error -- the second extraction is a use of the moved handle.
 
@@ -11,8 +12,8 @@ pub mod Collections
   pub nat fun vec_free<T>(vec: Vec(T)) impure Unit
 end
 
-pub type Holder
-  pub vec: Collections.Vec(I64)
+type Holder
+  vec: Collections.Vec(I64)
 end
 
 use Collections.vec_new
@@ -26,7 +27,7 @@ fun make_holder() impure Result(Holder, Collections.Error)
   return Ok(Holder(vec: v))
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val h = match make_holder()
     Ok(value) => value
     Err(error) => return 1

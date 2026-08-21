@@ -43,17 +43,17 @@ pub mod Memory
   pub nat fun block_view(block: &Block) &[U8]
 end
 
-pub type Pair
-  pub first: U8
-  pub second: U8
+type Pair
+  first: U8
+  second: U8
 end
 
-pub const BYTE_A: U8 = 0x5A
-pub const BYTE_C: U8 = 0x43
-pub const BYTE_PAIR_FIRST: U8 = 0x11
-pub const BYTE_PAIR_SECOND: U8 = 0x22
-pub const BYTE_BLOCK: U8 = 0xA5
-pub const NUMBER_I64: I64 = 0x0102030405060708
+const BYTE_A: U8 = 0x5A
+const BYTE_C: U8 = 0x43
+const BYTE_PAIR_FIRST: U8 = 0x11
+const BYTE_PAIR_SECOND: U8 = 0x22
+const BYTE_BLOCK: U8 = 0xA5
+const NUMBER_I64: I64 = 0x0102030405060708
 
 use Slice.len as slice_len
 use Collections.vec_new
@@ -238,7 +238,7 @@ fun check_custom_view() impure I64
   return 1
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val u8_code = collection_code(check_u8_view())
   if u8_code != 0
     return u8_code

@@ -1,12 +1,13 @@
+# [EXPECT REJECTION]
 # b4_mut_shared (bug-report 1d control): a shared `&` borrow and an
 # exclusive `&mut` borrow of the same whole variable, overlapping, must
-# be rejected.  The variable analogue of idx10c.  (EXPECT_REJECTED.)
-pub type P
-  pub x: I64
-  pub y: I64
+# be rejected.  The variable analogue of idx10c.
+type P
+  x: I64
+  y: I64
 end
 
-pub fun main() I64
+fun main() I64
   var p: P = P(x: 1, y: 2)
   val s = &p
   val m = &mut p

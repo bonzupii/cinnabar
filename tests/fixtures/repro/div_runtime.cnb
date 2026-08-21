@@ -1,7 +1,7 @@
 #! Division with a runtime zero divisor: the divisor is not statically
 #! known, so the program compiles and the runtime returns Err(DivByZero)
 #! instead of trapping.
-pub fun main() I64
+fun main() I64
   var divisor: I64 = 0
   match 100 / divisor
     Ok(value) => return 6

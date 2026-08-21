@@ -1,9 +1,10 @@
+# [EXPECT REJECTION]
 #! A HashMap key that reaches a native handle through a reference is
 #! rejected at compile time. `Named` holds `&Collections.String`; the
 #! reference keeps the key itself non-linear (only the referenced String
 #! is a handle), so the map is freeable and the program passes the borrow
 #! checker. The rejection is codegen's "a HashMap key cannot contain a
-#! native handle", not a linearity error. (EXPECT_REJECTED.)
+#! native handle", not a linearity error.
 
 pub mod Collections
   pub nat type HashMap(K, V)
@@ -28,12 +29,12 @@ use Collections.hash_map_free
 use Collections.string_from_slice
 use Collections.string_free
 
-pub type Named
-  pub id: I64
-  pub name: &Collections.String
+type Named
+  id: I64
+  name: &Collections.String
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val map = match hash_map_new[Named, I64]()
     Ok(m) => m
     Err(error) => return 1

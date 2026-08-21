@@ -57,7 +57,7 @@ fn array_of<'a>(report: &'a Value, key: &str) -> Result<&'a Vec<Value>, Box<dyn 
         .ok_or_else(|| format!("report had no '{}' array: {}", key, report).into())
 }
 
-const STRUCT_SOURCE: &str = "pub type Pair\n  pub left: I64\n  pub right: I64\nend\n\nfun main() I32\n  val pair = Pair(left: 1, right: 2)\n  if pair.left == 1\n  return 0\n  else\n  return 1\n  end\nend\n";
+const STRUCT_SOURCE: &str = "type Pair\n  left: I64\n  right: I64\nend\n\nfun main() I32\n  val pair = Pair(left: 1, right: 2)\n  if pair.left == 1\n  return 0\n  else\n  return 1\n  end\nend\n";
 
 #[test]
 fn parse_only_arena_is_emitted_as_a_document() -> Result<(), Box<dyn Error>> {

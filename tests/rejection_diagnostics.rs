@@ -129,6 +129,38 @@ const BUNDLES: &[Bundle] = &[
         path: "tests/fixtures/repro/loader_poison_cascade/Main.cnb",
         diagnostics: &["expected '='"],
     },
+    // Three unconsumed `pub` modifiers on reached root-scope items: losing
+    // any one would leave the exit code unchanged, so the count and order
+    // are the whole assertion.
+    Bundle {
+        path: "tests/fixtures/repro/unnecessary_pub.cnb",
+        diagnostics: &[
+            "pub on 'helper' has no cross-module caller",
+            "pub on 'LIMIT' has no cross-module caller",
+            "pub on 'main' has no cross-module caller",
+        ],
+    },
+    // Two `pub` fields on a struct that only its own module touches.
+    Bundle {
+        path: "tests/fixtures/repro/unnecessary_field_pub.cnb",
+        diagnostics: &[
+            "pub on field 'x' has no cross-module access",
+            "pub on field 'y' has no cross-module access",
+        ],
+    },
+    // A dead implementing type: the type is unused, and the impl's method
+    // is reported with it.  Dropping either would leave the file failing on
+    // its sibling, so both are asserted.
+    Bundle {
+        path: "tests/fixtures/repro/dead_impl.cnb",
+        diagnostics: &["unused struct 'DeadType'", "unused method 'greet'"],
+    },
+    // Two enums nothing constructs or matches: losing one would leave the
+    // file still failing on the other.
+    Bundle {
+        path: "tests/fixtures/repro/dead_enum.cnb",
+        diagnostics: &["unused enum 'Color'", "unused enum 'Shape'"],
+    },
     Bundle {
         path: "tests/fixtures/invalid_typechecker.cnb",
         diagnostics: &[

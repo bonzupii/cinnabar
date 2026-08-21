@@ -1,0 +1,12 @@
+# [EXPECT REJECTION]
+#! Unconsumed field visibility: a struct whose `pub` fields are only ever
+#! read from its own module.  (EXPECT_REJECTED.)
+type Pair
+  pub x: I64
+  pub y: I64
+end
+
+fun main() I64
+  val p = Pair(x: 1, y: 2)
+  return p.x + p.y
+end

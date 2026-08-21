@@ -2,13 +2,13 @@
 # an array whose element type is itself an enum.  Codegen used to mistake the
 # infallible index for a fallible Result(T, IndexError) and then fail to find
 # the IndexOutOfBounds variant in the user enum.  (EXPECT_OK 0.)
-pub type Tag
-  pub T0
-  pub T1(I64)
-  pub T2(I64, I64)
+type Tag
+  T0
+  T1(I64)
+  T2(I64, I64)
 end
 
-pub fun main() I64
+fun main() I64
   val tags = [T1(4), T2(3, 4), T0]
   val score = match tags[1]
     T0 => 1

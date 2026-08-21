@@ -1409,17 +1409,38 @@ pub fn patfact_scrutinee_of(nodes: &[i64], pat: i64) -> i64 {
     NONE
 }
 
+// The member-fact rows of one key form a chain: slot e of each row is the
+// next row attached to the same key, and the key's own TYINFO descriptor
+// holds the chain head (NODE_START) and tail (NODE_END).  A key is either
+// a struct (FIELDKEY rows) or an enum (PAYLOADKEY rows), so one chain per
+// key is homogeneous.  Member queries walk the chain instead of scanning
+// the whole arena, and attachment appends in declared order.
+fn member_chain_append(nodes: &mut [i64], key: i64, row: i64) {
+    let tail = node_end(nodes, key);
+    if tail != NONE {
+        node_set_e(nodes, tail, row);
+    } else {
+        node_set(nodes, key, NODE_START, row);
+    }
+    node_set(nodes, key, NODE_END, row);
+}
+
 pub fn alloc_fieldkey(nodes: &mut Vec<i64>, key: i64, name: i64, fkey: i64, idx: i64) -> i64 {
-    alloc_node(nodes, &[NODE_FIELDKEY, NO_FILE, NO_FILE, NO_FILE, key, name, fkey, idx, NONE, NONE])
+    let row = alloc_node(nodes, &[NODE_FIELDKEY, NO_FILE, NO_FILE, NO_FILE, key, name, fkey, idx, NONE, NONE]);
+    member_chain_append(&mut nodes[..], key, row);
+    row
 }
 
 pub fn find_fieldkey(nodes: &[i64], key: i64, name: i64) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_FIELDKEY && node_a(nodes, idx) == key && node_b(nodes, idx) == name {
-            return idx;
+    if key < 0 || node_tag(nodes, key) != NODE_TYINFO {
+        return NONE;
+    }
+    let mut row = node_start(nodes, key);
+    while row != NONE {
+        if node_tag(nodes, row) == NODE_FIELDKEY && node_b(nodes, row) == name {
+            return row;
         }
-        idx += 1;
+        row = node_e(nodes, row);
     }
     NONE
 }
@@ -1442,16 +1463,21 @@ pub fn fieldkey_idx_of(nodes: &[i64], row: i64) -> i64 {
 pub const NODE_PAYLOADKEY: i64 = 25;
 
 pub fn alloc_payloadkey(nodes: &mut Vec<i64>, enum_key: i64, variant: i64, pkey: i64, field: i64) -> i64 {
-    alloc_node(nodes, &[NODE_PAYLOADKEY, NO_FILE, NO_FILE, NO_FILE, enum_key, variant, pkey, field, NONE, NONE])
+    let row = alloc_node(nodes, &[NODE_PAYLOADKEY, NO_FILE, NO_FILE, NO_FILE, enum_key, variant, pkey, field, NONE, NONE]);
+    member_chain_append(&mut nodes[..], enum_key, row);
+    row
 }
 
 pub fn find_payloadkey(nodes: &[i64], enum_key: i64, variant: i64, field: i64) -> i64 {
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_PAYLOADKEY && node_a(nodes, idx) == enum_key && node_b(nodes, idx) == variant && node_d(nodes, idx) == field {
-            return idx;
+    if enum_key < 0 || node_tag(nodes, enum_key) != NODE_TYINFO {
+        return NONE;
+    }
+    let mut row = node_start(nodes, enum_key);
+    while row != NONE {
+        if node_tag(nodes, row) == NODE_PAYLOADKEY && node_b(nodes, row) == variant && node_d(nodes, row) == field {
+            return row;
         }
-        idx += 1;
+        row = node_e(nodes, row);
     }
     NONE
 }
@@ -1466,15 +1492,18 @@ pub fn payloadkey_idx_of(nodes: &[i64], row: i64) -> i64 {
 
 // Every (field name, substituted field key, declared-order index) fact row
 // attached to a canonical struct key, in declared field order (the attach
-// order is the declaration order).
+// order is the declaration order, preserved by the chain).
 pub fn fieldkey_rows_of(nodes: &[i64], key: i64) -> Vec<(i64, i64, i64)> {
     let mut rows: Vec<(i64, i64, i64)> = Vec::new();
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_FIELDKEY && node_a(nodes, idx) == key {
-            rows.push((node_b(nodes, idx), node_c(nodes, idx), node_d(nodes, idx)));
+    if key < 0 || node_tag(nodes, key) != NODE_TYINFO {
+        return rows;
+    }
+    let mut row = node_start(nodes, key);
+    while row != NONE {
+        if node_tag(nodes, row) == NODE_FIELDKEY {
+            rows.push((node_b(nodes, row), node_c(nodes, row), node_d(nodes, row)));
         }
-        idx += 1;
+        row = node_e(nodes, row);
     }
     rows
 }
@@ -1483,12 +1512,15 @@ pub fn fieldkey_rows_of(nodes: &[i64], key: i64) -> Vec<(i64, i64, i64)> {
 // attached to a canonical enum key, in declared order.
 pub fn payloadkey_rows_of(nodes: &[i64], key: i64) -> Vec<(i64, i64, i64)> {
     let mut rows: Vec<(i64, i64, i64)> = Vec::new();
-    let mut idx = 0i64;
-    while idx < nodes.len() as i64 / NODE_STRIDE {
-        if node_tag(nodes, idx) == NODE_PAYLOADKEY && node_a(nodes, idx) == key {
-            rows.push((node_b(nodes, idx), node_c(nodes, idx), node_d(nodes, idx)));
+    if key < 0 || node_tag(nodes, key) != NODE_TYINFO {
+        return rows;
+    }
+    let mut row = node_start(nodes, key);
+    while row != NONE {
+        if node_tag(nodes, row) == NODE_PAYLOADKEY {
+            rows.push((node_b(nodes, row), node_c(nodes, row), node_d(nodes, row)));
         }
-        idx += 1;
+        row = node_e(nodes, row);
     }
     rows
 }

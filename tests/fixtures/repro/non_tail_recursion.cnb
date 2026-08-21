@@ -1,3 +1,4 @@
+# [EXPECT REJECTION]
 #! non_tail_recursion (EXPECT_REJECTED): the O(1) call-stack guarantee
 #! makes non-tail self-recursion a compile-time error.  A self-recursive
 #! call must be in strict tail position — the direct expression value of
@@ -28,6 +29,6 @@ fun count_down(n: I64) I64
   return rest + 1
 end
 
-pub fun main() I64
+fun main() I64
   return fact(5)
 end

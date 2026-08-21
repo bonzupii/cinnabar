@@ -13,20 +13,20 @@ fun slice_sum(view: &[U8]) Usize
   return slice_sum_acc(view, 0)
 end
 
-pub const MAGIC_BYTE_0: U8 = 0x0D
-pub const MAGIC_BYTE_1: U8 = 0xF0
-pub const MAGIC_BYTE_2: U8 = 0xAD
-pub const MAGIC_BYTE_3: U8 = 0x0B
+const MAGIC_BYTE_0: U8 = 0x0D
+const MAGIC_BYTE_1: U8 = 0xF0
+const MAGIC_BYTE_2: U8 = 0xAD
+const MAGIC_BYTE_3: U8 = 0x0B
 
 # 0x0D + 0xF0 + 0xAD + 0x0B = 13 + 240 + 173 + 11 = 437
-pub const EXPECTED_SUM: Usize = 437
+const EXPECTED_SUM: Usize = 437
 
 fun array_as_slice() Usize
   val bytes: [U8; 4] = [MAGIC_BYTE_0, MAGIC_BYTE_1, MAGIC_BYTE_2, MAGIC_BYTE_3]
   return slice_sum(&bytes)
 end
 
-pub fun main() I64
+fun main() I64
   if array_as_slice() == EXPECTED_SUM
     return 0
   end

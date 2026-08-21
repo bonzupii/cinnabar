@@ -35,7 +35,7 @@ end
 
 pub mod Process
   #! A spawned child, reaped exactly once by `wait`.
-  pub nat type Child
+  nat type Child
 
   pub type Error
     pub SystemFault(I64)
@@ -114,7 +114,7 @@ fun run(command: &[U8], want_exit: I64, fail_base: I64) impure I64
   return 0
 end
 
-pub fun main() impure I64
+fun main() impure I64
   #! `true` is resolved through PATH and exits 0 -- proves command lookup,
   #! spawn+wait, and exit-code decoding for the ordinary successful case.
   val ok = run("true", 0, 10)

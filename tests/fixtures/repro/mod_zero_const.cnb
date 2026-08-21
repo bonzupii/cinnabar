@@ -1,3 +1,4 @@
-pub fun main() I64
+# [EXPECT REJECTION]
+fun main() I64
   return 1 % 0
 end

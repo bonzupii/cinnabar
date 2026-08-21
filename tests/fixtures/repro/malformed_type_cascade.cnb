@@ -1,10 +1,11 @@
+# [EXPECT REJECTION]
 #! Bug proof: a malformed type in a typed `val` initializer must produce
 #! exactly one diagnostic — the resolver's "unknown type" primary (the
 #! resolver owns name resolution and reports it once) — and the binding's
 #! type key must recover so the typechecker emits no duplicate "unknown
 #! type" at the same span and no "cannot assign 'I64' to '?'" secondary
 #! from a dropped key.
-pub fun main() I64
+fun main() I64
   val x: NoSuchType = 42
   return 0
 end

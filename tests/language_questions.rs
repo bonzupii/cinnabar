@@ -82,7 +82,7 @@ fn a_discard_is_reported_before_the_program_resolves() {
     let path = dir.join("unresolvable.cnb");
     // `NoSuchType` does not exist, so this file cannot get past the
     // resolver — and the discard must still be reported.
-    match std::fs::write(&path, "pub fun main() NoSuchType\n  val _ = 1\n  return 0\nend\n") {
+    match std::fs::write(&path, "fun main() NoSuchType\n  val _ = 1\n  return 0\nend\n") {
         Ok(()) => {}
         Err(err) => {
             assert!(false, "cannot write the probe: {}", err);

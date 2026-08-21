@@ -44,10 +44,10 @@ use Memory.deallocate
 use Memory.write_u8
 use Memory.block_view
 
-pub const BYTE_A: U8 = 0x41
-pub const BYTE_B: U8 = 0x42
-pub const BYTE_C: U8 = 0x43
-pub const VALUE: I64 = 111
+const BYTE_A: U8 = 0x41
+const BYTE_B: U8 = 0x42
+const BYTE_C: U8 = 0x43
+const VALUE: I64 = 111
 
 fun fail_block(block: Memory.Block, code: I64) impure I64
   deallocate(block)
@@ -67,7 +67,7 @@ fun fail_map_free(map: Collections.HashMap(&[U8], I64), block_a: Memory.Block, b
   return code
 end
 
-pub fun main() impure I64
+fun main() impure I64
   val block_a = match allocate(3)
     Ok(b) => b
     Err(error) => return 1
