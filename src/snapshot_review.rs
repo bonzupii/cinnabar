@@ -13,16 +13,11 @@
 //! `--update-snapshots` would have written.
 //!
 //! **Invariants:**
-//! - The bind address must be loopback; a non-loopback address is rejected
-//!   before the listener is created.
+//! - The bind address must be loopback; non-loopback is rejected first.
 //! - Request bodies above `MAX_BODY_BYTES` are rejected without being
 //!   buffered further.
-//! - Sidecar writes go through `project::accept_snapshot`, which refuses
-//!   any path that is not the snapshot of a discovered test before it
-//!   applies the same root-confinement check every other sidecar write
-//!   makes. Confinement alone would leave every source file in the project
-//!   writable through this endpoint, so the request names which fixture to
-//!   accept and the compiler decides whether that is one.
+//! - Sidecar writes go through `project::accept_snapshot`, which requires a
+//!   discovered test's snapshot path in addition to root confinement.
 
 use crate::project::{accept_snapshot, snapshot_report, ManifestError, ProjectManifest};
 use serde_json::{json, Value};
@@ -33,8 +28,7 @@ use std::path::Path;
 /// The document `GET /api/snapshots` answers with.
 pub const SNAPSHOTS_FORMAT: &str = "cinnabar.snapshots.v1";
 
-/// Largest request body buffered, in bytes. Reading stops and the request
-/// is rejected once the accumulated body exceeds this.
+/// Max buffered request body size.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 
 /// Build the report as a JSON document.
@@ -79,8 +73,7 @@ pub fn serve(
     }
     let listener = TcpListener::bind(parsed)
         .map_err(|bind_error| format!("cannot bind snapshot reviewer: {}", bind_error))?;
-    // As with the other servers here, only the bind is fatal: one visitor's
-    // broken connection must not end the session for the reviewer.
+    // Only bind is fatal.
     for incoming in listener.incoming() {
         let mut stream = match incoming {
             Ok(stream) => stream,
@@ -185,9 +178,7 @@ fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]
         .map_err(|write_error| format!("cannot write snapshot review response: {}", write_error))
 }
 
-// The page. Inlined rather than served from disk so the reviewer works from
-// an installed binary with no asset directory beside it, and so a diff of
-// what it shows is a diff of this file.
+// Inlined review page.
 const PAGE: &str = r#"<!doctype html>
 <html lang=en>
 <meta charset=utf-8>
@@ -231,9 +222,7 @@ details summary{cursor:pointer;color:var(--dim);padding:0 14px 12px}
 <script>
 const app = document.getElementById("app");
 
-// A line-level longest-common-subsequence diff. Enough to read a reworded
-// diagnostic, which is what these snapshots hold; nothing here needs to be
-// a general-purpose diff tool.
+// Line-level LCS diff; enough to read a reworded diagnostic.
 function diffLines(before, after) {
   const a = before === "" ? [] : before.split("\n");
   const b = after === "" ? [] : after.split("\n");

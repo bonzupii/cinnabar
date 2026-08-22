@@ -139,13 +139,7 @@ fn attach_docs(nodes: &mut Vec<i64>, target: i64, docs: i64) {
 }
 
 fn tok_text_is(nodes: &[i64], names: &[String], pos: i64, text: &str) -> bool {
-    // A keyword and a symbol are both looked up by interned text, but that
-    // interning table is shared with string-literal and doc-comment bodies:
-    // matching text alone would let a string literal like ")" or "end" be
-    // consumed as the punctuation/keyword it merely spells. Every text this
-    // is called with is either an all-letter keyword (TOK_IDENT) or pure
-    // punctuation (TOK_SYM), so the token kind expected is determined by the
-    // text itself.
+    // Text-kind disambiguates TOK_IDENT vs TOK_SYM.
     let expected_kind = match text.chars().next() {
         Some(c) => {
             if c.is_ascii_alphabetic() {
@@ -1108,9 +1102,7 @@ fn parse_primary(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, lists: &
         *pos += 1;
         Some(alloc_expr(nodes, EXPR_LIT, file, start, end, &[lit, value, NONE]))
     } else if kind == TOK_STRING {
-        // The lexer already decoded the escapes and interned the bytes; the
-        // literal carries that name id, and no stage re-reads the quoted
-        // source text.
+        // The lexer interned the decoded bytes; no stage re-reads the source.
         let name = node_b(nodes, *pos);
         let end = node_end(nodes, *pos);
         *pos += 1;
@@ -1424,10 +1416,9 @@ fn parse_array_pattern(pos: &mut i64, names: &[String], nodes: &mut Vec<i64>, li
             if !expect(nodes, names, pos, "..", errors) {
                 return None;
             }
+            // Rest pattern must be last; any element after it would match
+            // at the wrong index.
             rest = node_b(nodes, element);
-            // A rest pattern must be the last element: the fixed prefix ends
-            // here.  An optional trailing comma is allowed, but any element
-            // after the rest would match at the wrong index.
             if accept(nodes, names, pos, ",") {
                 skip_nl(nodes, pos);
             }

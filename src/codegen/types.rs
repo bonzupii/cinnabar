@@ -169,10 +169,8 @@ fn native_llvm<'ctx>(context: &'ctx Context, layout: i64, span: (i64, i64, i64))
     Err(builder_error(span.0, span.1, span.2, "native type has no declared layout kind"))
 }
 
-// The LLVM struct of a canonical struct key, built from the precomputed
-// NODE_FIELDKEY facts the typechecker attached to the key: one field type
-// per row, in declared order.  No ITEM_STRUCT re-walk and no generic
-// substitution happens here.
+// The LLVM struct of a canonical struct key, built from the typechecker's
+// precomputed NODE_FIELDKEY facts, in declared order.
 fn struct_llvm<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64, span: (i64, i64, i64)) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
     let rows = fieldkey_rows_of(env.3, key);
     let mut field_tys: Vec<BasicTypeEnum<'ctx>> = Vec::new();
@@ -223,9 +221,8 @@ fn push_enum_info(enum_infos: &mut EnumInfos, key: i64, size: i64, align: i64, c
 }
 
 fn enum_payload_bounds<'ctx, 'a>(env: &mut TyEnv<'ctx, 'a>, key: i64, span: (i64, i64, i64)) -> Result<(i64, i64, i64), CodegenError> {
-    // Payload bounds come from NODE_PAYLOADKEY rows (contiguous per variant
-    // in attach order); the total variant count is the declared variant list
-    // length, which payload rows alone cannot express for unit variants.
+    // Payload bounds from NODE_PAYLOADKEY rows; variant count is the
+    // declared list length (payload rows cannot express unit variants).
     let row = row_of(env.3, key, span)?;
     let sym = node_c(env.3, row);
     let decl = node_c(env.3, sym);

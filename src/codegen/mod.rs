@@ -39,10 +39,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// The embedded musl static archives, staged into OUT_DIR by build.rs at
-// compile time (never committed to the source tree).  Every emitted binary
-// is a standalone static executable with no host libc or dynamic linker
-// dependency.
+// Embedded musl archives staged by build.rs; the emitted binary is a
+// standalone static executable.
 #[cfg(all(feature = "static-musl", target_os = "linux"))]
 const MUSL_LIBC_A: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libc.a"));
 #[cfg(all(feature = "static-musl", target_os = "linux"))]
@@ -52,22 +50,7 @@ const MUSL_CRTI_O: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crti.o"));
 #[cfg(all(feature = "static-musl", target_os = "linux"))]
 const MUSL_CRTN_O: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crtn.o"));
 
-/// How a program is linked.
-///
-/// `Shipped` is what this compiler exists to produce: static, `-nostdlib`,
-/// `-no-pie`, against the musl archive embedded at build time, carrying no
-/// dynamic section and no host libc dependency.
-///
-/// `Instrumented` is test infrastructure and never a release artifact. It
-/// links dynamically against the host libc for one reason: a memory checker
-/// needs something to interpose on. Against a shipped binary Valgrind's
-/// memcheck has no dynamic section to hook and reports `0 allocs, 0 frees`
-/// for a program that demonstrably allocates, and a sanitizer runtime wants
-/// exactly the libc the shipped link deliberately omits.
-///
-/// This does not relax the static-only rule for shipped output. It puts a
-/// second link mode beside it, used only by the sanitizer gate, so that the
-/// binaries a user receives are unchanged by the existence of the checks.
+/// Link mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LinkMode {
     Dynamic,
@@ -76,12 +59,7 @@ pub enum LinkMode {
     Instrumented,
 }
 
-/// Where a linked build goes and how it is produced.
-///
-/// These travel together — the output path, the optimization level it is
-/// assembled at, and the descriptor of the platform it targets — and
-/// naming them as one value keeps a call site from silently pairing a
-/// cross target with the path a shipped binary was meant to occupy.
+/// Link output and target descriptor.
 pub struct BuildTarget<'a> {
     pub out: &'a Path,
     pub opt_level: &'a str,
@@ -108,9 +86,7 @@ pub fn compile_and_link(
     finish_temp(&temp_root, compiled)
 }
 
-/// Emit the program's LLVM IR and return it as text, without running `opt`,
-/// `llc`, or the linker.  This is exactly the IR `compile_and_link` hands to
-/// `opt` — the emitter's own output, before any optimization pass.
+/// Emit the program's LLVM IR as text, without `opt`, `llc`, or linking.
 pub fn compile_to_ir(
     names: &[String],
     nodes: &mut Vec<i64>,
@@ -123,9 +99,8 @@ pub fn compile_to_ir(
     emit_to_ir(names, nodes, lists, impls_list, entry_span, target, seeds)
 }
 
-/// Emit, optimize, and assemble the program to a relocatable object file at
-/// `target.out`, skipping the final static link.  Runs the same `opt`/`llc`
-/// steps as `compile_and_link` at the same optimization level.
+/// Emit, optimize, and assemble to a relocatable object at `target.out`,
+/// skipping the final static link.
 pub fn compile_to_object(
     names: &[String],
     nodes: &mut Vec<i64>,
@@ -153,11 +128,8 @@ fn make_temp_root() -> Result<PathBuf, CodegenError> {
     Ok(temp_root)
 }
 
-// The temp dir is removed on success and failure alike, so repeated or
-// failing compiles never accumulate gigabytes of `libc.a` copies in
-// tmpfs.  A cleanup failure is reported through the typed error model,
-// never to stderr.  A compile error takes precedence over a cleanup
-// error; a missing dir is not an error.
+// Temp dir removed on success and failure alike; cleanup failures are typed
+// errors, never stderr output.
 fn finish_temp(temp_root: &Path, compiled: Result<(), CodegenError>) -> Result<(), CodegenError> {
     match std::fs::remove_dir_all(temp_root) {
         Ok(()) => compiled,
@@ -344,8 +316,7 @@ fn opt_flags(level: &str) -> (String, String) {
 
 fn link(obj_path: &Path, out: &Path, target: &Target, instrumented: bool) -> Result<(), CodegenError> {
     // The sanitizer-instrumented link is a codegen-only override layered on
-    // top of whatever target the build carries; it is never a target a user
-    // names. Every other mode comes from the descriptor's own link field.
+    // the target's own link mode.
     let mode = if instrumented {
         LinkMode::Instrumented
     } else {
@@ -365,17 +336,8 @@ fn link(obj_path: &Path, out: &Path, target: &Target, instrumented: bool) -> Res
     run_tool("clang", &refs)
 }
 
-// The emitted module defines `main`, which is what musl's `crt1.o` calls in
-// the shipped link and what the host toolchain's own startup files call
-// here. So the instrumented link needs no separate entry point: it is the
-// same object, handed to the driver with none of the flags that cut it off
-// from the host libc.
-// `-no-pie` for the same reason the shipped link passes it: `llc` produces a
-// non-relocatable object, so its absolute `.rodata` relocations cannot go
-// into a position-independent executable. The host toolchain defaults to
-// PIE, so leaving it off fails the link rather than producing a different
-// binary — and the point of this mode is that it is the *same* object,
-// linked differently.
+// The emitted module defines `main`; `-no-pie` because `llc` output is
+// non-relocatable.
 fn link_instrumented(obj_path: &Path, out: &Path) -> Result<Vec<String>, CodegenError> {
     Ok(vec![
         "-no-pie".to_string(),

@@ -4,17 +4,11 @@
 //! anything: the grammar's keyword lists, the comment tokens, the file
 //! extension, the server binary name. Its suite compares those against the
 //! compiler's own tables and drives a real LSP session against the built
-//! server.
-//!
-//! It hangs off `cargo test` rather than a new step in
-//! `pre_commit_check.sh` because that script is not ours to edit
-//! (AGENTS.md), and the gate already runs the Cargo suite.
+//! server. Running under `cargo test` keeps it inside the gate's reach.
 //!
 //! **Invariants:**
-//! - The extension's suite must run somewhere the gate reaches. Left to
-//!   `npm test` alone none of it would ever run, and the drift it exists to
-//!   catch would surface as wrong highlighting or a silent editor rather
-//!   than as a failure.
+//! - The suite runs through `node --test` with the TAP reporter so a pass
+//!   count is assertable from stdout.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,9 +24,7 @@ fn vscode_extension_suite_passes() {
         panic!("no extension manifest under {}", root.display());
     }
 
-    // Pin the reporter: node picks `spec` or `tap` depending on whether stdout
-    // is a terminal, and only TAP's summary (`# pass <n>`) is stable enough to
-    // assert a count against.
+    // TAP's summary (`# pass <n>`) is stable enough to assert a count against.
     let output = match Command::new("node")
         .arg("--test")
         .arg("--test-reporter=tap")
@@ -41,9 +33,6 @@ fn vscode_extension_suite_passes() {
     {
         Ok(value) => value,
         Err(err) => {
-            // `nix develop` puts node on PATH; outside it the whole Cargo build
-            // already fails for want of llvm-config, so this is the same class
-            // of "run it in the dev shell" problem rather than a new one.
             panic!(
                 "could not run 'node --test' in {}: {}.  Run the suite through \
                  'nix develop --command cargo test'.",
@@ -55,8 +44,6 @@ fn vscode_extension_suite_passes() {
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.status.success() {
-        // node's test runner reports which assertion failed on stdout, so the
-        // failure is actionable without re-running anything by hand.
         panic!(
             "the VS Code extension suite failed:\n{}\n{}",
             stdout,
@@ -64,9 +51,7 @@ fn vscode_extension_suite_passes() {
         );
     }
 
-    // `node --test` exits 0 when it discovers nothing, so a renamed directory
-    // or a file that stops matching `*.test.js` would report success while
-    // running no tests at all -- the silent drift this suite exists to catch.
+    // `node --test` exits 0 when it discovers nothing, so require a pass count.
     let passed = summary_count(&stdout, "# pass ");
     assert!(
         passed > 0,

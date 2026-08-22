@@ -21,15 +21,10 @@
 //! invocation.
 //!
 //! **Invariants:**
-//! - This is the only place a typed error may become a string. Every stage
-//!   below carries its error, with a real span, until it arrives here —
-//!   including on the way into the structured envelope.
-//! - `NO_FILE` renders as a genuinely source-less error rather than as a
-//!   location. A fact about a compiler-synthesized wrapper has no line in
-//!   the user's program to point at, and inventing one would be a lie the
-//!   user cannot act on.
-//! - The pipeline order is fixed and a reporting stage halts it, so no
-//!   stage ever runs on facts an earlier one failed to establish.
+//! - This is the only place a typed error may become a string; every stage
+//!   below carries its error, with a real span, until it arrives here.
+//! - `NO_FILE` renders as a genuinely source-less error.
+//! - The pipeline order is fixed and a reporting stage halts it.
 
 use cinnabar::ast::*;
 use cinnabar::target::Target;
@@ -64,8 +59,7 @@ struct CliArgs {
 }
 
 enum ToolCommand {
-    // The output directory, and whether the caller wants the document
-    // rather than the page.
+    // (output directory, document-only flag)
     Doc(Option<PathBuf>, bool),
     Burn(String),
     Build(String),
@@ -759,9 +753,7 @@ fn main() -> ExitCode {
     if let Some(tool_command) = args.tool_command {
         return run_tool_command(&args.input, args.output.as_deref(), tool_command);
     }
-    // The target is parsed once, here, and every later stage — frontend
-    // analysis, IR emission, layout, and linking — reads the same
-    // descriptor rather than re-deriving the platform from a string.
+    // Target parsed once; all stages reuse descriptor.
     let mut target = match Target::parse(&args.target) {
         Ok(target) => target,
         Err(error) => return source_less_failure(&error.to_string()),
@@ -813,10 +805,8 @@ fn main() -> ExitCode {
         return report_diagnostics(json_out, &errors, &notes, &files);
     }
     if !borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut check, root, &ext_mods) {
-        // The structured envelope always carries the checker's notes: a
-        // consumer asked for machine-readable output, and there is no
-        // terminal to keep uncluttered. --explain-borrow=json is the older
-        // spelling of that same request.
+        // The JSON envelope always carries the checker's notes; --explain-
+        // borrow=json is the older spelling of that request.
         if json_out || args.explain_borrow.as_deref() == Some("json") {
             return report_diagnostics(true, &errors, &notes, &files);
         }
@@ -874,9 +864,7 @@ fn main() -> ExitCode {
     }
     if args.emit_obj {
         let out = emit_out_path(&args, "o");
-        // Object emission stops before linking, so the descriptor's link
-        // mode is never consulted; the target is carried only to share the
-        // BuildTarget shape with the link path.
+        // Object emission stops before linking; the link mode is unused here.
         let build_target = codegen::BuildTarget {
             out: &out,
             opt_level: &args.opt_level,
@@ -895,10 +883,7 @@ fn main() -> ExitCode {
         None => default_out_path(&args.input),
     };
     if args.static_link && (!target.supports_static_musl() || !cfg!(all(feature = "static-musl", target_os = "linux"))) {
-        // A refusal about how this binary was built has no line of the
-        // user's program to point at, so it travels as a source-less
-        // diagnostic — through the same reporter, and into the same
-        // envelope, as every other one.
+        // A build-configuration refusal has no user source to point at.
         let unsupported = Diag {
             message: "--static requires a Linux compiler built with the static-musl feature".to_string(),
             file: NO_FILE,
@@ -924,11 +909,8 @@ fn main() -> ExitCode {
     report_accepted(json_out, &format!("Successfully compiled {} to '{}'.", entry, out.display()))
 }
 
-/// Report a run that produced no diagnostics.
-///
-/// Under `--emit-json` this writes the diagnostic envelope with an empty
-/// list, keeping one document per invocation. Otherwise it prints
-/// `message` and returns success.
+/// Report a run that produced no diagnostics: the empty envelope under
+/// `--emit-json`, otherwise `message` with success.
 fn report_accepted(emit_json: bool, message: &str) -> ExitCode {
     if emit_json {
         return emit_report(&cinnabar::emit_json::diagnostics_report(&[], &[], &[]));
@@ -945,9 +927,7 @@ fn report_diagnostics(emit_json: bool, errors: &[Diag], notes: &[Note], files: &
     finish_with_diagnostics(errors, notes, files)
 }
 
-/// End the run with a codegen failure, in whichever rendering was asked
-/// for. It enters the structured envelope as the diagnostic it is, so a
-/// consumer needs no second shape for failures below the front end.
+/// End the run with a codegen failure as the structured diagnostic it is.
 fn report_codegen_error(emit_json: bool, codegen_err: &codegen::error::CodegenError, files: &[(String, String)]) -> ExitCode {
     if emit_json {
         let diag = Diag {
@@ -962,11 +942,8 @@ fn report_codegen_error(emit_json: bool, codegen_err: &codegen::error::CodegenEr
     finish_with_codegen_error(codegen_err, files)
 }
 
-/// Write one JSON document to standard output.
-///
-/// A serialization failure is still a compiler failure and is reported
-/// through the same source-less reporter every other tool error uses,
-/// rather than leaving the consumer with empty output and a success status.
+/// Write one JSON document to standard output; a serialization failure is
+/// reported through the source-less reporter.
 fn emit_report(report: &Value) -> ExitCode {
     match cinnabar::emit_json::render_report(report) {
         Ok(rendered) => {
@@ -1273,8 +1250,7 @@ fn generate_documentation(path: &Path, output: Option<&Path>, serve: bool, addre
         return report_diagnostics(emit_json, &analyzed.errors, &analyzed.notes, &analyzed.files);
     }
     if emit_json {
-        // The document, not a page: a documentation site that wants to lay
-        // out its own pages should not have to strip the compiler's.
+        // The document, not a page.
         return emit_report(&docs::docs_json(
             &analyzed.names,
             &analyzed.nodes,
@@ -1351,10 +1327,7 @@ fn run_project_compiler(path: &Path, run: bool, check: bool, target: &str) -> Ex
         if let Err(create_error) = std::fs::create_dir_all(&output_dir) {
             return source_less_failure(&format!("cannot create build directory '{}': {}", output_dir.display(), create_error));
         }
-        // The artifact is named by the manifest's NAME, not by whichever file
-        // happens to be the entry point. A project that renames its entry
-        // source is not renaming itself, and NAME is required precisely so
-        // there is an answer that does not depend on that.
+        // The artifact is named by the manifest's NAME, not the entry file.
         invocation.arg("-o").arg(output_dir.join(&manifest.name));
         if run {
             invocation.arg("--run");
@@ -1398,19 +1371,14 @@ fn exit_code_from_status(status: std::process::ExitStatus) -> ExitCode {
     }
 }
 
-/// Renders a manifest failure through the reporter every other diagnostic
-/// uses. One with a real span shows the offending line of `build.cnb`; one
-/// with no Cinnabar origin carries `NO_FILE` and renders source-less, which
-/// is what that already means to the reporter.
+/// Renders a manifest failure: a real span shows its line, `NO_FILE`
+/// renders source-less.
 fn finish_with_manifest_error(failure: &project::ManifestError) -> ExitCode {
     finish_with_diagnostics(&failure.diagnostics, &[], &failure.files)
 }
 
-// Renders a source-less runtime error and continues. The server
-// subcommands report per-connection failures through this so a bad
-// connection is rendered without stopping the listener for later
-// visitors; `source_less_failure` below is the same render plus the
-// failure exit that fatal tool errors need.
+// Renders a source-less runtime error and continues; server subcommands use
+// this for per-connection failures so the listener survives one bad visitor.
 fn report_source_less(message: &str) {
     if let Err(render_error) = render_source_less(message) {
         eprintln!("{}", render_error);
@@ -1910,8 +1878,7 @@ fn dump_expr(names: &[String], nodes: &[i64], lists: &[Vec<i64>], id: i64, depth
     if kind == EXPR_LIT {
         let lit = node_b(nodes, id);
         if lit == LIT_STRING {
-            // A string literal's `c` slot is the interned name id of its
-            // decoded bytes, not a number, so the dump shows the bytes.
+            // The `c` slot is the interned name id of the decoded bytes.
             println!("{}Lit(string, \"{}\")", pad, escaped_literal_text(&name_text(names, node_c(nodes, id))));
         } else {
             println!("{}Lit({}, {})", pad, lit_kind_name(lit), node_c(nodes, id));
@@ -2022,9 +1989,7 @@ fn dump_pat(names: &[String], nodes: &[i64], lists: &[Vec<i64>], id: i64, depth:
     }
 }
 
-// The literal kinds an `EXPR_LIT` node's `b` slot holds.  These are `LIT_*`
-// values, not the `TOK_*` token kinds the lexer produced them from; the two
-// numberings do not line up.
+// The `LIT_*` kind of an EXPR_LIT node's `b` slot, not the lexer's TOK_* kind.
 fn lit_kind_name(kind: i64) -> &'static str {
     if kind == LIT_INT {
         "int"
@@ -2098,12 +2063,7 @@ fn bin_name(op: i64) -> &'static str {
 }
 
 fn run_binary(path: &Path) -> ExitCode {
-    // A separator-less program name — the default output for `main.cnb`
-    // compiled in its own directory — would make `Command::new` search
-    // `$PATH` instead of running the binary that was just built, silently
-    // executing whatever else happens to be called `main`. Qualifying it
-    // with the current directory makes it unambiguously a path to this
-    // file. The name on disk is unchanged; only the invocation is.
+    // Qualify with `./` so `Command::new` runs this file, not a $PATH lookup.
     let invoked = if path.parent().is_some_and(|parent| !parent.as_os_str().is_empty()) {
         path.to_path_buf()
     } else {

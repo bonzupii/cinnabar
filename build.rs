@@ -60,9 +60,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while idx < STAGE_NAMES.len() {
         match STAGE_NAMES.get(idx) {
             Some(name) => {
-                // The rustc sysroot keeps libc.a and the crt start objects in a
-                // `self-contained` subdirectory of the target lib dir; musl's
-                // own layout keeps them at the top level.
+                // rustc sysroots keep the objects under `self-contained`;
+                // musl's layout keeps them at the top level.
                 let mut from = lib_dir.join(name);
                 if !from.is_file() {
                     from = lib_dir.join("self-contained").join(name);
@@ -86,10 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // The first directory (in discovery order) that holds a musl libc.a:
-//   1. the MUSL_LIBC_A environment variable,
-//   2. the self-provisioned cache,
-//   3. standard host musl paths,
-//   4. the rustc sysroot.
+// MUSL_LIBC_A override, self-provisioned cache, host musl paths, rustc sysroot.
 fn find_musl_lib_dir(arch: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Ok(path) = env::var("MUSL_LIBC_A") {
@@ -127,9 +123,7 @@ fn find_musl_lib_dir(arch: &str) -> Result<PathBuf, Box<dyn std::error::Error>> 
 }
 
 // Ensures a compiled musl exists in the self-provisioned cache, downloading
-// and building it from source when the cache is empty. An explicit
-// MUSL_LIBC_A override short-circuits this entirely: the developer is in
-// manual control, so no network or compiler is touched.
+// and building from source when empty; a MUSL_LIBC_A override skips this.
 fn provision_musl(arch: &str) -> Result<(), Box<dyn std::error::Error>> {
     if env::var_os("MUSL_LIBC_A").is_some() {
         return Ok(());
@@ -189,10 +183,8 @@ fn musl_arch(target: &str) -> Result<String, Box<dyn std::error::Error>> {
     }
 }
 
-// Downloads the pinned release tarball (once), verifies its SHA-256, and
-// leaves the verified archive at the cache path. A freshly downloaded archive
-// is written to a temp file and renamed only after its checksum matches, so a
-// corrupt download never becomes the cached archive.
+// Downloads the pinned tarball once, verifies its SHA-256, and renames it
+// into the cache only after verification passes.
 fn ensure_archive(cache_dir: &Path, archive: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if !archive.is_file() {
         fs::create_dir_all(cache_dir)?;
@@ -224,9 +216,7 @@ fn ensure_archive(cache_dir: &Path, archive: &Path) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
-// Fetches the release tarball to `dest`, trying curl first and falling back
-// to wget. Each attempt propagates the tool's own failure; a download is
-// never silently accepted as complete.
+// Fetches the tarball via curl, falling back to wget; failures propagate.
 fn download_archive(dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let curl_result = fetch(
         dest,
@@ -309,9 +299,8 @@ fn extract_archive_to(archive: &Path, src_dir: &Path) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-// Configures, compiles, and installs musl into `build_root/install`. The
-// configure is run with `clang` at `-O2` and `--disable-shared`, so only the
-// static archive and crt start objects the staged link needs are produced.
+// Configures, compiles, and installs musl into `build_root/install` with
+// `clang -O2 --disable-shared`.
 fn build_musl(
     arch: &str,
     archive: &Path,
@@ -322,9 +311,8 @@ fn build_musl(
     fs::create_dir_all(build_root)?;
     extract_archive_to(archive, src_dir)?;
     let mut configure = Command::new("./configure");
-    // The prefix must be absolute: `make install` runs with the source tree
-    // as its cwd, and a relative prefix would be re-resolved against that
-    // cwd, burying the install under `src/` instead of `build_root/install`.
+    // The prefix must be absolute: `make install` re-resolves a relative
+    // prefix against the source tree cwd.
     configure.arg(format!("--prefix={}", install_dir.display()));
     configure.arg("--disable-shared");
     if arch != std::env::consts::ARCH {
@@ -393,20 +381,15 @@ fn all_artifacts_present(lib_dir: &Path) -> bool {
     true
 }
 
-// Removes a file, reporting (but not failing on) removal errors. Used to
-// clean up a corrupt archive before aborting, where the checksum mismatch is
-// the real error and a failed cleanup must not mask it.
+// Removes a file, reporting but not propagating removal errors.
 fn remove_file_best_effort(path: &Path) {
     if let Err(err) = fs::remove_file(path) {
         eprintln!("build.rs: cannot remove '{}': {}", path.display(), err);
     }
 }
 
-// A directory counts as a musl lib dir when it holds libc.a either directly
-// (musl's own layout, as installed by a host package or the self-provisioned
-// build) or under the `self-contained` subdirectory that rustup uses for its
-// musl targets. The staging loop resolves each archive against the same two
-// locations.
+// A directory counts as a musl lib dir when it holds libc.a directly or
+// under the rustup `self-contained` subdirectory.
 fn holds_libc_a(dir: &Path) -> bool {
     dir.join("libc.a").is_file() || dir.join("self-contained").join("libc.a").is_file()
 }

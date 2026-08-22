@@ -1,20 +1,14 @@
 //! The fixture corpus, run for exit codes and for stream contents.
 //!
-//! Compiles every case in `repro_corpus` and checks the exit code it
-//! produces, then separately runs the `STREAM_CASES` to check that terminal
-//! output and command-line arguments carry their contents byte for byte.
-//! Children run under a timeout with stdin closed, and both output streams
-//! are drained on their own threads so a fixture that writes more than a
-//! pipe buffer holds cannot deadlock the harness.
-//!
-//! Corpus size is chosen by the test profile rather than by editing the
-//! table, so a reduced run covers the same corpus more thinly instead of
-//! covering a different, smaller one.
+//! Compiles every case in `repro_corpus` and checks its exit code, then runs
+//! the `STREAM_CASES` to check that terminal output and command-line
+//! arguments carry their contents byte for byte. Children run under a
+//! timeout with stdin closed; both output streams are drained on their own
+//! threads so a fixture writing more than a pipe buffer holds cannot deadlock.
 //!
 //! **Invariants:**
-//! - The corpus lives in `tests/support/repro_corpus.rs` and is shared with
-//!   `sanitizer_gate`. A second copy would drift, and the two suites would
-//!   quietly stop covering the same programs.
+//! - The corpus lives in `tests/support/repro_corpus.rs`, shared with
+//!   `sanitizer_gate`.
 //! - A fixture never reads the harness's own standard input.
 //! - A reduced profile samples evenly across the corpus, never a prefix.
 
@@ -101,10 +95,8 @@ const EXPECT_REJECTED_PATHS: &[&str] = &[
     "tests/fixtures/repro/loader_poison_cascade/Main.cnb",
 ];
 
-// Compile-only fixtures: the binary must build, but is never executed.
-// http_server.cnb is a blocking server loop; vm5.cnb and vm10.cnb loop
-// forever (their JMP never reaches HALT), so none has an exit code to
-// assert.
+// Compile-only fixtures: blocking server loop or infinite VM loop, so no
+// exit code to assert.
 const EXPECT_COMPILE: &[(&str, &str)] = &[
     ("http_server", "tests/fixtures/http_server.cnb"),
     ("vm5", "tests/fixtures/repro/vm5.cnb"),
@@ -235,17 +227,8 @@ fn repro_config() -> ReproConfig {
 
 fn run_binary(bin: &Path, timeout_secs: u64) -> i32 {
     let child = match Command::new(bin)
-        // A fixture must never read the harness's own standard input.
-        // `Terminal.read_line` blocks until a line or end of input arrives,
-        // so an inherited descriptor would make a fixture's exit code
-        // depend on whether the suite was run from a terminal, a pipe, or
-        // CI. A null stdin is at end of input immediately, which is a
-        // definite state every run agrees on.
-        //
-        // A fixture that means to be read rather than merely counted names
-        // its input in `STREAM_CASES` and runs under `run_with_streams`,
-        // which supplies exactly those bytes — still a definite state, just
-        // a richer one than "nothing".
+        // Null stdin: at end of input immediately, independent of how the
+        // suite was launched. Stream-fed fixtures run under `run_with_streams`.
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -303,16 +286,13 @@ fn wait_with_timeout(mut child: std::process::Child, timeout_secs: u64) -> i32 {
     }
 }
 
-// One directory per test: the tests in this file run concurrently, so a
-// shared per-process directory would let the first one to finish delete the
-// binaries the others are still running.
+// Per-test directory: concurrent tests must not share binaries.
 fn temp_dir(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("cinnabar_repro_{}_{}", std::process::id(), label))
 }
 
-// Removes the harness temp dir even when an assertion fails mid-run: a
-// failed iteration must not leak its compiled binaries (each a ~4.5 MB
-// embedded-libc.a link) into the temp filesystem.
+// Removes the temp dir on every exit path so failed iterations never leak
+// their compiled binaries into the temp filesystem.
 struct TempDirGuard(PathBuf);
 
 impl Drop for TempDirGuard {
@@ -324,13 +304,8 @@ impl Drop for TempDirGuard {
     }
 }
 
-/// Drains one of a child's output streams to end of file, on its own
-/// thread.
-///
-/// A program that fills a pipe buffer blocks until someone reads it, so
-/// draining the two streams in sequence would deadlock against a fixture
-/// that writes enough to both. The thread is started before anything is
-/// written to the child's standard input for the same reason.
+/// Drains one of a child's output streams on its own thread, started before
+/// stdin is written, so a fixture filling both pipe buffers cannot deadlock.
 fn drain<R: Read + Send + 'static>(
     pipe: Option<R>,
     stream: &'static str,
@@ -384,10 +359,8 @@ fn run_with_streams(bin: &Path, case: &StreamCase, timeout_secs: u64) -> StreamO
     };
     let out_reader = drain(child.stdout.take(), "standard output");
     let err_reader = drain(child.stderr.take(), "standard error");
-    // The input is written and its descriptor closed before the wait.
-    // `read_line` blocks until a line or end of input arrives, so a standard
-    // input left open would hang the fixture that reads past its last line —
-    // the exact fixture this table exists to run.
+    // Input is written and the descriptor closed before waiting, so a
+    // fixture reading past its last line reaches end of input instead of hanging.
     match child.stdin.take() {
         Some(mut pipe) => match pipe.write_all(case.stdin) {
             Ok(()) => {}
@@ -403,10 +376,7 @@ fn run_with_streams(bin: &Path, case: &StreamCase, timeout_secs: u64) -> StreamO
     }
 }
 
-/// Renders a stream for a failure message, so a mismatch reads as text
-/// rather than as a byte array. Escaped rather than lossy: a dropped or
-/// added terminator is the defect being looked for, and it has to be
-/// visible in the message.
+/// Renders a stream for a failure message: printable text, escaped otherwise.
 fn shown(bytes: &[u8]) -> String {
     let mut text = String::new();
     for byte in bytes {
@@ -433,8 +403,7 @@ fn assert_stream(case: &StreamCase, stream: &str, want: &[u8], got: &[u8]) {
     );
 }
 
-/// What each fixture writes, to which descriptor, and what it makes of what
-/// it was given — none of which the exit-code corpus can see.
+/// Each fixture's terminal output, arguments, and stdin handling.
 #[test]
 fn terminal_streams_and_arguments_carry_their_contents() {
     let cinnabar = env!("CARGO_BIN_EXE_cinnabar");
@@ -443,9 +412,6 @@ fn terminal_streams_and_arguments_carry_their_contents() {
     match std::fs::create_dir_all(&dir) {
         Ok(()) => {}
         Err(err) => {
-            // Not a silent return: this test carries the only assertions of
-            // terminal byte behaviour, and passing without making them would
-            // report coverage that did not run.
             assert!(false, "cannot create temp dir: {}", err);
             return;
         }

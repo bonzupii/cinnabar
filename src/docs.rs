@@ -31,12 +31,8 @@ pub fn render_api_docs(names: &[String], nodes: &[i64], lists: &[Vec<i64>], root
     page("Cinnabar API documentation", &body)
 }
 
-/// Every public declaration reachable from the entry, as one document.
-///
-/// The same walk the page above does, reported rather than laid out: the
-/// visibility test, the declaration kinds, and the attached prose are the
-/// ones `render_api_docs` uses, so a site built on this cannot publish a
-/// declaration the page would have hidden.
+/// Every public declaration reachable from the entry, as one document; the
+/// same walk and visibility test as `render_api_docs`.
 pub fn docs_json(names: &[String], nodes: &[i64], lists: &[Vec<i64>], root: i64, files: &[(String, String)]) -> Value {
     json!({
         "format": DOCS_FORMAT,
@@ -57,9 +53,7 @@ fn declarations_json(
     let mut idx = 0i64;
     while idx < list_len(lists, item_list) {
         let item = list_get(lists, item_list, idx);
-        // A visible item is one that is pub, or the program entry point
-        // (whose symbol carries the SYM_FUN_MAIN tag).  The entry point
-        // does not need pub — it is always reachable.
+        // Visible if pub or entry point.
         let is_item = node_tag(nodes, item) == NODE_ITEM;
         let is_pub = node_b(nodes, item) == 1;
         let sym = if is_item { item_sym_of(nodes, item) } else { NONE };
@@ -185,13 +179,8 @@ pub fn serve_cinnabook(
 ) -> Result<(), String> {
     let listener = TcpListener::bind(address)
         .map_err(|bind_error| format!("cannot bind Cinnabook server to '{}': {}", address, bind_error))?;
-    // Only the bind is fatal: once the socket is listening, a connection
-    // that fails to accept, read, or write is that one visitor's problem —
-    // a browser closing mid-response must not take the server down for
-    // every future visitor. Per-connection failures are reported to the
-    // caller through `report_error` (never printed directly here — this is
-    // library code, and only the CLI entry point in `main.rs` decides how a
-    // message reaches the user), which renders them, and the loop moves on.
+    // Only the bind is fatal: per-connection failures go to `report_error`
+    // and the accept loop continues.
     for incoming in listener.incoming() {
         let mut stream = match incoming {
             Ok(stream) => stream,
@@ -224,15 +213,8 @@ pub fn serve_cinnabook(
     Ok(())
 }
 
-/// Read a request through its header terminator, so the connection can be
-/// closed without leaving unread bytes behind.
-///
-/// A single `read` can return a partial request. Closing a socket that still
-/// holds unread bytes resets the connection (RST) instead of finishing it
-/// (FIN), which a client observes as "connection reset by peer". Reading
-/// until the header terminator consumes everything a header-only request
-/// sent, so the close that follows is a clean FIN. An empty request is also
-/// read cleanly (zero bytes) so the caller can skip it without reporting it.
+/// Reads through the header terminator so a following close is a clean FIN
+/// rather than an RST from unread bytes.
 fn read_headers(stream: &mut TcpStream) -> Result<usize, String> {
     let mut buffer = [0u8; 2048];
     let mut request = Vec::new();
@@ -365,11 +347,8 @@ fn render_methods(names: &[String], nodes: &[i64], lists: &[Vec<i64>], methods: 
     }
 }
 
-/// The prose the parser attached to `target`, paragraph by paragraph.
-///
-/// Scans `NODE_DOC` rows for ones whose slot `a` equals `target` and
-/// returns each non-empty interned paragraph. Both `render_attached_docs`
-/// and `declaration_json` format this vector.
+/// The prose the parser attached to `target`, paragraph by paragraph, from
+/// `NODE_DOC` rows whose slot `a` equals `target`.
 fn attached_docs(names: &[String], nodes: &[i64], lists: &[Vec<i64>], target: i64) -> Vec<String> {
     let mut paragraphs: Vec<String> = Vec::new();
     let mut node = 0i64;

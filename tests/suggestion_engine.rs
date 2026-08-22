@@ -1,22 +1,13 @@
 //! Suggestion-engine diagnostics, pinned through the real compiler.
 //!
-//! These tests run real fixtures through the compiler binary and read what
-//! it printed. They pin the wording contract itself, not merely that a
-//! suggestion appeared somewhere: every suggestion is hedged, an
-//! ambiguous match names no candidate, and every definition-site label
-//! carries a real span — the declaration it names.
-//!
-//! The two questions MANIFESTO.md does not answer — whether an unused
-//! declaration or a discard pattern is an error — are pinned in
-//! `tests/language_questions.rs`, not here.
+//! Runs real fixtures through the compiler binary and reads what it printed.
+//! Pins the wording contract: every suggestion is hedged, an ambiguous match
+//! names no candidate, and every definition-site label carries a real span.
 //!
 //! **Invariants:**
-//! - Suggestions are asserted through the compiler's rendered output, not
-//!   by calling the engine directly. A hedge the engine produces but the
-//!   diagnostic never prints would satisfy a unit test and fail the user.
-//! - An ambiguous case is asserted to name *no* candidate. Asserting only
-//!   that some suggestion appears would let the engine start guessing and
-//!   still pass.
+//! - Suggestions are asserted through the compiler's rendered output, never
+//!   by calling the engine directly.
+//! - An ambiguous case is asserted to name no candidate.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -68,9 +59,7 @@ fn compiler_output(path: &Path) -> String {
     ))
 }
 
-// Read from the engine rather than restated. A sixth term added there would
-// otherwise leave this test quietly checking the original five, which is the
-// drift the shared corpus was extracted to prevent.
+// Shared with the engine so new terms are picked up automatically.
 use cinnabar::suggest::BANDAID_TERMS;
 
 #[test]

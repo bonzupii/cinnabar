@@ -1,25 +1,10 @@
 //! Fixtures whose contract is more than an exit code.
 //!
-//! Kept apart from `repro_corpus` so a suite that only needs the
-//! expected-success list does not pull in a table it never reads. One table
-//! per file, each included where it is used.
+//! Kept apart from `repro_corpus` so suites needing only the expected-success
+//! list do not pull in a table they never read.
 
-/// A fixture whose contract is more than an exit code: what it is given on
-/// standard input and in `argv`, and exactly what it must write to each
-/// output descriptor.
-///
-/// `run_binary` gives every other fixture a null standard input and discards
-/// both output streams. That is deliberate — a fixture's result must not
-/// depend on the terminal the suite happened to run from — but it leaves
-/// everything a program writes invisible. A `print` that wrote to standard
-/// error, a `print_line` that dropped its terminator, a `read_line` that
-/// kept the newline it consumed, or an argument table that stopped after
-/// `argv[0]` would each leave every exit code in the suite unchanged.
-///
-/// These cases run under `run_with_streams` instead, which supplies exactly
-/// the bytes named here and reads both descriptors back separately. The
-/// input is still a definite state every run agrees on; it is simply a
-/// richer one than "nothing".
+/// A fixture run under `run_with_streams`: its stdin and `argv` inputs, and
+/// the exact bytes it must write to each output descriptor.
 pub(crate) struct StreamCase {
     pub(crate) name: &'static str,
     pub(crate) args: &'static [&'static str],
@@ -29,14 +14,10 @@ pub(crate) struct StreamCase {
     pub(crate) exit: i32,
 }
 
-// Not reduced by the test profile, unlike the expected-success corpus.
-// There are four, each is the only assertion of the behaviour it covers,
-// and a profile that dropped one would silently restore the blind spot the
-// whole table exists to remove.
+// Not reduced by the test profile; each case is its behaviour's only assertion.
 pub(crate) const STREAM_CASES: &[StreamCase] = &[
-    // `print` adds nothing and `print_line` adds exactly one terminator, so
-    // the two standard-output writes abut. Neither `eprint` reaches
-    // standard output, though the four calls interleave in program order.
+    // The two standard-output writes abut; neither `eprint` reaches stdout,
+    // though all four calls interleave in program order.
     StreamCase {
         name: "terminal_streams",
         args: &[],

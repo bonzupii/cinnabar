@@ -149,11 +149,8 @@ type F = (
     Vec<Vec<i64>>,
     Vec<(i64, i64, i64)>,
     Vec<(i64, i64, Vec<Vec<i64>>)>,
-    // Lowering-time flow state, threaded as the CFG is built and consumed
-    // in place of flat backward scans over the op array: the extraction
-    // token most recently recorded per container binding, the (container,
-    // token) pair most recently linked per binding, and the referent owner
-    // resolved per binding at its most recent bind/assign-with-loans.
+    // Lowering-time flow state: latest extraction token per container,
+    // latest (container, token) link, and each binding's referent owner.
     Vec<i64>,
     Vec<(i64, i64)>,
     Vec<(i64, i64)>,
@@ -344,15 +341,12 @@ fn is_container_key(nodes: &[i64], key: i64) -> bool {
     sym != NONE && nattype_is_container(nodes, sym) == 1
 }
 
-// A container holds linear elements when its typechecker-attached flag says
-// so; the flag covers every type argument (HashMap(K, V): the key counts
-// too).  Read here instead of re-deriving linearity over the argument list.
+// Container has linear elements per typechecker flag.
 fn container_has_linear_elem(ctx: &mut Ctx, key: i64) -> bool {
     is_container_key(ctx.1, key) && tyinfo_has_linear_elems(ctx.1, key) == 1
 }
 
-// The resolver-attached ownership mode of `expr`'s callee, or
-// NAT_MODE_NONE for a non-native call.
+// Resolver-attached ownership mode, or NAT_MODE_NONE.
 fn native_mode_of(ctx: &Ctx, expr: i64) -> i64 {
     let inst = expr_sym_of(ctx.1, expr);
     if node_tag(ctx.1, inst) != NODE_INST {
@@ -378,28 +372,8 @@ fn is_const_true(ctx: &Ctx, expr: i64) -> bool {
     node_tag(ctx.1, expr) == NODE_EXPR && node_a(ctx.1, expr) == EXPR_LIT && node_b(ctx.1, expr) == LIT_TRUE
 }
 
-// True when a returned reference is rooted in the program's static data
-// rather than in anything the function or its caller owns: a string
-// literal, or a constant of a reference type (which is one).
-//
-// Such a borrow has an origin — the binary's read-only data — and that
-// origin outlives every caller, so there is no loan to trace and no
-// lifetime question to answer. The returned-borrow rule (MANIFESTO
-// principle 5) exists to reject a returned borrow whose origin *among the
-// inputs* is unknown or ambiguous, which is a question about how long the
-// caller's data lives. A static borrow has no input origin because it
-// needs none, so it is not the ambiguous case the rule is about; treating
-// it as one would make `fun name() &[U8] return "cinnabar" end`
-// unwriteable, and returning a fixed message is one of the things string
-// literals exist for.
-//
-// This can never be a `&mut`: a literal is not a place and a constant is
-// not assignable, so nothing statically rooted can be borrowed mutably.
-// Forwarding one is static too: a call whose callee's converged summary is
-// an empty source set returns a borrow that derives from none of its
-// arguments, which for a reference-returning function means it is static.
-// The summary set only grows, so treating an empty set as static stays
-// monotone and the call-graph fixpoint still converges.
+// Static-rooted borrow: string literal or ref-typed const.
+// Origin is binary's read-only data, outlives all callers.
 fn static_rooted_ref(ctx: &Ctx, expr: i64) -> bool {
     if node_tag(ctx.1, expr) != NODE_EXPR {
         return false;
@@ -741,9 +715,8 @@ fn build_fn(f: &mut F, b: &mut B, ctx: &mut Ctx, fn_node: i64) -> bool {
         } else {
             emit_op(f, OP_BIND, binding, NONE, (0, 1, 0), span);
         }
-        // A by-value container parameter arrives with unknown provenance and
-        // may hold linear elements, so it starts MayContain; only a drain
-        // inside the callee can prove it empty before a free.
+        // A by-value container parameter starts MayContain: its provenance
+        // is unknown until a drain inside the callee proves it empty.
         if flags.1 == 0 && container_has_linear_elem(ctx, key) {
             emit_op(f, OP_CONT_MAY, binding, NONE, (0, 0, 0), span);
         }
@@ -846,9 +819,8 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         let flags = (is_linear_key(ctx, binding_key), if is_ref_key(ctx.1, binding_key) { 1 } else { 0 }, 0, is_mut);
         let binding = bind_var(f, b, ctx, name, binding_key, flags, span);
         let op = emit_op(f, OP_BIND, binding, NONE, (flags.1, has_init, 0), span);
-        // A struct/array literal whose field initialisers borrow keeps those
-        // loans against the new binding, so a later borrow of `s.f` resolves
-        // back to the underlying owner instead of being dropped.
+        // A literal whose initialisers borrow keeps those loans against
+        // the new binding, so a later borrow of `s.f` finds its owner.
         let loans_attached = has_init == 1 && (flags.1 == 1 || !prod.is_empty());
         if loans_attached {
             set_op_loans(f, op, &prod);
@@ -935,15 +907,8 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         let cond = node_b(ctx.1, stmt);
         let body = node_c(ctx.1, stmt);
         let join = new_block(f, b, BLK_JOIN, NONE, span);
-        // `new_block` makes the block it creates current, so the condition
-        // built below would otherwise emit into the loop-exit join and
-        // `expr_effects` would hand back the join as `cont`.  That made the
-        // exit block the branch point, gave it a self-edge, and -- because
-        // `break` targets the join -- fed every break's exit state back into
-        // the loop body.  A bare `flag` or any comparison forms no block of
-        // its own, so that was the ordinary case, not an edge case.  The join
-        // is still created first: `break` and `continue` need it as their
-        // target while the condition is being built.
+        // The join is created before the condition so `break`/`continue`
+        // have a target; the condition emits into this block, not the join.
         resume(f, b, block);
         let scope_start = b.2.len() as i64;
         b.1.push((block, join, scope_start));
@@ -957,13 +922,8 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
             add_edge(f, block, cont);
         }
         add_edge(f, cont, body_entry);
-        // A literal-true condition has no false path: the loop exits only via
-        // `break`, so the join merges only break-path state.  Routing the
-        // condition into the join would smuggle the pre-loop state (container
-        // still C_MAY, value still LIVE) onto the exit path, defeating the
-        // `while true` drain proof.  The join-to-out edge belongs to the
-        // enclosing list's sequencing (build_list), not here, so a mid-list
-        // loop cannot feed its exit state past the statements that follow it.
+        // A literal-true condition has no false path; the join merges only
+        // break-path state, and the join-to-out edge belongs to build_list.
         if !const_true {
             add_edge(f, cont, join);
         }
@@ -974,16 +934,8 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         let cond = node_b(ctx.1, stmt);
         let then_list = node_c(ctx.1, stmt);
         let else_list = node_d(ctx.1, stmt);
-        // The condition is built before the join exists.  `new_block` makes
-        // the block it creates current, and a condition that needs no block of
-        // its own (a bare `flag`) returns whatever is current -- so creating
-        // the join first made `cont` *be* the join.  Every branch edge then
-        // hung off the join: it gained the arms as successors and as
-        // predecessors, so each arm's entry merged the other arm's exit, and a
-        // value consumed on every arm was reported both as moved twice and as
-        // consumed on only some paths.  The `while` lowering above had the
-        // same hazard and is fixed the same way, by keeping the header current
-        // while the condition is built.
+        // The header stays current while the condition is built, so `cont`
+        // is never the join and branch edges never hang off it.
         let cont = expr_effects(f, b, ctx, cond, MODE_VALUE, ret, &mut Vec::new());
         let join = new_block(f, b, BLK_JOIN, NONE, span);
         // A condition that emitted no block of its own leaves `cont` as the
@@ -999,10 +951,7 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         } else {
             add_edge(f, cont, join);
         }
-        // The join-to-out edge belongs to the enclosing list's sequencing
-        // (build_list): an if mid-list must not feed its exit state past the
-        // statements that follow it, or a linear value consumed after the if
-        // would be falsely reported live at the function exit.
+        // The join-to-out edge belongs to the enclosing list's sequencing.
         return (block, join, Vec::new());
     }
     if kind == STMT_RETURN {
@@ -1014,14 +963,8 @@ fn build_stmt(f: &mut F, b: &mut B, ctx: &mut Ctx, stmt: i64, out: i64, ret: i64
         }
         let mut prod: Vec<i64> = Vec::new();
         expr_effects(f, b, ctx, value, MODE_VALUE, ret, &mut prod);
-        // The returned-borrow obligation must apply whenever the *declared
-        // return type* can carry a reference anywhere in its structure, not
-        // only when it is bare `&T`/`&mut T`/`&[T]`: a function returning
-        // `Result(&T, E)` or a struct with a reference field can return a
-        // dangling borrow of a local exactly the way a bare `&T`-returning
-        // one can, and `prod` already carries the right origin regardless of
-        // the wrapping shape (struct/variant construction propagates its
-        // arguments' own prod).
+        // The returned-borrow obligation applies to any return type that
+        // can carry a reference in its structure.
         let mut seen: Vec<i64> = Vec::new();
         if crate::typecheck::type_contains_ref(ctx.1, ctx.2, ret, &mut seen)
             && !static_rooted_ref(ctx, value)
@@ -1405,14 +1348,8 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
         let op_kind = if mode == MODE_MUT { OP_BORROW_M } else { OP_BORROW };
         let loan_kind = if mode == MODE_MUT { L_MUT } else { L_SHARED };
         check_pending_conflict(f, b, ctx, binding, mode, span);
-        // `final_path` (computed above) must be threaded through, not
-        // dropped as NONE: borrow_after_move_check reads an op's path to
-        // decide whether it observes a moved value, and a field-chain
-        // borrow with path NONE was therefore invisible to it — a borrow
-        // of an already-moved field (`&s.b` after `s.b` was moved, or
-        // `&s.n` after the whole of `s` was moved) compiled cleanly. This
-        // mirrors what the MODE_VALUE arm below already does with
-        // `final_path` for a field-chain *move*.
+        // The op carries `final_path` so borrow_after_move_check can tell
+        // whether this borrow observes a moved value.
         let op = emit_op(f, op_kind, binding, final_path, (0, 0, NONE), span);
         b.6 = op;
         let loan = alloc_loan(f, binding, loan_kind, 0, NONE);
@@ -1435,9 +1372,7 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
             }
             let elem_key = ty_elem_of(ctx.1, row.1);
             let (rkey, rpath) = walk_field_segments(f, ctx, segs, 1, elem_key, rroot);
-            // `rkey` is NONE exactly when `rpath` never resolved (every linear
-            // field walk that extends `rpath` also yields a concrete key), so
-            // guarding on it adds no new failure mode for valid programs.
+            // `rkey` is NONE exactly when `rpath` never resolved.
             if rkey == NONE || rpath == NONE || rpath == rroot {
                 emit_op(f, OP_LINEAR_ERROR, binding, expr, (LINEAR_ERR_WHOLE_MUT, 0, 0), span);
                 return;
@@ -1459,9 +1394,7 @@ fn walk_field_chain(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, binding: i64
     emit_op(f, OP_READ, binding, NONE, (0, 0, 0), span);
 }
 
-// The typechecker attached one fact row per (canonical struct key, field
-// name) carrying the substituted field key; no ITEM_STRUCT re-walk and no
-// re-run of generic substitution here.
+// Field key fact attached by typechecker; no re-walk.
 fn field_key_of(ctx: &mut Ctx, key: i64, field: i64) -> i64 {
     let row = find_fieldkey(ctx.1, key, field);
     if row == NONE {
@@ -1592,10 +1525,8 @@ fn referent_binding_of(f: &F, binding: i64) -> i64 {
     }
 }
 
-// Reads a binding's referent from the threaded flow state that
-// `note_referent` records at each bind/assign-with-loans emission, then
-// unifies it with the running owner.  The resolution itself happened once,
-// at the emission site; no op-array history is re-walked here.
+// Reads a binding's referent from the threaded flow state recorded at
+// emission; no op-array history is re-walked here.
 fn origin_owners_of(f: &F, binding: i64, owner: &mut i64, ok: &mut bool, visited: &mut Vec<i64>) {
     if !*ok || binding < 0 || list_has(visited, binding) {
         return;
@@ -1620,11 +1551,8 @@ fn origin_owners_of(f: &F, binding: i64, owner: &mut i64, ok: &mut bool, visited
     }
 }
 
-// Resolves a bind/assign's loan list to the single underlying referent
-// owner at emission time and records it in the threaded flow state, so a
-// later query reads the fact instead of scanning the op array.  The loan
-// owners a bind references all predate the bind, so their own referent
-// entries are already resolved when this runs.
+// Resolves a bind/assign's loan list to its single underlying referent
+// owner at emission time and records it in the threaded flow state.
 fn note_referent(f: &mut F, binding: i64, loans: &[i64]) {
     if binding < 0 {
         return;
@@ -1633,9 +1561,7 @@ fn note_referent(f: &mut F, binding: i64, loans: &[i64]) {
     let mut ok = true;
     let mut visited: Vec<i64> = Vec::new();
     // A ref-origin entry resolves through the referenced binding's own
-    // threaded entry, a loan entry through its owner binding, and a plain
-    // owner unifies with the running result.  This is the loan-following
-    // the old query-time scan performed, evaluated once here.
+    // threaded entry, a loan entry through its owner, a plain owner unifies.
     let mut idx = 0usize;
     while idx < loans.len() {
         let entry = match loans.get(idx) {
@@ -1760,8 +1686,7 @@ fn logical_short_circuit_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64,
 }
 
 // The typechecker attached the trait method's fn node to the dispatch row
-// when it created it; no ITEM_TRAIT method-list re-search (Single-Fact
-// Rule).
+// when it created it; no ITEM_TRAIT method-list re-search here.
 fn trait_method_of(ctx: &mut Ctx, expr: i64) -> i64 {
     let trow = find_trait_call(ctx.1, expr);
     if trow == NONE {
@@ -1771,9 +1696,8 @@ fn trait_method_of(ctx: &mut Ctx, expr: i64) -> i64 {
     }
 }
 
-// The typechecker attached the canonical key to every parameter type node
-// (trait method signatures included), so the mode reads the key's kind
-// instead of re-deriving it from raw NODE_TY tags.
+// The typechecker attached the canonical key to every parameter type node,
+// so the mode reads the key's kind from it.
 fn param_mode_of(nodes: &[i64], ty_node: i64) -> i64 {
     let kind = ty_kind_of(nodes, ty_key_of(nodes, ty_node));
     if kind == TYD_REF {
@@ -1890,14 +1814,13 @@ fn call_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod: 
         let container = container_binding_of(b, ctx, free_arg);
         let consume_key = list_first(ctx.2, params);
         // Only a container holding linear elements carries a drain
-        // obligation; the instantiated native parameter key is the
-        // canonical type fact for the consumed value.
+        // obligation; the parameter key is the consumed value's type.
         if free_arg != NONE && container_has_linear_elem(ctx, consume_key) {
             if container >= 0 {
                 emit_op(f, OP_CONT_FREE, container, NONE, (0, 0, 0), expr_span(ctx.1, expr));
             } else if !is_empty_container_expr(ctx, free_arg) {
-                // An anonymous non-constructor value has no binding state;
-                // retain its rejection as a CFG operation for report replay.
+                // An anonymous value has no binding state; the rejection
+                // rides a CFG operation for report replay.
                 emit_op(f, OP_CONT_FREE, NONE, NONE, (0, 0, 0), expr_span(ctx.1, expr));
             }
         }
@@ -1936,9 +1859,8 @@ fn path_root_binding_of(ctx: &mut Ctx, b: &B, expr: i64) -> i64 {
     lookup_name(b, first)
 }
 
-// The extraction token most recently recorded for a container binding,
-// threaded by the OP_CONT_EXTRACT emission site into the flow state; a
-// container with no extraction on the current path reads NONE.
+// The extraction token most recently recorded for a container binding;
+// NONE when no extraction on the current path.
 fn current_extraction_token(f: &F, container: i64) -> i64 {
     if container < 0 {
         return NONE;
@@ -1949,9 +1871,7 @@ fn current_extraction_token(f: &F, container: i64) -> i64 {
     }
 }
 
-// The (container, token) pair most recently linked for a binding, threaded
-// by the OP_CONT_LINK emission sites; a binding with no link on the
-// current path reads (NONE, NONE).
+// Latest linked (container, token) for binding.
 fn latest_extraction_link(f: &F, binding: i64) -> (i64, i64) {
     if binding < 0 {
         return (NONE, NONE);
@@ -1994,8 +1914,7 @@ fn match_effects(f: &mut F, b: &mut B, ctx: &mut Ctx, expr: i64, ret: i64, prod:
         let scrut = (&scrut_prod[..], scrut_root);
         pattern_effects(f, b, ctx, pat, scrut, known_empty);
         // The empty/error arm of an extraction match proves the container
-        // drained: vec_pop errors only on an empty vector, and the surface
-        // contract treats the remove KeyNotFound arm the same way.
+        // drained.
         if extraction_token >= 0 && arm_covers_extraction_failure(ctx, scrut_key, pat, arms, idx) {
             if direct_container >= 0 {
                 emit_op(f, OP_CONT_EMPTY, direct_container, NONE, (extraction_token, NONE, 0), span);
@@ -2462,9 +2381,7 @@ fn inc_has(inc: &[(i64, i64)], block: i64, path: i64) -> bool {
     false
 }
 
-// Lattice order: UNBOUND < LIVE < MOVED < PARTIAL.  The join is the least
-// upper bound: UNBOUND joins to the other side, LIVE joins MOVED to MOVED,
-// and any PARTIAL operand dominates, so entry states only ever rise.
+// Linear lattice join: UNBOUND < LIVE < MOVED < PARTIAL.
 fn join_linear(inn: &mut [i64], pout: &[i64], block: i64, inc: &mut Vec<(i64, i64)>) {
     let mut idx = 0usize;
     while idx < inn.len() {
@@ -2542,10 +2459,8 @@ fn apply_move(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool, c
     }
 }
 
-// Re-initialization is block-local: the MOVED->LIVE reset happens only in the
-// block's exit copy, never in a join, and the LIVE/PARTIAL error paths leave
-// the state untouched, so the block transform is entry-monotone and inter-block
-// join states never regress downwards.
+// Re-initialization is block-local: the MOVED->LIVE reset happens only in
+// the block's exit copy, never in a join, keeping the transform monotone.
 fn apply_assign(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool, ctx: &mut Ctx, span: (i64, i64, i64)) {
     let root = root_path_of(f, binding);
     if root < 0 {
@@ -2609,25 +2524,8 @@ fn apply_assign(f: &F, state: &mut [i64], binding: i64, path: i64, report: bool,
     }
 }
 
-// Reports a borrow of a value that has already been moved.
-//
-// `apply_move` catches *moving* a moved value, but a borrow of one was not
-// checked at all: `deallocate(block)` followed by `read_u8(&block, 0)`
-// compiled cleanly and produced a real use-after-free, and closing a
-// `File.Handle` and then writing through a borrow of it did the same.
-// MANIFESTO principle 7 says a linear value "cannot be used after move";
-// moving it twice is only one of the ways to do that, and the borrow is
-// the more dangerous one, because the move it follows has already released
-// the resource.
-//
-// The state is left untouched. Observing a moved value neither consumes it
-// again nor revives it, so the dataflow is unchanged and the diagnostic is
-// reported once per use site rather than folded into the move that caused
-// it.
-//
-// Only `ST_MOVED` is reported, never `ST_PARTIAL`: a partially moved
-// struct still has live fields, and borrowing it to reach one of those is
-// exactly what partial-move tracking exists to allow.
+// Reports borrow of already-moved value.
+// Only ST_MOVED is reported; ST_PARTIAL still has live fields.
 fn borrow_after_move_check(f: &F, state: &[i64], binding: i64, path: i64, ctx: &mut Ctx, span: (i64, i64, i64)) {
     if path < 0 {
         return;
@@ -2698,11 +2596,7 @@ fn linear_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> LinearFlow {
             push_internal(ctx.3, "internal: linear-consumption analysis did not converge");
             break;
         }
-        // Inconsistencies are recorded only on the converged sweep.  A
-        // (MOVED, LIVE) join that is inconsistent mid-iteration can later
-        // converge as both sides reach MOVED; recording those intermediate
-        // joins would report false positives.  Each sweep restarts the
-        // record so the final break leaves only the converged joins.
+        // Only the converged sweep records inconsistencies.
         inconsistencies.clear();
         let mut changed = false;
         let mut blk = 0i64;
@@ -2873,9 +2767,7 @@ fn join_tokens(inn: &mut [i64], pred: &[i64]) {
     }
 }
 
-// The per-container-binding drain lattice (EmptyOrDrained < MayContain) is
-// joined with the least upper bound at block entries, so every cell changes
-// at most once and the fixpoint converges monotonically over loops.
+// Container drain lattice joined at block entries; converges monotonically.
 fn container_fixpoint(f: &F, ctx: &mut Ctx, entry: i64) -> ContainerFlow {
     let nblocks = f.6.len() as i64;
     let nbind = f.0.len() as i64;
@@ -3476,16 +3368,8 @@ fn compute_summary(f: &F, ctx: &mut Ctx, entry: i64, fn_node: i64) -> Option<Vec
     if !sources.is_empty() {
         return Some(sources);
     }
-    // No returned borrow derives from an input.  For a function that
-    // returns a reference and emitted no `OP_RET_REF` at all, that is not a
-    // failure to trace: every one of its returns was statically rooted
-    // (`static_rooted_ref`), so the result borrows nothing from the
-    // arguments and outlives every caller.  Recording that as an *empty*
-    // source set rather than as no summary is what lets a caller forward
-    // the borrow — `fun forwarded() &[U8] return direct() end` — instead of
-    // being told the origin cannot be traced.  The set only ever grows, so
-    // a function that later turns out to also return an input-derived
-    // borrow converges to that larger set.
+    // Every return was statically rooted: an empty source set means the
+    // result outlives all callers, so the caller may forward the borrow.
     if returns_reference(ctx, fn_node) {
         return Some(Vec::new());
     }
@@ -3493,17 +3377,15 @@ fn compute_summary(f: &F, ctx: &mut Ctx, entry: i64, fn_node: i64) -> Option<Vec
 }
 
 // True when a function's declared return type can carry a reference
-// anywhere in its structure — the types the returned-borrow rule applies
-// to, per `type_contains_ref`'s doc comment.
+// anywhere in its structure.
 fn returns_reference(ctx: &mut Ctx, fn_node: i64) -> bool {
     let ret = ty_key_of(ctx.1, node_d(ctx.1, fn_node));
     let mut seen: Vec<i64> = Vec::new();
     crate::typecheck::type_contains_ref(ctx.1, ctx.2, ret, &mut seen)
 }
 
-// Summary sets only grow: each round unions the newly computed return-origin
-// parameter indices into the stored set, so the call-graph iteration is
-// monotone and converges without relying on the failure cap.
+// Summary sets only grow: each round unions new return-origin parameter
+// indices into the stored set, so the call-graph iteration is monotone.
 fn refine_summary(table: &mut Vec<(i64, Vec<i64>)>, fn_node: i64, sources: Option<Vec<i64>>) -> bool {
     let sources = match sources {
         Some(sources) => sources,
@@ -3567,9 +3449,7 @@ fn summary_of(table: &[(i64, Vec<i64>)], fn_node: i64) -> Option<&Vec<i64>> {
 }
 
 // One note per predecessor of an inconsistent join, saying whether the
-// value is consumed or still live where that path ends.  The states are the
-// converged dataflow's own per-block exit states — the same facts the join
-// compared to detect the inconsistency.
+// value is consumed or still live at that path's block exit.
 fn explain_join(f: &F, ctx: &mut Ctx, exit_states: &[Vec<i64>], join_block: i64, path: i64, name: &str) {
     let preds = pred_of(f, join_block);
     let mut pi = 0usize;
@@ -3610,10 +3490,8 @@ fn explain_join(f: &F, ctx: &mut Ctx, exit_states: &[Vec<i64>], join_block: i64,
     }
 }
 
-// A note at the binding site of a linear value an exit check found
-// unconsumed, naming the linear type the typechecker attached to it.  The
-// note is dropped when the binding has no source bind site (a synthesized
-// entry) rather than pointing anywhere invented.
+// Note at the bind site of an unconsumed linear value; dropped when the
+// binding has no source site (a synthesized entry).
 fn explain_unconsumed(f: &F, ctx: &mut Ctx, binding: i64, name: &str, ty_key: i64) {
     let bind_span = bind_span_of(f, binding);
     if bind_span.0 == NO_FILE {
@@ -3730,10 +3608,8 @@ fn report(f: &F, ctx: &mut Ctx, facts: &ReportFacts) {
             Some(list) => list.clone(),
             None => Vec::new(),
         };
-        // The span of the move that most recently consumed each path within
-        // this block's replay.  Same-block only: a value moved by an earlier
-        // block has no single unambiguous "moved here" site (the CFG may
-        // join several), so no note is invented for it.
+        // Span of the move that most recently consumed each path within
+        // this block's replay; cross-block moves carry no note.
         let mut last_move = empty_spans(npaths);
         let (first, last) = block_op_range(f, blk);
         let mut op = first;
@@ -3883,21 +3759,15 @@ fn report(f: &F, ctx: &mut Ctx, facts: &ReportFacts) {
 
 #[cfg(test)]
 mod tests {
-    // Drives the real front end (module loading through borrow checking,
-    // the same path `analysis::analyze` gives the LSP and the playground)
-    // over an in-memory source, with no LLVM dependency — the only way to
-    // pin borrow-checker behavior end to end on a machine without the LLVM
-    // toolchain `cargo test`'s fixture-linked suites need.
+    // Runs the real front end over an in-memory source, no LLVM needed.
     fn errors_for(source: &str) -> Vec<String> {
         let overlay = [("scratch.cnb".to_string(), source.to_string())];
         let result = crate::analysis::analyze("scratch.cnb", &overlay, &crate::target::Target::host());
         result.errors.iter().map(|d| d.message.clone()).collect()
     }
 
-    // Pins the fix to `walk_field_chain`: a field-chain borrow (`&s.b`) used
-    // to be emitted with path NONE, so `borrow_after_move_check` could never
-    // see it and a borrow of an already-moved field compiled cleanly into a
-    // real use-after-free.
+    // A field-chain borrow carries its path, so a borrow of an
+    // already-moved field is reported.
     #[test]
     fn field_borrow_after_move_is_rejected() {
         let source = r#"
@@ -3938,11 +3808,8 @@ end
         assert!(errors.iter().any(|m| m.contains("use of moved value")));
     }
 
-    // Same fix, the other trigger shape from the same finding: the whole
-    // struct moved by value (not just one field), then a field of it
-    // borrowed. `mark_descendants` already marks every child path MOVED
-    // when the root moves, so this only needed the path to reach
-    // `borrow_after_move_check` at all.
+    // A field borrow after the whole struct moved by value is reported;
+    // moving the root marks every child path MOVED.
     #[test]
     fn field_borrow_after_whole_struct_moved_is_rejected() {
         let source = r#"
@@ -3988,8 +3855,8 @@ end
         assert!(errors.iter().any(|m| m.contains("use of moved value")));
     }
 
-    // Negative control for both fixes above: borrowing a field before it is
-    // moved, and moving it after the borrow's last use, must stay accepted.
+    // Negative control: borrowing a field before it is moved, and moving
+    // it after the borrow's last use, stays accepted.
     #[test]
     fn field_borrow_before_move_is_still_accepted() {
         let source = r#"
@@ -4030,12 +3897,9 @@ end
         assert!(errors.is_empty(), "{:?}", errors);
     }
 
-    // Pins the fix to the returned-borrow obligation: it used to apply only
-    // when the declared return type's own kind was bare `&T`/`&mut T`/
-    // `&[T]`, so a function returning `Result(&T, E)` (or any other
-    // reference-carrying aggregate) could return a dangling borrow of a
-    // local with no diagnostic at all. `type_contains_ref` makes the check
-    // apply to the wrapped shape too.
+    // The returned-borrow obligation applies to any return type carrying a
+    // reference in its structure (`Result(&T, E)` included), so a borrow of
+    // a local wrapped in `Err` is reported.
     #[test]
     fn dangling_borrow_wrapped_in_result_is_rejected() {
         let source = r#"
@@ -4086,12 +3950,8 @@ use Collections.vec_new
 use Collections.vec_free
 "#;
 
-    // Trimmed to only vec_new/vec_free: a test that never touches
-    // allocate/deallocate/vec_push/vec_pop can't import them either, since
-    // an import nothing calls is now itself rejected, and an import-free
-    // `nat fun` a nothing calls is unreachable from main -- exactly the
-    // cascade documented on resolver::tests::fixture_corpus_stays_clean_of_
-    // dead_imports.
+    // The container natives a drain test needs: vec_new and vec_free.
+    // Each test declares only the imports its `main` reaches.
     const MINIMAL_CONTAINER_NATIVES: &str = r#"
 pub mod Memory
   pub nat type Block
@@ -4111,8 +3971,8 @@ use Collections.vec_new
 use Collections.vec_free
 "#;
 
-    // The same surface with `Vec` kept public, for tests whose source names
-    // `Collections.Vec` in a signature across the module boundary.
+    // The same surface with `Vec` public, for sources naming
+    // `Collections.Vec` in a cross-module signature.
     const MINIMAL_CONTAINER_NATIVES_PUB_VEC: &str = r#"
 pub mod Memory
   pub nat type Block
@@ -4132,8 +3992,8 @@ use Collections.vec_new
 use Collections.vec_free
 "#;
 
-    // Trimmed to vec_new/vec_pop/vec_free/deallocate, for a test that
-    // extracts and consumes an element but never refills the container.
+    // vec_new/vec_pop/vec_free/deallocate, for a test that extracts and
+    // consumes an element.
     const POP_CONTAINER_NATIVES: &str = r#"
 pub mod Memory
   pub nat type Block
@@ -4155,8 +4015,8 @@ use Collections.vec_new
 use Collections.vec_free
 "#;
 
-    // Verifies that a refill after extraction prevents a later match from
-    // proving the container drained.
+    // A refill after extraction keeps the container MayContain: a later
+    // match cannot prove it drained.
     #[test]
     fn refilling_a_container_after_an_extraction_forgets_the_extraction_proved_it_empty() {
         let source = format!(
@@ -4189,7 +4049,7 @@ end
         assert!(errors.iter().any(|m| m.contains("cannot free container holding linear elements")), "{:?}", errors);
     }
 
-    // Verifies that moving a refilled container preserves its MayContain state.
+    // Moving a refilled container preserves its MayContain state.
     #[test]
     fn moving_a_refilled_container_forgets_it_was_ever_provably_empty() {
         let source = format!(
@@ -4218,8 +4078,7 @@ end
         assert!(errors.iter().any(|m| m.contains("cannot free container holding linear elements")), "{:?}", errors);
     }
 
-    // Negative control for both fixes above: a container that is genuinely
-    // never refilled must still free cleanly.
+    // Negative control: a container that is never refilled frees cleanly.
     #[test]
     fn freeing_a_container_that_was_never_refilled_is_still_accepted() {
         let source = format!(
@@ -4244,11 +4103,7 @@ end
         assert!(errors.is_empty(), "{:?}", errors);
     }
 
-    // Pins the fix to the anonymous-free hole: `vec_free`'s argument was a
-    // call result rather than a named binding, so `container_binding_of`
-    // returned NONE and the drain check — keyed entirely on a binding —
-    // never ran at all, silently accepting a leak of every element the
-    // returned vec held.
+    // Freeing an anonymous call result requires a drain first.
     #[test]
     fn freeing_an_unresolvable_container_expression_is_rejected() {
         let source = format!(

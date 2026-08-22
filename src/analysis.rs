@@ -15,13 +15,8 @@
 //! the boundary where the compiler's spans meet the protocol's positions.
 //!
 //! **Invariants:**
-//! - No name is re-resolved and no type re-inferred here, ever. A question
-//!   the attachments cannot answer is answered with "nothing" rather than
-//!   with a second implementation that could drift from the first.
-//! - Answering "nothing" is a real answer, not a failure to handle a case.
-//!   An editor showing no hover is correct where a build would also have
-//!   no fact; an editor showing a *different* answer than the build would
-//!   be the bug this rule exists to prevent.
+//! - No name is re-resolved and no type re-inferred here; a question the
+//!   attachments cannot answer is answered with "nothing".
 
 use crate::ast::*;
 use crate::inspect::sym_kind_name;
@@ -127,9 +122,7 @@ pub fn analyze(entry_path: &str, overlay: &[(String, String)], target: &Target) 
             borrow::borrow_check(&mut names, &mut nodes, &mut lists, &mut check, root, &ext_mods);
         }
     }
-    // Unused items are reported only once the stages that can explain a
-    // broken program have run. A file with a type error is told about the
-    // type error, not that the functions containing it are unreachable.
+    // Unused items are reported only when the earlier stages found nothing.
     if errors.is_empty() {
         errors.append(&mut deferred);
     }
@@ -148,10 +141,6 @@ pub fn analyze(entry_path: &str, overlay: &[(String, String)], target: &Target) 
         typechecked,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Position mapping (byte offsets <-> LSP-style line / UTF-16 column)
-// ---------------------------------------------------------------------------
 
 /// Byte offset of the start of every line in `text`.
 pub fn line_starts(text: &str) -> Vec<i64> {
@@ -238,9 +227,8 @@ pub fn position_to_offset(text: &str, line: i64, character: i64) -> i64 {
     byte_pos
 }
 
-/// The file id of `path` in this analysis, or NONE.  Paths are compared
-/// component-wise so separators and casing quirks of the invoking editor
-/// don't produce a mismatch on the same file.
+/// The file id of `path` in this analysis, or NONE; paths compare
+/// component-wise.
 pub fn file_id_of(analysis: &Analysis, path: &str) -> i64 {
     let target = std::path::Path::new(path);
     let mut idx = 0usize;
@@ -265,10 +253,6 @@ pub fn file_text_of(analysis: &Analysis, file: i64) -> String {
         None => String::new(),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Node lookup
-// ---------------------------------------------------------------------------
 
 fn node_count(analysis: &Analysis) -> i64 {
     analysis.nodes.len() as i64 / NODE_STRIDE
@@ -314,12 +298,7 @@ fn smallest_with_tags(analysis: &Analysis, file: i64, offset: i64, tags: &[i64])
 }
 
 /// The smallest expression, pattern, type, item, or variant node covering
-/// (file, offset). Item and variant nodes let the cursor land on a
-/// declaration's own name (e.g. hovering `SERVER_PORT` in its `const`
-/// declaration) and still resolve a symbol, matching the coverage
-/// `references` already scans for. When the offset sits just past a node
-/// (the cursor at the end of an identifier), the position one byte back is
-/// also tried.
+/// (file, offset); one byte back is also tried for end-of-identifier cursors.
 pub fn node_at(analysis: &Analysis, file: i64, offset: i64) -> i64 {
     let tags = [NODE_EXPR, NODE_PAT, NODE_TY, NODE_ITEM, NODE_VARIANT];
     let found = smallest_with_tags(analysis, file, offset, &tags);
@@ -504,13 +483,8 @@ pub fn param_labels(analysis: &Analysis, fn_node: i64) -> Vec<String> {
     out
 }
 
-// ---------------------------------------------------------------------------
-// Hover
-// ---------------------------------------------------------------------------
-
-/// Markdown hover text and the span it describes, for the node under the
-/// cursor.  Built entirely from attached facts: the resolved symbol and the
-/// canonical type key.
+/// Hover markdown and span for the node under the cursor, built from the
+/// resolved symbol and its canonical type key.
 pub fn hover(analysis: &Analysis, file: i64, offset: i64) -> Option<(String, (i64, i64, i64))> {
     let id = node_at(analysis, file, offset);
     if id == NONE {
@@ -554,10 +528,6 @@ fn sym_kind_label(kind: i64) -> String {
     sym_kind_name(kind).to_lowercase().replace('_', " ")
 }
 
-// ---------------------------------------------------------------------------
-// Definition / references
-// ---------------------------------------------------------------------------
-
 fn sym_at(analysis: &Analysis, file: i64, offset: i64) -> i64 {
     let id = node_at(analysis, file, offset);
     if id == NONE {
@@ -585,8 +555,7 @@ pub fn definition(analysis: &Analysis, file: i64, offset: i64) -> Option<(i64, i
 }
 
 /// Every span whose row carries the same resolved symbol as the node under
-/// the cursor: uses in expressions, patterns, and type positions, plus the
-/// declaration row itself.
+/// the cursor, plus the declaration row itself.
 pub fn references(analysis: &Analysis, file: i64, offset: i64) -> Vec<(i64, i64, i64)> {
     let sym = sym_at(analysis, file, offset);
     let mut out: Vec<(i64, i64, i64)> = Vec::new();
@@ -621,10 +590,6 @@ pub fn references(analysis: &Analysis, file: i64, offset: i64) -> Vec<(i64, i64,
     }
     out
 }
-
-// ---------------------------------------------------------------------------
-// Completion
-// ---------------------------------------------------------------------------
 
 /// Completion labels with a kind code (SYM_* for declared symbols,
 /// COMPLETE_* for locals, keywords, and struct fields).
@@ -726,9 +691,7 @@ fn use_path_completions(analysis: &Analysis, file: i64, offset: i64) -> Vec<(Str
 }
 
 // Members of the module a dotted path names, filtered by the partial final
-// segment.  Shared by `use` lines and by qualified paths in ordinary code so
-// both resolve through the same scope facts, rather than two lookups that can
-// disagree about what a module exports.
+// segment; shared by `use` lines and qualified paths so both use one lookup.
 fn dotted_path_completions(
     analysis: &Analysis,
     file: i64,
@@ -814,14 +777,8 @@ fn dotted_path_completions(
     }
     out
 }
-// The dotted path immediately left of the cursor, anywhere an expression or a
-// type may appear: `Memory.` offers that module's members, `Memory.all`
-// narrows them.  Without this, a dot that is not a struct field access falls
-// through to whole-scope completion, which offers keywords like `fun` and
-// `if` in a position where no keyword can legally follow.
-//
-// `use` lines keep their own entry point because a bare `use F` must also
-// suggest module roots, which is meaningless mid-expression.
+// The dotted path immediately left of the cursor, anywhere an expression
+// or type may appear.
 fn qualified_completions(analysis: &Analysis, file: i64, offset: i64) -> Vec<(String, i64)> {
     let text = file_text_of(analysis, file);
     let end = if offset < 0 {
@@ -835,8 +792,7 @@ fn qualified_completions(analysis: &Analysis, file: i64, offset: i64) -> Vec<(St
         Some(value) => value,
         None => return Vec::new(),
     };
-    // Walk back over path characters only.  Every byte tested is ASCII, so the
-    // resulting index is always on a character boundary.
+    // Walk back over path characters only; every byte tested is ASCII.
     let bytes = before.as_bytes();
     let mut start = end;
     while start > 0 {
@@ -909,8 +865,7 @@ fn field_completions(analysis: &Analysis, file: i64, dot: i64) -> Vec<(String, i
         return out;
     }
     // The member-fact rows of a struct key are chained from the descriptor
-    // (slot e of each row is the next), so completions walk only this
-    // key's rows instead of the whole arena.
+    // (slot e of each row is the next).
     let mut id2 = node_start(&analysis.nodes, key);
     while id2 != NONE {
         if node_tag(&analysis.nodes, id2) == NODE_FIELDKEY {
@@ -923,8 +878,7 @@ fn field_completions(analysis: &Analysis, file: i64, dot: i64) -> Vec<(String, i
 
 fn scope_completions(analysis: &Analysis, file: i64, offset: i64) -> Vec<(String, i64)> {
     let mut out: Vec<(String, i64)> = Vec::new();
-    // Only symbols the resolver attached as visible from the cursor's
-    // precise scope.  Names and visibility are not reconstructed here.
+    // Only symbols the resolver attached as visible from the cursor's scope.
     let count = node_count(analysis);
     let scope = scope_at(analysis, file, offset);
     let mut id = 0i64;
@@ -1014,19 +968,14 @@ fn append_local_completions(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Signature help
-// ---------------------------------------------------------------------------
-
 pub struct SignatureInfo {
     pub label: String,
     pub params: Vec<String>,
     pub active: i64,
 }
 
-/// Signature help for the innermost call (or struct constructor) containing
-/// the cursor.  The active parameter is the count of argument expressions
-/// that end before the cursor.
+/// Signature help for the innermost call containing the cursor; the active
+/// parameter is the count of argument expressions ending before the cursor.
 pub fn signature_help(analysis: &Analysis, file: i64, offset: i64) -> Option<SignatureInfo> {
     let count = node_count(analysis);
     let mut best = NONE;
@@ -1111,24 +1060,12 @@ fn active_arg(analysis: &Analysis, args: i64, offset: i64) -> i64 {
     if active >= count && count > 0 { count - 1 } else { active }
 }
 
-// ---------------------------------------------------------------------------
-// Name spans
-// ---------------------------------------------------------------------------
-
 fn is_ident_byte(byte: u8) -> bool {
     byte == b'_' || byte.is_ascii_alphanumeric()
 }
 
 /// The span of `name`'s first whole-word occurrence within `[start, end)` of
 /// `file`'s text, or `None` when the exact text can't be pinpointed there.
-///
-/// Several node kinds' own `(start, end)` cover more than just the name --
-/// an item's span runs from its keyword through `end`, a variant's span
-/// grows to include a payload -- and there is no separate name-only span
-/// stored anywhere for those (see the parser's node-layout comments). This
-/// recovers one by search rather than by modeling every kind's slot layout,
-/// and callers that cannot tolerate an imprecise fallback (rename) treat
-/// `None` as "refuse" rather than as "use the wider span".
 fn locate_name(analysis: &Analysis, file: i64, start: i64, end: i64, name: &str) -> Option<(i64, i64)> {
     if name.is_empty() || start < 0 || end < start {
         return None;
@@ -1156,9 +1093,7 @@ fn locate_name(analysis: &Analysis, file: i64, start: i64, end: i64, name: &str)
 }
 
 // The short (undotted) declared name of a symbol, read from its own
-// declaration row rather than the symbol's possibly-qualified display name
-// (the `hover`/`sym_kind_label` name can read `Memory.allocate`; the source
-// token at every use site is always just `allocate`).
+// declaration row rather than the possibly-qualified display name.
 fn short_name_of_sym(analysis: &Analysis, sym: i64) -> Option<String> {
     if node_tag(&analysis.nodes, sym) == NODE_FN {
         return Some(name_text(&analysis.names, node_a(&analysis.nodes, sym)));
@@ -1185,17 +1120,8 @@ fn short_name_of_sym(analysis: &Analysis, sym: i64) -> Option<String> {
     None
 }
 
-// ---------------------------------------------------------------------------
-// Folding ranges
-// ---------------------------------------------------------------------------
-
-/// Byte spans of every foldable block in `file`: item bodies (module,
-/// struct, enum, trait, impl), function bodies (top-level and, since a
-/// method carries no wrapping item, `NODE_FN` directly), `while`/`if`
-/// bodies, `match` expressions, and -- via a source scan, since a plain
-/// comment keeps no parse-tree span at all -- `#|...|#`/`#!|...|#` comment
-/// blocks. A bodyless declaration (a native fn/type, or a trait method
-/// signature) has no interior lines and folds nothing.
+/// Byte spans of every foldable block in `file`: item and fn bodies,
+/// `while`/`if` bodies, `match` expressions, and block comments.
 pub fn folding_ranges(analysis: &Analysis, file: i64) -> Vec<(i64, i64)> {
     let count = node_count(analysis);
     let mut out: Vec<(i64, i64)> = Vec::new();
@@ -1234,13 +1160,8 @@ pub fn folding_ranges(analysis: &Analysis, file: i64) -> Vec<(i64, i64)> {
     out
 }
 
-// Plain `#|...|#`/`#!|...|#` block comments produce no token and no parse
-// span: the lexer scans past their text and discards it. Comments do not
-// nest in Cinnabar, so a plain byte scan for the next `|#` after an opener
-// is exact -- no stack, no ambiguity, unlike trying to fold the surrounding
-// keyword structure from source text (which cannot tell a bodyless
-// declaration from one with a body; that is why the block above reads real
-// parse-tree spans instead).
+// Block comments produce no parse span, so their ranges come from a byte
+// scan for the closing `|#`; Cinnabar comments do not nest.
 fn comment_block_spans(text: &str) -> Vec<(i64, i64)> {
     let bytes = text.as_bytes();
     let mut out: Vec<(i64, i64)> = Vec::new();
@@ -1273,15 +1194,8 @@ fn comment_block_spans(text: &str) -> Vec<(i64, i64)> {
     out
 }
 
-// ---------------------------------------------------------------------------
-// Document / workspace symbols
-// ---------------------------------------------------------------------------
-
-/// One entry in a document's or workspace's symbol outline. `span` is the
-/// whole declaration; `selection_span` is just the name where `locate_name`
-/// can pinpoint it, falling back to `span` otherwise -- an outline entry
-/// that highlights slightly more than the name is a cosmetic gap, not a
-/// wrong answer the way the same imprecision would be for `rename`.
+/// One entry in a document's or workspace's symbol outline: whole-declaration
+/// `span`, name-only `selection_span` (falling back to `span`).
 pub struct SymbolInfo {
     pub name: String,
     pub detail: String,
@@ -1291,8 +1205,7 @@ pub struct SymbolInfo {
     pub children: Vec<SymbolInfo>,
 }
 
-// LSP SymbolKind numbers -- a third numbering distinct from this compiler's
-// own SYM_* table and from CompletionItemKind (cinnabar_lsp.rs).
+// LSP SymbolKind numbers, distinct from SYM_* and CompletionItemKind.
 pub const SYMBOL_KIND_MODULE: i64 = 2;
 pub const SYMBOL_KIND_NAMESPACE: i64 = 3;
 pub const SYMBOL_KIND_CLASS: i64 = 5;
@@ -1452,9 +1365,8 @@ fn symbol_for_item(analysis: &Analysis, item: i64) -> Option<SymbolInfo> {
     })
 }
 
-/// Every top-level declaration in `file`, nested hierarchically (a module's
-/// children, a struct's fields, an enum's variants, a trait's or impl's
-/// methods). Imports are not declarations and are excluded.
+/// Every top-level declaration in `file`, nested hierarchically; imports
+/// are not declarations and are excluded.
 pub fn document_symbols(analysis: &Analysis, file: i64) -> Vec<SymbolInfo> {
     let count = node_count(analysis);
     let mut nested: Vec<i64> = Vec::new();
@@ -1490,10 +1402,7 @@ fn push_if_matches(out: &mut Vec<SymbolInfo>, info: SymbolInfo, needle: &str) {
 }
 
 /// Every declaration across every loaded file whose name contains `query`
-/// (case-insensitive; an empty query matches everything), flattened -- a
-/// workspace outline has no per-file nesting the way a document outline
-/// does. Struct fields and enum variants are reached only through a
-/// document outline's tree, not listed here on their own.
+/// (case-insensitive; empty matches all), flattened.
 pub fn workspace_symbols(analysis: &Analysis, query: &str) -> Vec<SymbolInfo> {
     let needle = query.to_lowercase();
     let count = node_count(analysis);
@@ -1517,8 +1426,7 @@ pub fn workspace_symbols(analysis: &Analysis, query: &str) -> Vec<SymbolInfo> {
                 push_if_matches(&mut out, info, &needle);
             }
         } else if tag == NODE_FN && node_file(&analysis.nodes, id) != NO_FILE && !wrapped_fns.contains(&id) {
-            // Bare method rows: top-level functions are already covered
-            // above through their wrapping `ITEM_FUN`/`ITEM_NATIVE_FUN`.
+            // Bare method rows; top-level fns were covered via their items.
             let info = symbol_for_fn(analysis, id, SYMBOL_KIND_METHOD);
             push_if_matches(&mut out, info, &needle);
         }
@@ -1526,10 +1434,6 @@ pub fn workspace_symbols(analysis: &Analysis, query: &str) -> Vec<SymbolInfo> {
     }
     out
 }
-
-// ---------------------------------------------------------------------------
-// Rename
-// ---------------------------------------------------------------------------
 
 /// The identifier-only span of the symbol under the cursor, or `None` when
 /// there is nothing there `rename_edits` could safely act on.
@@ -1548,13 +1452,8 @@ pub fn prepare_rename(analysis: &Analysis, file: i64, offset: i64) -> Option<(i6
     locate_name(analysis, file, start, end, &name).map(|(s, e)| (file, s, e))
 }
 
-/// Every occurrence of the symbol under the cursor, each narrowed from its
-/// enclosing node span down to the identifier's own span by a whole-word
-/// text search, paired with `new_name`. Returns `None` -- rather than a
-/// partial edit -- if the symbol's short name can't be read, if it has no
-/// occurrences, or if any occurrence's exact name text can't be pinpointed.
-/// Struct fields are never covered: `references` never resolves them, since
-/// a field carries no `SYM_*` symbol (see the module doc).
+/// Every occurrence of the symbol under the cursor narrowed to the
+/// identifier's own span, paired with `new_name`.
 pub fn rename_edits(
     analysis: &Analysis,
     file: i64,
@@ -1581,10 +1480,6 @@ pub fn rename_edits(
     Some(out)
 }
 
-// ---------------------------------------------------------------------------
-// Semantic tokens
-// ---------------------------------------------------------------------------
-
 /// Standard LSP semantic token type names, in legend order -- the index
 /// into this array is what `semantic_tokens` encodes per token.
 pub const SEMANTIC_TOKEN_TYPES: &[&str] =
@@ -1609,10 +1504,7 @@ fn semantic_token_type(kind: i64) -> Option<i64> {
 }
 
 /// Every symbol-resolved occurrence in `file` as `(start, end, token_type)`
-/// triples in source order, ready for delta-encoding. Locals, parameters,
-/// and struct fields carry no `SYM_*` symbol (see the module doc on
-/// `references`) and so are not classified here -- they keep whatever the
-/// grammar already highlights them as, rather than this layer guessing.
+/// triples in source order.
 pub fn semantic_tokens(analysis: &Analysis, file: i64) -> Vec<(i64, i64, i64)> {
     let count = node_count(analysis);
     let mut out: Vec<(i64, i64, i64)> = Vec::new();
@@ -1626,9 +1518,8 @@ pub fn semantic_tokens(analysis: &Analysis, file: i64) -> Vec<(i64, i64, i64)> {
                 if let Some(token_type) = semantic_token_type(kind) {
                     let raw_start = node_start(&analysis.nodes, id);
                     let raw_end = node_end(&analysis.nodes, id);
-                    // Item and variant spans run wider than their name (see
-                    // `locate_name`'s doc); expression, pattern, and type
-                    // spans already are the name.
+                    // Item and variant spans run wider than their name;
+                    // expression, pattern, and type spans are the name.
                     let span = if tag == NODE_ITEM || tag == NODE_VARIANT {
                         short_name_of_sym(analysis, sym)
                             .and_then(|name| locate_name(analysis, file, raw_start, raw_end, &name))
@@ -1649,17 +1540,8 @@ pub fn semantic_tokens(analysis: &Analysis, file: i64) -> Vec<(i64, i64, i64)> {
     out
 }
 
-// ---------------------------------------------------------------------------
-// Inlay hints
-// ---------------------------------------------------------------------------
-
-/// `: Type` hints for every `val`/`var` binding in `file` with no explicit
-/// type annotation, read from the typechecker's own attached inference --
-/// never re-inferred here (see the module doc). A binding the typechecker
-/// never reached (its canonical type key does not resolve) is skipped
-/// rather than shown with a guessed or garbled type. Each hint pairs the
-/// byte offset it anchors to (immediately after the bound name) with the
-/// label text to insert there.
+/// `: Type` hints for every unannotated `val`/`var` binding in `file`,
+/// each pairing its anchor offset with the label to insert.
 pub fn inlay_hints(analysis: &Analysis, file: i64) -> Vec<(i64, String)> {
     if !analysis.typechecked {
         return Vec::new();
@@ -1689,14 +1571,8 @@ pub fn inlay_hints(analysis: &Analysis, file: i64) -> Vec<(i64, String)> {
     out
 }
 
-// ---------------------------------------------------------------------------
-// Code actions
-// ---------------------------------------------------------------------------
-
 /// One mechanically-generated fix: a title and the `(file, start, end,
-/// replacement)` edits it applies. Every fix is derived from the structured
-/// `DiagKind` a diagnostic carries; a kind with no mechanical fix produces
-/// none rather than guessing from rendered prose.
+/// replacement)` edits it applies, derived from a diagnostic's `DiagKind`.
 pub struct CodeFix {
     pub title: String,
     pub edits: Vec<(i64, i64, i64, String)>,
@@ -1806,9 +1682,8 @@ fn remove_pub_fix(analysis: &Analysis, decl: i64) -> Option<(i64, i64, i64, Stri
     Some((file, kw_start, start, String::new()))
 }
 
-// The declaring `NODE_ITEM` a use site's symbol resolves to, if any -- only
-// item-kind declarations carry an `is_pub` flag (a bare method's `NODE_FN`
-// row does not), so a private *method* offers no "make public" fix here.
+// The declaring `NODE_ITEM` a use site's symbol resolves to, if any; only
+// item-kind declarations carry an `is_pub` flag.
 fn add_pub_fix(analysis: &Analysis, sym: i64) -> Option<(i64, i64, i64, String)> {
     if sym == NONE {
         return None;
@@ -1833,11 +1708,8 @@ fn import_name_of(analysis: &Analysis, item: i64) -> String {
     name_text(&analysis.names, name)
 }
 
-/// Fixes for diagnostics in `file` overlapping `[range_start, range_end)`,
-/// derived from each diagnostic's `DiagKind`: remove an unused import,
-/// remove an unused declaration, fix casing (built on `rename_edits`, so it
-/// shares its all-or-nothing guarantee), and make an item public
-/// (declarations only, not methods).
+/// Fixes for diagnostics in `file` overlapping `[range_start, range_end)`:
+/// remove an unused import or declaration, fix casing, make an item public.
 pub fn code_actions(analysis: &Analysis, file: i64, range_start: i64, range_end: i64) -> Vec<CodeFix> {
     let mut out: Vec<CodeFix> = Vec::new();
     for diag in &analysis.errors {

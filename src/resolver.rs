@@ -54,10 +54,7 @@ type State<'a> = (
     &'a mut Vec<Note>,
     // The item whose body is currently being resolved, innermost last.
     &'a mut Vec<i64>,
-    // `(from, to)` edges between item symbols: every symbol resolved inside
-    // an item is something that item depends on. Reachability is a graph
-    // walk over these from `main`, not a "was this name mentioned anywhere"
-    // flag — two dead functions that call each other are still dead.
+    // Dependency edges for reachability from main.
     &'a mut Vec<(i64, i64)>,
     // Seeded builtin names and symbols, filled during resolution.
     &'a mut Seeds,
@@ -66,15 +63,12 @@ type State<'a> = (
     &'a Target,
 );
 
-/// The owner of references that belong to no nameable item: the permanent
-/// root the reachability fixpoint seeds with. A reference outside any item
-/// is attributed here so it can only keep something alive, never kill it.
+/// The owner of references belonging to no nameable item: the permanent
+/// root the reachability fixpoint seeds with.
 const ROOT_OWNER: i64 = -2;
 
-/// Resolves names and reports which items and imports nothing reaches.
-///
-/// `deferred` receives the unused-item and unused-import diagnostics rather
-/// than `errors`; the caller reports them once the later stages have run.
+/// Resolves names and reports which items and imports nothing reaches;
+/// unused-item and unused-import diagnostics arrive in `deferred`.
 pub struct Diagnostics<'a> {
     pub errors: &'a mut Vec<Diag>,
     pub notes: &'a mut Vec<Note>,
@@ -186,9 +180,7 @@ pub fn resolve(
 
     materialize_scope_facts(&mut state);
 
-    // Reachability last, and only if nothing else failed. A program whose
-    // names do not resolve has no dependency graph worth walking; reporting
-    // every item as unused on top of the real error would bury it.
+    // Reachability last, and only if nothing else failed.
     if state.3.is_empty()
         && let Some(reached) = reachable_from_main(&state)
     {
@@ -356,13 +348,7 @@ fn push_entry(scopes: &mut [Vec<i64>], scope: i64, name: i64, sym: i64, ns: i64,
 /// the placeholder `collect_item` reserves for a `use` before the path that
 /// `use` names has been resolved, and the scan continues past it rather
 /// than answering "this name is taken". That is what makes this lookup give
-/// the same answer wherever in the file the `use` was written. A
-/// placeholder sitting ahead of a real declaration of the same name used to
-/// hide that declaration from `lookup_walk`, which then skipped to the
-/// enclosing scope, and from `finish_import`'s conflict check, which found
-/// its own placeholder and concluded the name was free — so an import
-/// written above a same-name local type silently shadowed it, while the
-/// same two declarations in the opposite order were correctly rejected.
+/// the same answer wherever in the file the `use` was written.
 fn scope_lookup(scopes: &[Vec<i64>], scope: i64, name: i64, ns: i64) -> (i64, i64) {
     let entries = match scopes.get(scope as usize) {
         Some(entries) => entries,
@@ -432,10 +418,8 @@ fn sym_home_of(nodes: &[i64], sym: i64) -> i64 {
 }
 
 fn sym_sub_of(nodes: &[i64], sym: i64) -> i64 {
-    // Slot e is a child scope only for namespace kinds and for seeded
-    // builtin types (no declaration item), whose `.from` surface lives
-    // there. A declared native type's slot e holds its container role
-    // (0/1); role 0 must not be read as the root scope.
+    // Slot e is a child scope only for namespace kinds and seeded builtin
+    // types; a declared native type stores its container role there.
     let kind = sym_kind_of(nodes, sym);
     let is_namespace = kind == SYM_MODULE || kind == SYM_STRUCT || kind == SYM_ENUM || kind == SYM_TRAIT;
     let is_seeded_builtin = kind == SYM_TYPE && sym_decl_of(nodes, sym) == NONE;
@@ -637,9 +621,8 @@ fn insert_decl(state: &mut State, scope: i64, name: i64, sym: i64, ns: i64, casi
         span
     };
     push_error(state.3, &message, report_span.0, report_span.1, report_span.2);
-    // A duplicate of two real declarations: point at the first one so the
-    // developer sees both sites of the clash in one diagnostic.  A builtin
-    // redeclaration has no source origin to point at, so it gets no note.
+    // A duplicate points at both clash sites; a builtin redeclaration has
+    // no source origin, so it gets no note.
     if !builtin_collision && existing_decl != NONE {
         push_note_for_last(
             state.3,
@@ -747,8 +730,7 @@ fn collect_item(state: &mut State, scope: i64, item: i64) {
             let row = native_fun_row_of(state.0, full);
             if row == usize::MAX {
                 sym_set_native_op(state.1, sym, NAT_NONE);
-                // A native outside the registry is a resolution error,
-                // never a panic or a later-stage surprise.
+                // A native outside the registry is a resolution error.
                 push_error(
                     state.3,
                     &format!("unknown native function '{}'", name_text(state.0, full)),
@@ -808,10 +790,8 @@ fn collect_fields_casing(names: &[String], nodes: &mut [i64], lists: &[Vec<i64>]
     while idx < count {
         let field = list_get(lists, fields, idx);
         report_casing(names, node_a(nodes, field), 1, errors, node_file(nodes, field), node_start(nodes, field), node_end(nodes, field));
-        // Slot d records the module scope the struct is declared in; the
-        // typechecker compares it against the accessing scope to enforce
-        // field visibility.  The scope id is a resolver fact, never
-        // re-derived downstream.
+        // Slot d records the declaring module scope; the typechecker
+        // compares it against the accessing scope for field visibility.
         node_set_d(nodes, field, scope);
         idx += 1;
     }
@@ -885,17 +865,15 @@ fn seed_protocol_variant(state: &mut State, enum_full: i64, var_name: i64, sym: 
 }
 
 // The seeded symbol slot a protocol variant name maps to, or none for a
-// name no protocol enum declares.  The variant names are matched by the
-// name ids the resolver interned into the seed table, never by text.
+// name no protocol enum declares.
 fn protocol_variant_slot(seeds: &Seeds, var_name: i64) -> Option<usize> {
     if var_name == seeds.name(SEED_NAME_ALLOC_FAILED) {
         Some(SEED_SYM_ALLOC_FAILED)
     } else if var_name == seeds.name(SEED_NAME_ACCESS_OOB) {
         Some(SEED_SYM_ACCESS_OOB)
     } else if var_name == seeds.name(SEED_NAME_INDEX_OOB) {
-        // `Collections.Error` declares its own `IndexOutOfBounds`; its tag
-        // lives in a slot of its own rather than aliasing the primitive
-        // `IndexError` variant the resolver seeds positionally.
+        // `Collections.Error` declares its own `IndexOutOfBounds` in a slot
+        // of its own, separate from the primitive `IndexError` variant.
         Some(SEED_SYM_COLLECTIONS_INDEX_OOB)
     } else if var_name == seeds.name(SEED_NAME_KEY_NOT_FOUND) {
         Some(SEED_SYM_KEY_NOT_FOUND)
@@ -1115,11 +1093,8 @@ fn seed_int_from(state: &mut State, scope: i64, name: i64) {
     let method = qualified_name(state.0, state.2, prefix, from_name);
     let row = native_fun_row_of(state.0, method);
     if row == usize::MAX {
-        // The registry table is the declaration of the int `.from`
-        // surface; a row missing from it means the method simply does not
-        // exist, and a program calling it gets the ordinary unknown-
-        // function diagnostic.  The registry self-consistency test pins
-        // the table so this branch cannot silently go stale.
+        // A name with no registry row has no int `.from` surface; the
+        // ordinary unknown-function diagnostic applies.
         return;
     }
     let from = alloc_sym(state.1, SYM_NATIVE_FUN, method, NONE, scope, NONE);
@@ -1128,10 +1103,8 @@ fn seed_int_from(state: &mut State, scope: i64, name: i64) {
     push_entry(state.4, scope, from_name, from, NS_VALUE, NONE);
 }
 
-// =====================================================================
 // The native registry: one seeded row per native function
-// — { qualified name, declared mode, verb } — and per native type —
-// { qualified name, layout kind, container role }.
+// { qualified name, declared mode, verb } and per native type { name, layout kind, container role }.
 
 const NATIVE_FUN_ROWS: &[(&str, i64, i64)] = &[
     ("I8.from", NAT_MODE_EFFECT, NAT_INT_FROM),
@@ -1228,9 +1201,8 @@ const NATIVE_VERB_MODES: &[(i64, &[i64])] = &[
     (NAT_PROCESS_WAIT, &[NAT_MODE_CONSUME]),
 ];
 
-// (qualified name, layout kind, container role).  The role is the
-// declared fact borrow and typecheck read instead of inferring
-// "container" from the presence of type arguments at an instantiation.
+// (qualified name, layout kind, container role); the role is the declared
+// fact borrow and typecheck read.
 const NATIVE_TYPE_ROWS: &[(&str, i64, i64)] = &[
     ("Memory.Block", NATIVE_LAYOUT_PAIR, 0),
     ("Collections.Vec", NATIVE_LAYOUT_TRIPLE, 1),
@@ -1344,9 +1316,7 @@ fn native_subsystem_of(verb: i64) -> NativeSubsystem {
 }
 
 // Derives an ownership mode from a native function's signature and
-// attaches it to the symbol's natfact row; typecheck and borrow read it.
-// A signature matching no predicate, or a mode its verb does not support,
-// is an internal error.
+// attaches it to the symbol's natfact row.
 fn classify_native_modes(state: &mut State) {
     let count = state.1.len() as i64 / NODE_STRIDE;
     let mut idx = 0i64;
@@ -1360,9 +1330,8 @@ fn classify_native_modes(state: &mut State) {
             let derived;
             let span;
             if decl == NONE || node_tag(state.1, decl) != NODE_ITEM || node_a(state.1, decl) != ITEM_NATIVE_FUN {
-                // Seeded surface (the int `.from` methods): there is no
-                // declared signature to classify, so the table's declared
-                // mode is the mode.
+                // Seeded surface (the int `.from` methods): the table's
+                // declared mode is the mode.
                 derived = sym_native_mode(state.1, idx);
                 span = (NONE, NONE, NONE);
             } else {
@@ -1443,9 +1412,8 @@ fn mode_name_of(mode: i64) -> String {
     }
 }
 
-// The signature classifier proper.  Reads only the declared signature
-// (parameter and return type nodes with their resolved symbols); this is
-// the one place a native's ownership mode is derived.
+// The signature classifier: reads the declared signature (parameter and
+// return type nodes with their resolved symbols).
 fn native_mode_of_signature(nodes: &[i64], lists: &[Vec<i64>], fn_node: i64) -> i64 {
     let params = node_c(nodes, fn_node);
     let ret = node_d(nodes, fn_node);
@@ -1529,10 +1497,8 @@ fn native_mode_of_signature(nodes: &[i64], lists: &[Vec<i64>], fn_node: i64) -> 
         return NAT_MODE_MUTATE;
     }
 
-    // 7. borrow — takes `&H`; returns a non-slice value that is not
-    //    provably a fresh handle (a concrete native type by value; a type
-    //    parameter return like `Result(V, Error)` is not provably fresh,
-    //    so a lookup lands here).
+    // 7. borrow — takes `&H` and returns a value that is not provably a
+    //    fresh handle (a concrete native type by value).
     if first_ty != NONE
         && node_a(nodes, first_ty) == TY_REF
         && type_is_handle_value(nodes, node_b(nodes, first_ty))
@@ -1550,9 +1516,8 @@ fn native_mode_of_signature(nodes: &[i64], lists: &[Vec<i64>], fn_node: i64) -> 
     NAT_MODE_NONE
 }
 
-// The resolved symbol of a type node that names a declared native type,
-// NONE otherwise.  A type parameter is not a native type: its symbol's
-// declaration is a parameter-list entry, not a `nat type` item.
+// The resolved symbol of a type node naming a declared native type; a
+// type parameter's declaration is not a `nat type` item, so NONE.
 fn ty_native_sym(nodes: &[i64], ty: i64) -> i64 {
     let sym = ty_sym_of(nodes, ty);
     if sym == NONE || node_tag(nodes, sym) != NODE_SYM || node_a(nodes, sym) != SYM_TYPE {
@@ -1594,9 +1559,7 @@ fn type_is_container(nodes: &[i64], ty: i64) -> bool {
 }
 
 // The element type of a container type application: its last type
-// argument.  A container used without arguments has no element (the
-// typechecker rejects the arity later; the classifier has nothing to
-// compare and the signature falls through to `mutate`).
+// argument; NONE for a container used without arguments.
 fn container_element_of(nodes: &[i64], lists: &[Vec<i64>], ty: i64) -> i64 {
     let args = node_c(nodes, ty);
     let count = list_len(lists, args);
@@ -1621,9 +1584,8 @@ fn result_payload_of(nodes: &[i64], lists: &[Vec<i64>], ty: i64) -> i64 {
 }
 
 fn type_is_result(nodes: &[i64], ty: i64) -> bool {
-    // The primitive kind is the fact: `Result` is a seeded *enum* symbol
-    // (SYM_ENUM), and only the seeded primitives carry a PRIM_* kind, so
-    // the kind check alone identifies the wrapper.
+    // `Result` is a seeded enum symbol, and only seeded primitives carry
+    // a PRIM_* kind, so the kind check alone identifies the wrapper.
     let sym = ty_sym_of(nodes, ty);
     sym != NONE && node_tag(nodes, sym) == NODE_SYM && node_f(nodes, sym) == PRIM_RESULT
 }
@@ -1666,9 +1628,7 @@ fn type_mentions_handle(nodes: &[i64], ty: i64) -> bool {
 }
 
 // Structural equality of two parse-level type nodes: same shape, same
-// name ids at named leaves.  Used by the extract predicate to compare the
-// container's element type against the return payload — two occurrences of
-// the same declared type parameter are the same syntactic entity.
+// name ids at named leaves.
 fn ty_nodes_equal(nodes: &[i64], lists: &[Vec<i64>], a: i64, b: i64) -> bool {
     if a == NONE || b == NONE || node_tag(nodes, a) != NODE_TY || node_tag(nodes, b) != NODE_TY {
         return false;
@@ -1722,11 +1682,8 @@ fn ty_nodes_equal(nodes: &[i64], lists: &[Vec<i64>], a: i64, b: i64) -> bool {
     true
 }
 
-// Every native function whose derived mode is `extract` marks the
-// container type its first parameter names as having an extraction
-// surface: the typechecker's Resolvability Rule reads this flag at
-// insertion sites, so the fact is computed here once, from the declared
-// signature, never from a NAT_* opcode.
+// Marks the container type each extract-mode native function's first
+// parameter names as having an extraction surface.
 fn link_extraction_surfaces(state: &mut State) {
     let count = state.1.len() as i64 / NODE_STRIDE;
     let mut idx = 0i64;
@@ -1813,15 +1770,8 @@ fn resolve_imports(state: &mut State, scope: i64, list: i64) {
     while idx < count {
         let item = list_get(state.2, list, idx);
         resolve_import(state, scope, item);
-        // A `use` inside `mod ... end` never reached here: this walk only
-        // ever looked at the list it started with, never a module's own
-        // child item list, even though `collect_item` already hoisted the
-        // module's placeholder into its own scope (`item_scope_of`, the
-        // same lookup `walk_item` uses for the identical shape). A
-        // module-local import resolves against that module's own scope,
-        // not the scope its `mod` block sits in — the same reasoning
-        // `walk_item`'s `ITEM_MODULE` arm already applies to everything
-        // else inside it.
+        // A module-local import resolves against the module's own scope,
+        // not the scope its `mod` block sits in.
         if node_tag(state.1, item) == NODE_ITEM && node_a(state.1, item) == ITEM_MODULE {
             let children = node_e(state.1, item);
             resolve_imports(state, item_scope_of(state.8, item), children);
@@ -1869,23 +1819,14 @@ fn finish_import(state: &mut State, scope: i64, item: i64, sym: i64, target_ns: 
         push_error(state.3, &format!("import '{}' conflicts with another symbol", name_text(state.0, entry_name)), span.0, span.1, span.2);
         return;
     }
-    // The `use` item's own symbol slot records what it resolved to, exactly
-    // as every other item kind's does. Only the scope *entry* used to be
-    // updated, so a `use` item's slot stayed at the parser's `NONE` forever
-    // — and `check_unused`, which reads the slot to tell an import that
-    // resolved from one that never did, returned on every single import
-    // before it could report anything. An import that failed to resolve, or
-    // that lost a conflict, still has no symbol and is still skipped there:
-    // it has already been told what is wrong with it.
+    // The `use` item's own symbol slot records what it resolved to, so
+    // `check_unused` can tell a resolved import from one that never did.
     item_set_sym(state.1, item, sym);
     rewrite_import(state.4, scope, item, sym, target_ns);
 }
 
-// The casing an imported name must satisfy is a property of the symbol's own
-// *kind* (function, constant, variant, type, ...), not of which namespace it
-// happens to resolve in: NS_VALUE holds snake_case functions but also
-// SCREAMING_SNAKE_CASE constants and PascalCase enum variants, so a blanket
-// per-namespace rule falsely rejects `use Config.MAX_LEN`/`use Colors.Red`.
+// The casing an imported name must satisfy follows the symbol's own kind
+// (function, constant, variant, type), not which namespace it resolves in.
 fn import_casing_of(nodes: &[i64], sym: i64) -> i64 {
     let kind = sym_kind_of(nodes, sym);
     if kind == SYM_CONST {
@@ -1929,9 +1870,7 @@ fn resolve_path(state: &mut State, scope: i64, segs: i64, final_ns: i64) -> i64 
 }
 
 // The pure descent of `resolve_path`: find the symbol a path names without
-// recording a dependency edge.  An impl's target is resolved this way so
-// the impl cannot keep its own type alive; every ordinary reference goes
-// through `resolve_path`, which records.
+// recording a dependency edge; an impl's target is resolved this way.
 fn resolve_path_sym(state: &mut State, scope: i64, segs: i64, final_ns: i64) -> i64 {
     let count = list_len(state.2, segs);
     if count == 0 {
@@ -1961,13 +1900,8 @@ fn resolve_path_sym(state: &mut State, scope: i64, segs: i64, final_ns: i64) -> 
     sym
 }
 
-// Records that the items currently being resolved depend on `sym`.
-//
-// Every owner on the stack gets an incoming edge: a plain item has one
-// owner, and an impl body has its implementing type pushed, so its
-// references keep a callee alive only while the type is reached. When
-// the stack is empty, the reference is attributed to the permanent root
-// owner.
+// Records that the items being resolved depend on `sym`: every stack owner
+// gets an incoming edge, or the permanent root when the stack is empty.
 fn record_dependency(state: &mut State, sym: i64) {
     if sym == NONE {
         return;
@@ -1992,25 +1926,15 @@ fn record_dependency(state: &mut State, sym: i64) {
 }
 
 /// Every item symbol reachable from `main`, or `None` when there is no
-/// `main` to reach from.
-///
-/// A compilation unit without an entry point is not a whole program, and
-/// reachability is a whole-program property: `build.cnb` is three `pub const`
-/// declarations, and a module compiled on its own is a module. Answering
-/// "everything is unreachable" for either would be answering a question
-/// nobody asked.
-///
-/// This is not an escape hatch. A program with no `main` cannot be built
-/// into a binary at all, so nothing that ships can take this path.
+/// `main` to reach from: a compilation unit without an entry point is not
+/// a whole program, and reachability is a whole-program property.
 fn reachable_from_main(state: &State) -> Option<Vec<i64>> {
     let mut reached: Vec<i64> = vec![ROOT_OWNER];
     let mut found_main = false;
     let mut idx = 0i64;
     while idx < state.1.len() as i64 / NODE_STRIDE {
-        // The kind matters as well as the flag: `SYM_FUN_MAIN` is 1, and the
-        // `f` slot means something else for other symbol kinds, so without
-        // the kind check any symbol whose `f` happened to hold 1 counted as
-        // an entry point.
+        // The kind matters as well as the flag: slot `f` means something
+        // else for non-function symbol kinds.
         if node_tag(state.1, idx) == NODE_SYM
             && node_a(state.1, idx) == SYM_FUN
             && node_f(state.1, idx) == SYM_FUN_MAIN
@@ -2069,9 +1993,8 @@ fn unreachable_label(kind: i64) -> Option<&'static str> {
     }
 }
 
-/// Whether the reached symbol `sym` has at least one live incoming edge from
-/// a caller declared in a different module scope, or is a type a reached
-/// public function of its own module exposes in its signature.
+/// Whether `sym` has a live incoming edge from a caller in another module
+/// scope, or is exposed by a reached public function's signature.
 fn has_live_cross_module_edge(state: &State, sym: i64, reached: &[i64]) -> bool {
     let target_home = sym_home_of(state.1, sym);
     let mut idx = 0usize;
@@ -2138,9 +2061,8 @@ fn report_unnecessary_pub(state: &mut State, item: i64, sym: i64, reached: &[i64
     );
 }
 
-/// Reports every declared item that nothing reachable from `main` needs, the
-/// impl methods whose implementing type is dead, and every reached `pub`
-/// item whose visibility no live cross-module edge justifies.
+/// Reports every declared item nothing reachable from `main` needs, dead
+/// impl methods, and unjustified `pub` on reached items.
 fn report_unreachable(state: &mut State, list: i64, reached: &[i64], deferred: &mut Vec<Diag>) {
     let count = list_len(state.2, list);
     let mut idx = 0i64;
@@ -2155,9 +2077,8 @@ fn report_unreachable(state: &mut State, list: i64, reached: &[i64], deferred: &
             report_unreachable(state, node_e(state.1, item), reached, deferred);
             continue;
         }
-        // A seeded builtin has no Cinnabar source behind it: `Result`,
-        // `Option`, `DivError` and `IndexError` are injected by the resolver
-        // and carry `NO_FILE`.
+        // A seeded builtin (`Result`, `Option`, `DivError`, `IndexError`)
+        // is injected by the resolver and carries `NO_FILE`.
         if node_file(state.1, item) == NO_FILE {
             continue;
         }
@@ -2194,10 +2115,8 @@ fn report_unreachable(state: &mut State, list: i64, reached: &[i64], deferred: &
             continue;
         }
         if contains_i64(reached, sym) {
-            // A reached item's `pub` must be justified by a live incoming
-            // edge from a caller in a different module. A reached struct's
-            // symbol row carries the flag the typechecker's field-visibility
-            // pass reads once typechecking has marked cross-module accesses.
+            // A reached item's `pub` is justified by a live cross-module
+            // caller edge, read from the struct symbol's flag.
             report_unnecessary_pub(state, item, sym, reached, deferred);
             if kind == ITEM_STRUCT && sym != NONE {
                 node_set_f(state.1, sym, 1);
@@ -2290,14 +2209,11 @@ fn walk_item(state: &mut State, scope: i64, item: i64) {
         return;
     }
     let kind = node_a(state.1, item);
-    // A module is a namespace rather than a thing to keep alive: its
-    // children are each checked on their own, so it owns nothing.
+    // A module is a namespace, owning nothing; `resolve_impl` owns the
+    // impl's attribution instead.
     let owner = if kind == ITEM_MODULE {
         NONE
     } else if kind == ITEM_IMPL {
-        // `resolve_impl` owns the impl's attribution: it resolves the trait
-        // and for-type, then pushes the implementing type while walking the
-        // method bodies.
         NONE
     } else {
         let sym = item_sym_of(state.1, item);
@@ -2424,18 +2340,13 @@ fn resolve_impl(state: &mut State, scope: i64, item: i64) {
         }
         item_set_sym(state.1, item, trait_sym);
     }
-    // The implementing type is the impl's owner for every reference the
-    // impl makes, found without recording a dependency: an impl must not
-    // keep its own target alive, or a dead type would never be reported
-    // for merely being implemented.
+    // The implementing type owns the impl's references, found without
+    // recording a dependency.
     let for_ty = node_e(state.1, item);
     let for_ty_sym = impl_target_sym(state, scope, for_ty);
     if for_ty_sym != NONE {
         state.11.push(for_ty_sym);
     }
-    // The for-type's own resolution records the self-edge, which
-    // `record_dependency` drops; method bodies are attributed to the
-    // implementing type.
     walk_type(state, scope, for_ty);
     walk_fn_list(state, scope, node_f(state.1, item));
     if for_ty_sym != NONE {
@@ -2444,9 +2355,7 @@ fn resolve_impl(state: &mut State, scope: i64, item: i64) {
 }
 
 // The symbol the impl extends, looked up without recording a dependency
-// edge: the impl's target is a declaration-level fact, and attributing it
-// to the root would keep a dead type alive.  The authoritative resolution
-// happens in the `walk_type` inside `resolve_impl`.
+// edge: attributing it to the root would keep a dead type alive.
 fn impl_target_sym(state: &mut State, scope: i64, ty: i64) -> i64 {
     if node_tag(state.1, ty) != NODE_TY {
         return NONE;
@@ -2740,9 +2649,7 @@ fn resolve_type_name(state: &mut State, scope: i64, ty: i64, name: i64) {
         mark_used(state.9, src);
     }
     // A single-identifier type never goes through `resolve_path`, so the
-    // dependency has to be recorded here too. Without it a function's own
-    // return type counts for nothing, and `main() ExitCode` reports
-    // `ExitCode` as unused.
+    // dependency is recorded here.
     record_dependency(state, sym);
     if !is_visible(state.5, state.6, state.1, scope, sym) {
         push_error_kind(state.3, &format!("cannot access type '{}' here", name_text(state.0, name)), node_file(state.1, ty), node_start(state.1, ty), node_end(state.1, ty), DiagKind::PrivateAccess { sym });
@@ -2782,14 +2689,7 @@ fn check_unused_imports(names: &[String], nodes: &[i64], lists: &[Vec<i64>], def
 }
 
 /// Reports a `use` that resolved to something no name in the file went on
-/// to reach.
-///
-/// The symbol slot is what separates the two failures a `use` can have: an
-/// import that never resolved has none, and has already been told so — it
-/// must not be told a second time that nothing uses what it does not name.
-/// `mark_used` records the item every time a lookup returns through its
-/// scope entry, so "used" here means a name actually resolved through this
-/// import, not that its text appears somewhere.
+/// to reach; an import that never resolved is skipped.
 fn check_unused(names: &[String], nodes: &[i64], lists: &[Vec<i64>], deferred: &mut Vec<Diag>, used: &[i64], item: i64) {
     if node_tag(nodes, item) != NODE_ITEM {
         return;
@@ -2826,15 +2726,8 @@ fn check_unused(names: &[String], nodes: &[i64], lists: &[Vec<i64>], deferred: &
     );
 }
 
-// ---------------------------------------------------------------------------
-// Dead code and unresolved-name suggestions
-// ---------------------------------------------------------------------------
-
 // The visible type-namespace names from `scope` up through its parents, as
-// (name, file, start, end) for the declaration each name points at.  This
-// reads the resolver's own scope table — the same entries `resolve_type_name`
-// walks — so a suggestion is offered from the names actually in scope rather
-// than from a second, parallel registry.
+// (name, file, start, end) per declaration.
 fn visible_type_names(state: &State, scope: i64) -> Vec<(String, i64, i64, i64)> {
     let mut out: Vec<(String, i64, i64, i64)> = Vec::new();
     let mut seen: Vec<i64> = Vec::new();
@@ -2873,9 +2766,8 @@ fn visible_type_names(state: &State, scope: i64) -> Vec<(String, i64, i64, i64)>
     out
 }
 
-// Offer a hedged "did you mean" note for an unresolved type name, pointing
-// at the candidate declaration when the match is unambiguous.  The error
-// must already be pushed so the note attaches to it.
+// Offers a hedged "did you mean" note for an unresolved type name; the
+// error must already be pushed so the note attaches to it.
 fn suggest_type_name(state: &mut State, scope: i64, misspelled: i64) {
     let text = name_text(state.0, misspelled);
     let entries = visible_type_names(state, scope);
@@ -2904,11 +2796,7 @@ fn suggest_type_name(state: &mut State, scope: i64, misspelled: i64) {
 mod tests {
     use super::*;
 
-    // Drives the real front end (module loading through borrow checking,
-    // the same path `analysis::analyze` gives the LSP and the playground)
-    // over an in-memory source, with no LLVM dependency — the only way to
-    // pin resolver behavior end to end on a machine without the LLVM
-    // toolchain `cargo test`'s fixture-linked suites need.
+    // Runs the real front end over an in-memory source, no LLVM needed.
     fn errors_for(source: &str) -> Vec<String> {
         let overlay = [("scratch.cnb".to_string(), source.to_string())];
         let result = crate::analysis::analyze("scratch.cnb", &overlay, &crate::target::Target::host());
@@ -2923,10 +2811,8 @@ mod tests {
         let mut errors: Vec<Diag> = Vec::new();
         let mut notes: Vec<Note> = Vec::new();
         let mut deferred: Vec<Diag> = Vec::new();
-        // Pass one: a bare program declares no protocol enums, so only the
-        // primitive slots `seed_builtins` fills unconditionally are
-        // populated; the protocol slots stay `NONE` until their declaring
-        // native modules are resolved.
+        // Pass one: a bare program populates only the primitive seed
+        // slots; protocol slots stay `NONE`.
         let source = "pub fun main() I32\n  return 0\nend\n";
         let overlay = [("scratch.cnb".to_string(), source.to_string())];
         let (loaded, files) = crate::module_loader::load_with_overlay(
@@ -2968,9 +2854,7 @@ mod tests {
         }
 
         // Pass two: declaring every sealed native module populates each
-        // protocol slot with the variant symbol of the matching name, so
-        // codegen's O(1) tag lookups are total for a program that uses the
-        // native surface. `Terminal.Error` declares `ExitDiagnostic`.
+        // protocol slot with the matching variant symbol.
         let mut names2: Vec<String> = Vec::new();
         let mut nodes2: Vec<i64> = Vec::new();
         let mut lists2: Vec<Vec<i64>> = Vec::new();
@@ -3014,12 +2898,8 @@ pub mod Memory\n  pub type Error\n    pub AllocationFailed(Usize)\n    pub Acces
         }
     }
 
-    // An import nothing names is an error (Manifesto, "Compile-Time
-    // Correctness": unused imports). `check_unused` reads the `use` item's
-    // own symbol slot to tell a resolved import from one that never
-    // resolved, and nothing ever wrote that slot — so the guard was true
-    // for every import in every program and this diagnostic could not fire
-    // at all. `finish_import` now records what the import resolved to.
+    // An import nothing names is an error; the `use` item's symbol slot
+    // tells a resolved import from one that never resolved.
     #[test]
     fn unused_import_is_rejected() {
         let source = r#"
@@ -3089,10 +2969,8 @@ end
         assert!(errors.is_empty(), "{:?}", errors);
     }
 
-    // An unused import must not answer a question nobody asked: a program
-    // with a real type error is told about the type error. This is why the
-    // check reports through `deferred` — reporting it from the resolver
-    // would return `false` and the later stages would never run at all.
+    // The unused-import check reports through `deferred`, so a program with
+    // a real type error still reaches the typechecker.
     #[test]
     fn a_real_error_is_reported_ahead_of_an_unused_import() {
         let source = r#"
@@ -3121,9 +2999,7 @@ end
         assert!(!errors.iter().any(|m| m.contains("unused import")), "{:?}", errors);
     }
 
-    // A `use` that names a type only mentioned in a signature counts as
-    // used: `resolve_type_name` marks the import, so the check must not
-    // report an import consumed by anything other than a call.
+    // A `use` naming a type mentioned only in a signature counts as used.
     #[test]
     fn import_used_only_in_a_type_position_is_accepted() {
         let source = r#"
@@ -3148,8 +3024,7 @@ end
         assert!(errors.is_empty(), "{:?}", errors);
     }
 
-    // An import that failed to resolve has already been told what is wrong
-    // with it; it must not also be reported as unused.
+    // An unresolvable import reports only its resolution failure.
     #[test]
     fn unresolvable_import_reports_only_the_resolution_failure() {
         let source = r#"
@@ -3170,10 +3045,8 @@ end
         assert!(!errors.iter().any(|m| m.contains("unused import")), "{:?}", errors);
     }
 
-    // A `use` of a type that shares its name with a local declaration is a
-    // conflict whichever order the two are written in. The import-first
-    // order used to be accepted silently, with every later mention of the
-    // name resolving to the imported type instead of the local one.
+    // A `use` conflicting with a same-named local type is an error in
+    // either declaration order.
     #[test]
     fn import_before_local_type_of_the_same_name_conflicts() {
         let source = r#"
@@ -3198,9 +3071,8 @@ end
         assert!(errors.iter().any(|m| m.contains("import 'Shape' conflicts with another symbol")), "{:?}", errors);
     }
 
-    // The same two declarations in the opposite order, which was already
-    // rejected: the diagnostic must be the same one, so that source order
-    // decides nothing.
+    // The same conflict in the opposite declaration order reports the
+    // same diagnostic.
     #[test]
     fn local_type_before_import_of_the_same_name_conflicts() {
         let source = r#"
@@ -3225,12 +3097,8 @@ end
         assert!(errors.iter().any(|m| m.contains("import 'Shape' conflicts with another symbol")), "{:?}", errors);
     }
 
-    // The shadowing this rules out, stated as behavior rather than as a
-    // diagnostic: with the import written first, `Shape(height: 3)` used to
-    // resolve to `Other.Shape` and produce "no field 'height' on struct
-    // 'Other.Shape'" — the program was checked against a type its author
-    // never named, and the local `Shape` right above it was never reported
-    // as conflicting with anything.
+    // With the import written first, `Shape(height: 3)` must still resolve
+    // to the local type, not the imported one.
     #[test]
     fn import_does_not_silently_shadow_a_later_local_type() {
         let source = r#"
@@ -3255,9 +3123,8 @@ end
         assert!(!errors.iter().any(|m| m.contains("Other.Shape")), "{:?}", errors);
     }
 
-    // A local declaration and an import of an unrelated name in the same
-    // scope are not a conflict: the placeholder must not be read as
-    // occupying every name.
+    // A local declaration and an import of an unrelated name coexist in
+    // one scope.
     #[test]
     fn import_beside_an_unrelated_local_type_is_accepted() {
         let source = r#"
@@ -3287,17 +3154,7 @@ end
         assert!(errors.is_empty(), "{:?}", errors);
     }
 
-    // Enabling the unused-import check newly rejected 27 dead imports across
-    // 5 fixtures in the corpus; each was fixed by deleting the dead import
-    // (and, where the import was the only thing keeping an otherwise-unused
-    // native declaration block reachable — resolve_imports attributes every
-    // import edge to ROOT_OWNER regardless of whether it's ever called — by
-    // deleting that block too, so removing the import doesn't just trade
-    // one diagnostic for a cascade of "unused native function" ones). The
-    // fifth, repro/head.cnb, was a language-tour fixture that declared far
-    // more surface than its `main` exercised; narrowed to what it actually
-    // demonstrates rather than restructuring `main` to call through all of
-    // it (a real content decision, made explicitly rather than guessed).
+    // The repro fixtures declare only imports their `main` reaches.
     #[test]
     fn fixture_corpus_stays_clean_of_dead_imports() {
         let paths = [
@@ -3314,10 +3171,8 @@ end
         }
     }
 
-    // Pins the fix to resolve_imports never recursing into a module's own
-    // child item list: a `use` written inside `mod ... end` used to never
-    // resolve at all, no matter how valid the path, because the walk that
-    // resolves imports only ever looked at the list it started with.
+    // A `use` written inside `mod ... end` resolves against the module's
+    // own scope.
     #[test]
     fn a_use_inside_a_mod_block_resolves() {
         let source = r#"
@@ -3343,9 +3198,8 @@ end
         assert!(errors.is_empty(), "{:?}", errors);
     }
 
-    // Negative control: an unresolvable module-local import still reports
-    // the resolution failure, not a silent pass -- the recursion above must
-    // not accidentally short-circuit resolve_import's own error path.
+    // Negative control: an unresolvable module-local import reports the
+    // resolution failure.
     #[test]
     fn an_unresolvable_use_inside_a_mod_block_is_rejected() {
         let source = r#"
@@ -3363,12 +3217,10 @@ end
 "#;
         let errors = errors_for(source);
         assert!(errors.iter().any(|m| m.contains("cannot resolve import")), "{:?}", errors);
-    }    // A native function whose name has no registry row is a resolution
-    // error naming the function: it has no verb, no mode, and no codegen,
-    // and letting it reach the backend would be a valid-looking program
-    // failing there.  The rejection is truthful and immediate, never a
-    // panic.  The signature uses only builtins so the test pins exactly
-    // this one rejection, not a second "unknown native type" one.
+    }
+
+    // A native function with no registry row is a resolution error naming
+    // the function; builtins-only signature keeps this the one diagnostic.
     #[test]
     fn unknown_native_function_is_rejected() {
         let source = r#"
@@ -3391,11 +3243,8 @@ end
         );
     }
 
-    // A native type whose name has no registry row is the same truthful
-    // rejection, naming the type: it has no layout kind, so a handle of it
-    // cannot be lowered.  The program is otherwise valid, and reachability
-    // is only ever reported when nothing else failed, so this is the single
-    // diagnostic.
+    // A native type with no registry row is rejected the same way, naming
+    // the type; it has no layout kind to lower.
     #[test]
     fn unknown_native_type_is_rejected() {
         let source = r#"
@@ -3413,12 +3262,10 @@ end
             "{:?}",
             errors
         );
-    }    // The registry tables are the single declaration of the native
-    // surface; a row whose verb does not support its declared mode, or a
-    // type row with an unknown layout kind, would be a table bug.  The
-    // completeness law makes drift between a declaration and its verb an
-    // internal error at compile time; this test pins the tables themselves
-    // so the law has nothing to catch.
+    }
+
+    // The registry tables must be self-consistent: every verb supports its
+    // declared mode, every type row names a known layout kind.
     #[test]
     fn registry_tables_are_self_consistent() {
         let mut idx = 0usize;
@@ -3449,12 +3296,9 @@ end
         }
     }
 
-    // The extraction binding of an extract-mode call is a fact row, not a
-    // mutated parse slot: after the front end runs on a vec_pop program,
-    // the call's type-argument slot still holds what the parser wrote, and
-    // the NODE_CALLFACT row carries the container binding the borrow
-    // checker reads.  Pins the fix for the AST clobbering: parse tree
-    // slots are never overwritten to pass facts between stages.
+    // The extraction binding of an extract-mode call lives on its
+    // NODE_CALLFACT row; the call's type-argument slot keeps the list
+    // the parser wrote.
     #[test]
     fn extraction_binding_is_a_fact_row_not_a_mutated_parse_slot() {
         let source = r#"
@@ -3520,8 +3364,7 @@ end
         assert!(call != NONE, "no extraction call-fact row was attached");
         assert_eq!(node_tag(&result.nodes, call), NODE_EXPR);
         assert_eq!(node_a(&result.nodes, call), EXPR_CALL);
-        // The parse slot the old code clobbered still holds the type-arg
-        // list the parser wrote (vec_pop[I64] has one explicit argument).
+        // The call's type-argument slot still holds the parser's list.
         assert!(
             node_c(&result.nodes, call) != NONE,
             "EXPR_CALL type-argument slot was clobbered"

@@ -1,17 +1,11 @@
 //! The `--emit-json` document surfaces, driven through the built binary.
 //!
-//! Every one of these runs the real compiler and parses what it wrote, so a
-//! flag that parses but reaches no emitter, or a document whose shape has
-//! drifted from what a consumer was promised, fails here. The documents are
-//! checked against the human rendering of the same run wherever both exist:
-//! the point of the JSON surface is to say the same thing in another
-//! spelling, and a test that only read the JSON could not notice it had
-//! stopped doing that.
+//! Every test runs the real compiler and parses what it wrote. Documents are
+//! cross-checked against the human rendering of the same run: verdicts,
+//! layout numbers, and diagnostic spans sliced back out of the source text.
 //!
 //! **Invariants:**
-//! - No test asserts a span it did not read out of the source text. A
-//!   diagnostic that pointed somewhere plausible but wrong would satisfy a
-//!   test that only checked the field was present.
+//! - No test asserts a span it did not read out of the source text.
 //! - Scratch directories are unique per process and per invocation.
 
 use serde_json::Value;
@@ -71,9 +65,7 @@ fn parse_only_arena_is_emitted_as_a_document() -> Result<(), Box<dyn Error>> {
     assert!(!names.is_empty(), "arena document carried no interning table");
     array_of(&report, "lists")?;
 
-    // The root is an index into the list arena, and following it has to
-    // land on real item rows: that is the only thing that makes the flat
-    // arena walkable by a consumer.
+    // The root indexes the list arena; following it must land on real ITEM rows.
     let root = report.get("root").and_then(Value::as_i64).ok_or("document had no root")?;
     let lists = array_of(&report, "lists")?;
     let root_items = lists
@@ -261,9 +253,8 @@ fn borrow_explanations_ride_the_same_envelope_under_either_spelling() -> Result<
     });
     assert!(explained, "the envelope omitted the checker's consume paths: {}", from_emit);
 
-    // Every explanation points into the file it is explaining. The notes
-    // exist to name a binding site or a path exit, and one without a real
-    // location would be worse than none.
+    // Explanations name binding sites or path exits, so each must point
+    // into the file being explained.
     for diagnostic in diagnostics {
         let explanations = array_of(diagnostic, "explanations")?;
         for explanation in explanations {
@@ -286,9 +277,8 @@ fn an_accepted_program_still_emits_exactly_one_document() -> Result<(), Box<dyn 
     std::fs::write(&source, STRUCT_SOURCE)?;
     let entry = path_text(&source);
 
-    // A consumer parses one document per invocation whatever the verdict
-    // was, rather than having to recognize a success sentence as "not an
-    // error".
+    // One document per invocation whatever the verdict, so a consumer never
+    // has to recognize a success sentence as "not an error".
     let (checked, check_accepted) = document(&[&entry, "--check-only", "--emit-json"])?;
     assert!(check_accepted, "a valid program failed the front end");
     assert_eq!(format_of(&checked), "cinnabar.diagnostics.v1");
@@ -306,8 +296,7 @@ fn an_accepted_program_still_emits_exactly_one_document() -> Result<(), Box<dyn 
 
 #[test]
 fn json_and_human_renderings_report_the_same_verdict() -> Result<(), Box<dyn Error>> {
-    // The exit status must match between the two renderings for every
-    // fixture.
+    // Exit status must match across both renderings for every fixture.
     let cases = [
         ("spec.cnb", true),
         ("unknown_var.cnb", false),

@@ -14,12 +14,10 @@
 //! calls to build protocol positions.
 //!
 //! **Invariants:**
-//! - No value in an emitted document is computed here. Every number and
-//!   name is copied from a `Diag`, a `Note`, or an arena row an earlier
-//!   stage wrote.
-//! - A span whose file id equals `NO_FILE` serializes to JSON null. A span
-//!   naming a file id absent from `files` serializes its offsets with a
-//!   null `path`.
+//! - No value in an emitted document is computed here; each is copied from
+//!   a `Diag`, a `Note`, or an arena row an earlier stage wrote.
+//! - A `NO_FILE` span serializes to JSON null; an absent file id keeps its
+//!   offsets with a null `path`.
 
 use crate::analysis::offset_to_position;
 use crate::ast::{diag_kind_name, note_kind_name, Diag, Note, NO_FILE};
@@ -76,12 +74,7 @@ pub fn source_json(files: &[(String, String)], file: i64, start: i64, end: i64) 
 }
 
 /// The structured diagnostic envelope: every diagnostic in `errors`, each
-/// carrying the notes an earlier stage attached to it.
-///
-/// The notes are the same rows `--explain-borrow` renders as secondary
-/// labels — which paths consume a value, where it was bound, where it was
-/// previously moved — so a consumer of this document has the whole
-/// explanation the terminal rendering would have shown.
+/// carrying its attached notes (consume paths, binding sites, prior moves).
 pub fn diagnostics_report(errors: &[Diag], notes: &[Note], files: &[(String, String)]) -> Value {
     let mut diagnostics: Vec<Value> = Vec::new();
     let mut error_idx = 0usize;
@@ -112,9 +105,8 @@ fn explanations_of(diag_idx: i64, notes: &[Note], files: &[(String, String)]) ->
         match notes.get(note_idx) {
             Some(note) => {
                 if note.0 == diag_idx {
-                    // `kind` is the stage's own classification and is what a
-                    // tool branches on; `message` is prose for a reader and
-                    // may be reworded without breaking anything.
+                    // `kind` is the machine-readable classification; `message`
+                    // is reader-facing prose.
                     explanations.push(json!({
                         "kind": note_kind_name(note.5),
                         "message": note.1,
@@ -144,11 +136,7 @@ pub fn files_json(files: &[(String, String)]) -> Vec<Value> {
     out
 }
 
-/// Serialize one document for standard output.
-///
-/// The rendering can fail, and a driver that swallowed that would print
-/// nothing at all where a consumer expects a document, so the failure is
-/// returned as a message for the one place allowed to stringify it.
+/// Serialize one document for standard output, returning a message on failure.
 pub fn render_report(report: &Value) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|render_error| format!("cannot serialize JSON report: {}", render_error))

@@ -1,20 +1,13 @@
 //! The language server, driven as a real subprocess over stdio.
 //!
-//! These tests spawn the built `cinnabar-lsp` binary and speak actual
-//! JSON-RPC to it — initialize, open documents, request hover, read
-//! published diagnostics, shut down. Nothing here calls into
-//! `cinnabar::analysis` directly, because what is being pinned are
-//! properties of the *server*: that a hover on a large source file answers
-//! within a bound, that a hover issued while diagnostics are in flight is
-//! answered without a duplicate analysis, and that overlay diagnostics,
-//! hover, and shutdown all work within one session.
+//! Spawns the built `cinnabar-lsp` binary and speaks JSON-RPC to it —
+//! initialize, open documents, hover, published diagnostics, shutdown.
+//! Every read is bounded by a timeout; the server is exercised through the
+//! protocol only.
 //!
 //! **Invariants:**
-//! - Every read from the server is bounded by a timeout. A language server
-//!   bug typically presents as silence, and a test that waited forever
-//!   would hang the suite rather than fail it.
-//! - The server is exercised through the protocol only. Reaching past it
-//!   into the library would stop testing the layer that can actually break.
+//! - Every read from the server is bounded by a timeout.
+//! - No test reaches into `cinnabar::analysis` directly.
 
 use serde_json::{json, Value};
 use std::cell::RefCell;
@@ -25,10 +18,8 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-// The bound a deadlock must trip, not a benchmark of debug-mode analysis
-// speed: the gate runs CPU-heavy test binaries concurrently with this one, so
-// a debug-build front-end run on a large fixture can legitimately take tens of
-// seconds before the server has a core to itself.
+// Deadlock bound, not a speed benchmark: the gate runs CPU-heavy test
+// binaries concurrently, so a debug-build run on a large fixture can take tens of seconds.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn fixture(rel: &str) -> String {
@@ -51,11 +42,7 @@ fn send_message(writer: &mut impl Write, message: &Value) -> Result<(), Box<dyn 
     Ok(())
 }
 
-// A spawned server's stderr is the only record of a panic or abort (`RUST_BACKTRACE`
-// is set in the dev shell).  The tests pipe it and otherwise discard it, so a
-// crashed server would fail with a bare timeout and no cause.  Draining it here,
-// after the child has exited, and folding it into the failure keeps that cause
-// visible.
+// Reads the server's stderr to the end; callers fold it into failure text.
 fn drain_stderr(child: &mut Child) -> String {
     let mut reader = match child.stderr.take() {
         Some(stderr) => stderr,
@@ -91,12 +78,8 @@ fn read_message(reader: &mut BufReader<ChildStdout>) -> Result<Value, Box<dyn Er
 
 struct MessageReader {
     receiver: Receiver<Result<Value, String>>,
-    // Messages a step read but did not need yet.  JSON-RPC over stdio is an
-    // asynchronous, interleaved stream: `publishDiagnostics` can arrive
-    // between a request and its response, and a later step often wants the
-    // exact message an earlier step skipped.  Discarding a message here would
-    // make that later step wait forever, so every non-matching message is
-    // retained until a step claims it.
+    // Non-matching messages are retained: a later step often wants the
+    // exact message an earlier step skipped.
     buffered: RefCell<VecDeque<Value>>,
 }
 
@@ -133,9 +116,7 @@ impl MessageReader {
         }
     }
 
-    // Find and remove a buffered unique message matching `matches`.  Only
-    // unique messages are ever buffered (see `stash_unique`), so this can
-    // never surface a stale `publishDiagnostics` ahead of a fresher one.
+    // Find and remove a buffered unique message matching `matches`.
     fn take_buffered(&self, matches: impl Fn(&Value) -> bool) -> Option<Value> {
         let mut buffered = self.buffered.borrow_mut();
         let mut index = 0usize;
@@ -152,12 +133,8 @@ impl MessageReader {
         None
     }
 
-    // Retain a message a step read but did not need yet.  Diagnostics are
-    // dropped: `publishDiagnostics` is superseded by the next publish for the
-    // same URI, so keeping an old copy would make a later step read stale
-    // diagnostics.  Everything else (a response to a different request, a log
-    // message) is kept, so a later step can still claim it instead of waiting
-    // forever for a message this step already consumed.
+    // Diagnostics are dropped (superseded by the next publish for the same
+    // URI); everything else is kept for a later step to claim.
     fn stash_unique(&self, message: Value) {
         let is_diagnostics = message.get("method").and_then(Value::as_str)
             == Some("textDocument/publishDiagnostics");
@@ -265,9 +242,7 @@ fn read_response_within(
 
 #[test]
 fn stdio_hover_for_large_http_server_completes_within_bound() -> Result<(), Box<dyn Error>> {
-    // This is deliberately generous enough for the complete compiler
-    // pipeline on a debug build, but finite: a hover may not monopolize the
-    // server indefinitely on a valid large source file.
+    // Generous for a debug-build full pipeline, but finite.
     let hover_timeout = Duration::from_secs(20);
     let mut child = Command::new(env!("CARGO_BIN_EXE_cinnabar-lsp"))
         .stdin(Stdio::piped())
@@ -362,11 +337,8 @@ fn stdio_hover_for_large_http_server_completes_within_bound() -> Result<(), Box<
 
 #[test]
 fn stdio_hover_during_http_server_diagnostics_responds_without_duplicate_analysis() -> Result<(), Box<dyn Error>> {
-    // VS Code sends `initialized`, opens the buffer (which schedules
-    // diagnostics), and can then replace a hover request before diagnostics
-    // finish.  Both hover requests need a terminal response promptly; once
-    // the authoritative diagnostic analysis finishes, a later hover must
-    // answer from those attached facts.
+    // A hover replacing another before diagnostics finish must still get a
+    // prompt terminal response, then answer from the attached facts.
     let prompt_timeout = Duration::from_secs(20);
     let mut child = Command::new(env!("CARGO_BIN_EXE_cinnabar-lsp"))
         .stdin(Stdio::piped())
@@ -415,9 +387,7 @@ fn stdio_hover_during_http_server_diagnostics_responds_without_duplicate_analysi
             }),
         )?;
 
-        // The server debounces diagnostics for 75 ms.  This delay makes the
-        // hover overlap the full-document diagnostic analysis rather than
-        // accidentally testing the no-work-before-debounce interval.
+        // Outlasts the 75 ms debounce so the hover overlaps real analysis.
         std::thread::sleep(Duration::from_millis(150));
         send_message(
             &mut writer,
@@ -525,10 +495,8 @@ fn stdio_hover_during_http_server_diagnostics_responds_without_duplicate_analysi
             return Err(format!("hover after diagnostics did not reuse SERVER_PORT facts: {}", cached_hover).into());
         }
 
-        // A document update invalidates the attached snapshot before the
-        // next diagnostic worker starts.  The server must not expose the
-        // old Usize fact during that gap; after the matching generation
-        // completes, the same hover must expose the edited I64 fact.
+        // The stale Usize fact must vanish during the invalidation gap; after
+        // the matching generation completes the hover must show the I64 fact.
         let edited_source = source.replacen(
             "const SERVER_PORT: Usize = 4067",
             "const SERVER_PORT: I64 = 4067",
@@ -811,9 +779,8 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
         latest
     );
 
-    // Keep a real entry error live while a secondary module opens, changes,
-    // and closes.  Secondary buffers must stay in the entry graph and must
-    // never erase the entry file's diagnostics.
+    // Secondary buffers stay in the entry graph and never erase the entry
+    // file's diagnostics.
     send_message(
         &mut writer,
         &json!({
@@ -941,10 +908,8 @@ fn stdio_server_handles_overlay_diagnostics_hover_and_shutdown() -> Result<(), B
         .ok_or("code-lens result was not an array")?;
     assert!(lens_count > 0, "borrow explanations were not exposed as code lenses: {}", lenses);
 
-    // Reverse open order: Math.cnb first becomes a temporary standalone
-    // root.  Opening main.cnb afterward must adopt it into main's larger
-    // compiler-produced graph, so subsequent Math edits retain main's
-    // importing context and diagnostics.
+    // Reverse open order: Math.cnb first is adopted into main's larger
+    // graph on open, so Math edits retain main's importing context.
     send_message(
         &mut writer,
         &json!({

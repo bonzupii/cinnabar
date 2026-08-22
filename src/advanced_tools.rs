@@ -11,20 +11,12 @@
 //! and runs submitted source over loopback HTTP.
 //!
 //! **Invariants:**
-//! - The playground binds only a loopback address, and a submitted program
-//!   runs under a wall-clock limit with its request body size capped. It
-//!   compiles and executes arbitrary code, so those are the boundaries
-//!   that make it a local tool rather than a remote one.
-//! - Minimization preserves the *failure signature*, not merely the
-//!   failure: a shrunk artifact that fails for a new reason is rejected as
-//!   a candidate, since it no longer reproduces the bug being minimized.
-//! - The soundness evidence states `formal_proof: false` and scopes itself
-//!   explicitly. It reports machine-checkable compiler facts, and must
-//!   never be worded to imply a mechanized preservation/progress proof it
-//!   does not have.
-//! - An exercise requires a real diagnostic to teach. Where the language
-//!   has not decided a rule, no exercise is written for it — see the note
-//!   above `initialize_mushlings` on discard patterns.
+//! - The playground binds only loopback and runs submitted programs under a
+//!   wall-clock limit with capped request bodies.
+//! - Minimization preserves the failure signature, not merely the failure.
+//! - Soundness evidence states `formal_proof: false` and scopes itself
+//!   explicitly.
+//! - An exercise requires a real diagnostic to teach.
 
 use crate::ast::{node_tag, NODE_EXPR, NODE_INST, NODE_STRIDE, NODE_TRAIT, NODE_TY};
 use serde_json::{json, Value};
@@ -35,9 +27,7 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-// The host's name as `arch-os`, derived from the structured target
-// descriptor so the driver and the tooling never assemble a platform from
-// separate `std::env` constants.
+// Host arch-os string from target descriptor.
 pub fn host_target() -> String {
     let host = crate::target::Target::host();
     let arch = match host.arch {
@@ -83,11 +73,7 @@ struct Exercise {
     file: &'static str,
     lesson: &'static str,
     source: &'static str,
-    // The diagnostic category the exercise must still produce when unsolved.
     expected: &'static str,
-    // The invariant the lesson teaches; the unsolved diagnostic's message
-    // must name it, so a same-category error for a different rule never
-    // counts as the expected failure.
     topic: &'static str,
 }
 
@@ -133,9 +119,7 @@ fn combined_output(output: &Output) -> String {
     format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
 }
 
-// One `--check-only --emit-json` run, returned as the parsed envelope and
-// the pass/fail status, so tooling reads diagnostic categories from
-// structured fields instead of scraping rendered text.
+// Single --check-only --emit-json run.
 fn compiler_json(executable: &Path, source: &Path) -> Result<(bool, Value), String> {
     let output = Command::new(executable)
         .arg(source)
@@ -148,8 +132,7 @@ fn compiler_json(executable: &Path, source: &Path) -> Result<(bool, Value), Stri
     Ok((output.status.success(), report))
 }
 
-// The ordered diagnostic category names in a `cinnabar.diagnostics.v1`
-// envelope.
+// Category names in diagnostics envelope.
 fn categories_of(report: &Value) -> Vec<String> {
     let mut categories: Vec<String> = Vec::new();
     let diagnostics = match report.get("diagnostics").and_then(|entry| entry.as_array()) {
@@ -164,9 +147,7 @@ fn categories_of(report: &Value) -> Vec<String> {
     categories
 }
 
-// Whether any diagnostic in the envelope carries the expected category and
-// its rendered message names the lesson's invariant, so a same-category
-// error for a different rule never counts as the expected failure.
+// Checks if envelope contains expected category and topic.
 fn diagnostic_matches(report: &Value, category: &str, topic: &str) -> bool {
     let diagnostics = match report.get("diagnostics").and_then(|entry| entry.as_array()) {
         Some(value) => value,
@@ -431,13 +412,7 @@ pub fn serve_playground(
         return Err("the local playground may bind only to a loopback address".to_string());
     }
     let listener = TcpListener::bind(parsed).map_err(|bind_error| format!("cannot bind playground: {}", bind_error))?;
-    // Only the bind is fatal: once the socket is listening, a connection
-    // that fails to accept, read, or write is that one visitor's problem —
-    // a browser closing mid-response must not take the server down for
-    // every future visitor. Per-connection failures are reported to the
-    // caller through `report_error` (never printed directly here — this is
-    // library code, and only the CLI entry point in `main.rs` decides how a
-    // message reaches the user), which renders them, and the loop moves on.
+    // Only bind is fatal; per-connection failures are reported without stopping server.
     for incoming in listener.incoming() {
         let mut stream = match incoming {
             Ok(stream) => stream,

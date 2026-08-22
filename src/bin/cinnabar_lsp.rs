@@ -17,12 +17,10 @@
 //! small, stable subset of the protocol it implements.
 //!
 //! **Invariants:**
-//! - There is no second implementation of name resolution, type inference,
-//!   or borrow checking anywhere in this file. Every language-aware
-//!   decision belongs to the analysis layer.
-//! - A published diagnostic set is either current or not published. Stale
-//!   generations are dropped rather than sent, because an editor showing
-//!   errors from a previous keystroke is worse than one showing none.
+//! - No second implementation of name resolution, type inference, or borrow
+//!   checking exists in this file.
+//! - A published diagnostic set is either current or not published; stale
+//!   generations are dropped.
 
 use cinnabar::analysis::{
     analyze, code_actions, completions, definition, document_symbols, file_id_of, file_text_of,
@@ -52,44 +50,30 @@ struct AnalysisResult {
 
 struct ServerState {
     target: Target,
-    // Open documents as (file-system path, buffer text): the module
-    // loader's overlay, so unsaved edits are analyzed like saved files.
+    // Open docs for overlay.
     docs: Vec<(String, String)>,
-    // URIs we last published diagnostics for, so stale ones are cleared.
+    // Last published diagnostic URIs.
     published: Vec<(String, Vec<String>)>,
-    // Analysis roots and the root that owns each open document.  Secondary
-    // modules stay in their entry file's graph when editors open them.
+    // Roots owning each open doc.
     roots: Vec<String>,
     doc_entries: Vec<(String, String)>,
-    // Per-document edit generations and pending debounce deadlines.  A
-    // completed analysis is published only when its generation is still
-    // current, which makes superseded full checks harmless.
+    // Generations and debounce deadlines per doc.
     generations: Vec<(String, i64)>,
     pending: Vec<(String, i64, Instant)>,
-    // At most one full front-end run is active.  Newer generations remain
-    // pending until it finishes, so sustained editing cannot accumulate
-    // detached compiler threads.
+    // Single active front-end run.
     running_path: Option<String>,
     analysis_tx: Sender<AnalysisResult>,
     analysis_rx: Receiver<AnalysisResult>,
-    // The one authoritative attached-fact snapshot for each root's current
-    // generation. Positional requests consume this analysis; they never
-    // invoke the compiler themselves.
+    // Completed analysis per root generation.
     completed: Vec<AnalysisResult>,
-    // Source-less (`NO_FILE`) diagnostic messages last surfaced per root,
-    // so a `window/showMessage` fires when a message appears rather than on
-    // every republish of the same analysis.
+    // Last source-less diagnostics per root.
     source_less: Vec<(String, Vec<String>)>,
 }
 
-// A fatal transport failure surfaces through main's Result: there is no
-// usable channel left to log through when the JSON-RPC connection itself is
-// gone.
+// Fatal transport failure.
 fn main() -> Result<(), String> {
     let (connection, io_threads) = Connection::stdio();
-    // Built from the same array `semantic_tokens`' indices are defined
-    // against, rather than a second copy of the type names here: the legend
-    // and the encoder can never drift out of sync.
+    // Built from semantic token type array.
     let token_types: Vec<Value> = SEMANTIC_TOKEN_TYPES.iter().map(|name| json!(*name)).collect();
     let capabilities = json!({
         "textDocumentSync": 1,
@@ -111,8 +95,7 @@ fn main() -> Result<(), String> {
         "inlayHintProvider": true,
         "codeActionProvider": true
     });
-    // lsp-server wraps this value in the InitializeResult's `capabilities`
-    // field itself.
+    // Wrapped in InitializeResult by lsp-server.
     let init_params = connection
         .initialize(capabilities)
         .map_err(|err| format!("initialize failed: {}", err))?;
@@ -147,18 +130,13 @@ fn main() -> Result<(), String> {
         source_less: Vec::new(),
     };
     main_loop(&connection, &mut state)?;
-    // The transport threads terminate when every channel endpoint is gone.
-    // Release the server-side endpoints before waiting for those threads;
-    // otherwise a clean shutdown deadlocks with the writer waiting on the
-    // still-live sender held by `connection`.
+    // Drop endpoints before joining threads.
     drop(connection);
     io_threads.join().map_err(|err| format!("io threads: {}", err))?;
     Ok(())
 }
 
-// Server-side logging goes through the protocol (`window/logMessage`, type
-// 3 = Info), never through the process's own stdio, which the JSON-RPC
-// transport owns.
+// Log via window/logMessage.
 fn log_message(connection: &Connection, message: &str) -> Result<(), String> {
     let note = Notification {
         method: "window/logMessage".to_string(),
@@ -170,8 +148,7 @@ fn log_message(connection: &Connection, message: &str) -> Result<(), String> {
         .map_err(|err| format!("send log message: {}", err))
 }
 
-// User-visible errors go through `window/showMessage` (type 1 = Error): the
-// same notification channel as `log_message`, but shown rather than filed.
+// Show error via window/showMessage.
 fn show_message(connection: &Connection, message: &str) -> Result<(), String> {
     let note = Notification {
         method: "window/showMessage".to_string(),
@@ -213,10 +190,6 @@ fn main_loop(connection: &Connection, state: &mut ServerState) -> Result<(), Str
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Requests
-// ---------------------------------------------------------------------------
 
 fn dispatch_request(connection: &Connection, state: &ServerState, req: Request) -> Result<(), String> {
     let method = req.method.clone();
@@ -298,8 +271,7 @@ fn send_ok(connection: &Connection, id: RequestId, result: Value) -> Result<(), 
         .map_err(|err| format!("send response: {}", err))
 }
 
-// The (path, file id, byte offset, analysis) behind a positional request,
-// or None when the params don't name a file this server can analyze.
+// Positional request context.
 fn positional<'state>(state: &'state ServerState, params: &Value) -> Option<(&'state Analysis, i64, i64)> {
     let uri = params.get("textDocument")?.get("uri")?.as_str()?;
     let path = uri_to_path(uri)?;
@@ -413,17 +385,10 @@ fn completion_kind_code(kind: i64) -> i64 {
     }
 }
 
-// An identifier spliced in after a trailing dot purely so the path parses.
-// It is never shown: completion filters on the text *before* the cursor, and
-// the analysis it produces is discarded with the request.
+// Stub identifier spliced after dot so path parses; never shown.
 const COMPLETION_STUB: &str = "cnb_completion_stub";
 
-// True when the cursor sits after a dot that terminates an identifier path.
-//
-// The identifier requirement is what keeps the retry below from being paid for
-// on every dot in the file: `1.`, a decimal point, or a dot typed in open space
-// can never name a module, so re-analyzing for them would be a stall with no
-// possible answer.
+// True when the cursor sits after a dot terminating an identifier path.
 fn follows_identifier_dot(analysis: &Analysis, file: i64, offset: i64) -> bool {
     if offset <= 0 {
         return false;
@@ -458,14 +423,8 @@ fn follows_identifier_dot(analysis: &Analysis, file: i64, offset: i64) -> bool {
     }
 }
 
-// Re-runs the front end over the open buffers with `COMPLETION_STUB` spliced
-// in at the cursor, then completes at the same offset.
-//
-// A buffer ending in `Memory.` is a syntax error, so the parse that would have
-// named the module never happens and no scope facts exist to resolve against.
-// That is precisely the moment an editor asks what follows the dot.  Splicing
-// an identifier in makes the path parse, which costs one extra front-end run
-// on a keystroke that would otherwise answer with nothing usable.
+// Re-runs the front end with `COMPLETION_STUB` spliced in at the cursor,
+// then completes at the same offset.
 fn completions_with_stub(state: &ServerState, path: &str, offset: i64) -> Option<Vec<(String, i64)>> {
     let mut docs = state.docs.clone();
     let doc = docs.iter_mut().find(|doc| doc.0 == path)?;
@@ -489,13 +448,8 @@ fn on_completion(state: &ServerState, params: &Value) -> Value {
         None => return Value::Null,
     };
     let mut items = completions(analysis, file, offset);
-    // Keywords are what whole-scope completion falls back to, and none of them
-    // may follow a dot; that combination means the qualified path failed to
-    // resolve, so retry with a parseable buffer before answering with noise.
-    // `all` holds vacuously on an empty result, which would make every dot the
-    // analysis cannot answer pay for a second front-end run on each keystroke.
-    // Requiring something to have been offered keeps the retry to the case it
-    // was written for: a resolvable path answered with keywords.
+    // A keywords-only answer after a dot means the path failed to resolve;
+    // retry against a parseable buffer.
     let keywords_only =
         !items.is_empty() && items.iter().all(|item| item.1 == COMPLETE_KEYWORD);
     if keywords_only && follows_identifier_dot(analysis, file, offset) {
@@ -527,14 +481,7 @@ fn on_completion(state: &ServerState, params: &Value) -> Value {
 }
 
 // Whole-document formatting through the same `format_source` the `cinnabar
-// fmt` subcommand uses, so the editor and the CLI cannot disagree about what
-// formatted source looks like.
-//
-// The open buffer is the input, not the file on disk: formatting must apply to
-// what the user is looking at, including unsaved edits.  Formatting is
-// deliberately independent of analysis -- it is pure text in, text out, so it
-// still works on a buffer the front-end has rejected, which is exactly when
-// reformatting tends to be asked for.
+// fmt` subcommand uses, on the open buffer.
 fn on_formatting(state: &ServerState, params: &Value) -> Value {
     let uri = match params.get("textDocument").and_then(|doc| doc.get("uri")).and_then(Value::as_str)
     {
@@ -550,9 +497,7 @@ fn on_formatting(state: &ServerState, params: &Value) -> Value {
         None => return Value::Null,
     };
     let formatted = format_source(&source);
-    // An unchanged buffer returns no edits rather than a no-op replacement of
-    // the whole document, which would otherwise dirty the file and reset the
-    // cursor every time the editor formats on save.
+    // An unchanged buffer yields no edit, so format-on-save does not dirty it.
     if formatted == source {
         return Value::Array(Vec::new());
     }
@@ -620,9 +565,7 @@ fn on_code_lens(state: &ServerState, params: &Value) -> Value {
         match analysis.notes.get(idx) {
             Some(note) => {
                 if note.2 == file {
-                    // Each lens carries the full explanation group for its
-                    // diagnostic, not only its own note, so a client renders
-                    // the binding, consuming and live spans from one payload.
+                    // Each lens carries the diagnostic's full explanation group.
                     lenses.push(json!({
                         "range": range_json(analysis, note.2, note.3, note.4),
                         "command": {
@@ -640,11 +583,8 @@ fn on_code_lens(state: &ServerState, params: &Value) -> Value {
     Value::Array(lenses)
 }
 
-// One diagnostic and every note attached to it, in the order the checker
-// raised them, with `focus` naming the note whose lens was clicked.  Each
-// note reports the stage's own `kind` alongside its prose, so a consumer
-// classifies a span by what the borrow checker called it rather than by
-// recognizing the wording of a sentence that is free to change.
+// One diagnostic and every attached note, `focus` naming the clicked note;
+// each note reports its structured `kind` alongside its prose.
 fn explanation_json(analysis: &Analysis, diag_idx: i64, focus_note: usize) -> Value {
     let diagnostic = match analysis.errors.get(diag_idx as usize) {
         Some(error) => json!({
@@ -682,9 +622,8 @@ fn explanation_json(analysis: &Analysis, diag_idx: i64, focus_note: usize) -> Va
     })
 }
 
-// The (path, analysis, file id) behind a file-scoped (non-positional)
-// request, or None when the params don't name a file this server has an
-// up-to-date analysis for. Mirrors `positional` minus the offset.
+// The (path, analysis, file id) behind a file-scoped request; mirrors
+// `positional` minus the offset.
 fn file_scoped<'state>(state: &'state ServerState, params: &Value) -> Option<(&'state Analysis, i64)> {
     let uri = params.get("textDocument")?.get("uri")?.as_str()?;
     let path = uri_to_path(uri)?;
@@ -770,9 +709,7 @@ fn on_document_symbol(state: &ServerState, params: &Value) -> Value {
     Value::Array(out)
 }
 
-// Every currently open root's analysis carries the full module graph it
-// reached, so a workspace search asks each one and concatenates -- there is
-// no single `Analysis` that already spans every open root at once.
+// Workspace search asks each open root's analysis and concatenates.
 fn on_workspace_symbol(state: &ServerState, params: &Value) -> Value {
     let query = params.get("query").and_then(Value::as_str).unwrap_or("");
     let mut out: Vec<Value> = Vec::new();
@@ -962,10 +899,6 @@ fn on_code_action(state: &ServerState, params: &Value) -> Value {
     Value::Array(out)
 }
 
-// ---------------------------------------------------------------------------
-// Notifications / document sync
-// ---------------------------------------------------------------------------
-
 fn handle_notification(
     connection: &Connection,
     state: &mut ServerState,
@@ -1078,9 +1011,7 @@ fn register_document(state: &mut ServerState, path: &str) -> String {
     if state.roots.contains(&path.to_string()) {
         return path.to_string();
     }
-    // A file that belongs to no project is the ordinary case for an editor —
-    // a scratch buffer, a fixture opened on its own — so the failure is the
-    // answer "no project", not something to report to the user.
+    // A file with no project is the ordinary scratch-buffer case.
     if let Ok(entry_path) = project::entry_for_source(std::path::Path::new(path)) {
         let entry = entry_path.to_string_lossy().to_string();
         state.doc_entries.push((path.to_string(), entry.clone()));
@@ -1110,10 +1041,8 @@ fn register_document(state: &mut ServerState, path: &str) -> String {
     entry
 }
 
-// Reconcile open-order differences from the compiler's actual module graph.
-// If this entry contains roots that were opened earlier as standalone files,
-// it becomes their owner.  No import or path semantics are reconstructed here:
-// membership comes exclusively from module_loader's analyzed file set.
+// Reconcile open-order differences from the compiler's module graph: an
+// entry containing earlier standalone roots becomes their owner.
 fn reconcile_root_graph(state: &mut ServerState, entry: &str, analysis: &Analysis) {
     let mut adopted: Vec<String> = Vec::new();
     let mut idx = 0usize;
@@ -1263,9 +1192,8 @@ fn current_generation(state: &ServerState, path: &str) -> i64 {
     0
 }
 
-// A completed analysis is valid only for the same root generation that
-// produced it. Document edits advance that generation before scheduling the
-// next worker, so stale compiler facts can never answer a positional request.
+// A completed analysis is valid only for its own root generation; edits
+// advance the generation before scheduling the next worker.
 fn completed_analysis<'state>(state: &'state ServerState, path: &str) -> Option<&'state Analysis> {
     let generation = current_generation(state, path);
     let mut idx = 0usize;
@@ -1463,9 +1391,7 @@ fn publish_analysis(
         fresh.push(uri);
         file += 1;
     }
-    // Replace only this root's publication set.  Another open root may own
-    // the same URI, so a stale URI is cleared only when no remaining root
-    // still publishes it.
+    // A stale URI is cleared only when no remaining root still publishes it.
     let mut prior: Vec<String> = Vec::new();
     let mut records: Vec<(String, Vec<String>)> = Vec::new();
     while let Some(record) = state.published.pop() {
@@ -1493,14 +1419,8 @@ fn publish_analysis(
     Ok(())
 }
 
-// A diagnostic carrying `NO_FILE` genuinely has no source location — the
-// entry file itself could not be read, for example — so the per-file filter
-// in `file_diagnostics` can never select it and it used to vanish entirely,
-// leaving an unreadable project looking clean and error-free. It is
-// forwarded as a `window/showMessage` error instead, which is honest about
-// the diagnostic having no location to attach to. Each message fires when
-// it first appears for a root and again only after it has gone away, not on
-// every republish of the same analysis.
+// Forwards `NO_FILE` diagnostics per root as `window/showMessage` errors,
+// on first appearance and again only after they have gone away.
 fn forward_source_less_diagnostics(
     connection: &Connection,
     state: &mut ServerState,
@@ -1617,10 +1537,6 @@ fn send_diagnostics(connection: &Connection, uri: &str, diagnostics: Vec<Value>)
         .map_err(|err| format!("send diagnostics: {}", err))
 }
 
-// ---------------------------------------------------------------------------
-// file:// URI <-> path
-// ---------------------------------------------------------------------------
-
 fn hex_value(byte: u8) -> Option<u8> {
     if byte.is_ascii_digit() {
         return Some(byte - b'0');
@@ -1676,13 +1592,10 @@ fn percent_encode_path(path: &str) -> String {
 /// A file:// URI to a local file-system path, or None for other schemes.
 fn uri_to_path(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("file://")?;
-    // Strip an empty authority; a non-empty authority (remote host) is not
-    // a local file.  "file:///..." leaves the absolute path (minus its
-    // leading slash on Windows drive paths).
+    // Strip the empty authority; a remote host is not a local file.
     let path_part = rest.strip_prefix('/')?;
     let decoded = percent_decode(path_part);
-    // Windows drive path: "C:/..." after decoding.  A path that does not
-    // look like a drive keeps its leading slash (POSIX).
+    // Windows drive path: "C:/..." after decoding; POSIX keeps the slash.
     let is_drive = {
         let bytes = decoded.as_bytes();
         bytes.len() >= 2
@@ -1690,11 +1603,7 @@ fn uri_to_path(uri: &str) -> Option<String> {
             && bytes.get(1).is_some_and(|byte| *byte == b':')
     };
     if is_drive {
-        // The same normalization `project` applies after canonicalizing:
-        // editors spell the drive letter in either case, while the paths the
-        // manifest loader stores are upper-cased, and the module loader's
-        // overlay lookup compares the two. On an already-plain path this
-        // changes nothing but the drive letter.
+        // Same normalization `project::comparable_path` applies.
         Some(project::comparable_path(std::path::Path::new(&decoded)).to_string_lossy().to_string())
     } else {
         Some(format!("/{}", decoded))
@@ -1769,10 +1678,7 @@ mod tests {
         assert_eq!(uri_to_path("file://server/share/source.cnb"), None);
     }
 
-    // VS Code sends drive letters lower-cased ("file:///c%3A/..."), while the
-    // manifest loader stores canonicalized paths with the drive upper-cased.
-    // The decoded path must land in the canonical spelling or the module
-    // loader's overlay never matches the open buffer.
+    // A lower-cased drive URI decodes to the canonical upper-case spelling.
     #[test]
     fn lowercase_drive_uri_decodes_to_canonical_drive_case() {
         assert_eq!(

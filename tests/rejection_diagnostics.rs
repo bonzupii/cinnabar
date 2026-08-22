@@ -1,30 +1,15 @@
 //! Bundled rejection fixtures, asserted diagnostic by diagnostic.
 //!
-//! Every other check on a rejected fixture asks only whether the compiler
-//! exited non-zero. For a fixture carrying a single rejection that is
-//! enough: drop the diagnostic and the fixture compiles, which the exit
-//! code catches immediately.
-//!
-//! It is not enough for a fixture that bundles several independent
-//! rejections. Stop reporting one of them and the fixture still fails on
-//! its siblings, so the exit code is unchanged and the suite stays green
-//! while a whole class of program has quietly become accepted. The
-//! fixtures below are exactly those bundles.
+//! A fixture carrying several independent rejections still fails on its
+//! siblings when one of them stops being reported, so exit codes alone stay
+//! green while a class of program quietly becomes accepted. Each bundled
+//! rejection here is asserted individually, against the ordered list of
+//! messages (order catches reshuffles; length catches losses and additions).
 //!
 //! **Invariants:**
-//! - Each bundled rejection is asserted individually. Asserting only the
-//!   exit code would let any one of them stop being reported without the
-//!   suite noticing, which is the specific gap this file closes.
-//! - A fixture that carries a single rejection does not belong here; the
-//!   exit code already covers it, and adding it would spend a wording
-//!   assertion where nothing needs one.
-//!
-//! The comparison is against the ordered list of messages, not a set of
-//! substrings that must appear somewhere. Order catches a reshuffle, and
-//! the length catches both a lost diagnostic and an unintended new one.
-//! `invalid_native_modifiers.cnb` shows why nothing weaker would do: its
-//! five rejections all carry the same message, so only the count
-//! distinguishes five reported sites from four.
+//! - Every diagnostic a bundle carries is asserted by text.
+//! - A fixture with a single rejection does not belong here; the exit code
+//!   already covers it.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,10 +22,7 @@ struct Bundle {
 }
 
 const BUNDLES: &[Bundle] = &[
-    // One `nat` on each item kind that may not carry it. The message is
-    // the same every time, so the count is the whole assertion: it is what
-    // separates "every disallowed position is rejected" from "the first
-    // one is".
+    // Every disallowed `nat` position must be rejected.
     Bundle {
         path: "tests/fixtures/invalid_native_modifiers.cnb",
         diagnostics: &[
@@ -51,10 +33,7 @@ const BUNDLES: &[Bundle] = &[
             "native modifier is only allowed on fun and type",
         ],
     },
-    // Resolution runs before type checking and this fixture fails there,
-    // so these four are everything it reports. The type-checking cases
-    // further down the file are unreachable behind them; see the note in
-    // `bundles_report_every_diagnostic_they_carry`.
+    // Resolver failures hide later type errors.
     Bundle {
         path: "tests/fixtures/invalid_resolver_and_typechecker.cnb",
         diagnostics: &[
@@ -64,8 +43,7 @@ const BUNDLES: &[Bundle] = &[
             "cannot resolve import 'NonExistentModule.some_func'",
         ],
     },
-    // One violation per casing rule the language enforces, so losing any
-    // one of the three would leave that rule unenforced and unnoticed.
+    // One violation per casing rule.
     Bundle {
         path: "tests/fixtures/invalid_casing.cnb",
         diagnostics: &[
@@ -74,10 +52,7 @@ const BUNDLES: &[Bundle] = &[
             "'bad_type_name' violates casing rule: expected PascalCase",
         ],
     },
-    // The malformed literal, and then the character the lexer resumed on.
-    // The second is the recovery behaving as intended rather than an
-    // afterthought: a lexer that swallowed the rest of the line would
-    // report only the first.
+    // The malformed literal, then the character the lexer resumed on.
     Bundle {
         path: "tests/fixtures/invalid_hex_literal.cnb",
         diagnostics: &["expected hexadecimal digits after 0x", "unexpected character"],
@@ -88,11 +63,7 @@ const BUNDLES: &[Bundle] = &[
         path: "tests/fixtures/repro/const_div_zero_cascade.cnb",
         diagnostics: &["division by zero in constant", "modulo by zero in constant"],
     },
-    // All three spellings of a discard, each rejected. The match arm is
-    // the consequential one: a catch-all would make any match trivially
-    // exhaustive, so a new enum variant would stop forcing anyone to handle
-    // it. Rejected in the lexer, so all three report before anything else
-    // in the file is considered.
+    // All three discard spellings, rejected in the lexer.
     Bundle {
         path: "tests/fixtures/09_discard_patterns.cnb",
         diagnostics: &[
@@ -101,18 +72,12 @@ const BUNDLES: &[Bundle] = &[
             "'_unused' begins with an underscore, which marks a value as deliberately unused; bind it with a real name and use it",
         ],
     },
-    // Reachability applies to public and private items alike, so both the
-    // function and the constant must be reported. Losing either would leave
-    // the fixture still failing on its sibling.
+    // Reachability covers public and private items alike.
     Bundle {
         path: "tests/fixtures/dead_code.cnb",
         diagnostics: &["unused function 'unused_helper'", "unused constant 'UNUSED_CONST'"],
     },
-    // The type-checking cases the bundle above can never reach, in a file
-    // the resolver accepts. Some of these are consequences of others — the
-    // `Option(?)` pair follows from `try` on an integer, and the inference
-    // failure from the unusable Result — and they are listed because the
-    // compiler reports them, not because the fixture set out to cause them.
+    // Type-checking cases in a file the resolver accepts.
     Bundle {
         path: "tests/fixtures/repro/match_arm_multiline_recovery.cnb",
         diagnostics: &["match arm body must be a single expression; move multi-statement blocks into a helper function"],
@@ -129,9 +94,7 @@ const BUNDLES: &[Bundle] = &[
         path: "tests/fixtures/repro/loader_poison_cascade/Main.cnb",
         diagnostics: &["expected '='"],
     },
-    // Three unconsumed `pub` modifiers on reached root-scope items: losing
-    // any one would leave the exit code unchanged, so the count and order
-    // are the whole assertion.
+    // Three unconsumed `pub` modifiers on reached root-scope items.
     Bundle {
         path: "tests/fixtures/repro/unnecessary_pub.cnb",
         diagnostics: &[
@@ -148,15 +111,12 @@ const BUNDLES: &[Bundle] = &[
             "pub on field 'y' has no cross-module access",
         ],
     },
-    // A dead implementing type: the type is unused, and the impl's method
-    // is reported with it.  Dropping either would leave the file failing on
-    // its sibling, so both are asserted.
+    // A dead implementing type: the impl's method is reported with it.
     Bundle {
         path: "tests/fixtures/repro/dead_impl.cnb",
         diagnostics: &["unused struct 'DeadType'", "unused method 'greet'"],
     },
-    // Two enums nothing constructs or matches: losing one would leave the
-    // file still failing on the other.
+    // Two enums nothing constructs or matches.
     Bundle {
         path: "tests/fixtures/repro/dead_enum.cnb",
         diagnostics: &["unused enum 'Color'", "unused enum 'Shape'"],
@@ -192,9 +152,8 @@ const BUNDLES: &[Bundle] = &[
     },
 ];
 
-/// Removes the colour sequences ariadne writes, so a diagnostic can be
-/// matched by its text. Ariadne emits only the `ESC [ … letter` form, which
-/// ends at the first ASCII letter.
+/// Removes ariadne's colour sequences (`ESC [ … letter`) so diagnostics
+/// can be matched by text.
 fn strip_ansi(text: &str) -> String {
     let mut out = String::new();
     let mut escaped = false;
@@ -214,11 +173,7 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
-/// The messages the compiler reported for `path`, in order.
-///
-/// Both streams are read: a diagnostic belongs on standard error, and
-/// reading only that stream would let one that escaped to standard output
-/// register as a diagnostic that was never reported at all.
+/// The messages the compiler reported for `path`, in order; both streams read.
 fn diagnostics_of(path: &Path) -> Vec<String> {
     let output = match Command::new(env!("CARGO_BIN_EXE_cinnabar")).arg(path).output() {
         Ok(output) => output,
@@ -264,22 +219,8 @@ fn bundles_report_every_diagnostic_they_carry() {
     }
 }
 
-/// A bundle whose rejections span two stages reports only the earlier one,
-/// which is why the type-checking cases needed a file of their own.
-///
-/// The pipeline stops at the first stage that fails.
-/// `invalid_resolver_and_typechecker.cnb` carries twenty-four numbered
-/// cases and reports four, all from the resolver; the nineteen
-/// type-checking ones sit behind them asserting nothing. That is not a
-/// defect in the compiler — the staging is deliberate — but it does mean a
-/// fixture cannot bundle rejections from two stages and expect both to be
-/// checked.
-///
-/// So the two must not overlap: nothing `invalid_typechecker.cnb` reports
-/// may also be reported by the file that shadows it, or the split has
-/// quietly stopped recovering anything. Asserted against what the compiler
-/// actually reports, rather than against a line count or a guess at which
-/// messages belong to which stage.
+/// The pipeline stops at the first failing stage, so a fixture cannot span
+/// two stages: the shadowing bundle and the split file must share no message.
 #[test]
 fn the_shadowed_stage_reports_nothing_the_split_file_covers() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));

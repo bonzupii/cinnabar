@@ -11,26 +11,13 @@
 //! at a declaration without this file ever knowing where anything is.
 //!
 //! **Invariants:**
-//! - Producing nothing is the correct output whenever the match is not
-//!   clear. A confidently wrong suggestion costs the reader more than an
-//!   unadorned error does.
-//! - No message asserts what the programmer meant; the hedge is part of
-//!   the contract, not a stylistic softener.
+//! - Producing nothing is the correct output whenever the match is not clear.
+//! - No message asserts what the programmer meant; the hedge is contractual.
 
-/// The phrases a suggestion message must contain.  Every message the engine
-/// returns is built around one of these, which is what keeps a suggestion a
-/// *suggestion* rather than a claim about what the programmer meant.
-///
-/// One entry, because one phrasing is emitted.  "possible match" was listed
-/// here too and produced nowhere, which left the contract accepting a
-/// message the engine cannot construct — a check that passes for a case
-/// that does not exist is not a check.  Add it back when something emits it.
+/// The phrase every suggestion message must contain, keeping it hedged.
 pub const HEDGE_PHRASES: [&str; 1] = ["did you mean"];
 
-/// Vocabulary a suggestion must never contain.  A suggestion that told the
-/// programmer to silence, stub, or comment out code would point at a local
-/// bandaid instead of the structurally correct fix, so the engine never
-/// emits any of these.
+/// Vocabulary a suggestion must never contain: bandaids, not fixes.
 pub const BANDAID_TERMS: [&str; 5] = ["suppress", "silence", "stub", "comment out", "ignore this"];
 
 /// A candidate for a suggestion: the name actually in scope and the real
@@ -51,9 +38,7 @@ pub struct Suggestion {
     pub end: i64,
 }
 
-/// Case- and separator-insensitive form of a name: two names that differ
-/// only in case or in underscore placement (a snake_case spelling against a
-/// PascalCase declaration, say) are the same word to the matcher.
+/// Case- and separator-insensitive form of a name for matching.
 fn normalized(text: &str) -> String {
     let mut out = String::new();
     for ch in text.chars() {
@@ -64,9 +49,7 @@ fn normalized(text: &str) -> String {
     out
 }
 
-/// The Levenshtein edit distance between two strings, computed over their
-/// bytes.  A single misspelling, insertion, deletion, or transposition is
-/// distance 1 or 2.
+/// Levenshtein edit distance over bytes; one edit is distance 1.
 fn levenshtein(a: &str, b: &str) -> usize {
     let a_bytes = a.as_bytes();
     let b_bytes = b.as_bytes();
@@ -97,15 +80,11 @@ fn levenshtein(a: &str, b: &str) -> usize {
     previous[b_bytes.len()]
 }
 
-/// The unique closest candidate within the matcher's tolerance, or `None`
-/// when nothing is close enough or two candidates tie for closest.  Naming
-/// a candidate asserts the programmer meant it; a tie means the engine
-/// cannot say which one, so it says nothing.
+/// The unique closest candidate within tolerance, or `None` when nothing is
+/// close enough or two candidates tie.
 pub fn best_match(misspelled: &str, candidates: &[String]) -> Option<String> {
     let target = normalized(misspelled);
-    // Short names tolerate a single edit; longer names tolerate two, so a
-    // short name is not "matched" to an unrelated word by an edit budget
-    // that dwarfs its length.
+    // Short names tolerate 1 edit, longer names 2.
     let limit = if target.len() >= 5 { 2usize } else { 1usize };
     let mut best_distance = usize::MAX;
     let mut best_name: Option<String> = None;
@@ -136,9 +115,7 @@ pub fn best_match(misspelled: &str, candidates: &[String]) -> Option<String> {
     }
 }
 
-/// A full hedged suggestion for `misspelled`, or `None` when the match is
-/// ambiguous or inconclusive.  The caller's plain error is the neutral
-/// message in that case; no candidate is named.
+/// A full hedged suggestion for `misspelled`, or `None` when ambiguous.
 pub fn suggest(misspelled: &str, candidates: &[Candidate]) -> Option<Suggestion> {
     let names: Vec<String> = {
         let mut collected: Vec<String> = Vec::new();

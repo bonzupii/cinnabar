@@ -1,17 +1,13 @@
 //! Integration tests for the tooling layer, against the library directly.
 //!
 //! Covers the analysis queries the language server is built on, byte-offset
-//! to position mapping, module-loader overlays for unsaved buffers, the
-//! formatter, and the borrow checker's explanatory notes. These call into
-//! `cinnabar::analysis` rather than through the protocol, which is what
-//! makes them the right place to pin an answer's *content*; the protocol
-//! behaviour around those answers is pinned in `lsp_protocol.rs`.
+//! to position mapping, module-loader overlays, the formatter, and the
+//! borrow checker's explanatory notes. Protocol behaviour around these
+//! answers is pinned in `lsp_protocol.rs`.
 //!
 //! **Invariants:**
-//! - Every query under test consumes facts the pipeline attached. A test
-//!   here that passed while the compiler disagreed would mean the tooling
-//!   had grown a second implementation, which is the thing this layer
-//!   exists not to have.
+//! - Every query under test consumes facts the pipeline attached; no query
+//!   here re-derives one.
 
 use cinnabar::analysis::{
     analyze, code_actions, completions, definition, document_symbols, file_id_of, folding_ranges,
@@ -304,9 +300,8 @@ fn borrow_explanations_have_a_stable_json_surface() -> Result<(), Box<dyn Error>
         .output()?;
     assert!(!output.status.success(), "borrow-invalid input unexpectedly succeeded");
     let report: Value = serde_json::from_slice(&output.stdout)?;
-    // The envelope is the compiler's one structured diagnostic surface, not
-    // a borrow-specific one: `--explain-borrow=json` is the older spelling
-    // of the request `--emit-json` makes for every stage.
+    // The envelope is the one structured diagnostic surface;
+    // `--explain-borrow=json` is the older spelling of `--emit-json`.
     assert_eq!(
         report.get("format").and_then(Value::as_str),
         Some("cinnabar.diagnostics.v1")
@@ -437,9 +432,8 @@ fn folding_ranges_cover_module_and_function_bodies() {
     let text = analysis.files.first().map(|pair| pair.1.clone()).unwrap_or_default();
     let ranges = folding_ranges(&analysis, entry_file);
     assert!(!ranges.is_empty(), "expected at least one foldable range");
-    // The module's span starts at `mod`, not at the `pub` modifier before it
-    // (see the parser's item-span comments), so this looks for a range that
-    // *contains* the module body rather than one starting exactly at `pub`.
+    // The module's span starts at `mod`, not `pub`, so look for a range
+    // containing the body rather than one starting at `pub`.
     let mod_start = offset_of(&text, "mod Memory");
     assert!(mod_start >= 0);
     let has_module_range = ranges.iter().any(|(start, end)| {
@@ -504,10 +498,7 @@ fn rename_edits_cover_every_occurrence_across_files() {
     let main_text = analysis.files.first().map(|pair| pair.1.clone()).unwrap_or_default();
     let call_at = offset_of(&main_text, "add(10");
     let edits = rename_edits(&analysis, entry_file, call_at, "sum").expect("rename should succeed");
-    // `use Math.add`'s own path segment, the call site, both in main.cnb,
-    // plus the declaration in Math.cnb: an item carries one symbol for its
-    // whole span, so `use`'s import path resolves the same symbol a use
-    // site does (matching `hover`/`definition` on the same dispatch).
+    // `use Math.add`'s path segment, the call site, and the declaration:
     assert_eq!(edits.len(), 3, "edits: {:?}", edits);
     let mut per_file: Vec<i64> = Vec::new();
     for (edit_file, start, end, new_text) in &edits {
@@ -527,9 +518,7 @@ fn rename_edits_refuse_a_position_with_no_symbol() {
     let analysis = analyze(&entry, &[], &Target::host());
     let entry_file = file_id_of(&analysis, &entry);
     let text = analysis.files.first().map(|pair| pair.1.clone()).unwrap_or_default();
-    // Well inside the file's opening doc comment: comments carry no parse
-    // node at all (see the module doc on `folding_ranges`), so nothing here
-    // resolves a symbol to rename.
+    // Comments carry no parse node, so nothing here resolves a symbol.
     let comment_at = offset_of(&text, "never used");
     assert!(comment_at >= 0);
     assert!(rename_edits(&analysis, entry_file, comment_at, "whatever").is_none());

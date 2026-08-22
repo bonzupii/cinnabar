@@ -1,36 +1,23 @@
 //! End-to-end fuzzing of the compiler's generalization.
 //!
-//! The positive corpus is built correct-by-construction: a generator-side
-//! scope table tracks every declared variable's type and expected value, so
-//! generated programs are valid without an interpreter and the executed
-//! binaries are checked against the generator's own expected final value.
-//! Structure is randomized recursively (tree depth 1..4, struct fields 1..6,
-//! enum variants 1..5, simple and nested loops, enum and fixed-array
-//! matches, slice rest patterns, fallible slice indexing, `&mut` field
-//! assignment, trait-bounded generics, parenthesized arithmetic chains).  The negative corpus proves
-//! linearity is tracked by type (TYD_NATIVE), never by name: randomized
-//! custom native handles that are leaked or double-moved must be rejected
-//! with the exact linear-consumption diagnostics.
+//! The positive corpus is generated correct-by-construction: a generator-side
+//! scope table tracks every declared variable's type and expected value, and
+//! executed binaries are checked against the generator's predicted final
+//! value. Structure is randomized recursively (tree depth 1..4, struct fields
+//! 1..6, enum variants 1..5, loops, enum/array matches, slice rest patterns,
+//! fallible indexing, `&mut` field assignment, trait-bounded generics). The
+//! negative corpus leaks or double-moves randomized custom native handles and
+//! requires the exact linear-consumption diagnostics.
 //!
-//! The PRNG seed is drawn from OS entropy on every run, so each gate
-//! execution tests completely new trees.  Set CINNABAR_FUZZ_SEED to replay a
-//! specific run.  Any failure saves the generated source to
-//! tests/fixtures/repro/fuzz_fail_<seed>.cnb and prints the seed to stderr.
-//! Cargo features select balanced or smoke coverage; without either feature,
-//! the full gate profile ignores local budget environment variables.  The
-//! `CINNABAR_FUZZ_*` controls can override reduced-profile corpus budgets.
+//! The PRNG seed is drawn from OS entropy per run; CINNABAR_FUZZ_SEED replays
+//! one. A failure saves its source to tests/fixtures/repro/fuzz_fail_<seed>.cnb.
 //!
 //! **Invariants:**
-//! - The positive corpus is correct by construction, not by consulting the
-//!   compiler. The generator knows each program's expected final value
-//!   independently, so a compiler that agreed with itself but not with the
-//!   language would still fail.
-//! - The negative corpus uses randomized *custom* native handles, which is
-//!   what makes it evidence that linearity is tracked by type descriptor
-//!   rather than by a recognized name. A fixed set of handle names would
-//!   pass just as well against a name-keyed implementation.
-//! - A failure is reproducible: the seed is printed and the generated
-//!   source saved. A fuzz failure nobody can replay is not a bug report.
+//! - The positive corpus's expected values are derived independently of the
+//!   compiler.
+//! - Negative-corpus handles are randomly named, so linearity cannot pass by
+//!   name matching.
+//! - Every failure is reproducible from its printed seed.
 
 #[path = "support/test_controls.rs"]
 mod test_controls;
@@ -278,8 +265,6 @@ fn unique_snake(rng: &mut Rng, used: &mut Vec<String>) -> String {
     name
 }
 
-// ---- arithmetic semantics shared by helper functions and the generator ----
-
 #[derive(Clone, Copy)]
 enum UnarySem {
     Add(i64),
@@ -395,8 +380,6 @@ fn pick_bool_sem(rng: &mut Rng) -> BoolSem {
         BoolSem::Less(rng.range(1, 8))
     }
 }
-
-// ---- program model ----
 
 #[derive(Clone)]
 struct StructDef {
@@ -597,10 +580,8 @@ fn in_state(state: &State, name: &str) -> bool {
     false
 }
 
-// After an `if`/`elif`/`else` chain, drop every variable declared inside a
-// branch: its locals go out of scope at the branch's `end`, so a later
-// reference to them would name an unknown variable.  Pre-existing names keep
-// their post-branch values (Cinnabar if bodies are scoped).
+// Branch-declared variables go out of scope at the chain's `end`; drop them
+// from the scope table while pre-existing names keep their post-branch values.
 fn prune_to_snapshot(state: &mut State, snap: &State) {
     let mut kept_ints: Vec<IntVar> = Vec::new();
     let mut idx = 0usize;
@@ -960,8 +941,6 @@ fn struct_reader_parts(rng: &mut Rng, sdef: &StructDef) -> (Vec<usize>, String) 
     (idxs, body)
 }
 
-// ---- conditions ----
-
 #[derive(Clone, Copy)]
 enum CmpOp {
     Eq,
@@ -1078,8 +1057,6 @@ fn pick_cond(g: &mut Gen) -> Cond {
     }
 }
 
-// ---- arm expressions for enum matches ----
-
 fn arm_expr(g: &mut Gen, apcount: usize, binds: &[String], payloads: &[i64]) -> (String, i64) {
     if apcount == 0 {
         let k = g.rng.range(1, 7);
@@ -1134,8 +1111,6 @@ fn arm_expr(g: &mut Gen, apcount: usize, binds: &[String], payloads: &[i64]) -> 
         }
     }
 }
-
-// ---- statement generation ----
 
 fn gen_arith_assign(g: &mut Gen) {
     let total = g.total.clone();
@@ -1399,10 +1374,8 @@ fn gen_struct_block(g: &mut Gen, sidx: usize) {
     set_int(&mut g.state, &total, cur + f0);
 }
 
-// Emits one arm per variant of `edef`, binding payloads into fresh names and
-// computing each arm's expression from the constructed payload values.  The
-// arm whose index is `taken` is the one that executes at runtime; its value
-// is returned so the generator can fold it into its expected total.
+// Emits one arm per `edef` variant, binding payloads to fresh names; the arm
+// at index `taken` executes, and its expression value is folded into the total.
 fn emit_enum_arms(g: &mut Gen, edef: &EnumDef, payloads: &[i64], taken: usize) -> i64 {
     let vcount = edef.variants.len();
     let mut arm_expected = 0i64;
@@ -1569,9 +1542,8 @@ fn gen_while(g: &mut Gen) {
     }
 }
 
-// Overwrites one field of a live struct variable through a fresh `&mut`
-// reference (`r.field = value`), keeping the generator's copy in sync so
-// later reads of that field fold the new value.
+// Overwrites one field through a fresh `&mut` reference, keeping the
+// generator's copy in sync so later reads fold the new value.
 fn gen_struct_field_assign(g: &mut Gen) {
     let mut candidates: Vec<(String, usize, usize)> = Vec::new();
     let mut idx = 0usize;
@@ -1963,8 +1935,6 @@ fn gen_stmt(g: &mut Gen, depth: i32) {
     }
 }
 
-// ---- endings ----
-
 fn gen_simple_ending(g: &mut Gen) {
     let total = g.total.clone();
     let expected = match int_of(&g.state, &total) {
@@ -2110,8 +2080,6 @@ fn gen_array_block(g: &mut Gen) {
     ));
     g.push("end");
 }
-
-// ---- corpus generators ----
 
 fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
     let mut g = Gen {
@@ -2351,13 +2319,8 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
     g.push(&format!("var {}: I64 = 0", total));
     g.total = total.clone();
     add_int(&mut g.state, &total, 0);
-    // Everything this generator declares is used, unconditionally.
-    //
-    // Reachability is now a language rule: an item nothing reachable from
-    // `main` needs is a compile error. A generator whose job is to emit
-    // *valid* programs therefore cannot leave a declaration unreferenced on
-    // a coin flip. The variety stays in what these blocks contain — the
-    // gates only ever decided whether a declared thing was mentioned.
+    // Reachability is a language rule: a valid program cannot leave a
+    // declaration unreferenced on a coin flip.
     gen_struct_block(&mut g, 0);
     if struct_count == 2 {
         gen_struct_block(&mut g, 1);
@@ -2382,18 +2345,8 @@ fn generate_positive(rng: &mut Rng, seed: u64, iteration: usize) -> String {
     g.src
 }
 
-/// References every helper and every enum this program declares.
-///
-/// Reachability is a language rule: an item nothing reachable from `main`
-/// needs is a compile error. A generator whose contract is to emit *valid*
-/// programs therefore cannot leave a declaration unreferenced on a coin
-/// flip. The randomness stays in what each declaration contains; only the
-/// fact that it is mentioned becomes certain.
-///
-/// Results are bound and not read. Folding them into the running total would
-/// change the value the harness predicts for the program, and the point here
-/// is to reference the declarations without altering what the program
-/// computes. An unused *local* is not an item, so it is not dead code.
+/// Emits one call per declared helper and one construction per declared
+/// enum, each bound to a fresh local that is never referenced afterward.
 fn exercise_declarations(g: &mut Gen) {
     let unary: Vec<String> = g.unary_helpers.iter().map(|helper| helper.0.clone()).collect();
     let binary: Vec<String> = g.binary_helpers.iter().map(|helper| helper.0.clone()).collect();
@@ -2431,8 +2384,7 @@ fn exercise_declarations(g: &mut Gen) {
             }
         }
     }
-    // Constructing a variant reaches its enum, which is what keeps every
-    // declared enum alive rather than only the one a match happened to pick.
+    // Constructing a variant reaches its enum, keeping every declared enum alive.
     let enums: Vec<(String, usize)> = g
         .enums
         .iter()
@@ -2457,9 +2409,7 @@ fn exercise_declarations(g: &mut Gen) {
     }
 }
 
-// The linearity probes use the registered `Memory` surface: an invented
-// `nat fun` would be rejected as an unknown native, not probed.  Only
-// the binding names stay random.
+// The probes use the registered `Memory` surface; only binding names are random.
 fn generate_negative(rng: &mut Rng, shape: usize) -> (String, &'static str) {
     let mut used: Vec<String> = vec!["main".to_string()];
     let h1 = unique_snake(rng, &mut used);
@@ -2519,8 +2469,6 @@ fn generate_negative(rng: &mut Rng, shape: usize) -> (String, &'static str) {
     push("end");
     (src, want)
 }
-
-// ---- tool invocation ----
 
 fn run_tool(cmd: &mut Command, secs: u64) -> (i32, String) {
     let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
@@ -2608,10 +2556,8 @@ fn temp_dir() -> PathBuf {
     std::env::temp_dir().join(format!("cinnabar_fuzz_{}", std::process::id()))
 }
 
-// Removes the fuzzer's temp dir on every exit path, including a panic from
-// a failure assertion.  Without this, a failed iteration leaks the compiled
-// binaries (each carrying a ~4.5 MB embedded-libc.a link copy) and fills
-// the tmpfs over repeated runs.
+// Removes the fuzzer's temp dir on every exit path, including assertion panics,
+// so failed iterations never leak compiled binaries into the tmpfs.
 struct TempDirGuard(PathBuf);
 
 impl Drop for TempDirGuard {

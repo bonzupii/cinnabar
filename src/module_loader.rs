@@ -15,13 +15,9 @@
 //! component-wise, so `a/b.cnb` and `a\b.cnb` name one entry.
 //!
 //! **Invariants:**
-//! - A file that cannot be read is a diagnostic carrying the span of the
-//!   `use` that asked for it — not a panic, and not a silent omission that
-//!   would resurface later as an unresolved name.
-//! - The overlay is consulted by both read paths or by neither; a module
-//!   reachable only through an unsaved buffer must load exactly as one on
-//!   disk would, or the server would analyze a different program than the
-//!   editor is showing.
+//! - An unreadable file is a diagnostic carrying the span of the `use` that
+//!   asked for it, never a panic or silent omission.
+//! - The overlay is consulted by both read paths or by neither.
 
 use crate::ast::*;
 use std::path::Path;
@@ -46,10 +42,8 @@ pub fn load(
     load_with_overlay(names, nodes, lists, errors, entry_path, &[])
 }
 
-/// Load exactly like `load`, but prefer in-memory sources from `overlay`
-/// (path, text) over the file system.  The language server uses this to
-/// analyze unsaved editor buffers; paths are compared component-wise so
-/// `a/b.cnb` and `a\b.cnb` name the same overlay entry.
+/// Load like `load`, but prefer in-memory sources from `overlay` (path,
+/// text) over the file system; paths compare component-wise.
 pub fn load_with_overlay(
     names: &mut Vec<String>,
     nodes: &mut Vec<i64>,

@@ -14,10 +14,7 @@
 //! emits the interning table, the list arena and one object per row.
 //!
 //! **Invariants:**
-//! - It prints facts the pipeline attached and never re-derives one. The
-//!   dump's whole value is that it shows the compiler's actual state; a
-//!   field this file computed for display would make it a second opinion
-//!   rather than a window.
+//! - Prints only facts the pipeline attached; nothing is re-derived here.
 //! - Both renderings consume the same `RowDetail`; neither reads an arena
 //!   slot directly.
 
@@ -34,12 +31,8 @@ pub fn dump_typed_arena(names: &[String], nodes: &[i64], lists: &[Vec<i64>]) -> 
     out
 }
 
-/// The whole arena as one JSON document: the interning table, the list
-/// arena, and every node row with its slots and extracted detail.
-///
-/// `format` names which stopping point produced it — the parse-only arena
-/// or the fully attributed one — because the two documents have the same
-/// shape and differ only in which attachment slots are still `-1`.
+/// The whole arena as one JSON document; `format` names the pipeline
+/// stopping point that produced it.
 pub fn arena_json(
     names: &[String],
     nodes: &[i64],
@@ -98,11 +91,7 @@ fn nodes_json(names: &[String], nodes: &[i64], lists: &[Vec<i64>], files: &[(Str
     out
 }
 
-// The three leading slots are a source span on almost every row, but not on
-// all of them: a type-descriptor row spends them on linearity flags the
-// canonical-key lookup never compares.  `RowDetail::spanned` is what the
-// extraction says about the row it just read, so `source` is present only
-// where a location is real and the raw slots are always there either way.
+// Leading slots are span except for tyinfo rows using them for flags.
 fn node_json(names: &[String], nodes: &[i64], lists: &[Vec<i64>], files: &[(String, String)], id: i64) -> Value {
     let tag = node_tag(nodes, id);
     let detail = row_detail(names, nodes, lists, id, tag);
@@ -196,8 +185,7 @@ fn dump_node_row(names: &[String], nodes: &[i64], lists: &[Vec<i64>], id: i64, o
 enum DetailValue {
     /// An entry of the interning table.
     Name(String),
-    /// A string literal's decoded bytes, which may contain a newline or a
-    /// NUL and so cannot be shown raw in a line-oriented dump.
+    /// A string literal's decoded bytes, shown escaped in the line dump.
     Literal(String),
     /// Another row of this arena.
     Node(i64),
@@ -211,12 +199,8 @@ enum DetailValue {
     Type(i64, String),
 }
 
-/// One named value of a row's detail.
-///
-/// `text_key` is what the terminal rendering labels it — empty where the
-/// text form shows the value alone — and `json_key` is its field name in
-/// the JSON rendering. They differ where the text form's spelling would
-/// make an awkward object key, which is why one extraction can serve both.
+/// One named value of a row's detail: `text_key` labels the terminal
+/// rendering, `json_key` is the JSON field name.
 struct DetailField {
     json_key: &'static str,
     text_key: &'static str,
@@ -529,11 +513,8 @@ fn sym_detail(names: &[String], nodes: &[i64], id: i64) -> RowDetail {
     )
 }
 
-// A type-descriptor row is the one shape whose leading slots are not a
-// span: the typechecker's linearity pass parks its flags in `file` and
-// `start`, where the canonical-key lookup never compares them.  Reporting
-// `spanned: false` is how a consumer learns that, instead of reading a
-// linearity flag as a file id.
+// A tyinfo row parks linearity flags in `file`/`start`, so it reports
+// `spanned: false` rather than a flag read as a file id.
 fn tyinfo_detail(names: &[String], nodes: &[i64], lists: &[Vec<i64>], id: i64) -> RowDetail {
     let key = node_a(nodes, id);
     RowDetail {

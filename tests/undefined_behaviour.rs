@@ -1,50 +1,20 @@
-//! Milestone 8 — undefined behaviour, asserted against the emitted IR.
+//! Undefined-behaviour classes, asserted against the emitted IR.
 //!
-//! ## Why not UBSan
+//! UBSan cannot run here (its checks are emitted by Clang's front end while
+//! lowering C), and most classes it covers are designed out of the language:
+//! arithmetic wraps per width, shift counts mask by `width - 1`, `/` and `%`
+//! return `Result`, constant out-of-range indexing is a compile error,
+//! `Memory.read_u8`/`write_u8` bounds-check, and user code has no pointers
+//! or dereference operator. What is asserted instead is the static property
+//! that the compiler emits no IR whose behaviour is undefined:
 //!
-//! UBSan's checks are emitted by Clang's *front end* while lowering C. There
-//! is no LLVM pass to run over a Cinnabar module, so covering it would mean
-//! the Cinnabar emitter emitting equivalents itself — and almost every class
-//! it checks is one this language has designed out rather than left
-//! unchecked:
-//!
-//! | UBSan class            | Cinnabar |
-//! |------------------------|----------|
-//! | signed overflow        | arithmetic wraps per width in two's complement (`MANIFESTO.md`) |
-//! | shift out of range     | shift counts mask by `width - 1` |
-//! | division by zero       | `/` and `%` return `Result`; a provable zero is a compile error |
-//! | array out of bounds    | constant index out of range is a compile error; dynamic returns `Result` |
-//! | raw memory access      | `Memory.read_u8`/`write_u8` bounds-check and return `Result` |
-//! | null dereference       | there is no dereference operator, and no pointer in user code |
-//!
-//! Adding runtime checks for those would be checking conditions the language
-//! does not admit. So what is asserted here is the stronger, static property:
-//! **the compiler does not emit IR whose behaviour is undefined**. That holds
-//! for every program the compiler can produce, not only the ones a test
-//! happens to execute — which is more than running UBSan over a corpus would
-//! have given.
-//!
-//! ## What each assertion corresponds to
-//!
-//! - **No `nsw`/`nuw` on arithmetic.** Those flags tell LLVM that overflow
-//!   cannot happen and make it undefined when it does. `MANIFESTO.md`
-//!   guarantees the opposite — that arithmetic wraps — so a flag appearing on
-//!   an `add`, `sub`, `mul` or `shl` would be the compiler contradicting the
-//!   language it implements. `getelementptr inbounds nuw` is exempt and
-//!   checked separately: that is a struct field offset, which cannot wrap
-//!   because the layout says so.
-//! - **No `exact` on division or shifts**, which would make a non-exact
-//!   result undefined.
+//! - **No `nsw`/`nuw` on `add`, `sub`, `mul`, or `shl`** — the language
+//!   guarantees wrapping. (`getelementptr inbounds nuw` is a struct field
+//!   offset and is checked separately.)
+//! - **No `exact` on division or shifts.**
 //! - **No `poison` values.**
-//! - **`unreachable` only in a control-flow join every path diverges out
-//!   of.** A `match` lowers its last pattern test as a branch, and the
-//!   not-taken edge is unreachable precisely because the type checker proved
-//!   the match exhaustive; the join after a branch whose arms all return is
-//!   unreachable for the same kind of reason. Both are statically proven
-//!   rather than assumed at runtime, so neither needs a check —
-//!   `MANIFESTO.md` keeps runtime checks for genuinely dynamic conditions.
-//!   An `unreachable` anywhere else would be a real "cannot happen" with
-//!   nothing proving it, and is what this assertion is looking for.
+//! - **`unreachable` only in a control-flow join every path diverges out of**
+//!   (e.g. the exhaustive-match join), never as an assumed "cannot happen".
 
 #[path = "support/test_controls.rs"]
 mod test_controls;
@@ -59,15 +29,8 @@ use test_controls::{evenly_selected, profile_name, profile_usize, reduced_usize_
 const BALANCED_CASES: usize = 20;
 const SMOKE_CASES: usize = 6;
 
-/// The block names an `unreachable` may appear in.
-///
-/// Both are control-flow joins, and a join is unreachable exactly when every
-/// path into it diverged. `match_merge` is the not-taken edge of a match's
-/// last pattern test, unreachable because the type checker proved the match
-/// exhaustive. `if_merge` is the join after a branch whose arms all return.
-///
-/// Anywhere else, an `unreachable` is a "cannot happen" with nothing proving
-/// it, which is what this list exists to catch.
+/// The only block names an `unreachable` may appear in: control-flow joins
+/// every path into diverged (`match_merge`, `if_merge`).
 const DIVERGING_JOINS: [&str; 2] = ["match_merge", "if_merge"];
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -78,9 +41,7 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(format!("{}.cnb", name))
 }
 
-// One directory per test, never nested inside another's: these run
-// concurrently, and a guard removing a parent would delete a sibling's IR
-// mid-scan.
+// Per-test directory: concurrent tests must not share IR output.
 fn temp_dir(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("cinnabar_ub_{}_{}", std::process::id(), label))
 }
@@ -126,8 +87,7 @@ fn arithmetic_opcode(line: &str) -> Option<&'static str> {
         Some(pair) => pair.1.trim(),
         None => return None,
     };
-    // The opcodes are already the strings this returns, so there is nothing
-    // to map them through — and nothing for a wildcard arm to swallow.
+    // Returns the matched opcode itself; no remapping needed.
     for opcode in ARITHMETIC_OPCODES {
         if value.starts_with(opcode) {
             return Some(opcode);
@@ -141,8 +101,7 @@ fn assert_no_undefined_behaviour(name: &str, ir: &str) {
     for line in ir.lines() {
         let trimmed = line.trim();
 
-        // Track the enclosing basic block, so an `unreachable` can be
-        // attributed to the construct that produced it.
+        // Track the enclosing basic block.
         let head = match trimmed.split_whitespace().next() {
             Some(token) => token,
             None => continue,
@@ -232,11 +191,7 @@ fn the_compiler_emits_no_undefined_behaviour() {
     drop(guard);
 }
 
-/// The overflow-flag assertion is not vacuous: the IR really does contain
-/// the arithmetic it is scanning.
-///
-/// A scanner that matched no instructions would pass every fixture in
-/// silence, and the absence of a flag would be evidence of nothing.
+/// The scan must match real arithmetic in the IR, or the flag assertion is vacuous.
 #[test]
 fn the_scan_finds_the_arithmetic_it_checks() {
     let dir = temp_dir("coverage");
@@ -249,7 +204,6 @@ fn the_scan_finds_the_arithmetic_it_checks() {
     }
     let guard = TempDirGuard(dir.clone());
 
-    // A fixture that exercises every width and every operator.
     let ir = emit_ir(&dir, "int_width_grid");
     let mut found = 0usize;
     for line in ir.lines() {

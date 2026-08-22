@@ -35,20 +35,15 @@
 //!   binding site, a path's last move, a branch exit — never one invented
 //!   to have something to point at.
 
-/// The structured category of a diagnostic, decided by the pass that
-/// detected the violation. Specific variants carry the arena fact a
-/// consumer needs (the offending symbol, the mis-cased name, the casing
-/// rule); the general variants name the pipeline stage whose rule was
-/// broken. A tool branches on this value, never on the rendered message.
+/// The structured category of a diagnostic; specific variants carry the
+/// arena fact a consumer needs. Tools branch on this, never on the message.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DiagKind {
     /// An import no name in the file reached; the import's `NODE_ITEM`.
     UnusedImport(i64),
     /// A declared item nothing reachable from `main` needs; its symbol id.
     UnusedDeclaration(i64),
-    /// A name that breaks the casing law; the interned name id and the
-    /// expected casing code (1 = snake_case, 2 = PascalCase,
-    /// 3 = SCREAMING_SNAKE_CASE).
+    /// A name that breaks the casing law; name id and expected casing code.
     CasingViolation { name: i64, expected: i64 },
     /// Use of a private item from outside its module; the target symbol id.
     PrivateAccess { sym: i64 },
@@ -58,8 +53,7 @@ pub enum DiagKind {
     UnnecessaryFieldPub { field: i64 },
     /// A lexer or parser rejection.
     Syntax,
-    /// A name-resolution rejection (unknown names, duplicate symbols,
-    /// unresolved imports).
+    /// A name-resolution rejection.
     Resolve,
     /// A type mismatch or other typecheck rejection.
     TypeError,
@@ -80,9 +74,7 @@ pub struct Diag {
     pub kind: DiagKind,
 }
 
-/// The symbolic name of a diagnostic kind, for the JSON envelope and the
-/// tooling that reads it. Compared by variant discriminant so the payload
-/// slots are never destructured-and-dropped here.
+/// The symbolic name of a diagnostic kind, compared by variant discriminant.
 pub fn diag_kind_name(kind: &DiagKind) -> &'static str {
     use std::mem::discriminant;
     if discriminant(kind) == discriminant(&DiagKind::UnusedImport(0)) {
@@ -124,14 +116,7 @@ pub fn casing_rule_name(casing: i64) -> &'static str {
 
 // (diagnostic index, message, file, start, end, kind)
 pub type Note = (i64, String, i64, i64, i64, i64);
-// What role a note plays in the explanation, assigned by the stage that
-// raised it.  The message is prose meant for a reader and is free to be
-// reworded; the kind is what a tool may branch on, so an editor drawing a
-// value's path through a function does not have to recognize the checker's
-// sentences to know which span is the binding and which is a consuming
-// branch.  A note whose role is not one of these is NOTE_CONTEXT: it
-// supports the diagnostic without making a claim about a linear value's
-// flow.
+// Role of a diagnostic note for tooling.
 pub const NOTE_CONTEXT: i64 = 0;
 pub const NOTE_BINDING: i64 = 1; // where the value under discussion was bound
 pub const NOTE_CONSUMED: i64 = 2; // a path along which it is consumed
@@ -244,13 +229,8 @@ pub const EXPR_MATCH: i64 = 7; // b: scrutinee expr id, c: arm ids list
 pub const EXPR_TRY: i64 = 8; // b: inner expr id
 pub const EXPR_INDEX: i64 = 9; // b: base expr id, c: index expr id, d: fallibility flag (INDEX_*)
 
-// Slot-d flag on EXPR_INDEX rows.  The typechecker attaches this fact once,
-// and codegen reads it rather than re-deriving fallibility from the shape of
-// the result type: an array whose element is itself a `Result` is infallible
-// when indexed by a compile-time-proven constant, even though its result type
-// is a `Result`.  `INDEX_FALLIBLE` marks a runtime or slice index typed as
-// `Result(T, IndexError)`; `INDEX_INFALLIBLE` marks a constant array index
-// typed as the bare element type.
+// Slot-d flag on EXPR_INDEX rows, attached by the typechecker: FALLIBLE for
+// runtime/slice indices (Result), INFALLIBLE for constant-proven array indices.
 pub const INDEX_INFALLIBLE: i64 = 0;
 pub const INDEX_FALLIBLE: i64 = 1;
 pub const EXPR_FIELD_ACCESS: i64 = 10; // b: base expr id, c: field name id; `expr.field` on a non-path base
@@ -259,12 +239,8 @@ pub const LIT_INT: i64 = 0;
 pub const LIT_HEX: i64 = 1;
 pub const LIT_TRUE: i64 = 2;
 pub const LIT_FALSE: i64 = 3;
-// A string literal.  Its `c` slot holds the interned name id of the
-// *decoded* bytes (escapes already applied), not a numeric value: the
-// literal's value is a byte sequence, and the name table is the arena that
-// already stores byte sequences.  Interning also means two identical
-// literals share one id, which is what lets codegen emit one `.rodata`
-// global per distinct literal.
+// String literal: `c` holds the interned name id of the decoded bytes;
+// identical literals share one id.
 pub const LIT_STRING: i64 = 4;
 
 pub const UN_NEG: i64 = 0;
@@ -325,7 +301,7 @@ pub const SYM_IMPL_METHOD: i64 = 9;
 pub const SYM_TRAIT_METHOD: i64 = 10;
 
 // Slot-f flag on SYM_FUN rows: 1 marks the program entry point (`main`),
-// assigned by the resolver so codegen never re-derives it from the name.
+// assigned by the resolver and read by codegen.
 pub const SYM_FUN_MAIN: i64 = 1;
 
 pub fn intern(names: &mut Vec<String>, text: &str) -> i64 {
@@ -359,14 +335,8 @@ pub fn name_text(names: &[String], id: i64) -> String {
     }
 }
 
-/// Renders a string literal's decoded bytes back into the source form that
-/// would produce them, escaping exactly the five sequences the language
-/// defines.
-///
-/// Every tool that shows a literal goes through this: a decoded literal can
-/// contain a newline or a NUL, which would break a line-oriented dump or
-/// make it non-text, and a reader needs to tell a real newline from the two
-/// characters that produced it.
+/// Renders a string literal's decoded bytes back into source form, escaping
+/// the five sequences the language defines.
 pub fn escaped_literal_text(text: &str) -> String {
     let mut out = String::new();
     for ch in text.chars() {
@@ -678,12 +648,8 @@ pub const TYD_ARRAY: i64 = 8;
 pub const TYD_PARAM: i64 = 9;
 pub const TYD_MONO: i64 = 10; // (fn node, type-arg keys): one key per monomorphized function
 
-// Builtin scalar sub-kinds.  Stored in slot `f` of TYD_BUILTIN descriptor
-// rows at seed time; every later stage classifies scalars from this
-// integer, never from the symbol's name.  The width, signedness, and
-// two's-complement mask of each sub-kind are the single definitions in
-// `builtin_int_width` / `builtin_int_is_signed` / `builtin_int_mask`;
-// the typechecker and codegen both read those helpers, never a name.
+// Builtin scalar sub-kinds, stored in slot `f` of TYD_BUILTIN rows at seed
+// time; every later stage classifies scalars from this integer.
 pub const BUILTIN_I8: i64 = 0;
 pub const BUILTIN_I16: i64 = 1;
 pub const BUILTIN_I32: i64 = 2;
@@ -696,9 +662,7 @@ pub const BUILTIN_U64: i64 = 8;
 pub const BUILTIN_USIZE: i64 = 9;
 pub const BUILTIN_BOOL: i64 = 10;
 
-// The bit width of a builtin integer sub-kind.  Isize/Usize are the
-// target pointer width (64 on x86_64/AArch64).  Non-integer sub-kinds
-// report 0; callers only consult this for `builtin_int_is_int` sub-kinds.
+// Bit width of a builtin integer sub-kind; Isize/Usize are the pointer width.
 pub fn builtin_int_width(sub: i64) -> u32 {
     if sub == BUILTIN_I8 || sub == BUILTIN_U8 {
         8
@@ -800,10 +764,8 @@ pub const NATIVE_LAYOUT_SCALAR: i64 = 1;
 pub const NATIVE_LAYOUT_PAIR: i64 = 2;
 pub const NATIVE_LAYOUT_TRIPLE: i64 = 3;
 
-/// The source spelling of a binary operator opcode.  Every stage that names
-/// an operator in a diagnostic reads it from here, so a message from the
-/// typechecker and one from codegen cannot disagree about what `BIN_SHL` is
-/// called.
+/// The source spelling of a binary operator opcode, shared by every
+/// stage that names an operator in a diagnostic.
 pub fn op_text(op: i64) -> &'static str {
     if op == BIN_ADD {
         "+"
@@ -884,9 +846,7 @@ pub const SEED_SYM_SOME: usize = SEED_SYM_ERR + 1;
 pub const SEED_SYM_NONE: usize = SEED_SYM_SOME + 1;
 pub const SEED_SYM_DIV_BY_ZERO: usize = SEED_SYM_NONE + 1;
 pub const SEED_SYM_INDEX_OOB: usize = SEED_SYM_DIV_BY_ZERO + 1;
-// The number of symbol slots `seed_builtins` fills unconditionally for
-// every program; the protocol slots that follow are populated only when
-// their declaring native modules are resolved.
+// Slots `seed_builtins` fills unconditionally; protocol slots follow.
 pub const SEED_SYM_PRIMITIVE_COUNT: usize = SEED_SYM_INDEX_OOB + 1;
 pub const SEED_SYM_ALLOC_FAILED: usize = SEED_SYM_PRIMITIVE_COUNT;
 pub const SEED_SYM_ACCESS_OOB: usize = SEED_SYM_ALLOC_FAILED + 1;
@@ -999,9 +959,8 @@ pub fn tyinfo_sym_of(nodes: &[i64], key: i64) -> i64 {
     }
 }
 
-/// Whether a native container descriptor's type arguments include a linear
-/// key (0 or 1, attached by the typechecker's linearity pass); NONE when
-/// the flag was never attached.  Only meaningful for TYD_NATIVE rows.
+/// Whether a native container's type arguments include a linear key
+/// (0/1, typechecker-attached); NONE when never attached.
 pub fn tyinfo_has_linear_elems(nodes: &[i64], key: i64) -> i64 {
     let row = find_tyinfo(nodes, key);
     if row == NONE {
@@ -1021,9 +980,7 @@ pub fn tyinfo_builtin_kind(nodes: &[i64], key: i64) -> i64 {
 }
 
 // Instance rows.  (tag=NODE_INST, a=fn slot, b=type-arg key list, c=return key,
-// d=parameter key list, e=canonical mono key, f=symbol kind).  The source
-// span belongs to the call that caused this instantiation; it is not a
-// synthesized declaration, so it must never use NO_FILE.
+// d=parameter key list, e=canonical mono key, f=symbol kind). Real span only.
 
 pub fn alloc_instance(
     nodes: &mut Vec<i64>,
@@ -1121,10 +1078,7 @@ pub fn find_const_value(nodes: &[i64], sym: i64) -> i64 {
 }
 
 // Trait-dispatch rows.  (tag=NODE_TRAIT, a=call expr, b=method instance id,
-// c=trait symbol, d=method name id, e=method fn node).  The method fn node
-// is attached by the typechecker at dispatch-row creation so the borrow
-// checker reads the signature directly instead of re-searching the trait's
-// method list.
+// c=trait symbol, d=method name id, e=typechecker-attached method fn node).
 
 pub const NODE_TRAIT: i64 = 15;
 
@@ -1159,20 +1113,14 @@ pub fn find_trait_call(nodes: &[i64], expr: i64) -> i64 {
     NONE
 }
 
-
 // Struct-field-fact rows.  (tag=NODE_FIELDKEY, a=struct key, b=field name
-// id, c=substituted field key, d=declared-order index).  One row per
-// (canonical struct key, field) pair, filled by the typechecker from the
-// declared field types and the key's own type arguments; the borrow
-// checker and codegen read these rows instead of re-walking ITEM_STRUCT
-// lists and re-running generic substitution.
+// id, c=substituted field key, d=declared-order index); filled by the
+// typechecker from declared field types and the key's type arguments.
 
 pub const NODE_FIELDKEY: i64 = 17;
 
-// Resolver-owned tooling facts. These rows preserve the resolver's scope
-// decisions after its transient lookup tables are gone, so editor tooling
-// consumes name-resolution output instead of rebuilding a parallel scope
-// walker.
+// Resolver-owned tooling facts preserving scope decisions after the
+// resolver's transient lookup tables are gone.
 //
 // SCOPE_AT:      a=kind, b=source node, c=scope
 // SCOPE_VISIBLE: a=kind, b=query scope, c=local name, d=symbol, e=namespace
@@ -1366,10 +1314,8 @@ pub fn alloc_patfact(nodes: &mut Vec<i64>, pat: i64, scrutinee: i64) -> i64 {
     alloc_node(nodes, &[NODE_PATFACT, NO_FILE, NO_FILE, NO_FILE, pat, scrutinee, NONE, NONE, NONE, NONE])
 }
 
-// The ownership mode a native function was classified into at resolution;
-// stored in slot e of the SYM_NATIVE_FUN symbol row so it reads in constant
-// time. NAT_MODE_NONE when the symbol has no registry row or classification
-// never ran.
+// Ownership mode of a native function, in slot e of its symbol row;
+// NAT_MODE_NONE when unclassified.
 pub fn sym_native_mode(nodes: &[i64], sym: i64) -> i64 {
     node_e(nodes, sym)
 }
@@ -1409,12 +1355,8 @@ pub fn patfact_scrutinee_of(nodes: &[i64], pat: i64) -> i64 {
     NONE
 }
 
-// The member-fact rows of one key form a chain: slot e of each row is the
-// next row attached to the same key, and the key's own TYINFO descriptor
-// holds the chain head (NODE_START) and tail (NODE_END).  A key is either
-// a struct (FIELDKEY rows) or an enum (PAYLOADKEY rows), so one chain per
-// key is homogeneous.  Member queries walk the chain instead of scanning
-// the whole arena, and attachment appends in declared order.
+// Member-fact rows of one key form a chain via slot e; the TYINFO
+// descriptor holds head (NODE_START) and tail (NODE_END).
 fn member_chain_append(nodes: &mut [i64], key: i64, row: i64) {
     let tail = node_end(nodes, key);
     if tail != NONE {
@@ -1454,11 +1396,8 @@ pub fn fieldkey_idx_of(nodes: &[i64], row: i64) -> i64 {
 }
 
 // Variant-payload-fact rows.  (tag=NODE_PAYLOADKEY, a=enum key, b=variant
-// declaration index, c=substituted payload type key, d=payload field
-// index).  One row per (enum key, variant, payload field) triple, filled
-// by the typechecker from declared payload types and the key's own type
-// arguments; the emitter reads these rows instead of re-walking
-// ITEM_ENUM lists and re-running generic substitution.
+// declaration index, c=substituted payload key, d=payload field index);
+// filled by the typechecker from declared payloads and type arguments.
 
 pub const NODE_PAYLOADKEY: i64 = 25;
 
@@ -1490,9 +1429,8 @@ pub fn payloadkey_idx_of(nodes: &[i64], row: i64) -> i64 {
     node_d(nodes, row)
 }
 
-// Every (field name, substituted field key, declared-order index) fact row
-// attached to a canonical struct key, in declared field order (the attach
-// order is the declaration order, preserved by the chain).
+// Every (field name, substituted key, declared-order index) row of a
+// canonical struct key, in declared order.
 pub fn fieldkey_rows_of(nodes: &[i64], key: i64) -> Vec<(i64, i64, i64)> {
     let mut rows: Vec<(i64, i64, i64)> = Vec::new();
     if key < 0 || node_tag(nodes, key) != NODE_TYINFO {
@@ -1552,14 +1490,8 @@ fn list_to_key_vec(lists: &[Vec<i64>], id: i64) -> Vec<i64> {
     keys
 }
 
-// The member-type facts of a canonical struct or enum descriptor: one
-// NODE_FIELDKEY row per declared field and one NODE_PAYLOADKEY row per
-// declared payload field, each carrying the declared type substituted with
-// the descriptor's own type arguments.  Idempotent: rows that already
-// exist for a key are left untouched, so both descriptor creation in
-// `canon_tyinfo` and the typechecker's post-resolution sweep may call it.
-// Kinds other than struct/enum and symbols without a matching declaration
-// do nothing.
+// Attaches NODE_FIELDKEY/NODE_PAYLOADKEY rows for a struct or enum
+// descriptor's members, with type arguments substituted; idempotent.
 pub fn attach_member_facts(
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
@@ -1669,9 +1601,8 @@ pub fn canon_tyinfo(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, kind: i64, 
     }
     let key = nodes.len() as i64 / NODE_STRIDE;
     alloc_tyinfo(nodes, key, kind, sym, args, elem, len);
-    // Facts and the linearity flag are attached at creation when members are
-    // resolved; a forward-referenced descriptor defers both to the
-    // typechecker's settle pass.
+    // Facts and the linearity flag attach at creation when members are
+    // resolved; a forward-referenced descriptor defers both to the settle pass.
     attach_member_facts(nodes, lists, key, kind, sym, args);
     let mut seen: Vec<i64> = Vec::new();
     let flag = linear_flag_of(nodes, lists, key, &mut seen);
@@ -1772,9 +1703,7 @@ fn has_value(list: &[i64], value: i64) -> bool {
 }
 
 // A declared member key substituted with the descriptor's type arguments;
-// `declared` passes through unchanged when the declaration is generic-free.
-// The member walk reports 2 when a member key is unresolved, deferring
-// memoization.
+// passes through unchanged when the declaration is generic-free.
 fn member_key_of(
     nodes: &mut Vec<i64>,
     lists: &mut Vec<Vec<i64>>,
@@ -1851,15 +1780,9 @@ fn linear_members_flag_of(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, sym: 
 }
 
 // The linearity flag (0 or 1) of a canonical type key, memoized in the
-// descriptor's own slot so every later read is a single O(1) access.  A
-// key currently being expanded is not linear, which terminates recursive
-// and composite types deterministically; native handles and type
-// parameters are linear, arrays inherit their element, and struct/enum
-// descriptors inherit any linear member.  Returns 2 without memoizing
-// when a forward-referenced member key is not resolved yet, so the
-// typechecker's settle pass computes the flag once every declaration is
-// collected; `canon_tyinfo` computes it for every descriptor whose members
-// are already resolved.
+// descriptor's own slot. Native handles and type parameters are linear,
+// arrays inherit their element, and struct/enum descriptors inherit any
+// linear member; 2 is returned unmemoized when a member key is unresolved.
 pub fn linear_flag_of(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, key: i64, seen: &mut Vec<i64>) -> i64 {
     if key < 0 {
         return 0;

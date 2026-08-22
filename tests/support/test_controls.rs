@@ -7,12 +7,10 @@
 //!
 //! **Invariants:**
 //! - `evenly_selected` takes exactly `budget` cases spread across the whole
-//!   ordered corpus, never a prefix. A prefix would systematically miss the
-//!   later shapes, so a reduced run would report green while an entire
-//!   region of the corpus went unexecuted.
+//!   ordered corpus, never a prefix.
 //! - The two reduced profiles are mutually exclusive, asserted rather than
-//!   silently resolved in favour of one of them.
-//! - Selection arithmetic is done in `u128`, so a large corpus and budget
+//!   silently resolved.
+//! - Selection arithmetic is done in `u128`, so corpus and budget size
 //!   cannot overflow into a wrong selection.
 
 use std::env::VarError;

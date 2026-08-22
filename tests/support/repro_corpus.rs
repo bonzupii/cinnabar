@@ -1,17 +1,13 @@
 //! The expected-success fixture corpus.
 //!
-//! One table, shared by every suite that runs it. `repro_harness` runs these
-//! for their exit codes; `sanitizer_gate` runs them again under a memory
-//! checker. A second copy would drift, and the two suites would quietly stop
-//! covering the same programs — which is exactly the kind of hand-maintained
-//! duplicate AGENTS.md calls a standing correctness bug.
+//! One table, shared by every suite that runs it: `repro_harness` runs these
+//! for their exit codes, `sanitizer_gate` runs them again under a memory
+//! checker.
 //!
 //! **Invariants:**
-//! - This table is the single definition of the expected-success corpus.
-//!   A suite that needs a subset samples from it; it does not keep its own
-//!   list.
-//! - Each entry carries the exit code its fixture must produce, so adding a
-//!   fixture means stating what it does rather than only that it compiles.
+//! - This table is the single definition of the expected-success corpus; a
+//!   suite needing a subset samples from it rather than keeping its own list.
+//! - Each entry carries the exit code its fixture must produce.
 
 /// Fixture stem under `tests/fixtures/repro/`, and the exit code it must
 /// produce.

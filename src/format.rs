@@ -6,11 +6,9 @@
 //! tokens and comment contents exactly as written.
 //!
 //! **Invariants:**
-//! - Formatting is not a semantic pass. It does not resolve a name, infer
-//!   a type, or reproduce any compiler-owned fact — a formatter that
-//!   understood types would be a second front end to keep in step.
-//! - Token text and comment bodies survive a round trip unchanged. Only
-//!   the whitespace between them is this file's to decide.
+//! - Formatting is not a semantic pass: it resolves no name and infers no
+//!   type, deciding only the whitespace between tokens.
+//! - Token text and comment bodies survive a round trip unchanged.
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BlockKind {
@@ -88,10 +86,7 @@ fn match_arm_has_multiline_body(code: &str) -> bool {
     }
 }
 
-// The index just past the closing quote of the string literal opening at
-// `open`, or the end of the line when the literal is unterminated (which
-// the lexer reports; the formatter only has to avoid running off the end).
-// A backslash escapes the next byte, so `\"` does not close the literal.
+// Index past closing quote of literal at `open`.
 fn skip_string_literal(bytes: &[u8], open: usize) -> usize {
     let mut idx = open + 1;
     while idx < bytes.len() {
@@ -140,12 +135,7 @@ fn comment_free_code(line: &str, block_comment: &mut bool) -> String {
             } else if bytes.get(idx).is_some_and(|byte| *byte == b'#') {
                 break;
             } else if bytes.get(idx).is_some_and(|byte| *byte == b'"') {
-                // A string literal's contents are not code: a `#` inside one
-                // does not start a comment, a bracket inside one does not
-                // change nesting depth, and a word inside one is not a
-                // keyword — `print("match")` must not read as opening a
-                // match block. The literal collapses to an empty pair so the
-                // line keeps its shape without its contents being scanned.
+                // Literal contents are not code: skip them, emit an empty pair.
                 idx = skip_string_literal(bytes, idx);
                 code.push_str("\"\"");
             } else {
@@ -327,10 +317,7 @@ mod tests {
 
     #[test]
     fn ignores_structure_words_inside_string_literals() {
-        // A keyword inside a literal is text, not structure: `"match"` must
-        // not open a block and `"end"` must not close one, or every line
-        // after the literal would be indented against a block that does not
-        // exist.
+        // `"match"` must not open a block, `"end"` must not close one.
         let source = "fun main() I64\nprint(\"match\")\nprint(\"end\")\nreturn 0\nend\n";
         let expected = "fun main() I64\n  print(\"match\")\n  print(\"end\")\n  return 0\nend\n";
         assert_eq!(format_source(source), expected);
@@ -339,9 +326,7 @@ mod tests {
 
     #[test]
     fn ignores_comment_and_bracket_characters_inside_string_literals() {
-        // A `#` inside a literal does not start a comment, so the bracket
-        // after it still counts; an unbalanced bracket *inside* the literal
-        // does not count. An escaped quote does not end the literal.
+        // `#` and brackets inside a literal are text; escaped quotes do not end it.
         let source = "fun main() I64\nprint(\"# ( not code\")\nprint(\"say \\\"hi\\\"\")\nreturn 0\nend\n";
         let expected = "fun main() I64\n  print(\"# ( not code\")\n  print(\"say \\\"hi\\\"\")\n  return 0\nend\n";
         assert_eq!(format_source(source), expected);
@@ -350,9 +335,7 @@ mod tests {
 
     #[test]
     fn preserves_literal_contents_verbatim() {
-        // The formatter re-indents lines and never rewrites token text, so a
-        // literal's bytes — including leading whitespace inside it — come
-        // through unchanged.
+        // Literal bytes, including internal whitespace, come through unchanged.
         let source = "fun main() I64\nval text = \"  spaced   out  \"\nreturn 0\nend\n";
         let expected = "fun main() I64\n  val text = \"  spaced   out  \"\n  return 0\nend\n";
         assert_eq!(format_source(source), expected);

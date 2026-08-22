@@ -14,10 +14,8 @@
 //! calls `llvm_type` itself.
 //!
 //! **Invariants:**
-//! - Nothing here re-derives a layout fact by parallel logic. A number this
-//!   report prints is one the real build would use, or it is not printed —
-//!   a layout report that could disagree with the binary would be worse
-//!   than none.
+//! - Nothing here re-derives a layout fact by parallel logic: every number
+//!   printed comes from the same lowering a real build uses.
 
 use crate::ast::*;
 use crate::codegen::error::*;
@@ -31,9 +29,7 @@ use inkwell::context::Context;
 use inkwell::types::BasicTypeEnum;
 use serde_json::{json, Value};
 
-// The discriminant every enum is lowered with.  Both renderings report it,
-// so it is named once here rather than spelled into each of them, where the
-// two could drift apart while the emitter moved under both.
+// Discriminant type for all enums.
 const ENUM_TAG_TYPE: &str = "I64";
 
 struct FieldLayout {
@@ -59,9 +55,7 @@ struct TypeLayout {
     variants: Vec<VariantLayout>,
 }
 
-/// Measure every concrete struct/enum/native key in the arena, and report
-/// the host triple they were measured for.  Runs after the full front-end;
-/// requires no linking tools.
+/// Measure every concrete struct/enum/native key; runs after the front end.
 fn measure_all(
     names: &[String],
     nodes: &mut Vec<i64>,
@@ -118,11 +112,8 @@ pub fn render_layouts(
     Ok(out)
 }
 
-/// Render the same measurement as one JSON document.
-///
-/// Sizes, alignments, offsets and variant tags are the values `measure_all`
-/// produced, so this document and the text report cannot disagree; only the
-/// spelling differs.
+/// Render the same measurement as one JSON document, from `measure_all`'s
+/// values.
 pub fn layouts_json(
     names: &[String],
     nodes: &mut Vec<i64>,
@@ -214,9 +205,8 @@ fn layout_json(names: &[String], nodes: &[i64], lists: &[Vec<i64>], layout: &Typ
     })
 }
 
-// Concrete struct/enum/native keys, in canonical key order.  A key
-// containing a type parameter (or an unknown/mono marker) has no machine
-// layout and is skipped.
+// Concrete struct/enum/native keys, in canonical key order; non-concrete
+// keys (type parameters, unknown/mono markers) are skipped.
 fn collect_candidates(nodes: &[i64], lists: &[Vec<i64>]) -> Vec<(i64, i64)> {
     let mut out: Vec<(i64, i64)> = Vec::new();
     let count = nodes.len() as i64 / NODE_STRIDE;

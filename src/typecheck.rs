@@ -73,9 +73,8 @@ type State<'a> = (
     // The platform a build is for, so typechecking can reject an operation
     // a target does not support before code generation begins.
     &'a Target,
-    // The canonical key of the first seeded builtin (I8); every other
-    // builtin subtype key is this base plus its BUILTIN_* index, so a
-    // builtin lookup is a constant-time add instead of an arena scan.
+    // The canonical key of the first seeded builtin (I8); every other builtin
+    // subtype key is this base plus its BUILTIN_* index.
     i64,
 );
 
@@ -133,10 +132,8 @@ pub fn typecheck(
         idx += 1;
     }
 
-    // Linearity is settled now, before any signature, constant, or
-    // expression checking: every descriptor that exists already carries its
-    // flag, and every descriptor created later carries it from creation, so
-    // `tyinfo_is_linear` is a constant-time read for the whole check.
+    // Linearity is settled before any signature, constant, or expression
+    // check, so `tyinfo_is_linear` is a constant-time read for the whole run.
     attach_linearity(state.1, state.2);
 
     check_fn_sigs_list(&mut state, root);
@@ -222,9 +219,8 @@ fn sym_home(nodes: &[i64], sym: i64) -> i64 {
     node_d(nodes, sym)
 }
 
-// The canonical key of a builtin subtype: the seeded builtin descriptors
-// are contiguous and start at the base key, so a subtype key is the base
-// plus its BUILTIN_* index.
+// The canonical key of a builtin subtype: the base key plus its
+// BUILTIN_* index.
 fn builtin_key_of(base: i64, sub: i64) -> i64 {
     if base == NONE {
         return NONE;
@@ -232,9 +228,8 @@ fn builtin_key_of(base: i64, sub: i64) -> i64 {
     base + sub
 }
 
-// The canonical key of a builtin primitive symbol, resolved by matching the
-// symbol against the seeded subtype slots; constant in the number of
-// builtins rather than proportional to the arena size.
+// The canonical key of a builtin primitive symbol, found by matching the
+// symbol against the seeded subtype slots.
 fn builtin_key_of_sym(seeds: &Seeds, base: i64, sym: i64) -> i64 {
     if base == NONE {
         return NONE;
@@ -520,23 +515,8 @@ fn unknown_key(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) -> i64 {
     canon_tyinfo(nodes, lists, TYD_UNKNOWN, NONE, NONE, NONE, NONE)
 }
 
-// The centralized error-recovery rule: whenever an expression, constant
-// evaluation, or pattern fails semantically and its primary diagnostic has
-// been emitted, its type key recovers to the expected key when one is
-// known, or to TYD_UNKNOWN otherwise, and is attached to the failing node
-// so no downstream unification site can produce a cascading "found '?'"
-// secondary.  Every expression, constant, and pattern checker routes its
-// error returns through this single function; no sub-checker invents its
-// own error key.
-//
-// The attach is guarded to expression and pattern nodes that carry no type
-// yet: a node's type is a single fact computed by its checker, and a quiet
-// constant probe (fold_const with quiet = 1) must never clobber the real
-// type the checker already attached (an index expression probed for
-// constant folding keeps its Usize type).  The nodes that reach recovery
-// untyped are exactly the ones whose checker failed, so the attach always
-// lands on the failing node; other inputs (invariant failures) get the
-// recovered key without a node write.
+// Centralized error recovery: failed node recovers to expected key or UNKNOWN.
+// Guards against clobbering already-typed nodes.
 fn recover_ty(state: &mut State, node: i64, expected: i64) -> i64 {
     let key = if expected != NONE {
         expected
@@ -716,15 +696,7 @@ fn is_bool_key(nodes: &[i64], key: i64) -> bool {
     key_kind(nodes, key) == TYD_BUILTIN && tyinfo_builtin_kind(nodes, key) == BUILTIN_BOOL
 }
 
-// True when a comparison operator is defined on operands of this type.
-//
-// Comparison is a scalar operation: `==` and `!=` compare integers and
-// `Bool`, and the ordering operators compare integers, since ordering
-// `Bool` names nothing. There is no structural equality in the language
-// and no operator overloading, so a struct, enum, array, slice, reference,
-// or native handle has no comparison to lower — aggregates are taken apart
-// with `match` and field access instead. Rejecting these here is what
-// keeps codegen from being handed an aggregate where it expects a scalar.
+// True if comparison operator is defined for type.
 fn comparable_key(nodes: &[i64], key: i64, op: i64) -> bool {
     if is_int_key(nodes, key) {
         return true;
@@ -768,8 +740,7 @@ fn attach_variant_facts(nodes: &mut [i64], lists: &[Vec<i64>]) {
 
 fn attach_linearity(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) {
     // Settles flags for descriptors created before all declarations were
-    // collected, and recomputes native has-linear-elements flags now that
-    // type arguments resolve.
+    // collected; recomputes native has-linear-elements flags.
     let mut seen: Vec<i64> = Vec::new();
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
@@ -810,19 +781,8 @@ fn has_value(list: &[i64], value: i64) -> bool {
     false
 }
 
-// Whether a canonical type key's value can carry a reference anywhere in its
-// structure, not only when the key itself is bare `&T`/`&mut T`/`&[T]`. The
-// borrow checker's returned-borrow obligation must
-// apply to a function returning `Result(&T, E)` or a struct with a reference
-// field the same way it applies to a bare `&T` return; gating on the key's
-// own bare kind let a dangling reference escape wrapped in either shape.
-// Mirrors `linear_of`'s struct/enum-member walk (identical substitution,
-// identical cycle guard) because it is the same question -- "does every
-// concrete instantiation of this type carry X" -- for a different X, so a
-// second, independent member-walk is not worth introducing for it. Callers
-// pass a fresh `seen` per top-level query; unlike `linear_of` this is not
-// memoized onto the tyinfo row (no spare payload slot for a second flag),
-// which is a bounded cost paid at case-fold, not at every use.
+// True if type key can carry a reference anywhere in structure.
+// Checks wrapped shapes like Result(&T) and struct fields.
 pub fn type_contains_ref(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>, key: i64, seen: &mut Vec<i64>) -> bool {
     if key < 0 {
         return false;
@@ -926,13 +886,7 @@ fn subst_declared_key(
     subst_key(nodes, lists, declared, &from, &to)
 }
 
-// One fact row per (canonical struct key, field name) and per (canonical
-// enum key, variant, payload field): the substituted member key and its
-// declared-order index, computed from the declared member types and the
-// key's own type arguments.  Descriptor creation in `canon_tyinfo` already
-// recorded these rows; this sweep re-verifies every struct and enum
-// descriptor in the arena so no key reaches codegen without its member
-// facts, whatever order canonicalization happened in.
+// Verifies member facts for every struct/enum descriptor.
 fn attach_fieldkey_facts(nodes: &mut Vec<i64>, lists: &mut Vec<Vec<i64>>) {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
@@ -1068,11 +1022,8 @@ fn render_key(
     text
 }
 
-/// Render a canonical type key for display outside the typechecker (the
-/// arena dump, layout printing, and the language server).  Attached keys are
-/// fully resolved after type checking, so no inference-variable bindings or
-/// origin table are needed; this is the same rendering the typechecker's own
-/// diagnostics use.
+/// Render a canonical type key for display outside the typechecker; the
+/// same rendering its own diagnostics use.
 pub fn render_type_key(names: &[String], nodes: &[i64], lists: &[Vec<i64>], key: i64) -> String {
     render_key(names, nodes, lists, &[], &[], key)
 }
@@ -1222,16 +1173,7 @@ fn collect_impl_item(state: &mut State, item: i64) {
 }
 
 /// Reports every method the trait declares that this `impl` does not
-/// provide.
-///
-/// `verify_impl_method` checks the methods an impl *has* against the trait;
-/// nothing checked the ones it lacks, so a missing method surfaced only if
-/// some call site happened to dispatch it ("impl method not found"), and an
-/// incomplete impl that nothing fully exercised compiled cleanly. A trait
-/// method is a signature with no body — the parser gives trait methods no
-/// body at all, so the language has no default/provided methods for one to
-/// fall back on — which makes every declared method mandatory and this a
-/// plain set difference.
+/// provide: a trait method has no body, so every declared one is mandatory.
 fn verify_impl_complete(state: &mut State, trait_sym: i64, for_key: i64, item: i64, methods: i64) {
     let trait_item = sym_decl(state.1, trait_sym);
     if trait_item == NONE {
@@ -1399,9 +1341,7 @@ fn check_fn_item(state: &mut State, item: i64) {
     }
 }
 
-// The resolver stores every module's scope id on its symbol (slot e); the
-// typechecker tracks the scope it is currently walking so field accesses can
-// be checked against the declaring module.  The root item list is scope 0.
+// The module's scope id from the resolver (slot e of its symbol); root is 0.
 fn module_scope_of(nodes: &[i64], item: i64) -> i64 {
     let sym = item_sym_of(nodes, item);
     if sym == NONE {
@@ -1430,9 +1370,8 @@ fn check_fn_sigs_item(state: &mut State, item: i64) {
     } else if kind == ITEM_FUN || kind == ITEM_NATIVE_FUN {
         check_fn_sigs(state, node_d(state.1, item));
     } else if kind == ITEM_TRAIT {
-        // Trait method signatures are canon'd here (with write) so the
-        // borrow checker reads their keys from the attached type rows.
-        // The methods have no bodies, so only their signatures are visited.
+        // Trait method signatures are canon'd (write) so the borrow checker
+        // reads their keys from the attached type rows.
         let methods = node_e(state.1, item);
         let count = list_len(state.2, methods);
         let mut idx = 0i64;
@@ -1481,9 +1420,7 @@ fn check_fn(state: &mut State, fn_node: i64, self_key: i64, is_main: i64) {
     let ret = canon_ty(state, ret_ty, self_key, 1);
     let saved_ret_ty_node = state.17;
     state.17 = ret_ty;
-    // The program entry point (`SYM_FUN_MAIN`, set by the resolver) must
-    // return a builtin scalar, Unit, or an exit-status enum (MANIFESTO):
-    // codegen derives the process exit code only from those two layouts.
+    // Entry point must return builtin scalar, Unit, or exit-status enum.
     if is_main == 1 {
         let ret_kind = key_kind(state.1, ret);
         if ret_kind != TYD_BUILTIN && ret_kind != TYD_ENUM {
@@ -1507,9 +1444,8 @@ fn check_fn(state: &mut State, fn_node: i64, self_key: i64, is_main: i64) {
     state.17 = saved_ret_ty_node;
 }
 
-// The exit-status enum shape: 2 or 3 variants (Success, Failure, and an
-// optional integer-scalar Diagnostic) whose third variant's payload is the
-// process exit code.  Any other enum returned from `main` is an error.
+// The exit-status enum shape: Success, Failure, and an optional int-payload
+// Diagnostic variant whose payload is the process exit code.
 fn check_exit_status_enum(state: &mut State, esym: i64, ret_ty: i64) {
     let decl = sym_decl(state.1, esym);
     if decl == NONE || node_tag(state.1, decl) != NODE_ITEM || node_a(state.1, decl) != ITEM_ENUM {
@@ -1556,21 +1492,11 @@ fn variant_payload_len(state: &mut State, variant: i64) -> i64 {
     }
 }
 
-// Sentinel for a tail-unsafe call whose reference cannot be pinned to a
-// single frame-local binding to name (a `match`/`try` returning a
-// reference).  It is still rejected and still truthfully reported; only the
-// variable name is absent.
+// Sentinel for a tail-unsafe call whose frame root has no single binding
+// to name; the call is still rejected, only unnamed.
 const TAIL_ROOT_UNNAMED: i64 = -2;
 
-// The frame-local root of a reference argument (MANIFESTO's tail-call law).
-// Returns the name id of a binding in the current function's frame that
-// `expr`'s reference value is rooted in, `TAIL_ROOT_UNNAMED` when it is
-// frame-rooted but no single binding names it, or NONE when the value
-// provably does not point into the current frame.  A reference points into
-// the frame only when it was (transitively) borrowed from a local or
-// by-value parameter of the current function; a reference received as an
-// incoming reference parameter, or read from static storage, points outside
-// it and is safe to pass through a tail call.
+// Frame-local root of reference argument, or NONE if outside frame.
 fn expr_frame_root(state: &mut State, expr: i64) -> i64 {
     if node_tag(state.1, expr) != NODE_EXPR {
         return NONE;
@@ -1648,13 +1574,8 @@ fn expr_frame_root(state: &mut State, expr: i64) -> i64 {
     TAIL_ROOT_UNNAMED
 }
 
-// The frame root of a `&`/`&mut` operand: the binding whose *storage* the
-// borrowed place occupies.  Storage is outside the current frame only when
-// it is static or reached through an incoming reference parameter, so a
-// bare path (a local, a by-value parameter, or a reference parameter's own
-// slot — `&param` is `&&T`, pointing at the parameter's frame slot) is
-// frame storage, while a field/index reached through a reference is
-// wherever that reference points.
+// The frame root of a `&`/`&mut` operand: the binding whose storage the
+// borrowed place occupies; static places are outside the frame.
 fn place_frame_root(state: &mut State, place: i64) -> i64 {
     if node_tag(state.1, place) != NODE_EXPR {
         return TAIL_ROOT_UNNAMED;
@@ -1687,9 +1608,8 @@ fn place_frame_root(state: &mut State, place: i64) -> i64 {
     TAIL_ROOT_UNNAMED
 }
 
-// The frame root of a reference-typed path value: NONE when the value
-// points outside the frame (an incoming reference parameter, or a
-// module-level constant/static), the root binding's name otherwise.
+// The frame root of a reference-typed path value: NONE when it points
+// outside the frame, the root binding's name otherwise.
 fn path_value_root(state: &mut State, expr: i64) -> i64 {
     let sym = expr_sym_of(state.1, expr);
     if sym != NONE {
@@ -1707,11 +1627,8 @@ fn path_value_root(state: &mut State, expr: i64) -> i64 {
             return NONE;
         }
     }
-    // A local binding of reference type points wherever its defining value
-    // points: an immutable `val`'s defining value is its initializer, and a
-    // match-arm binding's is the scrutinee.  A `var` can be reassigned, so
-    // its origin cannot be pinned statically and is conservatively treated
-    // as frame-rooted.
+    // A reference-typed `val` points where its initializer (or match
+    // scrutinee) points; a reassignable `var` is conservatively frame-rooted.
     if found.2 != NONE && node_tag(state.1, found.2) == NODE_STMT && node_a(state.1, found.2) == STMT_LET && found.1 == 0 {
         return expr_frame_root(state, node_e(state.1, found.2));
     }
@@ -1724,12 +1641,8 @@ fn path_value_root(state: &mut State, expr: i64) -> i64 {
     first
 }
 
-// Computes and attaches the tail-safety fact for a call (MANIFESTO's
-// tail-call law): whether any argument carries a reference into the current
-// frame, which would make LLVM's `tail` marker a false promise.  Attached
-// during body checking so the scope used to resolve a binding's kind is the
-// exact scope the body was checked under; codegen and the self-recursion
-// rejection both read the attached fact.
+// Attaches the tail-safety fact for a call: whether any argument carries a
+// reference into the current frame.
 fn attach_call_tail_safe(state: &mut State, expr: i64) {
     let args = node_d(state.1, expr);
     let count = list_len(state.2, args);
@@ -1746,15 +1659,7 @@ fn attach_call_tail_safe(state: &mut State, expr: i64) {
     alloc_callfact(state.1, expr, tail_safe, root);
 }
 
-// The O(1) call-stack guarantee (MANIFESTO): every self-recursive call
-// must be in strict tail position — the direct expression value of a
-// `return`, or the non-diverging result expression of a match in tail
-// position — because non-tail self-recursion grows the CPU call stack
-// per frame and the runtime guard that once bounded it is retired.  The
-// pass runs after the body is checked, so every call carries its
-// resolved instance row; tailness is a property of the statement tree,
-// so it is computed here by walking it (the resolver attached symbols,
-// the typechecker attached instances — nothing is re-derived).
+// Self-recursive calls must be in tail position to guarantee O(1) stack.
 fn check_tail_calls(state: &mut State, fn_node: i64) {
     let body = node_f(state.1, fn_node);
     if body != NONE {
@@ -1771,10 +1676,8 @@ fn tail_walk_stmt_list(state: &mut State, fn_node: i64, list: i64, tail: i64) {
     }
 }
 
-// `tail` is 1 only for the value expression of a match arm in tail
-// position; statement lists (function bodies, loop bodies, if branches)
-// never produce tail values, so their expression statements are walked
-// with 0 and only their `return`s are tail.
+// `tail` is 1 only for a match arm's value expression in tail position;
+// statement lists never produce tail values, only their `return`s do.
 fn tail_walk_stmt(state: &mut State, fn_node: i64, stmt: i64, tail: i64) {
     if node_tag(state.1, stmt) != NODE_STMT {
         return;
@@ -1828,9 +1731,7 @@ fn tail_walk_expr(state: &mut State, fn_node: i64, expr: i64, tail: i64) {
                 );
             }
         } else if is_self {
-            // A self-tail call that passes a borrow of its own frame cannot
-            // be a real tail call: reusing the frame would invalidate the
-            // borrow (MANIFESTO's O(1) call-stack guarantee).
+            // A self-tail call passing a frame borrow cannot reuse the frame.
             let root = callfact_root_name_of(state.1, expr);
             if root != NONE {
                 if root >= 0 {
@@ -1855,10 +1756,8 @@ fn tail_walk_expr(state: &mut State, fn_node: i64, expr: i64, tail: i64) {
                 }
             }
         }
-        // Argument expressions are always evaluated in non-tail position, so
-        // they are walked with tail = 0 unconditionally: a self-recursive
-        // call nested in an argument (e.g. `f(g(n - 1))`) is non-tail
-        // recursion even when the outer call sits in tail position.
+        // Arguments are always non-tail: a self-call nested in one is
+        // non-tail recursion even when the outer call is in tail position.
         tail_walk_expr_list(state, fn_node, node_d(state.1, expr));
     } else if kind == EXPR_MATCH {
         tail_walk_expr(state, fn_node, node_b(state.1, expr), 0);
@@ -2076,9 +1975,7 @@ fn check_stmt(state: &mut State, stmt: i64, ret: i64, impure: i64, self_key: i64
     key
 }
 
-// The scope the resolver attached to `source` (a SCOPE_AT fact), so a
-// suggestion reads the scope the resolver already computed rather than
-// reconstructing one.
+// The scope the resolver attached to `source` (a SCOPE_AT fact).
 fn scope_of(nodes: &[i64], source: i64) -> i64 {
     let count = nodes.len() as i64 / NODE_STRIDE;
     let mut idx = 0i64;
@@ -2094,9 +1991,8 @@ fn scope_of(nodes: &[i64], source: i64) -> i64 {
     NONE
 }
 
-// The return-type node of the function a call resolves to, when the call's
-// Result/Option value is directly that function's return value.  A division
-// or index result has no declared function to point at, so it yields NONE.
+// The return-type node of the callee, when the call's Result/Option value
+// is directly that function's return value; NONE otherwise.
 fn call_result_origin(state: &mut State, expr: i64) -> i64 {
     if node_tag(state.1, expr) != NODE_EXPR || node_a(state.1, expr) != EXPR_CALL {
         return NONE;
@@ -2144,10 +2040,8 @@ fn assign_target_declared_type(state: &mut State, target: i64) -> i64 {
     NONE
 }
 
-// Offer a hedged "did you mean" note for an unresolved value name, drawn
-// from the locals in the live environment and the value-namespace names the
-// resolver materialized for the source's scope.  The error must already be
-// pushed so the note attaches to it.
+// Offers a hedged "did you mean" note for an unresolved value name, drawn
+// from the live locals and the resolver's value-namespace names.
 fn suggest_value_name(state: &mut State, source: i64, misspelled: i64) {
     let text = name_text(state.0, misspelled);
     let mut entries: Vec<(String, i64, i64, i64)> = Vec::new();
@@ -2228,10 +2122,7 @@ fn collect_const_item(state: &mut State, item: i64) {
     }
     let kind = node_a(state.1, item);
     if kind == ITEM_MODULE {
-        // Constants resolve against the scope of the module that declares
-        // them; the walk descends into the module's scope and restores the
-        // enclosing scope on the way out, exactly as the signature and
-        // body walks do.
+        // Constants resolve against the scope of the declaring module.
         let saved_scope = state.13;
         state.13 = module_scope_of(state.1, item);
         collect_consts(state, node_e(state.1, item));
@@ -2250,10 +2141,8 @@ fn collect_const_item(state: &mut State, item: i64) {
     let end = node_end(state.1, item);
     let (value, key) = fold_const(state, value_expr, declared, 0);
     let ok = unify_key(state.1, state.2, state.6, key, declared);
-    // A folded key of TYD_UNKNOWN (or a declared key that failed to
-    // resolve) means the initializer already produced its primary
-    // diagnostic; the mismatch below would be a "found '?'" cascade, so it
-    // is suppressed (Single-Fact: fold_const owns the error return key).
+    // A TYD_UNKNOWN key means the initializer already produced its primary
+    // diagnostic; the mismatch check below is suppressed.
     if !ok && key_kind(state.1, key) != TYD_UNKNOWN && key_kind(state.1, declared) != TYD_UNKNOWN {
         push_type_error(state.3, &format!("constant initializer type mismatch: expected '{}', found '{}'", render_key(state.0, state.1, state.2, state.6, state.7, declared), render_key(state.0, state.1, state.2, state.6, state.7, key)), file, start, end);
         push_note_for_last(
@@ -2289,10 +2178,7 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
         }
         if lit == LIT_STRING {
             // A string constant folds to the interned name id of its bytes,
-            // which is what codegen needs to emit (or reuse) the literal's
-            // `.rodata` global — the same id an inline literal carries, so a
-            // `const` string and an inline string are one representation.
-            // There is no range to check: the value is a byte sequence.
+            // the same id an inline literal carries; no range to check.
             return (value, byte_slice_key(state));
         }
         let key = if is_int_key(state.1, declared) {
@@ -2301,25 +2187,16 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
             builtin_key_of(state.20, BUILTIN_I64)
         };
         if !range_check_literal(state, value, lit, 0, key, (file, start, end), quiet) {
-            // The literal's value is out of range for the target width, but
-            // its type recovers to the declared key (the expected type of
-            // the constant), so collect_const_item's unify succeeds and the
-            // range diagnostic is the only one emitted (no "found '?'"
-            // cascade).  In a quiet probe the declared key is NONE and the
-            // recovery is TYD_UNKNOWN, which probes treat as "not a
-            // constant".
+            // Recover to the declared key so the range diagnostic is the
+            // only one emitted.
             return (value, recover_ty(state, expr, declared));
         }
         return (value, key);
     }
     if kind == EXPR_UNARY && node_b(state.1, expr) == UN_NEG {
         let operand = node_c(state.1, expr);
-        // A negated literal is one atomic signed constant: the magnitude is
-        // extracted raw from the child literal and negated in two's
-        // complement, then range-checked once against the target width.  The
-        // child literal is never evaluated as an independent positive value,
-        // so a 64-bit pattern like 0xFFFFFFFFFFFFFF00 does not trip an I64
-        // range error before the negation is applied.
+        // A negated literal is one atomic signed constant: the raw magnitude
+        // is negated in two's complement, then range-checked once.
         let target = if is_int_key(state.1, declared) {
             declared
         } else {
@@ -2338,9 +2215,7 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
             let magnitude = node_c(state.1, operand);
             let negated = magnitude.wrapping_neg();
             if !range_check_literal(state, negated, LIT_INT, 1, target, (file, start, end), quiet) {
-                // The negated value is out of range for the target width, but
-                // the constant still recovers to the target key, so the range
-                // diagnostic is the only one emitted (no "found '?'" cascade).
+                // Recover to the target key; the range diagnostic is the only one.
                 return (negated, recover_ty(state, expr, target));
             }
             return (negated, target);
@@ -2351,9 +2226,8 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
             if quiet == 0 {
                 push_type_error(state.3, "unary '-' is not allowed on unsigned integer types", file, start, end);
             }
-            // The negation is rejected, but the constant still recovers to
-            // the declared key, so the unsigned-negation diagnostic is the
-            // only one emitted (no "found '?'" cascade).
+            // Recover to the declared key; the unsigned-negation diagnostic
+            // is the only one emitted.
             return (value, recover_ty(state, expr, declared));
         }
         if key_kind(state.1, key) == TYD_UNKNOWN {
@@ -2362,10 +2236,7 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
         let negated = value.wrapping_neg();
         if is_int_key(state.1, declared) {
             if !range_check_literal(state, negated, LIT_INT, 1, declared, (file, start, end), quiet) {
-                // Same root cause as the atomic path: the magnitude is out of
-                // range for the target width, but the type recovers to the
-                // declared key, so the range diagnostic is the only one
-                // emitted (no cascading "found '?'" secondary).
+                // Recover to the declared key; the range diagnostic is the only one.
                 return (negated, recover_ty(state, expr, declared));
             }
             return (negated, declared);
@@ -2387,9 +2258,8 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
             return (value, key);
         }
         if sym == NONE {
-            // An unresolvable path: the resolver bound nothing, so the
-            // diagnostic names the path's own segments instead of the
-            // generic "constant expression required" (a truthful primary).
+            // The diagnostic names the path's own segments rather than the
+            // generic "constant expression required".
             let segs = list_to_vec(state.2, node_b(state.1, expr));
             let path_text = join_path(state.0, &segs);
             if quiet == 0 {
@@ -2402,22 +2272,17 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
         } else if quiet == 0 {
             push_type_error(state.3, "constant expression required", file, start, end);
         }
-        // The path failed in a typed constant initializer: the constant
-        // recovers to the declared key so no "found '?'" cascade follows
-        // the primary.
+        // The constant recovers to the declared key so no "found '?'"
+        // cascade follows the primary.
         return (0, recover_ty(state, expr, declared));
     }
     if kind == EXPR_BINARY {
         let op = node_b(state.1, expr);
         let lhs = node_c(state.1, expr);
         let rhs = node_d(state.1, expr);
-        // The literal-typing rule, identical to `check_binary_operands`: an
-        // operand that is only integer literals adopts the peer operand's
-        // type when the peer has one, otherwise the type expected of this
-        // operator's result.  A comparison declares `Bool`, which tells its
-        // operands nothing, so there the operands type each other.  Keeping
-        // this in step with the runtime path is what stops the same source
-        // text from typing one way in a `const` and another in a `var`.
+        // The literal-typing rule, the same one `check_binary_operands`
+        // applies: a literal-only operand adopts the peer operand's type
+        // when it has one, else this operator's expected operand type.
         let operand_declared = binary_operand_expected(state, op, declared);
         let lhs_untyped = int_literal_expr(state.1, lhs);
         let rhs_untyped = int_literal_expr(state.1, rhs);
@@ -2461,9 +2326,7 @@ fn fold_const(state: &mut State, expr: i64, declared: i64, quiet: i64) -> (i64, 
         }
         let (v, k) = fold_bin(state, op, lv, rv, lk, (file, start, end), quiet);
         if key_kind(state.1, k) == TYD_UNKNOWN && quiet == 0 {
-            // fold_bin already emitted the primary diagnostic; the constant
-            // still recovers to the declared key so no "found '?'" cascade
-            // follows.
+            // fold_bin reported the primary; recover to avoid a cascade.
             return (0, recover_ty(state, expr, declared));
         }
         return (v, k);
@@ -2518,23 +2381,14 @@ fn mask_int(value: u64, width: u32) -> u64 {
     if width >= 64 { value } else { value & ((1u64 << width) - 1) }
 }
 
-// The constant folder is width- and signedness-aware so folded constants
-// agree with runtime at every width: signed operands are sign-extended and
-// shifted/comparisoned arithmetically, unsigned operands are masked and
-// shifted/comparisoned logically, results are stored as the width-masked
-// bit pattern (codegen's const emission masks again), and shift counts are
-// masked by the width.  Euclidean division and the defined `MIN / -1` edge
-// hold for every signed width.
+// Width-aware constant folding: signed operands are sign-extended and
+// compared arithmetically, unsigned masked and compared logically, results
+// stored width-masked, shift counts masked by the width.
 fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, i64, i64), quiet: i64) -> (i64, i64) {
     let (file, start, end) = span;
     let bool_key = builtin_key_of(state.20, BUILTIN_BOOL);
     if op == BIN_AND || op == BIN_OR {
-        // `check_binary` requires Bool operands for `&&`/`||`; folding must
-        // enforce the identical rule; otherwise `const C: Bool = 1 && 2`
-        // (folds `1 & 2` as if they were already Bool) and `val c: Bool = 1
-        // && 2` (rejected by check_binary) would disagree on the exact same
-        // source text, which is the divergence the literal-typing rule was
-        // written to rule out everywhere.
+        // `&&`/`||` fold only over Bool, the same rule `check_binary` applies.
         if !is_bool_key(state.1, key) {
             if quiet == 0 {
                 push_type_error(state.3, &format!("logical operator '{}' requires Bool operands", op_text(op)), file, start, end);
@@ -2549,14 +2403,8 @@ fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, 
     let sub = tyinfo_builtin_kind(state.1, key);
     let width = builtin_int_width(sub);
     if width == 0 {
-        // `Bool` equality is well-defined on the raw 0/1 values even though
-        // Bool has no integer width, so it folds here; `comparable_key` is
-        // the same predicate `check_binary` applies, so a constant and a
-        // runtime expression agree on exactly which comparisons exist.
-        // Every other non-integer operand is rejected below rather than
-        // folded, and the diagnostic is re-reported in non-quiet mode so
-        // the constant is refused truthfully instead of failing
-        // unification against '?'.
+        // Bool equality folds on the raw 0/1 values; `comparable_key` is the
+        // same predicate `check_binary` applies.
         if comparable_key(state.1, key, op) {
             if op == BIN_EQ {
                 return ((lv == rv) as i64, bool_key);
@@ -2621,10 +2469,8 @@ fn fold_bin(state: &mut State, op: i64, lv: i64, rv: i64, key: i64, span: (i64, 
         if op == BIN_BXOR {
             return (mask_int((a ^ b) as u64, width) as i64, key);
         }
-        // Signed comparisons sign-extend the stored (width-masked) values
-        // before ordering them, so a negative arithmetic result stored as
-        // its masked bit pattern (I8 `-1 + 0` -> 255) still compares as
-        // -1, agreeing with runtime.
+        // Signed comparisons order the sign-extended values, so a negative
+        // result stored width-masked still compares correctly.
         if op == BIN_EQ {
             return ((a == b) as i64, bool_key);
         }
@@ -2759,14 +2605,8 @@ fn check_expr(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64
     recover_ty(state, expr, expected)
 }
 
-// The type of a string literal: `&[U8]`, a shared borrow of a byte slice.
-//
-// A literal's bytes live in the binary's read-only data for the whole run,
-// so the borrow has no owner to outlive: there is nothing to consume,
-// nothing to free, and no lifetime to track.  `&[U8]` rather than a
-// dedicated string type because the byte slice is the representation the
-// rest of the language already has — `Slice.len`, indexing, and
-// `Collections.string_from_slice` all work on it unchanged.
+// The type of a string literal: `&[U8]`, a shared borrow of a byte slice
+// rooted in read-only data, usable by every slice operation unchanged.
 fn byte_slice_key(state: &mut State) -> i64 {
     let byte = builtin_key_of(state.20, BUILTIN_U8);
     let slice = canon_tyinfo(state.1, state.2, TYD_SLICE, NONE, NONE, byte, NONE);
@@ -2781,9 +2621,7 @@ fn check_lit(state: &mut State, expr: i64, expected: i64) -> i64 {
         return key;
     }
     if lit == LIT_STRING {
-        // A string literal has one type and adopts nothing: unlike an
-        // integer literal it is not a width-agnostic magnitude, so an
-        // expected type of anything else is a mismatch the caller reports.
+        // A string literal has one type, `&[U8]`, and adopts nothing.
         let key = byte_slice_key(state);
         expr_set_ty(state.1, expr, key);
         return key;
@@ -2798,18 +2636,15 @@ fn check_lit(state: &mut State, expr: i64, expected: i64) -> i64 {
     let start = node_start(state.1, expr);
     let end = node_end(state.1, expr);
     if !range_check_literal(state, value, lit, 0, key, (file, start, end), 0) {
-        // The literal is out of range for the width it was adopted into;
-        // its type recovers to the expected key (or TYD_UNKNOWN when none
-        // is known) so the range diagnostic is the only one emitted.
+        // Recover to the expected key so the range diagnostic is the only one.
         return recover_ty(state, expr, expected);
     }
     expr_set_ty(state.1, expr, key);
     key
 }
 
-// The bit width a scalar of sub-kind `sub` is range-checked against. The
-// pointer-width pair (`Isize`/`Usize`) reads the target's architecture
-// width; every fixed-width integer uses its declared width.
+// The bit width a scalar of sub-kind `sub` is range-checked against;
+// `Isize`/`Usize` use the target's pointer width.
 fn scalar_width(state: &mut State, sub: i64) -> u32 {
     if sub == BUILTIN_ISIZE || sub == BUILTIN_USIZE {
         state.19.pointer_width_bits()
@@ -2818,11 +2653,8 @@ fn scalar_width(state: &mut State, sub: i64) -> u32 {
     }
 }
 
-// Rejects an integer literal whose magnitude does not fit the width and
-// signedness of `key` (the type it is being adopted into).  `lit` picks the
-// diagnostic spelling (hex vs decimal); `negated` marks a value produced by
-// unary negation, which is displayed signed and checked against the signed
-// half of the width.  Quiet probes never report.
+// Rejects an integer literal that does not fit `key`'s width and signedness;
+// negated values check against the signed half, quiet probes never report.
 fn range_check_literal(state: &mut State, value: i64, lit: i64, negated: i64, key: i64, span: (i64, i64, i64), quiet: i64) -> bool {
     let (file, start, end) = span;
     if key_kind(state.1, key) != TYD_BUILTIN {
@@ -2836,11 +2668,8 @@ fn range_check_literal(state: &mut State, value: i64, lit: i64, negated: i64, ke
     let bits = value as u64;
     let ok = if builtin_int_is_signed(sub) {
         if negated == 1 {
-            // A negated literal must be non-positive and within the target
-            // type's negative range.  `value` is the wrapping_neg of the
-            // literal's magnitude, so an out-of-range hex magnitude can wrap
-            // positive (e.g. `-0xFFFFFFFFFFFFFF00` -> 256); the upper bound
-            // catches those, the lower bound the genuinely too-negative ones.
+            // A negated literal must land in the target type's negative
+            // range; the wrapping_neg value can wrap positive.
             let min_val = -(1i128 << (width - 1));
             let v128 = value as i128;
             v128 <= 0 && v128 >= min_val
@@ -2876,13 +2705,8 @@ fn check_unary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
     } else {
         let inner = check_expr(state, operand, NONE, ret, impure, self_key);
     if op == UN_REF || op == UN_REF_MUT {
-        // The sanctioned array-to-slice coercion, in both borrow forms:
-        // `&arr` is `&[T]` and `&mut arr` is `&mut [T]`.  Borrowing an
-        // array never yields `&[T; N]` — the length travels in the slice
-        // view instead of in the type — and there is no reason for the
-        // exclusive borrow to behave differently from the shared one.  A
-        // `&mut [T]` is what lets a caller hand a fixed-size buffer to a
-        // native that fills it, which is how `File.read` receives one.
+        // The array-to-slice coercion, in both borrow forms: `&arr` is
+        // `&[T]` and `&mut arr` is `&mut [T]`; the length lives in the view.
         let borrow = if op == UN_REF { TYD_REF } else { TYD_REF_MUT };
         let target = if key_kind(state.1, inner) == TYD_ARRAY {
             let elem = key_elem(state.1, inner);
@@ -2897,16 +2721,10 @@ fn check_unary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
                 push_type_error(state.3, "unary '-' requires an integer operand", file, start, end);
             }
             // Only a bare integer-literal operand is untyped and may adopt
-            // the expected width (`-5` types as I8 in `val x: I8 = -5`); a
-            // typed value (a path, call, index, field access, ...) already
-            // has a type and must never adopt another one through negation
-            // — that is exactly the implicit conversion the literal-typing
-            // rule forbids for every other operator, and unary '-' is not
-            // an exception.
+            // the expected width; a typed value keeps its own type.
             let literal_operand = int_literal_expr(state.1, operand);
             if literal_operand && expected != NONE && is_int_key(state.1, expected) {
-                // The negated literal adopts the expected width, so `-5` types
-                // as I8 in `val x: I8 = -5`; only signed widths may be negated.
+                // The literal adopts the expected width; only signed widths negate.
                 if !key_is_signed(state.1, expected) {
                     push_type_error(state.3, "unary '-' is not allowed on unsigned integer types", file, start, end);
                     key = recover_ty(state, expr, expected);
@@ -2940,19 +2758,8 @@ fn check_unary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
     key
 }
 
-
-// True when an expression is built out of nothing but integer literals,
-// unary negation, and integer-valued binary operators.  Such an expression
-// carries no type of its own — it is a width-agnostic magnitude — so it
-// adopts the type its context demands (MANIFESTO, "Types": integer literals
-// adopt the expected type in a typed context).  Every other expression form
-// (path, call, index, field access, match, try, struct literal, array) has a
-// declared or inferred type of its own and never adopts one; making a typed
-// *value* take another width would be the implicit conversion the manifesto
-// forbids.
-//
-// Comparison and logical operators are excluded because they yield `Bool`,
-// not an integer, however their own operands are typed.
+// True when an expression is built purely from integer literals, unary
+// negation, and integer-valued binary operators: a width-agnostic magnitude.
 fn int_literal_expr(nodes: &[i64], expr: i64) -> bool {
     if node_tag(nodes, expr) != NODE_EXPR {
         return false;
@@ -2975,16 +2782,7 @@ fn int_literal_expr(nodes: &[i64], expr: i64) -> bool {
     false
 }
 
-// The integer type a binary operator's *operands* are expected to have,
-// derived from the type expected of the operator's result.  A comparison or
-// logical operator yields `Bool`, which constrains its operands not at all,
-// so it contributes no expectation and the operands type each other.  Every
-// integer operator yields the operand type itself, so the expectation passes
-// straight through — except that `/` and `%` wrap it: they evaluate to
-// `Result(T, DivError)` at runtime, so an expected Result names the operand
-// type in its `Ok` payload.  A constant initializer whose division the
-// folder collapses declares `T` directly, and that shape is read straight
-// through like any other operator's; both spellings name the same `T`.
+// Expected operand type derived from result type for binary operators.
 fn binary_operand_expected(state: &mut State, op: i64, expected: i64) -> i64 {
     if expected == NONE || op == BIN_AND || op == BIN_OR || (BIN_EQ..=BIN_GE).contains(&op) {
         return NONE;
@@ -3002,11 +2800,7 @@ fn check_static_zero_divisor(state: &mut State, op: i64, rhs: i64) -> i64 {
         return 0;
     }
     let (value, key) = fold_const(state, rhs, NONE, 1);
-    // Only an *integer* constant divisor can be a provable zero.  A folded
-    // `Bool` carries 0 for `false` and a folded string carries an interned
-    // name id, neither of which is a numeric zero; reporting either as a
-    // division by zero would replace the real operand-type diagnostic with
-    // a false one.
+    // Only an integer constant divisor can be a provable zero.
     if is_int_key(state.1, key) && value == 0 {
         let message = if op == BIN_DIV {
             "division by zero"
@@ -3036,20 +2830,9 @@ fn division_result_key(state: &mut State, payload: i64) -> i64 {
     canon_tyinfo(state.1, state.2, TYD_ENUM, result_sym, args, NONE, NONE)
 }
 
-// Checks a binary operator's two operands under the literal-typing rule.
-// An operand that is only integer literals has no type of its own, so it
-// adopts one from its context: the peer operand's type when the peer has
-// one, otherwise the type expected of the operator's result, otherwise the
-// `I64` default.  Whichever operand is typed is therefore checked first, so
-// `255 != narrowed` types exactly like `narrowed != 255`.  An operand that
-// is *not* a bare literal expression is never handed the result's expected
-// type: it already has a type, and reporting it against a foreign
-// expectation would emit a cascade ahead of the real operand-mismatch or
-// assignment diagnostic.
-//
-// `fold_const`'s `EXPR_BINARY` arm applies the identical rule to constant
-// initializers; the two must agree, or the same source text would type one
-// way in a `const` and another in a `var`.
+// Checks a binary operator's two operands under the literal-typing rule:
+// a literal-only operand adopts the peer's type, else the expected operand
+// type; `fold_const`'s EXPR_BINARY arm applies the identical rule.
 fn check_binary_operands(state: &mut State, operands: (i64, i64, i64), ret: i64, impure: i64, self_key: i64) -> (i64, i64) {
     let (lhs, rhs, operand_expected) = operands;
     let lhs_untyped = int_literal_expr(state.1, lhs);
@@ -3103,10 +2886,7 @@ fn check_binary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i
                 push_type_error(state.3, &format!("comparison '{}' requires operands of the same type", op_text(op)), file, start, end);
             }
         } else if !comparable_key(state.1, l, op) && key_kind(state.1, l) != TYD_UNKNOWN {
-            // The operands agree but the type has no comparison. Reported
-            // only when they agree, so a mismatch produces one diagnostic
-            // rather than a same-type error followed by a not-comparable
-            // cascade.
+            // The operands agree but the type has no comparison.
             push_type_error(state.3, &format!("comparison '{}' is not defined for '{}': compare integer or Bool values, or take the value apart with match", op_text(op), render_key(state.0, state.1, state.2, state.6, state.7, l)), file, start, end);
         }
         expr_set_ty(state.1, expr, bool_key);
@@ -3119,10 +2899,8 @@ fn check_binary(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i
     }
     let ok = unify_key(state.1, state.2, state.6, l, r);
     if lhs_bad {
-        // The primary already implicates both operands and the rhs was
-        // still checked (its own diagnostics surface); the operands-differ
-        // error below would be a cascade, so the expression recovers
-        // instead.
+        // The primary already implicates both operands; recover to avoid
+        // a second operands-differ error.
         return recover_ty(state, expr, expected);
     }
     if !ok {
@@ -3167,11 +2945,8 @@ fn check_array(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i6
     } else {
         NONE
     };
-    // The first element adopts the expected element type (when the array
-    // literal is checked against an annotated `[T; N]` or `&[T]` key), so
-    // `val bytes: [U8; 4] = [0x0D, 0xF0, 0xAD, 0x0B]` types each literal as
-    // U8 and range-checks it against that width; the remaining elements
-    // adopt the first element's type as before.
+    // The first element adopts the expected element type; the remaining
+    // elements adopt the first element's type.
     let first = check_expr(state, list_get(state.2, elems, 0), elem_expected, ret, impure, self_key);
     let mut idx = 1i64;
     while idx < count {
@@ -3454,9 +3229,7 @@ fn variant_value_key(state: &mut State, expr: i64, expected: i64, sym: i64) -> i
         } else {
             let item = sym_decl(state.1, enum_sym);
             key = enum_key_with_fresh(state.1, state.2, state.6, state.7, expr, enum_sym, item);
-            // A payload-bearing variant cannot be used as a bare value: the
-            // constructor requires its declared payload values, otherwise
-            // codegen would lower an enum with an uninitialised payload.
+            // A payload-bearing variant cannot be used as a bare value.
             let payload_decl = node_b(state.1, decl);
             if list_len(state.2, payload_decl) > 0 {
                 push_type_error(state.3, &format!("variant '{}' requires payload values", name_text(state.0, node_a(state.1, decl))), file, start, end);
@@ -3515,8 +3288,8 @@ fn field_access_key(state: &mut State, expr: i64, base: i64, field: i64, expecte
         push_type_error(state.3, &format!("no field '{}' on type '{}'", name_text(state.0, field), render_key(state.0, state.1, state.2, state.6, state.7, eff)), file, start, end);
         return recover_ty(state, expr, expected);
     }
-    // Fields are private to their declaring module unless marked `pub`; the
-    // resolver attached the declaring scope to the field row (slot d).
+    // A field is private unless `pub` or accessed from its declaring scope
+    // (resolver-attached, field row slot d).
     let fnode = struct_field_node(state.1, state.2, item, field);
     if fnode != NONE && node_c(state.1, fnode) == 0 && node_d(state.1, fnode) != state.13 {
         push_type_error(state.3, &format!("field '{}' of type '{}' is private to its module", name_text(state.0, field), render_key(state.0, state.1, state.2, state.6, state.7, eff)), file, start, end);
@@ -3555,11 +3328,8 @@ fn struct_field_node(nodes: &[i64], lists: &[Vec<i64>], item: i64, name: i64) ->
     NONE
 }
 
-// Marks the field row's `e` slot when the access comes from a module other
-// than the one the field was declared in. The resolver stored the declaring
-// module scope in the field row's `d` slot; `state.13` is the scope the
-// checker is walking. `enforce_field_visibility` reads the `e` flag at the
-// end of typechecking.
+// Marks the field row's `e` slot on a cross-module access (declaring scope
+// in slot d); read by `enforce_field_visibility` after typechecking.
 fn record_cross_scope_field(state: &mut State, fnode: i64) {
     if fnode == NONE {
         return;
@@ -3571,11 +3341,7 @@ fn record_cross_scope_field(state: &mut State, fnode: i64) {
 }
 
 // Emits `UnnecessaryFieldPub` for every `pub` field of a reached struct
-// whose field row's `e` slot no cross-module access marked during
-// typechecking.  The resolver marked the struct symbol's slot `f` with `1`
-// when reachability reached it from `main`; this pass reads that flag and
-// runs after every expression has been checked.  Module children are
-// visited through a worklist rather than a nested walker.
+// whose field row's `e` slot no cross-module access marked.
 fn enforce_field_visibility(
     names: &[String],
     nodes: &[i64],
@@ -3643,9 +3409,8 @@ fn enforce_field_visibility(
 }
 
 fn enum_sym_of_variant(nodes: &[i64], variant_sym: i64) -> i64 {
-    // The resolver recorded the parent enum item on the variant row's
-    // slot e; the enum symbol is that item's own symbol slot.  Matching
-    // scopes instead would re-derive the resolver's ownership fact.
+    // The parent enum item rides the variant row's slot e; its symbol slot
+    // is the enum symbol.
     let decl = sym_decl(nodes, variant_sym);
     if decl != NONE && node_tag(nodes, decl) == NODE_VARIANT {
         let enum_item = node_e(nodes, decl);
@@ -3756,12 +3521,8 @@ fn check_call(state: &mut State, expr: i64, expected: i64, ret: i64, impure: i64
     result
 }
 
-// The container binding of an extract-mode call, written to the call's
-// dedicated fact row (`NODE_CALLFACT`, slot d) so the borrow checker
-// reads the binding without re-walking the argument list (Single-Fact
-// Rule).  The parse tree is never mutated: `EXPR_CALL` slots keep what
-// the parser wrote.  The mode comes from the resolver's registry row, not
-// from a NAT_* opcode.
+// Writes an extract-mode call's container binding to NODE_CALLFACT slot d,
+// read by the borrow checker.
 fn attach_extraction_binding(state: &mut State, expr: i64, sym: i64) {
     let mode = if sym != NONE && node_tag(state.1, sym) == NODE_SYM && sym_kind(state.1, sym) == SYM_NATIVE_FUN {
         sym_native_mode(state.1, sym)
@@ -3818,10 +3579,8 @@ fn check_unresolved_callee(state: &mut State, expr: i64, expected: i64) -> i64 {
         push_type_error(state.3, &format!("unknown function '{}'", name_text(state.0, first)), file, start, end);
         suggest_value_name(state, expr, first);
     }
-    // The callee could not be resolved and an error was already reported;
-    // the call recovers to the expected key (or TYD_UNKNOWN) so the
-    // surrounding unification succeeds and no cascading "found '?'"
-    // secondary follows the primary diagnostic.
+    // The call recovers to the expected key so unification succeeds and
+    // no "found '?'" cascade follows the primary.
     recover_ty(state, expr, expected)
 }
 
@@ -3832,9 +3591,7 @@ fn check_direct_call(state: &mut State, expr: i64, expected: i64, sym: i64, ret:
     }
     let fn_node = fn_node_of(state.1, decl);
     let kind = sym_kind(state.1, sym);
-    // A function not declared `impure` may not call an `impure` function or
-    // native (MANIFESTO).  The enclosing purity flag is threaded down from
-    // the current function's declaration.
+    // A pure function may not call an `impure` one; purity is threaded down.
     if node_e(state.1, fn_node) == 1 && impure == 0 {
         push_type_error(state.3, &format!("impure function '{}' cannot be called from a pure context", name_text(state.0, node_a(state.1, fn_node))), node_file(state.1, expr), node_start(state.1, expr), node_end(state.1, expr));
     }
@@ -3857,9 +3614,7 @@ fn check_direct_call(state: &mut State, expr: i64, expected: i64, sym: i64, ret:
         list_push(state.2, param_keys, concrete);
         let arg = list_get(state.2, arg_exprs, idx);
         if arg == NONE {
-            // The arity mismatch was already reported; the missing argument
-            // has no node to check, so the loop stops here (no "argument N
-            // has type '?'" cascade).
+            // The arity mismatch was already reported; nothing left to check.
             break;
         }
         let akey = check_expr(state, arg, concrete, ret, impure, self_key);
@@ -3905,10 +3660,9 @@ fn check_direct_call(state: &mut State, expr: i64, expected: i64, sym: i64, ret:
     result
 }
 
-// A native container type C(T) may hold linear elements only if its native
-// surface provides a by-value extraction function.  On every mutate-mode
-// call, each container-typed argument's element key is checked against the
-// extraction flag the resolver attached.
+// A container type may hold linear elements only if its native surface
+// provides a by-value extraction function; checked per argument on every
+// mutate-mode call.
 fn check_container_resolvability(state: &mut State, expr: i64, param_keys: i64) {
     let count = list_len(state.2, param_keys);
     let mut idx = 0i64;
@@ -3919,9 +3673,8 @@ fn check_container_resolvability(state: &mut State, expr: i64, param_keys: i64) 
             if cty_sym != NONE && nattype_is_container(state.1, cty_sym) == 1 {
                 let args = key_args(state.1, key);
                 if args != NONE {
-                    // Any linear type argument is a linear obligation
-                    // living inside the container: for HashMap(K, V) both
-                    // the key and the value count, not just the value.
+                    // Every linear type argument is a linear obligation
+                    // inside the container.
                     let acount = list_len(state.2, args);
                     let mut ai = 0i64;
                     let mut has_linear = 0;
@@ -4070,11 +3823,8 @@ fn check_int_from(state: &mut State, expr: i64, expected: i64, sym: i64, ret: i6
     let args_list = alloc_list(state.2);
     list_push(state.2, args_list, receiver_key);
     list_push(state.2, args_list, akey);
-    // The mono key carries both the receiver and the source type: codegen
-    // keys the lowered conversion function by this mono key, so without the
-    // source type every `I64.from(...)` call would share the first-seen
-    // parameter layout and call an i8-parameter function with i16/i32/i64
-    // arguments.
+    // The mono key carries both the receiver and the source type; codegen
+    // keys the lowered conversion function by this mono key.
     let mono = canon_tyinfo(state.1, state.2, TYD_MONO, sym, args_list, NONE, NONE);
     let param_keys = alloc_list(state.2);
     list_push(state.2, param_keys, akey);
@@ -4090,9 +3840,8 @@ fn check_int_from(state: &mut State, expr: i64, expected: i64, sym: i64, ret: i6
 fn builtin_type_of_scope(nodes: &[i64], scope: i64) -> i64 {
     let mut idx = 0i64;
     while idx < nodes.len() as i64 / NODE_STRIDE {
-        // A declared native type's slot e is its container role (0/1), not
-        // a scope; only a seeded builtin type (decl == NONE) keeps its
-        // sub-scope there.
+        // Only a seeded builtin type (decl == NONE) keeps its sub-scope in
+        // slot e; a declared native type stores its container role there.
         if node_tag(nodes, idx) == NODE_SYM
             && node_a(nodes, idx) == SYM_TYPE
             && sym_decl(nodes, idx) == NONE
@@ -4195,8 +3944,7 @@ fn trait_call_deferred(state: &mut State, expr: i64, trait_sym: i64, trait_metho
     if !param_has_bound(state.1, recv, trait_sym) {
         push_type_error(state.3, &format!("type parameter '{}' does not implement trait '{}'", name_text(state.0, key_sym(state.1, recv)), name_text(state.0, sym_name(state.1, trait_sym))), file, start, end);
     }
-    // A trait method not declared `impure` may not be called from a pure
-    // context (MANIFESTO); the enclosing purity flag is threaded down.
+    // A non-`impure` trait method may not be called from a pure context.
     if node_e(state.1, trait_method) == 1 && impure == 0 {
         push_type_error(state.3, &format!("impure trait method '{}' cannot be called from a pure context", name_text(state.0, node_a(state.1, trait_method))), file, start, end);
     }
@@ -4302,11 +4050,10 @@ fn check_struct_construct(state: &mut State, expr: i64, sym: i64, ret: i64, impu
             record_cross_scope_field(state, struct_field_node(state.1, state.2, item, name));
             let concrete = subst_key(state.1, state.2, declared, &from, &to);
             let value = list_get(state.2, values, idx);
-            if value == NONE {
-                // The count mismatch was already reported; the missing value
-                // has no node to check.
-                break;
-            }
+                if value == NONE {
+                    // The count mismatch was already reported.
+                    break;
+                }
             let vkey = check_expr(state, value, concrete, ret, impure, self_key);
             let ok = unify_key(state.1, state.2, state.6, vkey, concrete);
             if !ok && key_kind(state.1, vkey) != TYD_UNKNOWN && key_kind(state.1, concrete) != TYD_UNKNOWN {
@@ -4374,8 +4121,7 @@ fn check_variant_construct(state: &mut State, expr: i64, expected: i64, sym: i64
         let concrete = subst_key(state.1, state.2, declared, &from, &to);
         let value = list_get(state.2, values, idx);
         if value == NONE {
-            // The arity mismatch was already reported; the missing payload
-            // has no node to check.
+            // The arity mismatch was already reported.
             break;
         }
         let vkey = check_expr(state, value, concrete, ret, impure, self_key);
@@ -4439,11 +4185,8 @@ fn check_arm(state: &mut State, arm: i64, scrut: (i64, i64), ret: i64, impure: i
     attach_local_facts(state, arm);
     let body = node_b(state.1, arm);
     let key = if node_tag(state.1, body) == NODE_STMT && node_a(state.1, body) == STMT_EXPR {
-        // Later arms are checked against the merged type of the non-diverging
-        // arms seen so far, so an arm literal adopts it (`Err(DivByZero) => 0`
-        // against a U8 `Ok` arm) instead of defaulting to I64 and failing to
-        // unify.  The first non-diverging arm is still checked with no
-        // expected type, exactly as before.
+        // Later arms are checked against the merged type of the
+        // non-diverging arms seen so far.
         check_expr(state, node_b(state.1, body), expected, ret, impure, self_key)
     } else {
         check_stmt(state, body, ret, impure, self_key)
@@ -4462,9 +4205,8 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64, scrutinee: i64) -> i64
     let end = node_end(state.1, pat);
     if kind == PAT_BIND {
         let name = node_b(state.1, pat);
-        // The bound value is (a subpart of) the match scrutinee, so its
-        // frame-rootedness is the scrutinee's; the tail-safety trace reads
-        // this fact back without re-walking the arm list.
+        // The bound value is a subpart of the scrutinee; its frame root is
+        // the scrutinee's.
         alloc_patfact(state.1, pat, scrutinee);
         bind(state.4, name, s_key, 0, pat);
         pat_set_ty(state.1, pat, s_key);
@@ -4478,9 +4220,8 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64, scrutinee: i64) -> i64
         } else {
             builtin_key_of(state.20, BUILTIN_I64)
         };
-        // A literal pattern carries the scrutinee's own scalar type when that
-        // type is a primitive integer or Bool, so `5` matches a U8 scrutinee
-        // instead of forcing an I64 key that cannot unify.
+        // A literal pattern carries the scrutinee's scalar type when it is
+        // a primitive integer or Bool.
         let scrut = deref_key(state.1, s_key);
         if key_kind(state.1, scrut) == TYD_BUILTIN {
             let sub = tyinfo_builtin_kind(state.1, scrut);
@@ -4554,9 +4295,8 @@ fn check_pattern(state: &mut State, pat: i64, s_key: i64, scrutinee: i64) -> i64
     let rest = node_c(state.1, pat);
     if rest != NONE {
         let rest_key = rest_type_of(state.1, state.2, s_key, inner);
-        // A rest binding is a slice view of the scrutinee, so its
-        // frame-rootedness is the scrutinee's; the tail-safety trace reads
-        // this fact back without re-walking the arm list.
+        // A rest binding is a slice view of the scrutinee; its frame root
+        // is the scrutinee's.
         alloc_patfact(state.1, pat, scrutinee);
         bind(state.4, rest, rest_key, 0, pat);
         pat_set_rest_key(state.1, pat, rest_key);
@@ -4839,22 +4579,15 @@ fn origin_of(origins: &[(i64, i64, i64)], var: i64) -> (i64, i64, i64) {
 
 #[cfg(test)]
 mod tests {
-    // Drives the real front end (module loading through borrow checking,
-    // the same path `analysis::analyze` gives the LSP and the playground)
-    // over an in-memory source, with no LLVM dependency — the only way to
-    // pin typechecker behavior end to end on a machine without the LLVM
-    // toolchain `cargo test`'s fixture-linked suites need.
+    // Runs the real front end over an in-memory source, no LLVM needed.
     fn errors_for(source: &str) -> Vec<String> {
         let overlay = [("scratch.cnb".to_string(), source.to_string())];
         let result = crate::analysis::analyze("scratch.cnb", &overlay, &crate::target::Target::host());
         result.errors.iter().map(|d| d.message.clone()).collect()
     }
 
-    // An `impl` that leaves one of the trait's methods out used to be
-    // accepted: only the methods it did provide were checked against the
-    // trait, so the omission surfaced solely at a call site that happened
-    // to dispatch the missing method. An impl nothing fully exercised
-    // compiled clean.
+    // An `impl` that omits a trait method is rejected even when no call
+    // site dispatches the missing method.
     #[test]
     fn impl_missing_a_trait_method_is_rejected() {
         let source = r#"
@@ -4890,8 +4623,7 @@ end
         );
     }
 
-    // Every missing method is named, not just the first: a diagnostic that
-    // stopped at one would have the developer rebuild to find the next.
+    // The diagnostic names every missing method, not just the first.
     #[test]
     fn every_missing_trait_method_is_named() {
         let source = r#"
@@ -4925,8 +4657,7 @@ end
         assert!(errors.iter().any(|m| m.contains("missing method 'depth'")), "{:?}", errors);
     }
 
-    // Negative control, modelled on the trait/impl pair in
-    // `tests/fixtures/spec.cnb`: a complete impl stays accepted.
+    // Negative control: a complete impl stays accepted.
     #[test]
     fn complete_impl_is_accepted() {
         let source = r#"
@@ -4969,8 +4700,7 @@ end
         assert!(errors.is_empty(), "{:?}", errors);
     }
 
-    // Completeness is per impl: one type implementing the trait fully does
-    // not excuse another that does not.
+    // Completeness is per impl: one complete impl does not excuse another.
     #[test]
     fn a_second_incomplete_impl_is_rejected_on_its_own() {
         let source = r#"

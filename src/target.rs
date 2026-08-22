@@ -11,13 +11,10 @@
 //! than rejecting a language operation in the frontend.
 //!
 //! **Invariants:**
-//! - `Target::triple()` is the only place an LLVM triple string is
-//!   formed; no other stage matches or re-forms it.
-//! - `TargetOs::abi()` owns every numeric ABI constant the emitter reads;
-//!   the emitter never hardcodes a flag value.
-//! - A named target defaults to `X86_64`; only `host` takes the
-//!   compiler's own architecture and OS, so a named cross target is
-//!   deterministic regardless of the host it is built on.
+//! - `Target::triple()` is the only place an LLVM triple string is formed.
+//! - `TargetOs::abi()` owns every numeric ABI constant the emitter reads.
+//! - A named target defaults to `X86_64`; only `host` takes the compiler's
+//!   own architecture and OS.
 
 /// The operating system half of a target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,10 +32,8 @@ pub enum TargetArch {
     AArch64,
 }
 
-/// How a linked build is produced: the shipped static musl link, the
-/// Windows MinGW link, or the ordinary dynamic link. The sanitizer-instrumented
-/// link is a codegen-only mode layered on top of a `Target`, not a target
-/// property a user can name.
+/// How a linked build is produced: shipped static musl, Windows MinGW,
+/// or ordinary dynamic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TargetLink {
     Dynamic,
@@ -46,9 +41,8 @@ pub enum TargetLink {
     WindowsMinGW,
 }
 
-/// The native subsystems a declared verb can belong to. The resolver maps
-/// each native verb to one of these and checks it against the target before
-/// the surface is allowed to typecheck.
+/// The native subsystems a declared verb can belong to; the resolver checks
+/// each native verb's subsystem against the target before typechecking.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeSubsystem {
     Core,
@@ -136,10 +130,8 @@ impl Target {
         }
     }
 
-    /// Parses a `--target` argument into a descriptor. `host` resolves to
-    /// the compiler's own OS and architecture. A bare OS uses the canonical
-    /// `X86_64` architecture; an explicit architecture may precede either a
-    /// short OS name or a conventional target triple.
+    /// Parses a `--target` argument: `host`, a bare OS (default `X86_64`),
+    /// or an explicit architecture before an OS name or triple.
     pub fn parse(name: &str) -> Result<Target, TargetError> {
         if name == "host" {
             return Ok(Target::host());
@@ -191,9 +183,7 @@ impl Target {
         format!("{}-{}", arch, os)
     }
 
-    /// True when this is the compiler's own OS and architecture. The host
-    /// build uses the native LLVM machine with host CPU features; a cross
-    /// target uses the explicit triple with generic CPU.
+    /// True when this is the compiler's own OS and architecture.
     pub fn is_host(&self) -> bool {
         self.host_toolchain
     }
@@ -226,10 +216,8 @@ impl Target {
         }
     }
 
-    /// Whether a native subsystem is available on this target. Core,
-    /// memory, and process operations are implemented uniformly across
-    /// every supported operating system; the file and network surfaces
-    /// require the target's ABI row to name an entry point.
+    /// Whether a native subsystem is available: file/network require the
+    /// target's ABI row to name an entry point.
     pub fn supports_subsystem(&self, subsystem: NativeSubsystem) -> bool {
         match subsystem {
             NativeSubsystem::Core | NativeSubsystem::Memory | NativeSubsystem::Process => true,
@@ -239,11 +227,8 @@ impl Target {
     }
 }
 
-/// Static ABI facts for one operating system: the numeric constants the
-/// emitter lowers native calls against, the errno accessor, and the
-/// descriptor-width facts that decide a C signature. One row per OS, read
-/// by the emitter through the session's `Target`; no emission site branches
-/// on a target string.
+/// Static ABI facts for one operating system: the constants the emitter
+/// lowers native calls against, plus errno and descriptor widths.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Abi {
     /// `PROT_READ | PROT_WRITE` passed to `mmap`.

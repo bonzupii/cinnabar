@@ -8,13 +8,10 @@
 //! calls into it.
 //!
 //! **Invariants:**
-//! - The language's casing rules are enforced here, at generation time, on
-//!   module, type, function, and parameter names. Emitting a declaration
-//!   the resolver would reject would push a diagnostic onto a file the
-//!   author did not write and cannot fix.
+//! - Casing rules are enforced here, at generation time, on module, type,
+//!   function, and parameter names.
 //! - Delimiters in a type expression are balance-checked before emission,
-//!   so a malformed IDL fails as an IDL error naming its line rather than
-//!   as a parse error in generated source.
+//!   so a malformed IDL fails as an IDL error naming its line.
 
 use std::path::Path;
 

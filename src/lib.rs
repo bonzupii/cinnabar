@@ -2,14 +2,11 @@
 //!
 //! The CLI driver (`src/main.rs`) and the language server
 //! (`src/bin/cinnabar_lsp.rs`) consume one shared implementation of every
-//! stage through this crate. The pipeline is not altered by being a
-//! library: each stage computes its facts once and attaches them to the
-//! flat node arena for every later consumer to read.
+//! stage through this crate; each stage computes its facts once and attaches
+//! them to the flat node arena for later consumers to read.
 //!
 //! **Invariants:**
-//! - There is exactly one implementation of each stage. A second entry
-//!   point that re-ran resolution or inference for tooling's convenience
-//!   would let an editor and a build disagree about the same program.
+//! - There is exactly one implementation of each stage.
 
 pub mod analysis;
 pub mod advanced_tools;

@@ -1,21 +1,16 @@
 //! Hand-derived oracles for the arithmetic the `verify_math` fixtures run.
 //!
-//! Every expected value here is computed independently, in Rust, from the
-//! same declared constants the Cinnabar fixtures use: the checksums, the
-//! little-endian byte combining, the range and port workflows, the option
-//! and loop flows, the bitflags, and Euclidean division and modulo. Two of
-//! the tests go further and compare a compiled fixture's actual stdout
-//! against an oracle string built in this file.
+//! Every expected value is computed independently, in Rust, from the same
+//! declared constants the Cinnabar fixtures use: checksums, little-endian
+//! byte combining, range and port workflows, option and loop flows,
+//! bitflags, and Euclidean division and modulo. Two tests also compare a
+//! compiled fixture's actual stdout against an oracle string built here.
 //!
 //! **Invariants:**
-//! - The oracle is derived, never transcribed. Its whole value is that it
-//!   comes from the specification's arithmetic rather than from what the
-//!   compiler currently prints — copying an observed output in here would
-//!   turn a correctness check into a change detector.
-//! - Euclidean division and modulo are written out explicitly, with the
-//!   sign correction applied to Rust's truncating operators rather than
-//!   assumed to agree with them. That difference is precisely what these
-//!   cases exist to pin.
+//! - The oracle is derived from the specification's arithmetic, never
+//!   transcribed from compiler output.
+//! - Euclidean division and modulo apply an explicit sign correction to
+//!   Rust's truncating operators rather than assuming agreement.
 
 fn header_checksum(kind: u32, flags: u32) -> u32 {
     (kind << 16) ^ (flags << 8) ^ kind ^ flags
@@ -181,9 +176,7 @@ fn bool01(value: bool) -> i64 {
 }
 
 // Recomputes every `label=value` line printed by int_widths.cnb with
-// independent Rust wrapping arithmetic, explicit shift-count masking, and
-// explicit truncation/extension casts, so the fixture output is verified
-// against a second implementation of the width semantics.
+// independent Rust wrapping arithmetic, shift masking, and explicit casts.
 fn int_widths_oracle() -> String {
     let mut out = String::new();
     // Per-width two's-complement wraparound at the top of the range.

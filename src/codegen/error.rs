@@ -8,12 +8,10 @@
 //! code that raised the error.
 //!
 //! **Invariants:**
-//! - Codegen failures are values, never panics. That is what lets the CLI
-//!   report a tool failure as a diagnostic instead of a backtrace.
-//! - A failure with no Cinnabar source origin carries `NO_FILE` rather than
-//!   a plausible-looking location. `clang` failing to link is not a fact
-//!   about line 1 of the user's program, and saying so would be a
-//!   fabricated span.
+//! - Codegen failures are values, never panics; the CLI renders them as
+//!   diagnostics.
+//! - A failure with no Cinnabar source origin carries `NO_FILE`, never a
+//!   fabricated location.
 
 pub enum CodegenErrorKind {
     Builder(String),

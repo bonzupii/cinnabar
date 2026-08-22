@@ -225,10 +225,7 @@ fn lex_block_comment(bytes: &[u8], mut pos: usize, start: usize, file: i64, erro
     pos
 }
 
-// Advances past the nested block's matching `|#`, so the nested closer
-// never terminates the outer comment.  When the nested block has no
-// closer, the scan reaches end of input and the outer unterminated
-// handling fires.
+// Skips past the nested block's matching `|#`; end of input if none exists.
 fn skip_nested_block(bytes: &[u8], pos: usize) -> usize {
     let mut scan = pos + 2;
     while byte_at(bytes, scan) != 0 && !is_block_close(bytes, scan) {
@@ -265,19 +262,7 @@ fn lex_ident(
     let end = scan_ident_end(bytes, pos);
     match slice_text(source, pos, end, errors) {
         Some(text) => {
-            // A leading underscore is a discard, and Cinnabar has no discards.
-            //
-            // `_` as a match arm is the consequential one: a catch-all makes
-            // any match trivially exhaustive, so adding a variant to an enum
-            // would stop forcing anyone to handle it. `_` and `_name` as
-            // bindings are the same idea spelled differently — a value the
-            // program declines to account for.
-            //
-            // Rejected here, where casing is, because that catches every
-            // position at once: arm, binding, parameter, field. A value that
-            // is genuinely not needed means the surrounding code has the
-            // wrong shape, and the fix is to restructure it rather than to
-            // name it in a way the compiler ignores.
+            // Leading underscore marks a discard; Cinnabar has no discards.
             if text.starts_with('_') {
                 let message = if text == "_" {
                     "discard pattern '_' is not allowed; bind the value with a real name and use it, or split the match arm so each variant has its own".to_string()
@@ -351,10 +336,6 @@ fn decimal_value(bytes: &[u8], start: usize, end: usize, file: i64, errors: &mut
         }
         pos += 1;
     }
-    // A literal is a non-negative magnitude stored as its u64 bit pattern;
-    // the typechecker range-checks it against the adopting type's bounds
-    // (so 0xFFFFFFFFFFFFFFFF is legal as U64 and rejected as I64), and an
-    // untyped literal defaults to I64, whose range check rejects it there.
     Some(value as i64)
 }
 
@@ -398,10 +379,6 @@ fn hex_value(bytes: &[u8], start: usize, end: usize, file: i64, errors: &mut Vec
         }
         pos += 1;
     }
-    // A literal is a non-negative magnitude stored as its u64 bit pattern;
-    // the typechecker range-checks it against the adopting type's bounds
-    // (so 0xFFFFFFFFFFFFFFFF is legal as U64 and rejected as I64), and an
-    // untyped literal defaults to I64, whose range check rejects it there.
     Some(value as i64)
 }
 
@@ -423,30 +400,11 @@ fn accumulate_digit(
     }
 }
 
-// Scans a double-quoted string literal and interns its *decoded* bytes.
-//
-// Only the five escapes the language defines are accepted (`\n`, `\t`,
-// `\0`, `\"`, `\\`); every other escape is a lexical error rather than a
-// silently-passed-through backslash, so a literal's byte sequence is fully
-// determined here and no later stage re-scans the source for it.
-//
-// This escape set is also what makes a literal's UTF-8 validity a
-// compile-time fact with no check to perform: the source text arrives as a
-// `&str` (the module loader reads it as UTF-8 or fails), every unescaped
-// byte is therefore part of a well-formed sequence copied through
-// unchanged, and all five escapes decode to ASCII. There is no byte escape
-// (`\xNN`) precisely because one would let a literal name a lone
-// continuation byte and put runtime validation back on the table.
-//
-// A literal does not span lines: an unescaped newline before the closing
-// quote is an error, which keeps a missing quote from swallowing the rest
-// of the file.
+// Scans and interns decoded string bytes; only five escapes accepted.
 fn lex_string(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: usize, source: &str, file: i64, errors: &mut Vec<Diag>) -> usize {
     let start = pos;
     let mut cursor = pos + 1;
-    // Start of the current unescaped run.  Runs are copied out of `source`
-    // as whole `&str` slices rather than byte by byte, so a multi-byte
-    // character passes through as the character it is.
+    // Runs are copied as whole `&str` slices so multi-byte characters survive.
     let mut run = cursor;
     let mut text = String::new();
     while cursor < bytes.len() {
@@ -468,19 +426,8 @@ fn lex_string(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: 
             if !append_run(&mut text, source, run, cursor, errors) {
                 return cursor + 1;
             }
-            // A backslash begins a two-byte escape only when a byte follows
-            // it that a literal could contain at all. At end of file none
-            // follows, and a newline bounds the literal rather than
-            // belonging to it. In both cases the backslash stands alone and
-            // must consume only itself: consuming a second byte it does not
-            // have would put the reported span past the last byte of the
-            // source, and consuming the newline would let the escape swallow
-            // the very byte that stops a missing quote from running on into
-            // the rest of the file.
-            //
-            // Advancing by one leaves the newline and end-of-file arms above
-            // to report the unterminated literal, so neither case needs its
-            // own copy of that diagnostic and every span stays in range.
+            // A lone backslash at end of file or before a newline consumes
+            // only itself; the newline/EOL arms above report the literal.
             let body = byte_at(bytes, cursor + 1);
             if cursor + 1 >= bytes.len() || body == b'\n' {
                 push_syntax(errors, "incomplete escape in string literal", file, cursor as i64, (cursor + 1) as i64);
@@ -496,20 +443,8 @@ fn lex_string(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: 
                     cursor += 2;
                 }
                 None => {
-                    // An escape body is a character, not a byte. `"\é"` is a
-                    // typo someone will make, and assuming one byte both
-                    // ended the reported span inside the character and left
-                    // the next run starting on a continuation byte — which
-                    // `append_run` then rejects, so the user was handed an
-                    // internal invariant failure in place of their typo.
-                    //
-                    // Taking the body's real width keeps the span over the
-                    // whole escape and every run on a character boundary.
-                    //
-                    // Reported and scanning continues rather than bailing
-                    // mid-string: bailing would leave the closing quote to
-                    // open a second literal and report a spurious
-                    // "unterminated" on the same line.
+                    // An unknown escape body is a character: take its real
+                    // UTF-8 width so the next run starts on a boundary.
                     let body_width = match source.get(cursor + 1..).and_then(|rest| rest.chars().next()) {
                         Some(character) => character.len_utf8(),
                         None => 1,
@@ -528,14 +463,8 @@ fn lex_string(names: &mut Vec<String>, nodes: &mut Vec<i64>, bytes: &[u8], pos: 
     cursor
 }
 
-// Appends the source text between two byte offsets of an unescaped run.
-// Both offsets fall on a character boundary: a run begins after the opening
-// quote or after a whole escape and ends at a quote or a backslash. The
-// quote and the backslash are ASCII, and an escape is consumed by whole
-// characters — including an undefined one, whose body may be any character
-// at all — so no run can start part-way through a multi-byte sequence.
-// `source.get` rather than an index so a broken invariant is an internal
-// diagnostic, never a panic.
+// Appends the source text of one unescaped run; both offsets fall on
+// character boundaries, so `source.get` cannot panic.
 fn append_run(text: &mut String, source: &str, from: usize, to: usize, errors: &mut Vec<Diag>) -> bool {
     match source.get(from..to) {
         Some(part) => {
@@ -819,9 +748,7 @@ mod tests {
             Some(diag) => assert!(diag.message.contains("nested")),
             None => assert!(false),
         }
-        // The nested block's `|#` must not terminate the outer comment:
-        // `val x = 1` stays inside the comment and lexes nothing, while the
-        // outer `|#` closes it and the following line lexes normally.
+        // The nested block's `|#` must not terminate the outer comment.
         assert_eq!(
             kinds,
             vec![TOK_NL, TOK_IDENT, TOK_IDENT, TOK_SYM, TOK_INT, TOK_NL, TOK_EOF]
@@ -885,12 +812,7 @@ mod tests {
 
     #[test]
     fn preserves_multibyte_utf8() {
-        // A literal is UTF-8 source text copied through unchanged, so a
-        // multi-byte character keeps the bytes of its encoding rather than
-        // being widened or split. This is what makes a literal's UTF-8
-        // validity a compile-time fact: every unescaped byte comes from
-        // well-formed source and every escape decodes to ASCII, so no
-        // decoding step can introduce a malformed sequence.
+        // UTF-8 source text is copied through unchanged, byte for byte.
         assert_eq!(
             lex_string_bytes("\"é€𝄞\"\n"),
             vec![0xC3, 0xA9, 0xE2, 0x82, 0xAC, 0xF0, 0x9D, 0x84, 0x9E]
@@ -899,9 +821,7 @@ mod tests {
 
     #[test]
     fn interns_equal_literals_to_one_name() {
-        // Equal literals must share one name id, because that identity is
-        // what lets codegen emit a single `.rodata` global per distinct
-        // literal instead of one per occurrence.
+        // Equal literals share one name id.
         let mut names: Vec<String> = Vec::new();
         let mut nodes: Vec<i64> = Vec::new();
         let mut errors: Vec<Diag> = Vec::new();
@@ -962,10 +882,7 @@ mod tests {
         }
     }
 
-    // Every span a lexical error carries has to address bytes the file
-    // actually has. A span reaching past the last byte cannot be rendered
-    // against the source it names, so this asserts the offsets rather than
-    // the wording.
+    // Every error span must address bytes the source actually has.
     fn assert_spans_addressable(source: &str, errors: &[Diag]) {
         let mut idx = 0usize;
         while idx < errors.len() {
@@ -988,9 +905,7 @@ mod tests {
 
     #[test]
     fn trailing_backslash_at_eof_stays_inside_the_source() {
-        // A backslash as the last byte of the file has no escape body.
-        // Reading one anyway put both the escape span and the following
-        // unterminated-literal span one byte past the end of the source.
+        // A trailing backslash at end of file must stay inside the source.
         let source = "val x = \"runs off\\";
         let errors = lex_errors(source);
         assert!(errors.len() > 0, "a literal ending in a backslash must be rejected");
@@ -999,11 +914,7 @@ mod tests {
 
     #[test]
     fn an_undefined_escape_over_a_multibyte_body_reports_the_typo() {
-        // An escape body is a character, not a byte. Assuming one byte ended
-        // the span inside `é` and left the next run on a continuation byte,
-        // so the literal failed an internal boundary check and the user was
-        // told the compiler had broken its own invariant instead of being
-        // told they had mistyped an escape.
+        // A multibyte escape body is spanned by whole characters.
         let source = "val x = \"a\\éb\"\n";
         let errors = lex_errors(source);
         assert_eq!(errors.len(), 1, "expected exactly the typo: {:?}", errors);
@@ -1027,10 +938,7 @@ mod tests {
 
     #[test]
     fn backslash_before_newline_does_not_swallow_the_next_line() {
-        // A newline is never an escape body — it bounds the literal. Taking
-        // it as one carried the scan onto the following line, so the line
-        // after an unterminated literal vanished into that literal instead
-        // of being lexed as the source it is.
+        // A newline is never an escape body; it bounds the literal.
         let source = "val x = \"open\\\nval y = 1\n";
         let mut names: Vec<String> = Vec::new();
         let mut nodes: Vec<i64> = Vec::new();

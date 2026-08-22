@@ -64,29 +64,14 @@ pub fn discover(start: &Path) -> Result<ProjectManifest, ManifestError> {
     Err(ManifestError::source_less(format!("cannot find {} from '{}'", MANIFEST_FILE, start.display())))
 }
 
-/// The entry source of the project containing `source`.
-///
-/// The failure is handed back rather than swallowed. Whether "there is no
-/// project here" is worth reporting is the caller's policy and not this
-/// function's: the language server treats it as an ordinary answer for a file
-/// that belongs to no project, while a caller that needs a project has the
-/// diagnostic to render. Deciding here would mean either discarding a real
-/// failure or printing one from inside a pipeline stage.
+/// The entry source of the project containing `source`; a missing manifest
+/// is handed back to the caller as a `ManifestError`.
 pub fn entry_for_source(source: &Path) -> Result<PathBuf, ManifestError> {
     discover(source).map(|manifest| manifest.entry)
 }
 
-/// The plainly comparable spelling of a path.
-///
-/// On Windows `fs::canonicalize` returns a verbatim path — `\\?\C:\...`,
-/// or `\\?\UNC\server\share\...` — which never compares equal to the plain
-/// spelling of the same file that editors, `file://` URIs, and manifest
-/// joins produce, whether the comparison is textual or component-wise.
-/// Every canonicalization in this module passes through here, and the
-/// language server normalizes editor-supplied paths the same way, so paths
-/// from both sources meet in one spelling. The drive letter is upper-cased
-/// because editors and the kernel disagree about its case; a path that is
-/// already plain changes in nothing else.
+/// The plainly comparable spelling of a path: strips the Windows verbatim
+/// prefix and upper-cases the drive letter.
 pub fn comparable_path(path: &Path) -> PathBuf {
     let text = path.to_string_lossy();
     let stripped = match text.strip_prefix(r"\\?\UNC\") {
@@ -150,10 +135,7 @@ pub fn load_manifest(path: &Path) -> Result<ProjectManifest, ManifestError> {
                 "manifest items must be pub const declarations",
             ));
         }
-        // Whether the field exists is settled before whether its type is
-        // right. The other order tells the author of `pub const VERSION: I64`
-        // to change its type — asserting `VERSION` is a manifest field, which
-        // it is not, and sending them to fix the wrong thing first.
+        // Field existence is settled before field type.
         let field = name_text(&analyzed.names, node_d(&analyzed.nodes, item));
         if field != "NAME" && field != "ENTRY" && field != "TESTS" {
             return Err(manifest_item_error(
@@ -179,9 +161,7 @@ pub fn load_manifest(path: &Path) -> Result<ProjectManifest, ManifestError> {
             Some(text) => text.clone(),
             None => return Err(manifest_item_error(&analyzed, item, "manifest field has an invalid folded value")),
         };
-        // Three fields, and the check above has already rejected anything
-        // else, so the final arm is `TESTS` rather than a fourth case that
-        // cannot happen.
+        // The check above rejected anything but the three fields.
         if field == "NAME" {
             name = Some(validate_project_name(&value, &analyzed, item)?);
         } else if field == "ENTRY" {
@@ -212,18 +192,7 @@ pub fn load_manifest(path: &Path) -> Result<ProjectManifest, ManifestError> {
 
 /// The project name names the built artifact, so it has to be one path
 /// component and nothing else.
-///
-/// A name carrying a separator, a parent-directory step, or a drive prefix
-/// would let a manifest choose where the build writes rather than merely
-/// what it is called. `ENTRY` and `TESTS` are confined to the project root
-/// because a path is obviously a path; `NAME` reaches the same filesystem
-/// through a field that does not look like one, which is exactly why it is
-/// checked here rather than trusted.
 fn validate_project_name(value: &str, analyzed: &analysis::Analysis, item: i64) -> Result<String, ManifestError> {
-    // What the first component *is* decides the message. Counting components
-    // first would answer "../outside" with a complaint about its length,
-    // which is true and useless: the problem is the step out of the root, and
-    // that is what the manifest author has to be told.
     let mut components = Path::new(value).components();
     let name = match components.next() {
         Some(Component::Normal(text)) => match text.to_str() {
@@ -255,13 +224,8 @@ fn validate_project_name(value: &str, analyzed: &analysis::Analysis, item: i64) 
             &format!("project name must be a single path component, but continues with '{:?}'", trailing),
         ));
     }
-    // A single component is still not enough on Windows. `NUL`, `CON`, the
-    // `COM`/`LPT` series, and any name with a trailing dot or space name
-    // devices rather than files, in *every* directory — so `NAME = "NUL"`
-    // would let a build report success while its artifact went nowhere. The
-    // check is unconditional rather than `cfg(windows)`: a manifest is
-    // portable, and a project that builds on Linux and vanishes on Windows
-    // is worse than one rejected in both places.
+    // Windows reserved device names (`NUL`, `CON`, `COM`/`LPT`...) are
+    // rejected unconditionally: a manifest is portable across platforms.
     if is_reserved_device_name(&name) {
         return Err(manifest_item_error(
             analyzed,
@@ -279,10 +243,8 @@ fn validate_project_name(value: &str, analyzed: &analysis::Analysis, item: i64) 
     Ok(name)
 }
 
-/// Whether `name` is a Windows reserved device name.
-///
-/// Matched on the stem before the first dot and without regard to case,
-/// because `NUL`, `nul`, and `nul.txt` all name the same device.
+/// Whether `name` is a Windows reserved device name, matched on the stem
+/// before the first dot, case-insensitively.
 fn is_reserved_device_name(name: &str) -> bool {
     let stem = match name.split('.').next() {
         Some(text) => text,
@@ -314,19 +276,8 @@ fn is_manifest_string_type(nodes: &[i64], key: i64) -> bool {
     byte != NONE && node_b(nodes, byte) == TYD_BUILTIN && node_f(nodes, byte) == BUILTIN_U8
 }
 
-/// A manifest failure, carried as the compiler's own diagnostics.
-///
-/// `build.cnb` is Cinnabar source, so its errors have real spans in a real
-/// file and belong in the same ariadne report as every other diagnostic.
-/// Flattening them to a string here did two forbidden things at once: it
-/// stringified an error before the final diagnostic, and it put a second
-/// byte-offset-to-line-and-column implementation beside the one the compiler
-/// already has.
-///
-/// A failure with no Cinnabar origin — a directory that cannot be read, a
-/// manifest that is not there — carries `NO_FILE`, which the renderer already
-/// understands. That is a source-less origin represented explicitly rather
-/// than faked with a span into a file it did not come from.
+/// A manifest failure, carried as the compiler's own diagnostics; source-less
+/// failures use `NO_FILE`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManifestError {
     pub diagnostics: Vec<Diag>,
@@ -393,12 +344,8 @@ fn canonicalize_confined_existing(root: &Path, path: &Path, role: &str) -> Resul
     Ok(resolved)
 }
 
-/// Resolve an existing project file and prove it stays inside the root,
-/// returning the resolved path rather than the spelling the caller gave.
-///
-/// The resolved path is what the read and write paths below act on: it
-/// contains no symlink, so a concurrent re-point of the original spelling
-/// cannot redirect a later `read_to_string` or `write` that used it.
+/// Resolve an existing project file and prove it stays inside the root;
+/// the symlink-free resolved path is what later reads and writes act on.
 fn confine_existing_file(root: &Path, path: &Path, role: &str) -> Result<PathBuf, ManifestError> {
     let resolved = canonicalize_confined_existing(root, path, role)?;
     if !resolved.is_file() {
@@ -408,12 +355,7 @@ fn confine_existing_file(root: &Path, path: &Path, role: &str) -> Result<PathBuf
 }
 
 /// Prove that a not-yet-existing project file's parent directory is confined
-/// to the root, so creating the file there cannot escape it.
-///
-/// This is the one case where acting on the caller's spelling is correct:
-/// there is no file yet to resolve, so confinement is established on the
-/// directory that will contain it, and the file name itself is a plain
-/// component already checked by `validate_relative_path`.
+/// to the root; confinement is established on the directory, not the file.
 fn confine_parent_dir(root: &Path, path: &Path, role: &str) -> Result<(), ManifestError> {
     let parent = match path.parent() {
         Some(value) => value,
@@ -426,16 +368,8 @@ fn confine_parent_dir(root: &Path, path: &Path, role: &str) -> Result<(), Manife
     Ok(())
 }
 
-/// Confines and reads a project file in one step, reading the resolved path.
-///
-/// A check-then-use pair on the original spelling — canonicalize to prove it
-/// stays inside the root, then re-open the spelling and re-follow whatever
-/// symlink it points at *now* — lets a concurrent writer re-point that
-/// symlink between the two and make the read land outside the confinement
-/// the check just established. Reading the resolved path closes the gap:
-/// there is no symlink left in it to re-point. The caller has already
-/// established the file exists (`sidecar_present`); resolving it again makes
-/// the confine and the read agree on one target.
+/// Confines and reads a project file in one step, through its resolved
+/// path.
 fn read_confined(root: &Path, path: &Path, role: &str) -> Result<String, ManifestError> {
     let resolved = confine_existing_file(root, path, role)?;
     let text = fs::read_to_string(&resolved)
@@ -443,14 +377,8 @@ fn read_confined(root: &Path, path: &Path, role: &str) -> Result<String, Manifes
     Ok(text)
 }
 
-/// Confines and writes a project file in one step.
-///
-/// Writing has the same re-point race reading had, plus a create case: an
-/// existing sidecar is written through its resolved path (no symlink left to
-/// re-point), while a sidecar that does not exist yet is written into its
-/// confined parent directory. `update_snapshots` reaches both shapes — an
-/// existing snapshot is rewritten and a first snapshot is created — so one
-/// helper owns both rather than splitting the race in half at the call site.
+/// Confines and writes a project file in one step: an existing sidecar is
+/// written through its resolved path, a new one into its confined parent.
 fn write_confined(root: &Path, path: &Path, role: &str, contents: &str) -> Result<(), ManifestError> {
     if sidecar_present(path, role)? {
         let resolved = confine_existing_file(root, path, role)?;
@@ -655,12 +583,7 @@ impl SnapshotEntry {
 }
 
 /// Every rejection test in the project, with its snapshot and its current
-/// diagnostic.
-///
-/// This runs the same discovery, the same compile, and the same
-/// normalization `run_tests` does, so a reviewer is shown exactly the
-/// comparison the test suite makes — not a second one that could call a
-/// difference where the suite sees none.
+/// diagnostic; the same discovery, compile, and normalization as `run_tests`.
 pub fn snapshot_report(executable: &Path, manifest: &ProjectManifest) -> Result<Vec<SnapshotEntry>, ManifestError> {
     let tests = discover_tests(manifest)?;
     let mut entries = Vec::new();
@@ -700,17 +623,8 @@ pub fn snapshot_report(executable: &Path, manifest: &ProjectManifest) -> Result<
     Ok(entries)
 }
 
-/// Write one snapshot, as `--update-snapshots` would.
-///
-/// The target must be the sidecar of a discovered test. Confinement is not
-/// sufficient on its own: `write_confined` establishes that a path lies
-/// inside the project, which the sources, the manifest, and every other
-/// regular file in the tree also satisfy, so a caller passing an arbitrary
-/// project-relative path would rewrite one of those with snapshot text.
-/// Discovery already names the complete set of files acceptance may touch,
-/// so membership in that set is the check, and a path that does not name
-/// one — including one spelled with `..` segments that would resolve to
-/// one — is refused rather than normalized into range.
+/// Write one snapshot, as `--update-snapshots` would; the target must be
+/// the sidecar of a discovered test, not merely a confined project path.
 pub fn accept_snapshot(manifest: &ProjectManifest, snapshot_relative: &str, text: &str) -> Result<(), ManifestError> {
     let snapshot = manifest.root.join(snapshot_relative);
     let discovered = discover_tests(manifest)?;
@@ -730,17 +644,13 @@ pub struct TestSummary {
     pub failed: Vec<String>,
 }
 
-// The same category of protection the repro and fuzz harnesses apply to
-// every child process they spawn, with the same defaults: a hanging test
-// program (or a compiler wedged on one input) fails that test with a
-// timeout message instead of hanging the whole `cinnabar test` run.
+// Per-test timeouts so a hanging test fails with a timeout message instead
+// of hanging the whole `cinnabar test` run.
 const TEST_COMPILE_TIMEOUT_SECS: u64 = 30;
 const TEST_RUN_TIMEOUT_SECS: u64 = 10;
 
-/// Waits for `child` until it exits or the deadline passes, killing it in
-/// the latter case. `Ok(true)` means it exited on its own; `Ok(false)`
-/// means it was killed for the timeout. The child is not yet reaped —
-/// the caller collects its status or output and owns the final verdict.
+/// Waits for `child` until exit or deadline, killing it at the deadline;
+/// `Ok(true)` exited on its own, `Ok(false)` was killed. Not yet reaped.
 fn wait_or_kill(child: &mut Child, limit: Duration, what: &str) -> Result<bool, ManifestError> {
     let deadline = Instant::now() + limit;
     loop {
@@ -754,9 +664,7 @@ fn wait_or_kill(child: &mut Child, limit: Duration, what: &str) -> Result<bool, 
             match child.kill() {
                 Ok(()) => {}
                 Err(kill_error) => {
-                    // InvalidInput means the child exited between the
-                    // `try_wait` above and the kill; the caller's reap
-                    // will collect that exit normally.
+                    // InvalidInput: the child exited between try_wait and kill.
                     if kill_error.kind() != std::io::ErrorKind::InvalidInput {
                         return Err(ManifestError::source_less(format!(
                             "cannot stop timed-out {}: {}",
@@ -771,9 +679,8 @@ fn wait_or_kill(child: &mut Child, limit: Duration, what: &str) -> Result<bool, 
     }
 }
 
-/// `Command::output` with a deadline: stdout and stderr are piped and
-/// collected, and a child that outlives the deadline is killed and
-/// reported as a timeout failure rather than waited on forever.
+/// `Command::output` with a deadline; an over-deadline child is killed and
+/// reported as a timeout failure.
 fn output_with_timeout(command: &mut Command, limit: Duration, what: &str) -> Result<Output, ManifestError> {
     let mut child = command
         .stdout(Stdio::piped())
@@ -795,9 +702,7 @@ fn output_with_timeout(command: &mut Command, limit: Duration, what: &str) -> Re
     Ok(output)
 }
 
-/// `Command::status` with a deadline: the child inherits the test runner's
-/// stdio, and one that outlives the deadline is killed and reported as a
-/// timeout failure rather than waited on forever.
+/// `Command::status` with a deadline; the child inherits the runner's stdio.
 fn status_with_timeout(command: &mut Command, limit: Duration, what: &str) -> Result<ExitStatus, ManifestError> {
     let mut child = command
         .spawn()
@@ -831,13 +736,8 @@ fn exit_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.exit", path.display()))
 }
 
-/// What a rejected compile printed, wherever it printed it.
-///
-/// The reporter renders through ariadne, which writes to standard output,
-/// so a snapshot that read only `stderr` would record an empty string and
-/// pin nothing — which is exactly what a diagnostic snapshot exists not to
-/// do. Both streams are read so the sidecar holds the diagnostic the user
-/// saw, in the order they saw it.
+/// What a rejected compile printed, both streams read (ariadne writes to
+/// standard output).
 fn diagnostic_text(compile: &Output) -> String {
     let mut text = String::from_utf8_lossy(&compile.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&compile.stderr));
@@ -904,11 +804,7 @@ fn status_matches(status: ExitStatus, expected: i32, test: &Path) -> Result<(), 
     }
 }
 
-/// A diagnostic reduced to what it says.
-///
-/// Converts CRLF to LF and strips CSI escape sequences (ESC `[` through a
-/// final byte in 0x40..=0x7E), which the reporter emits whether or not a
-/// terminal is attached. Bytes following an ESC that is not `[` are kept.
+/// A diagnostic reduced to what it says: CRLF to LF, CSI escapes stripped.
 fn normalize_text(text: &str) -> String {
     let unified = text.replace("\r\n", "\n");
     let mut out = String::with_capacity(unified.len());
@@ -919,8 +815,7 @@ fn normalize_text(text: &str) -> String {
             continue;
         }
         // A CSI sequence: ESC '[' then parameter and intermediate bytes,
-        // ended by a byte in the final range. Anything else following an
-        // ESC is left alone rather than guessed at.
+        // ended by a byte in the final range.
         match characters.next() {
             Some('[') => {
                 for following in characters.by_ref() {
@@ -970,12 +865,7 @@ mod tests {
         }
     }
 
-    /// Asserts the rejection says `message`, and says it *somewhere real*.
-    ///
-    /// The span is checked rather than a rendered "file:line:col" prefix.
-    /// That prefix used to come from a renderer inside this module, and
-    /// removing it is the point: the diagnostic now carries its own span to
-    /// the compiler's reporter, so the span is what there is to assert.
+    /// Asserts the rejection says `message` and carries a real span.
     fn assert_rejected_at_source(failure: &ManifestError, message: &str) {
         let diagnostic = match failure.diagnostics.first() {
             Some(value) => value,
@@ -1031,10 +921,8 @@ mod tests {
         assert_eq!(manifest.tests, root.join("tests"));
     }
 
-    // `fs::canonicalize` on Windows answers with a `\\?\`-prefixed verbatim
-    // path, which compares equal to nothing an editor, URI, or manifest join
-    // ever produces. The stripping is what lets every other test in this
-    // module compare a canonicalized path against a plainly-joined one.
+    // A Windows `\\?\`-prefixed canonical path compares against a
+    // plainly-joined path after the verbatim prefix is stripped.
     #[test]
     fn comparable_path_strips_windows_verbatim_prefixes() {
         assert_eq!(
@@ -1105,9 +993,7 @@ mod tests {
         assert_rejected_at_source(&failure, "project paths cannot leave the project root");
     }
 
-    // NAME names the built artifact, so it reaches the filesystem through a
-    // field that does not look like a path. A name that escapes its single
-    // component would choose where the build writes.
+    // NAME names the built artifact, so it must stay a single path component.
     #[test]
     fn project_name_cannot_reach_outside_its_own_component() {
         let escaping = rejected_manifest(

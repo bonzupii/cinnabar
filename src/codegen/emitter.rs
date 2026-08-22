@@ -87,9 +87,8 @@ const UTF8_LEAD_3_MAX: u64 = 0xEF;
 const UTF8_LEAD_4_MIN: u64 = 0xF0;
 const UTF8_LEAD_4_MAX: u64 = 0xF4;
 
-// Minimum decodable code point per sequence length (any smaller value is
-// an overlong encoding), the maximum Unicode code point, and the UTF-16
-// surrogate window.
+// Minimum decodable code point per sequence length (smaller = overlong),
+// the maximum code point, and the UTF-16 surrogate window.
 const UTF8_CP_3_MIN: u64 = 0x800;
 const UTF8_CP_4_MIN: u64 = 0x10000;
 const UTF8_CP_MAX: u64 = 0x10FFFF;
@@ -453,10 +452,8 @@ fn key_builtin_of(sess: &Session, key: i64) -> i64 {
     }
 }
 
-// True for `&[U8]`, the type of a string literal and therefore of a string
-// constant.  Nothing else in the language folds to a constant of this type,
-// so this is how the constant path recognizes that the value it stored is
-// the interned name id of a byte sequence rather than a number.
+// True for `&[U8]`, so the constant path recognizes an interned byte
+// sequence: nothing else folds to a constant of this type.
 fn is_byte_slice_key(sess: &Session, key: i64) -> bool {
     if em_key_kind(sess, key) != TYD_REF {
         return false;
@@ -482,10 +479,8 @@ fn list_to_vec_of(sess: &Session, id: i64) -> Vec<i64> {
     list_to_vec(sess.6, id)
 }
 
-// The attached fact row for `name` on the canonical struct key, filled by
-// the typechecker; no ITEM_STRUCT re-walk and no re-run of generic
-// substitution here.  Callers read the index and key
-// slots they consume.
+// The typechecker's NODE_FIELDKEY fact row for `name` on the canonical
+// struct key; no struct re-walk or generic re-substitution here.
 fn struct_field_fact_row(sess: &Session, struct_key: i64, name: i64, span: (i64, i64, i64)) -> Result<i64, CodegenError> {
     let row = find_fieldkey(sess.5, struct_key, name);
     if row == NONE {
@@ -570,10 +565,8 @@ fn variant_payload_key(sess: &mut Session, enum_key: i64, variant_idx: i64, fiel
 
 fn enum_payload_ptr<'ctx>(sess: &mut Session<'ctx, '_, '_>, ptr: PointerValue<'ctx>, enum_key: i64, variant_idx: i64, span: (i64, i64, i64)) -> Result<(PointerValue<'ctx>, BasicTypeEnum<'ctx>), CodegenError> {
     let enum_ty = llvm_of(sess, enum_key, span)?;
-    // A discriminant-only enum (no variant carries a payload) lowers to a
-    // single-field struct; there is no index-1 field to point into, so the
-    // region is the enum pointer itself.  Only unit variants reach here in
-    // that case, and their callers never dereference the returned pointer.
+    // A discriminant-only enum lowers to a single-field struct: the region
+    // is the enum pointer itself; callers never dereference it.
     let region = if payloadkey_rows_of(sess.5, enum_key).is_empty() {
         ptr
     } else {
@@ -617,10 +610,8 @@ fn slice_len_of<'ctx>(sess: &mut Session<'ctx, '_, '_>, view_ptr: PointerValue<'
     load_i64(sess, lp)
 }
 
-// Two-tier addressing: `offset_array_elem_ptr` GEPs `[0, idx]` against
-// `[N x T]`; `offset_buffer_elem_ptr` GEPs `[idx]` against `T` (`byte_elem_ptr`
-// is the `i8` form).  Precondition: `base` is an allocation of the named
-// type and `idx` is within its bounds.
+// `offset_array_elem_ptr` GEPs `[0, idx]` against `[N x T]`; the buffer
+// form GEPs `[idx]` against `T`. Precondition: in-bounds index.
 fn offset_array_elem_ptr<'ctx>(sess: &mut Session<'ctx, '_, '_>, array_ty: BasicTypeEnum<'ctx>, base: PointerValue<'ctx>, idx: IntValue<'ctx>) -> Result<PointerValue<'ctx>, CodegenError> {
     let zero = sess.0.i64_type().const_zero();
     let gep = unsafe { sess.2.build_gep(array_ty, base, &[zero, idx], "") }.map_err(builder_fail)?;
@@ -663,10 +654,8 @@ fn emit_stmt_list<'ctx, 'a>(
 ) -> Result<(PointerValue<'ctx>, bool), CodegenError> {
     let count = list_len(sess.6, list);
     if count == 0 {
-        // An empty block evaluates to its expected type.  The typechecker
-        // attaches Unit to empty while/if bodies and to the fall-through of
-        // Unit-returning functions; build a tag-0 value into a fresh slot
-        // instead of failing, so empty blocks lower cleanly.
+        // An empty block evaluates to its expected (Unit) type: build a
+        // tag-0 value into a fresh slot instead of failing.
         let slot = alloca_typed(sess, expected_key, "empty", span)?;
         build_unit_value_into(sess, expected_key, slot, span)?;
         return Ok((slot, false));
@@ -945,18 +934,7 @@ fn emit_expr<'ctx, 'a>(
     }
 }
 
-// The `.rodata` global holding a string literal's bytes, created on first
-// use and reused afterwards.
-//
-// The global's name is derived from the literal's interned name id, so the
-// module itself is the reuse table: two occurrences of the same literal
-// intern to the same id, resolve to the same global, and share one copy of
-// the bytes. There is no side table to keep in step with the name arena.
-//
-// The bytes are stored exactly as the lexer decoded them, with no trailing
-// NUL: a Cinnabar byte slice carries its own length, and appending a
-// terminator would make the global disagree with the length the slice
-// reports.
+// String literal .rodata global, reused by interned name id.
 fn string_literal_global<'ctx>(sess: &mut Session<'ctx, '_, '_>, name_id: i64) -> Result<(PointerValue<'ctx>, u64), CodegenError> {
     let text = em_name(sess, name_id);
     let bytes = text.as_bytes();
@@ -969,9 +947,7 @@ fn string_literal_global<'ctx>(sess: &mut Session<'ctx, '_, '_>, name_id: i64) -
             let created = sess.1.add_global(data.get_type(), Some(AddressSpace::from(0u16)), &symbol);
             created.set_initializer(&data);
             created.set_constant(true);
-            // Private and unnamed_addr: the literal has no linkage-visible
-            // identity, only its contents, so the linker is free to merge
-            // equal literals across translation units.
+            // Private + unnamed_addr: the linker may merge equal literals.
             created.set_linkage(inkwell::module::Linkage::Private);
             created.set_unnamed_address(inkwell::values::UnnamedAddress::Global);
             created
@@ -980,10 +956,8 @@ fn string_literal_global<'ctx>(sess: &mut Session<'ctx, '_, '_>, name_id: i64) -
     Ok((global.as_pointer_value(), bytes.len() as u64))
 }
 
-// Materializes a string literal as a `&[U8]` slice value: the `.rodata`
-// pointer and the byte length, in the same `{ ptr, i64 }` shape every other
-// slice in the language uses.  Shared by the inline-literal path and the
-// `const` path so the two cannot diverge.
+// Materializes a string literal as a `{ ptr, i64 }` `&[U8]` slice, shared
+// by the inline-literal and `const` paths.
 fn emit_string_slice<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, name_id: i64, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
     let (data, len) = string_literal_global(sess, name_id)?;
     let view = declare_local(sess, key, "str", span)?;
@@ -1027,9 +1001,8 @@ fn emit_path<'ctx, 'a>(
             }
             let value = find_const_value(sess.5, sym);
             if is_byte_slice_key(sess, key) {
-                // A string constant folded to the interned name id of its
-                // bytes, so it materializes through exactly the same global
-                // as an inline literal of the same text.
+                // A string const holds an interned name id, materialized
+                // through the same global as an inline literal.
                 return emit_string_slice(sess, key, value, span);
             }
             let ptr = declare_local(sess, key, "const", span)?;
@@ -1083,13 +1056,8 @@ fn emit_unary<'ctx, 'a>(
     let key = sub_key(sess, ctx.3, ctx.4, em_expr_ty(sess, expr));
     if op == UN_REF || op == UN_REF_MUT {
         let inner_ptr = emit_expr(sess, ctx, inner)?;
-        // `&arr[i]` and `&mut arr[i]` are typed as one expression: the
-        // typechecker hands the borrow down into the index, so a fallible
-        // index yields `Result(&T, IndexError)` and the value `emit_index`
-        // already produced *is* this expression's value -- there is nothing
-        // left to borrow.  Which of the two it is comes from the access
-        // fact on the index node, not from the shape of the key here, so
-        // the fallible path is decided in exactly one place for indexing.
+        // For `&arr[i]` the borrow is handed down into the index, so a
+        // fallible index's produced value *is* this expression's value.
         if node_d(sess.5, inner) == INDEX_FALLIBLE {
             return Ok(inner_ptr);
         }
@@ -1122,10 +1090,7 @@ fn emit_unary<'ctx, 'a>(
     let iv = load_key(sess, ikey, iptr, span)?.into_int_value();
     let out = declare_local(sess, key, "un", span)?;
     // A negated literal adopts the expected width (`val x: I8 = -1` types
-    // the literal as I64 and the negation as I8), so the operand's key can
-    // be wider or narrower than the result key.  Coerce the operand to the
-    // result width first: a castless store of a differently sized value
-    // would write past the result slot and corrupt the frame.
+    // the literal I64), so coerce the operand to the result width first.
     let coerced = coerce_int(sess, ikey, iv, key, span)?;
     if op == UN_NEG {
         let r = sess.2.build_int_neg(coerced, "").map_err(builder_fail)?;
@@ -1137,10 +1102,8 @@ fn emit_unary<'ctx, 'a>(
     Ok(out)
 }
 
-// Recasts an integer value from its own width to `to_key`'s width: widening
-// sign-extends a signed source and zero-extends an unsigned one, narrowing
-// truncates, equal widths are a no-op.  The single place an integer value is
-// width-coerced, so every store matches the width of the slot it targets.
+// Recasts an integer to `to_key`'s width: sign/zero-extend on widening,
+// truncate on narrowing. The single width-coercion point in codegen.
 fn coerce_int<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     from_key: i64,
@@ -1199,15 +1162,7 @@ fn bin_ge_pred(sess: &Session, key: i64) -> IntPredicate {
     }
 }
 
-// Loads a binary operator's operand as the scalar the operator needs.
-//
-// The typechecker already rejects an aggregate operand (arithmetic
-// requires integers, comparison requires integers or `Bool`), so reaching
-// here with one means an earlier stage let something through. That is an
-// internal error with a real source span, not a Rust panic: `into_int_value`
-// aborts the process on a mismatch, which would take the compiler down with
-// a backtrace and no diagnostic, in a codebase whose rule is that codegen
-// failures are never a panic.
+// Loads binary operand as scalar; aggregates are rejected earlier.
 fn load_scalar_operand<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     key: i64,
@@ -1264,9 +1219,8 @@ fn emit_binary<'ctx, 'a>(
     } else if op == BIN_MUL {
         r = sess.2.build_int_mul(lv, rv, "").map_err(builder_fail)?;
     } else if op == BIN_SHL || op == BIN_SHR {
-        // A shift amount >= the operand bit width is poison in LLVM, so it
-        // is masked by bit_width - 1 (7 for i8, 31 for i32, 63 for i64),
-        // matching the constant folder's wrapping_shl/wrapping_shr mask.
+        // A shift amount >= the operand width is poison in LLVM; mask by
+        // bit_width - 1, matching the constant folder's wrapping shifts.
         let rhs_ty = rv.get_type();
         let width = rhs_ty.get_bit_width();
         let mask_const = rhs_ty.const_int((width - 1) as u64, false);
@@ -1758,14 +1712,8 @@ fn emit_index<'ctx, 'a>(
         len_val = slice_len_of(sess, base_ptr)?;
     }
 
-    // The typechecker attaches an explicit fallibility fact to the index
-    // node: INDEX_FALLIBLE for runtime and slice indices (whose result it
-    // types as Result(T, IndexError)), INDEX_INFALLIBLE for a constant array
-    // index proven in range (whose result is the bare element type).  The
-    // element type itself cannot be the signal: an array of Result elements
-    // indexed by a constant has a Result-typed result that is still
-    // infallible.  Reading the attached fact keeps codegen from re-deriving
-    // a decision the typechecker already made.
+    // The typechecker's INDEX_FALLIBLE/INDEX_INFALLIBLE fact decides the
+    // path.
     if node_d(sess.5, expr) != INDEX_FALLIBLE {
         let base_ty = llvm_of(sess, base_key, span)?;
         let elem_ty = llvm_of(sess, elem_key, span)?;
@@ -1878,9 +1826,9 @@ fn emit_call<'ctx, 'a>(
     Ok(out)
 }
 
-// A self-tail call becomes a loop jump: each argument is staged into an
-// entry-block alloca via `copy_value`, copied into the parameter slots,
-// then control branches to `body_header`.
+// A self-tail call becomes a loop jump: arguments are staged into
+// allocas, copied into the parameter slots, then control branches to
+// `body_header`.
 fn emit_self_tail_call<'ctx, 'a>(
     sess: &mut Session<'ctx, '_, '_>,
     ctx: &mut FnCtx<'ctx, 'a>,
@@ -2092,9 +2040,8 @@ fn get_or_emit_fn<'ctx>(
     let to = list_to_vec_of(sess, args_list);
     let param_decls = node_c(sess.5, fn_slot);
     let body = node_f(sess.5, fn_slot);
-    // The `entry` block stores the incoming arguments into the parameter
-    // slots once; the `body_header` block is the jump target of self-tail
-    // calls, which overwrite the same slots before branching back.
+    // The `entry` block stores arguments into the parameter slots once;
+    // `body_header` is the self-tail-call jump target.
     let entry = sess.0.append_basic_block(fn_val, "entry");
     sess.2.position_at_end(entry);
     let mut body_locals: Locals<'ctx> = Vec::new();
@@ -2556,20 +2503,9 @@ fn native_allocate<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     let p0 = get_local(locals, 0, span)?;
     let k0 = get_local_key(locals, 0, span)?;
     let size = load_key(sess, k0, p0, span)?.into_int_value();
-    // `mmap` directly, not libc's allocator: `Memory` is the raw-memory
-    // quarantine, and a `Block` already carries the length `munmap`
-    // needs to give the mapping back, so nothing about the allocator's
-    // bookkeeping is required here. `Collections` keeps using the libc
-    // allocator, because a growable container genuinely needs `realloc`
-    // semantics rather than whole mappings.
-    //
-    // An anonymous private mapping of `size` bytes, rounded up to a page
-    // by the kernel. The requested length is what the handle records, so
-    // the bounds checks in `write_u8`/`read_u8` still reject an offset
-    // past what the program asked for, not merely past the page.
+    // `mmap` an anonymous private mapping of the requested length; the
+    // ABI's heap fallback applies when mappings are unavailable.
     let data = if !sess.13.abi().memory_uses_mapping {
-        // The target ABI selects the heap fallback when anonymous mappings
-        // are unavailable.
         let call = sess.2.build_call(extern_malloc(sess), &[into_meta(size.into())], "").map_err(builder_fail)?;
         match call.try_as_basic_value() {
             ValueKind::Basic(value) => value.into_pointer_value(),
@@ -2722,13 +2658,8 @@ fn native_read_u8<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>
     Ok(())
 }
 
-// Writes a fresh growable-container handle's three declared slots — data
-// pointer (null), length (0), capacity (0) — one store each.  This is what
-// `vec_new` and `hash_map_new` both mean, and it is deliberately the two
-// explicit stores rather than a whole-layout zero store: a constructor must
-// name every slot its layout declares so that a slot added to the layout
-// later is a compile-time "which constructor forgets to write it" question,
-// not a silently-zeroed field nobody realized existed.
+// Writes a fresh container handle's three declared slots — null data
+// pointer, zero length, zero capacity — one store per declared slot.
 fn init_container_slots<'ctx>(sess: &mut Session<'ctx, '_, '_>, key: i64, ptr: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let d = struct_gep(sess, key, ptr, 0, "", span)?;
     store_key(sess, d, ptr_ty(sess).const_null().into())?;
@@ -2898,18 +2829,8 @@ fn native_string_len<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ct
     Ok(())
 }
 
-// The (data pointer, byte length) pair of whichever byte-sequence view a
-// native's first parameter names.
-//
-// The language has no overloading, so `Terminal.print` accepts either
-// `&Collections.String` or `&[U8]` by having its *emitted body* read the
-// pair out of whichever representation the program declared — never by
-// matching the parameter's spelling. The two differ only in where the pair
-// lives: a `&String` parameter is a pointer to a heap-owning handle whose
-// fields must be loaded through it, while a `&[U8]` parameter *is* the
-// `{ ptr, i64 }` view, held directly in the parameter slot. The decision
-// comes from the canonical type descriptor the typechecker already
-// attached to the parameter.
+// The (data pointer, byte length) pair of the first parameter's byte view:
+// a `&String` loads through its heap handle, a `&[U8]` *is* the view.
 fn byte_view_of<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>, span: (i64, i64, i64)) -> Result<(PointerValue<'ctx>, IntValue<'ctx>), CodegenError> {
     let p0 = get_local(locals, 0, span)?;
     let viewed = deref_key_of(sess, get_local_key(locals, 0, span)?);
@@ -2950,9 +2871,7 @@ fn native_print<'ctx>(
     newline: bool,
     span: (i64, i64, i64),
 ) -> Result<(), CodegenError> {
-    // `write` is emitted directly, not through libc's wrapper: the kernel
-    // entry point sits in the emitted IR for the Terminal surface, so
-    // nothing sits between the Cinnabar declaration and the system call.
+    // `write` is emitted directly: the kernel entry point sits in the IR.
     let (data, len) = byte_view_of(sess, locals, span)?;
     let fd = sess.0.i64_type().const_int(if stderr { 2 } else { 1 }, false);
     write_all(sess, fd, data, len, span)?;
@@ -2966,8 +2885,7 @@ fn native_print<'ctx>(
 }
 
 // The out-of-line `write_all` runtime helper, emitted once per module with
-// private linkage; retries a partial `write` with the cursor advanced, and
-// retries unchanged on `EINTR`.
+// private linkage; retries a partial `write` and an `EINTR` interruption.
 fn get_or_emit_write_all<'ctx>(sess: &mut Session<'ctx, '_, '_>, span: (i64, i64, i64)) -> Result<FunctionValue<'ctx>, CodegenError> {
     let name = ".cnb.write_all";
     if let Some(existing) = sess.1.get_function(name) {
@@ -3063,26 +2981,8 @@ fn native_string_free<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'c
     Ok(())
 }
 
-// === HashMap: structural keys over an open-addressed table ===
-//
-// A map is an open-addressed table of slots, each slot a `{ flag, key,
-// value }` triple whose stride and field offsets derive from the slot's own
-// LLVM struct type (declared K and V, never a hand-counted byte size). The
-// flag marks a slot empty, occupied, or tombstoned (left by `remove` so a
-// probe past a removed key still reaches later keys that collided behind
-// it). Capacity is a power of two, so `(hash + step) & (capacity - 1)` maps
-// a hash to a probe sequence, and the table grows by rehashing before the
-// load factor reaches half.
-//
-// A key is hashed and compared *structurally*, field by field, not by its
-// raw ABI bytes: two keys are equal exactly when their declared fields are,
-// read recursively through nested structs, enums, arrays, and slice
-// contents. Padding bytes are never read, so no construction-time zeroing
-// is needed for correctness. The hash folds the same field values the
-// comparison reads -- the property a probe relies on -- and both are
-// emitted inline into the monomorphized native body, one implementation per
-// concrete K. Bucketing appears only as the final `& (capacity - 1)` after
-// hashing, never as a substitute for it.
+// Open-addressed slot table; layout derives from the declared K/V types.
+// Keys are hashed and compared structurally, field by field, never by bytes.
 
 const HASH_SEED: u64 = 14695981039346656037;
 const HASH_PRIME: u64 = 1099511628211;
@@ -3124,9 +3024,8 @@ fn fold_hash_word<'ctx>(sess: &mut Session<'ctx, '_, '_>, hash_slot: PointerValu
     Ok(())
 }
 
-// A scalar's bits as a full machine word. Zero-extension (never
-// sign-extension) so two equal values of any width or signedness fold the
-// same word.
+// A scalar's bits as a full machine word, zero-extended so equal values of
+// any width or signedness fold the same word.
 fn scalar_word<'ctx>(sess: &mut Session<'ctx, '_, '_>, value: IntValue<'ctx>) -> Result<IntValue<'ctx>, CodegenError> {
     if value.get_type().get_bit_width() >= 64 {
         Ok(value)
@@ -3158,10 +3057,8 @@ fn no_structural_equality<'ctx>(sess: &Session<'ctx, '_, '_>, key: i64, span: (i
 }
 
 // Structural key equality, emitted inline into the monomorphized native
-// body: two keys are equal exactly when their declared fields are, read
-// recursively through nested structs, enums, arrays, and slice contents.
-// Padding bytes are never read, and a reference-typed field compares what
-// it points to, not the address it holds.
+// body: two keys are equal exactly when their declared fields are; a
+// reference-typed field compares what it points to.
 fn emit_key_eq<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, key: i64, a: PointerValue<'ctx>, b: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
     let kind = key_kind_of(sess.5, key);
     if kind == TYD_BUILTIN {
@@ -3264,9 +3161,8 @@ fn emit_key_eq<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, k
     Err(no_structural_equality(sess, key, span))
 }
 
-// Content equality of two `&[T]` slice views: equal length, then every
-// element equal, as a short-circuiting runtime loop. Two slices with equal
-// bytes but different backing addresses therefore compare equal.
+// Content equality of two `&[T]` slice views as a short-circuiting runtime
+// loop: equal length, then every element equal.
 fn emit_slice_eq<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, slice_key: i64, a: PointerValue<'ctx>, b: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
     let elem = key_elem_of(sess.5, slice_key);
     let a_data = slice_data(sess, a)?;
@@ -3306,12 +3202,8 @@ fn emit_slice_eq<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>,
     Ok(result)
 }
 
-// Folds a key's structural fields into `hash_slot`, so hash and equality
-// read the same values and cannot disagree. An enum's tag is folded, then
-// control dispatches on the tag so only the active variant's payload is
-// hashed -- an inactive variant's bytes are uninitialized, and reading them
-// as this variant's fields (a reference in particular) would dereference a
-// garbage pointer.
+// Folds a key's structural fields into `hash_slot`; an enum hashes its
+// tag, then the active variant's payload.
 fn emit_key_hash_into<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, key: i64, ptr: PointerValue<'ctx>, hash_slot: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let kind = key_kind_of(sess.5, key);
     if kind == TYD_BUILTIN {
@@ -3425,9 +3317,7 @@ fn emit_slice_hash_into<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue
 }
 
 // Moves every occupied slot of a table into a fresh, zeroed one, probing
-// the new table for an empty slot per key. Called only on grow, so the new
-// table always has room; this drops tombstones, keeping a grown table at
-// most half occupied and free of stale markers.
+// the new table for an empty slot per key; drops tombstones on the way.
 fn rehash_into<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     f: FunctionValue<'ctx>,
@@ -3640,11 +3530,7 @@ fn native_hash_map_insert<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionVal
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
 
     sess.2.position_at_end(exhausted);
-    // Defensive: a table kept below half occupancy always has an empty or
-    // tombstoned slot, so this is unreachable in practice. If it is ever
-    // reached, rehash into a larger table (which drops tombstones and
-    // guarantees room) and retry, rather than writing a slot that does not
-    // exist.
+    // Unreachable while occupancy stays under half; rehash and retry.
     sess.2.build_unconditional_branch(grow_block).map_err(builder_fail)?;
 
     sess.2.position_at_end(do_insert);
@@ -3840,13 +3726,8 @@ fn native_self_check<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: 
     Ok(())
 }
 
-// The largest path staged in the compiler-generated C string buffer.
-//
-// A path arrives as a `&[U8]` carrying its own length, but `openat` wants a
-// NUL-terminated string, so the path is copied into a stack buffer with a
-// terminator appended. Bounding it at the kernel's own limit means the copy
-// needs no allocation and a longer path is rejected with the same error the
-// kernel would have produced.
+// Largest path staged in the compiler-generated C string buffer: bounded at
+// the kernel's own limit so a too-long path gets the kernel's error.
 const PATH_MAX: u64 = 4096;
 
 // The platform's errno accessor comes from the target's typed ABI row; the
@@ -3871,12 +3752,8 @@ fn is_eintr<'ctx>(sess: &mut Session<'ctx, '_, '_>, result: IntValue<'ctx>, span
     sess.2.build_and(failed, matches, "").map_err(builder_fail)
 }
 
-// Builds `Err(SystemFault(code))` into `out`.
-//
-// Shared by every native surface that reports a platform error, so the
-// mapping from an errno to a Cinnabar value is stated once. Each caller
-// reads the code from the platform's errno accessor (`runtime_errno`) and
-// passes it here to be written into the `SystemFault` payload.
+// Builds `Err(SystemFault(code))` into `out`; the one errno-to-value
+// mapping shared by every native surface reporting a platform error.
 fn system_fault_result<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out: PointerValue<'ctx>, code: IntValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let err_key = result_arg_key(sess, ret_key, 1);
     let tag = seeded_enum_variant_tag(sess, SEED_SYM_SYSTEM_FAULT, span)?;
@@ -3888,12 +3765,9 @@ fn system_fault_result<'ctx>(sess: &mut Session<'ctx, '_, '_>, ret_key: i64, out
     copy_to_out(sess, ret_key, out, err_result, span)
 }
 
-// Splits control flow on a libc result: negative is a failure that
-// writes `Err(SystemFault(errno))` into `out` and jumps to the join block,
-// non-negative continues in the block this returns positioned at.
-//
-// The caller resumes emitting the success path immediately and branches to
-// the returned join block when done.
+// Splits control flow on a libc result: negative writes
+// `Err(SystemFault(errno))` and jumps to the join block; the caller emits
+// its success path here.
 fn libc_result_branch<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     f: FunctionValue<'ctx>,
@@ -3916,14 +3790,8 @@ fn libc_result_branch<'ctx>(
     Ok(after)
 }
 
-// The `openat` flags a `File.Mode` variant selects.
-//
-// The mode is a Cinnabar enum rather than an integer parameter, so a
-// program never writes a Linux flag constant: `File.open(path,
-// WriteTruncate)` says what it means, and the numbers stay inside the
-// compiler. The tags come from the program's own declaration order through
-// the seeded variant symbol, so the mapping does not depend on
-// how the enum happens to be written.
+// The `openat` flags a `File.Mode` variant selects; tags come from the
+// program's declaration order via the seeded variant symbol.
 fn open_flags_of<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     mode_key: i64,
@@ -3982,8 +3850,7 @@ fn native_file_open<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     let after = new_block(sess, f, "open_after");
     sess.2.build_conditional_branch(fits, attempt, too_long).map_err(builder_fail)?;
     sess.2.position_at_end(too_long);
-    // A path the buffer cannot hold is reported with the code the kernel
-    // itself would have returned, rather than a Cinnabar-specific one.
+    // Report the kernel's own ENAMETOOLONG-style code.
     let name_too_long = sess.0.i64_type().const_int(sess.13.abi().name_too_long, false);
     system_fault_result(sess, ret_key, out, name_too_long, span)?;
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
@@ -4013,15 +3880,8 @@ fn native_file_open<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     Ok(out)
 }
 
-// `read` and `write` differ only in their direction and which C entry point
-// direction the bytes travel, so one emitter serves both: the buffer is a
-// `&mut [U8]` to fill or a `&[U8]` to send, and the result is the count the
-// kernel reports.
-//
-// The count is returned rather than looped over, because a short read is
-// information the caller needs — it is how end-of-file is observed (a zero
-// count) and how a partial record is detected. `Terminal.print` loops
-// because it has no way to report a short write; `File.write` does.
+// One emitter serves `read` and `write`: the buffer is a `&mut [U8]` to
+// fill or a `&[U8]` to send, and the kernel's byte count is the result.
 fn native_file_transfer<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     f: FunctionValue<'ctx>,
@@ -4071,14 +3931,8 @@ fn native_file_transfer<'ctx>(
     Ok(out)
 }
 
-// Closing consumes the handle, which is why `File.Handle` is linear: a
-// descriptor left open is a leak the borrow checker can catch, and closing
-// twice would release a descriptor another part of the program has since
-// been handed.
-//
-// `close` returns `Unit`, so a failing close is not reported. That is the
-// honest surface: the descriptor is gone either way, and the errors `close`
-// can report are about flushing that the program can no longer act on.
+// Closing consumes the linear `File.Handle` exactly once: a descriptor left
+// open is a leak; closing twice would release a re-issued descriptor.
 fn native_file_close<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let p0 = get_local(locals, 0, span)?;
     let fd = net_fd_of_handle(sess, p0)?;
@@ -4089,8 +3943,7 @@ fn native_file_close<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ct
 }
 
 // Names of the module globals holding the command line and the built
-// argument slice.  Derived from one place so the entry-point writer and
-// `Runtime.args` cannot disagree about where the values live.
+// argument slice, shared by the entry-point writer and `Runtime.args`.
 const ARGC_GLOBAL: &str = ".cnb.argc";
 const ARGV_GLOBAL: &str = ".cnb.argv";
 const ARGS_VIEW_GLOBAL: &str = ".cnb.args.view";
@@ -4109,12 +3962,8 @@ fn runtime_global<'ctx>(sess: &mut Session<'ctx, '_, '_>, name: &str, ty: BasicT
     }
 }
 
-// Stores `argc` and `argv` where `Runtime.args` can find them.
-//
-// The C runtime hands the command line to `main` and to nothing else, so
-// this is the only point at which it can be captured. Two stores in the
-// entry block, unconditionally: a program that never asks for its
-// arguments pays those and nothing more.
+// Stores `argc` and `argv` in module globals where `Runtime.args` finds them;
+// `main` is the only place the command line can be captured.
 fn capture_command_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, wrapper: FunctionValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let argc = match wrapper.get_nth_param(0) {
         Some(value) => value.into_int_value(),
@@ -4132,12 +3981,8 @@ fn capture_command_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, wrapper: Functio
     Ok(())
 }
 
-// The length of a NUL-terminated C string, as a loop over its bytes.
-//
-// `argv` entries are C strings, and a Cinnabar `String` carries an explicit
-// length instead of a terminator, so the length has to be measured once at
-// the boundary. This is emitted rather than calling libc's `strlen` because
-// the argument surface does not route through libc.
+// Length of a NUL-terminated C string, emitted inline: `argv` entries are
+// C strings while `String` carries an explicit length, and no libc is linked.
 fn emit_strlen<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, text: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<IntValue<'ctx>, CodegenError> {
     let i64_ty = sess.0.i64_type();
     let cursor = alloca_raw(sess, i64_ty.into(), "len", span)?;
@@ -4160,20 +4005,8 @@ fn emit_strlen<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, t
     load_i64(sess, cursor)
 }
 
-// Builds the `&[Collections.String]` view over the process's arguments,
-// once, and returns it on every later call.
-//
-// The `String` handles point *into* `argv` rather than copying it. The
-// process's argument strings live for the whole run, which is what makes
-// that safe, and it is also why the view is a shared borrow: a `String`
-// cannot be moved out of a slice (the element is linear, and moving a
-// linear element out of a container by index is a compile error), so a
-// program can read an argument but can never hand one to `string_free`.
-// The borrow checker enforces on its own that these are never freed.
-//
-// The handle array itself is allocated once and deliberately never
-// released: it is process-lifetime data, exactly like the `argv` it points
-// into, so there is no moment at which freeing it would be correct.
+// Builds the `&[Collections.String]` view over the process's arguments once
+// and returns it on every later call; handles point into `argv`.
 fn native_runtime_args<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<(), CodegenError> {
     let i64_ty = sess.0.i64_type();
     let view_ty = slice_view_ty(sess.0);
@@ -4203,10 +4036,8 @@ fn native_runtime_args<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<
             return Err(builder_error(span.0, span.1, span.2, &format!("internal: malloc returned void ({:?})", inst.get_opcode())));
         }
     };
-    // A failed allocation yields an empty argument list rather than a
-    // failure the surface cannot report: `Runtime.args` returns a slice,
-    // not a Result, and a program that reads no arguments is a better
-    // outcome than one that reads a null pointer.
+    // A failed allocation yields an empty list: `Runtime.args` returns a
+    // slice, not a Result.
     let null = is_null_ptr(sess, table)?;
     let fill = new_block(sess, f, "args_fill");
     let empty = new_block(sess, f, "args_empty");
@@ -4255,26 +4086,9 @@ fn native_runtime_args<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<
     Ok(())
 }
 
-// Reads one line from standard input into a fresh `Collections.String`.
-//
-// Byte at a time, which is the point rather than an oversight. A larger
-// read would consume bytes past the newline, and an unbuffered file
-// descriptor has nowhere to put them back — the next `read_line` would
-// silently lose them, and so would anything else reading the same
-// descriptor. Buffering belongs to a reader the program owns, not to a
-// primitive that hands the descriptor back after every call.
-//
-// The newline is consumed but not included: a line's content is what the
-// caller wants, and the terminator is an artifact of the encoding. End of
-// input with nothing read is `Err(EndOfInput)` rather than an empty
-// string, so a program can tell "a blank line" from "no more lines". Bytes
-// already read followed by end of input are returned as a final line.
-//
-// The bytes are validated as UTF-8 before they become a `String`, through
-// the same scan `string_from_slice` runs. Standard input is the least
-// controlled source a string can have, and the language validates string
-// construction from any slice whose contents are not settled at compile
-// time; a line is one of those.
+// Reads one line from standard input into a fresh `Collections.String`,
+// one byte per `read`; drops the newline, reports `Err(EndOfInput)` on an
+// empty stream, and UTF-8 validates the bytes.
 fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx>, ret_key: i64, out: PointerValue<'ctx>, span: (i64, i64, i64)) -> Result<PointerValue<'ctx>, CodegenError> {
     let i64_ty = sess.0.i64_type();
     let str_key = result_arg_key(sess, ret_key, 0);
@@ -4312,9 +4126,7 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     sess.2.position_at_end(cond);
     let read_call = sess.2.build_call(extern_read(sess), &[into_meta(sess.0.i32_type().const_zero().into()), into_meta(byte_slot.into()), into_meta(i64_ty.const_int(1, false).into())], "").map_err(builder_fail)?;
     let got = libc_io_result(sess, read_call, span)?;
-    // A non-positive result ends the line: zero is end of input, negative
-    // is a read error. Both stop here, and `finish` decides between
-    // returning what was read and reporting end of input.
+    // Zero bytes = end of input, negative = read error; both stop here.
     let progressed = sess.2.build_int_compare(IntPredicate::SGT, got, i64_ty.const_zero(), "").map_err(builder_fail)?;
     let keep = new_block(sess, f, "line_keep");
     let retry = new_block(sess, f, "line_retry");
@@ -4352,16 +4164,8 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
             return Err(builder_error(span.0, span.1, span.2, &format!("internal: realloc returned void ({:?})", inst.get_opcode())));
         }
     };
-    // `realloc` returning null leaves the old block valid, so it is freed
-    // here rather than leaked.
-    //
-    // The line so far is *not* returned. The byte that triggered the growth
-    // has already been taken off the descriptor and cannot be put back, so
-    // there is no line left to hand over: returning `Ok` with the bytes that
-    // happened to fit would drop that byte and every byte after it while
-    // reporting success, and no caller could tell that truncated line from a
-    // complete one. An allocation that failed is reported as one, exactly as
-    // the initial allocation is.
+    // A null `realloc` leaves the old block valid; the growth failure is
+    // then reported as end of input.
     let grow_failed = is_null_ptr(sess, grown)?;
     let grow_fail_block = new_block(sess, f, "line_grow_fail");
     let grow_ok = new_block(sess, f, "line_grow_ok");
@@ -4390,15 +4194,8 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     let final_len = load_i64(sess, length)?;
     let final_buf = load_ptr(sess, buffer)?;
 
-    // A failed read is a failed read, not the end of the stream.
-    //
-    // `finish` is reached three ways: the read returned zero, the read
-    // failed, or a newline arrived. Reporting the middle one as
-    // `EndOfInput` told a caller the stream had ended cleanly when the
-    // device had in fact errored, and returning the bytes read so far as
-    // `Ok` handed back a line that was never terminated — the same defect
-    // the allocation path was fixed for, one screen up.
-    //
+    // `finish` is reached three ways: end of input, read error, or newline.
+    // A failed read reports an error, never EndOfInput or a partial line.
     let read_failed = sess.2.build_int_compare(IntPredicate::EQ, got, i64_ty.const_all_ones(), "").map_err(builder_fail)?;
     let failed_block = new_block(sess, f, "line_read_failed");
     let ended_block = new_block(sess, f, "line_ended");
@@ -4420,8 +4217,7 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     sess.2.build_conditional_branch(at_end, end_block, line_block).map_err(builder_fail)?;
 
     sess.2.position_at_end(end_block);
-    // Nothing was read and the stream is over: the buffer is released here
-    // rather than handed back inside a `String` nobody asked for.
+    // The buffer is freed; the caller receives only the decoded line.
     let free = extern_free(sess);
     sess.2.build_call(free, &[into_meta(final_buf.into())], "").map_err(builder_fail)?;
     let end_tag = seeded_enum_variant_tag(sess, SEED_SYM_END_OF_INPUT, span)?;
@@ -4431,13 +4227,8 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
     sess.2.build_unconditional_branch(after).map_err(builder_fail)?;
 
     sess.2.position_at_end(line_block);
-    // A line arrives from outside the process, so its bytes are precisely the
-    // "a slice can come from anywhere" case the language validates on string
-    // construction — no different from `string_from_slice`, and rather more
-    // exposed. Storing them unchecked would let `read_line` be the one
-    // constructor able to hand back a `String` holding malformed UTF-8, and
-    // every reader of that string would inherit a guarantee the language
-    // states but this path never established.
+    // Stdin bytes are UTF-8 validated before becoming a `String`, same as
+    // `string_from_slice`.
     let line_valid = new_block(sess, f, "line_utf8_ok");
     let line_invalid = new_block(sess, f, "line_utf8_bad");
     emit_utf8_scan(sess, f, final_buf, final_len, line_valid, line_invalid, span)?;
@@ -4468,12 +4259,7 @@ fn native_read_line<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ct
 const READ_LINE_CAPACITY: u64 = 128;
 
 // Writes `Err(<variant>(payload))` into the caller's return slot, for the
-// error variants that carry exactly one integer.
-//
-// `read_line` has two allocation sites — the initial buffer and every
-// doubling — and both report failure the same way. Building that error in
-// one place keeps the variant and its payload derived from the declared
-// surface once: both sites consume the sealed registry tag.
+// error variants carrying exactly one integer.
 fn emit_payload_error<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     ret_key: i64,
@@ -4491,10 +4277,8 @@ fn emit_payload_error<'ctx>(
     copy_to_out(sess, ret_key, out, result, span)
 }
 
-// Reads the descriptor out of a scalar-layout handle (`File.Handle` or
-// `Net.Socket`).  A scalar handle *is* its integer — there is no struct to
-// GEP through — so this is the plain load the layout declares, not a field
-// read from a shared envelope.
+// Reads the descriptor out of a scalar-layout handle: the handle *is* its
+// integer, so this is the plain load the layout declares.
 fn net_fd_of_handle<'ctx>(sess: &mut Session<'ctx, '_, '_>, handle: PointerValue<'ctx>) -> Result<IntValue<'ctx>, CodegenError> {
     load_i64(sess, handle)
 }
@@ -4730,9 +4514,8 @@ fn native_net_recv<'ctx>(sess: &mut Session<'ctx, '_, '_>, f: FunctionValue<'ctx
     sess.2.position_at_end(attempt);
     let call = sess.2.build_call(extern_recv(sess), &[fd_arg, into_meta(data.into()), into_meta(len.into()), into_meta(flags.into())], "").map_err(builder_fail)?;
     let raw = socket_result(sess, call, span)?;
-    // `recv` reports failure with -1, the same convention as `send`; a zero
-    // count is the peer's orderly close of its send side, returned as the
-    // byte count so the caller can distinguish it from a fault.
+    // `recv` reports failure with -1; a zero count is the peer's orderly
+    // close of its send side, returned as the byte count.
     let raw_failed = sess.2.build_int_compare(IntPredicate::EQ, raw, raw.get_type().const_all_ones(), "").map_err(builder_fail)?;
     let success = new_block(sess, f, "net_recv_success");
     let decide_failure = new_block(sess, f, "net_recv_decide_failure");
@@ -4771,24 +4554,11 @@ fn native_net_close<'ctx>(sess: &mut Session<'ctx, '_, '_>, locals: &Locals<'ctx
     build_unit_value_into(sess, ret_key, out, span)
 }
 
-/// `ENOMEM`, reported when an allocation this native needs (as opposed to
-/// the child's own memory, which the kernel is responsible for) fails.
+/// `ENOMEM`, reported when an allocation this native needs fails.
 const ENOMEM: u64 = 12;
 
-/// Builds a fresh, NUL-terminated heap copy of a Cinnabar `String`'s bytes
-/// -- what `execvp`'s `argv` entries need and a length-prefixed `String`
-/// does not provide on its own. Unlike `nul_terminated_path`'s
-/// fixed stack buffer (fine for the one path a single `File.open` call
-/// needs), this runs once per element of a runtime-sized argv list: an
-/// `alloca` emitted inside that loop's body would be one stack slot shared
-/// by every iteration, silently aliasing every earlier argument's storage
-/// once the loop moved on. A fresh `malloc` per element is what makes each
-/// argument's buffer outlive the loop that built it.
-///
-/// Returns a null pointer if the allocation failed, exactly what
-/// `is_null_ptr` on the result reports -- the caller branches on that
-/// before ever reading the buffer, so the copy below never runs against a
-/// null destination.
+/// Builds a NUL-terminated heap copy of a `String`'s bytes, one `malloc`
+/// per argv element; a null return means the allocation failed.
 fn heap_nul_terminated<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     f: FunctionValue<'ctx>,
@@ -4846,9 +4616,7 @@ fn native_process_spawn<'ctx>(
     let merge = new_block(sess, f, "spawn_merge");
     let enomem = sess.0.i64_type().const_int(ENOMEM, false);
 
-    // The `char*[]` argv for execvp needs: `len` entries plus one trailing NULL,
-    // eight bytes each regardless of target word size since this compiler
-    // only targets LP64 triples.
+    // `char*[]` argv for execvp: `len` entries + trailing NULL, 8 bytes each.
     let one = sess.0.i64_type().const_int(1, false);
     let eight = sess.0.i64_type().const_int(8, false);
     let n_plus_1 = sess.2.build_int_add(len, one, "").map_err(builder_fail)?;
@@ -4922,15 +4690,8 @@ fn native_process_spawn<'ctx>(
     let path_ptr = load_ptr(sess, argv_arr)?;
     sess.2.build_call(extern_execvp(sess), &[into_meta(path_ptr.into()), into_meta(argv_arr.into())], "").map_err(builder_fail)?;
     sess.2.build_call(extern_exit(sess), &[into_meta(sess.0.i32_type().const_int(127, false).into())], "").map_err(builder_fail)?;
-    // Not `unreachable`: that the kernel never returns from `exit_group`
-    // is a fact about the kernel, not something this compiler's type
-    // checker proved the way it proves a `match` exhaustive -- exactly the
-    // "cannot happen with nothing proving it" `undefined_behaviour.rs`
-    // exists to catch. If it somehow did return, falling through into the
-    // parent's own continuation would run the rest of this native, then
-    // the caller's own code, a second time in what only started as the
-    // child; spinning in place is the honest terminator for a branch this
-    // compiler cannot actually rule out.
+    // Not `unreachable` — nothing here proved it cannot be reached; spin
+    // in place if `exit_group` ever returns.
     let trap = new_block(sess, f, "spawn_child_trap");
     sess.2.build_unconditional_branch(trap).map_err(builder_fail)?;
     sess.2.position_at_end(trap);
@@ -5005,12 +4766,8 @@ fn native_process_wait<'ctx>(
         ValueKind::Instruction(inst) => return Err(builder_error(span.0, span.1, span.2, &format!("internal: waitpid returned void ({:?})", inst.get_opcode()))),
     };
     let join = libc_result_branch(sess, f, ret_key, out, raw, span)?;
-    // The kernel packs the child's status as `((exit_code & 0xff) << 8) |
-    // termination_signal`: a clean exit has the low byte zero. Reading a
-    // signaled child's exit code as if it had one is the one case this
-    // first slice does not distinguish -- the low byte can be checked by a
-    // caller that cares, since `wait`'s own contract is "the encoded status
-    // word `waitpid` returned", not a codegen-imposed simplification of it.
+    // Kernel status encoding: `((exit_code & 0xff) << 8) | termination_signal`;
+    // `wait` hands back the encoded word as-is.
     let status = sess.2.build_load(sess.0.i32_type(), status_slot, "").map_err(builder_fail)?.into_int_value();
     let status64 = sess.2.build_int_z_extend(status, sess.0.i64_type(), "").map_err(builder_fail)?;
     let eight = sess.0.i64_type().const_int(8, false);
@@ -5027,9 +4784,7 @@ fn native_process_wait<'ctx>(
     Ok(out)
 }
 
-// The Win32 `CloseHandle` entry point: takes a HANDLE pointer and returns
-// a 32-bit success flag, so a kernel object is released when its handle is
-// consumed.
+// The Win32 `CloseHandle` entry point: a HANDLE pointer in, 32-bit flag out.
 fn extern_close_handle<'ctx>(sess: &mut Session<'ctx, '_, '_>) -> FunctionValue<'ctx> {
     extern_fn(sess, "CloseHandle", sess.0.i32_type().fn_type(&[ptr_ty(sess).into()], false))
 }
@@ -5077,9 +4832,7 @@ fn i1_and<'ctx>(sess: &mut Session<'ctx, '_, '_>, a: IntValue<'ctx>, b: IntValue
     sess.2.build_and(a, b, "").map_err(builder_fail)
 }
 
-// Lowercases an ASCII letter byte (OR 0x20); non-letters pass through
-// unchanged, and the caller only compares the result against lowercase
-// letters or punctuation that OR 0x20 leaves alone.
+// Lowercases an ASCII letter byte (OR 0x20); other bytes pass through.
 fn i8_lower<'ctx>(sess: &mut Session<'ctx, '_, '_>, a: IntValue<'ctx>) -> Result<IntValue<'ctx>, CodegenError> {
     sess.2.build_or(a, sess.0.i8_type().const_int(0x20, false), "").map_err(builder_fail)
 }
@@ -5107,9 +4860,7 @@ fn is_shell_metachar<'ctx>(sess: &mut Session<'ctx, '_, '_>, b: IntValue<'ctx>) 
 }
 
 // Writes `count` backslash bytes into `buf` at the running offset held in
-// `w_slot`, advancing the offset.  Used by the Windows command-line
-// quoting pass, where backslashes before quotes and at the end of an
-// argument must be doubled.
+// `w_slot`, advancing the offset; part of the Windows quoting pass.
 fn emit_backslash_run<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     f: FunctionValue<'ctx>,
@@ -5141,9 +4892,8 @@ fn emit_backslash_run<'ctx>(
     Ok(())
 }
 
-// The Windows `Process.wait` lowering: WaitForSingleObject on the stored
-// handle (infinite timeout), then GetExitCodeProcess for the status.  Both
-// failures report `Err(SystemFault(GetLastError()))`.
+// Windows `Process.wait`: WaitForSingleObject (infinite) then
+// GetExitCodeProcess; failures report `Err(SystemFault(GetLastError()))`.
 fn native_process_wait_windows<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     f: FunctionValue<'ctx>,
@@ -5207,13 +4957,8 @@ fn native_process_wait_windows<'ctx>(
     Ok(out)
 }
 
-// The Windows `Process.spawn` lowering: builds one quoted command line
-// from the argv slice (the Win32 convention), converts it to UTF-16, and
-// hands it to CreateProcessW with an explicit empty environment.  Standard
-// argument quoting doubles backslashes before quotes and at the end of an
-// argument; when the program is a batch file (whose command line cmd.exe
-// re-parses), an argument containing a shell metacharacter is rejected
-// rather than silently reinterpreted.
+// Windows `Process.spawn`: quotes argv into one Win32 command line,
+// converts to UTF-16, and calls CreateProcessW with an empty environment.
 fn native_process_spawn_windows<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     f: FunctionValue<'ctx>,
@@ -5264,7 +5009,7 @@ fn native_process_spawn_windows<'ctx>(
     let merge = new_block(sess, f, "wspawn_merge");
     let length_pass = new_block(sess, f, "wspawn_length");
 
-    // ---- is argv[0] a batch file? ----
+    // Is argv[0] a batch file?
     let has_first = sess.2.build_int_compare(IntPredicate::SGT, len, zero, "").map_err(builder_fail)?;
     let check_batch = new_block(sess, f, "wspawn_check_batch");
     let not_batch = new_block(sess, f, "wspawn_not_batch");
@@ -5308,7 +5053,7 @@ fn native_process_spawn_windows<'ctx>(
     let metachar_scan = new_block(sess, f, "wspawn_meta_scan");
     sess.2.build_conditional_branch(is_batch, metachar_scan, not_batch).map_err(builder_fail)?;
 
-    // ---- reject shell metacharacters when the program is a batch file ----
+    // Reject shell metacharacters when the program is a batch file.
     sess.2.position_at_end(metachar_scan);
     store_key(sess, scan_i, zero.into())?;
     let scan_cond = new_block(sess, f, "wspawn_scan_cond");
@@ -5353,9 +5098,8 @@ fn native_process_spawn_windows<'ctx>(
     sess.2.position_at_end(not_batch);
     sess.2.build_unconditional_branch(length_pass).map_err(builder_fail)?;
 
-    // ---- pass 1: per-arg quoted byte length and need-quote flag ----
-    // The per-argument need-quote flags live in a heap array of `len`
-    // bytes (one per argument) so the fill pass can read them back.
+    // Pass 1: per-arg quoted byte length and need-quote flag, the flags in
+    // a heap array of `len` bytes so the fill pass can read them back.
     sess.2.position_at_end(length_pass);
     let need_alloc = sess.2.build_select(sess.2.build_int_compare(IntPredicate::EQ, len, zero, "").map_err(builder_fail)?, one, len, "").map_err(builder_fail)?.into_int_value();
     let need_call = sess.2.build_call(malloc, &[into_meta(need_alloc.into())], "").map_err(builder_fail)?;
@@ -5499,7 +5243,7 @@ fn native_process_spawn_windows<'ctx>(
     system_fault_result(sess, ret_key, out, enomem, span)?;
     sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
 
-    // ---- pass 2: fill the quoted UTF-8 command line ----
+    // Pass 2: fill the quoted UTF-8 command line.
     sess.2.position_at_end(fill_pass);
     store_key(sess, w_slot, zero.into())?;
     store_key(sess, f_i, zero.into())?;
@@ -5682,7 +5426,7 @@ fn native_process_spawn_windows<'ctx>(
     sess.2.position_at_end(f_done);
     sess.2.build_call(free, &[into_meta(need_arr.into())], "").map_err(builder_fail)?;
 
-    // ---- pass 3: UTF-8 -> UTF-16 length of the assembled command line ----
+    // Pass 3: UTF-8 -> UTF-16 length of the assembled command line.
     store_key(sess, units_slot, zero.into())?;
     store_key(sess, u_i, zero.into())?;
     let u_cond = new_block(sess, f, "wspawn_u_cond");
@@ -5731,7 +5475,7 @@ fn native_process_spawn_windows<'ctx>(
     system_fault_result(sess, ret_key, out, enomem, span)?;
     sess.2.build_unconditional_branch(merge).map_err(builder_fail)?;
 
-    // ---- pass 4: UTF-8 -> UTF-16 fill + NUL ----
+    // Pass 4: UTF-8 -> UTF-16 fill + NUL.
     sess.2.position_at_end(utf16_fill);
     store_key(sess, w16_slot, zero.into())?;
     store_key(sess, v_i, zero.into())?;
@@ -5816,12 +5560,10 @@ fn native_process_spawn_windows<'ctx>(
     let w16 = load_i64(sess, w16_slot)?;
     let nul_off = offset_buffer_elem_ptr(sess, sess.0.i16_type().into(), buf16, w16)?;
     sess.2.build_store(nul_off, sess.0.i16_type().const_zero()).map_err(builder_fail)?;
-    // The UTF-8 command line is no longer needed once the wide buffer is
-    // complete (the per-argument need array was already freed).
+    // The UTF-8 command line is spent once the wide buffer is complete.
     sess.2.build_call(free, &[into_meta(buf8.into())], "").map_err(builder_fail)?;
 
-    // ---- CreateProcessW ----
-    // `si`, `pi`, `env` slots are reached through their declared array types.
+    // CreateProcessW; `si`, `pi`, `env` are reached through declared arrays.
     let si = alloca_raw(sess, sess.0.i64_type().array_type(12).into(), "si", span)?;
     let zero8 = sess.0.i8_type().const_zero();
     sess.2.build_memset(si, 8, zero8, i64_ty.const_int(96, false)).map_err(builder_fail)?;
@@ -5865,9 +5607,8 @@ fn native_process_spawn_windows<'ctx>(
             return Err(builder_error(span.0, span.1, span.2, &format!("internal: CreateProcessW returned void ({:?})", inst.get_opcode())));
         }
     };
-    // CreateProcessW copies the command line into the child's address
-    // space before returning, so the wide buffer is spent on both the
-    // success and failure paths.
+    // CreateProcessW copies the command line, so the wide buffer is spent
+    // on both the success and failure paths.
     sess.2.build_call(free, &[into_meta(buf16.into())], "").map_err(builder_fail)?;
     let create_ok = new_block(sess, f, "wspawn_create_ok");
     let create_fail = new_block(sess, f, "wspawn_create_fail");
@@ -5941,19 +5682,8 @@ fn emit_cont_step<'ctx>(
     Ok(ok2)
 }
 
-// Emits the UTF-8 well-formedness scan over the `len` bytes at `data`.
-//
-// Control leaves through exactly one of the two blocks the caller supplies:
-// `valid_block` once every sequence in the range has been accepted, and
-// `invalid_block` at the first one that is not. The caller positions the
-// builder at each and decides what a well-formed or malformed buffer means
-// for it; the scan has no opinion about where the bytes came from.
-//
-// Every construction of a `Collections.String` from bytes that are not
-// settled at compile time runs this one scan, which is what makes "a String
-// holds well-formed UTF-8" a single fact rather than one per constructor.
-// A second copy would be free to drift — accepting an overlong encoding
-// here and rejecting it there — while the language promises one answer.
+// Emits the UTF-8 well-formedness scan over the `len` bytes at `data`,
+// branching to `valid_block` or `invalid_block`.
 fn emit_utf8_scan<'ctx>(
     sess: &mut Session<'ctx, '_, '_>,
     f: FunctionValue<'ctx>,
@@ -6016,9 +5746,7 @@ fn emit_utf8_scan<'ctx>(
     sess.2.position_at_end(c2a);
     let c2b = emit_cont_step(sess, f, i, len, data, 2, bad)?;
     sess.2.position_at_end(c2b);
-    // Decode the 3-byte code point
-    // ((lead & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F) and reject
-    // overlong encodings (cp < U+0800) and surrogates (U+D800..U+DFFF).
+    // Decode the 3-byte code point; reject overlong and surrogate values.
     let one = sess.0.i64_type().const_int(1, false);
     let i1 = sess.2.build_int_add(i, one, "").map_err(builder_fail)?;
     let i2 = sess.2.build_int_add(i, two, "").map_err(builder_fail)?;
@@ -6054,10 +5782,7 @@ fn emit_utf8_scan<'ctx>(
     sess.2.position_at_end(c3b);
     let c3c = emit_cont_step(sess, f, i, len, data, 3, bad)?;
     sess.2.position_at_end(c3c);
-    // Decode the 4-byte code point
-    // ((lead & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) |
-    // (b3 & 0x3F) and reject overlong encodings (cp < U+10000) and code
-    // points above U+10FFFF.  A 4-byte sequence can never be a surrogate.
+    // Decode the 4-byte code point; reject overlong and above-U+10FFFF values.
     let three_c = sess.0.i64_type().const_int(3, false);
     let i1b = sess.2.build_int_add(i, one, "").map_err(builder_fail)?;
     let i2b = sess.2.build_int_add(i, two, "").map_err(builder_fail)?;
@@ -6203,12 +5928,8 @@ pub fn emit_program<'ctx>(sess: &mut Session<'ctx, '_, '_>, entry_span: (i64, i6
     let main_val = get_or_emit_fn(sess, main_fn, NONE, mono, params_list, ret_key)?;
     let exit_key = ret_key;
     let i32_ty = sess.0.i32_type();
-    // `main(int argc, char **argv)` rather than `main(void)`: the C runtime
-    // passes the command line here and nowhere else, so `Runtime.args` can
-    // only see it if the entry point accepts it. The two values are stashed
-    // in module globals on entry and read back when a program asks for
-    // them — a program that never calls `Runtime.args` pays two stores and
-    // allocates nothing.
+    // `main(int argc, char **argv)` so the C runtime's command line reaches
+    // `Runtime.args` via the two module globals stashed on entry.
     let sig = i32_ty.fn_type(&[i32_ty.into(), ptr_ty(sess).into()], false);
     let main_wrapper = sess.1.add_function("main", sig, None);
     let entry = sess.0.append_basic_block(main_wrapper, "entry");
@@ -6270,9 +5991,7 @@ pub fn emit_program<'ctx>(sess: &mut Session<'ctx, '_, '_>, entry_span: (i64, i6
         }
         return Ok(());
     }
-    // Any other return layout is rejected by the typechecker (main must
-    // return a builtin scalar, Unit, or an exit-status enum), so this is
-    // defensive: exit with code 1 instead of misreading a non-tag layout.
+    // Unreachable for a typechecked program; exit 1 rather than misread.
     let code1 = i32_ty.const_int(1, false);
     sess.2.build_return(Some(&code1)).map_err(builder_fail)?;
     Ok(())

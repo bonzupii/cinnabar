@@ -1,44 +1,25 @@
 //! Memory access widths and handle integrity, asserted against the IR.
 //!
-//! An external memory checker cannot cover this. A Cinnabar binary is
-//! linked `-static -nostdlib -no-pie` against a musl `libc.a` embedded in
-//! the compiler, so it carries no dynamic section; Valgrind's memcheck has
-//! nothing to interpose on and reports `0 allocs, 0 frees` for a program
-//! that demonstrably allocates, at every optimization level. ASan is no
-//! better placed: its runtime wants the libc the link deliberately does
-//! not provide.
-//!
-//! So the two properties are pinned where they are stated literally — in
-//! the IR — and behaviourally, by
-//! `tests/fixtures/repro/mem_byte_access.cnb`, which detects a wide access
-//! as a clobbered neighbouring byte. The IR assertions here catch what the
-//! runtime oracle structurally cannot: a handle field that is never
-//! initialized is read as garbage rather than producing a wrong value, so
-//! no in-language check can observe it.
+//! Shipped binaries are linked `-static -nostdlib -no-pie`, so an external
+//! memory checker has no allocation to interpose on; these properties are
+//! pinned in the emitted IR instead, plus one behavioural fixture
+//! (`mem_byte_access.cnb`) that detects a wide access as a clobbered
+//! neighbouring byte. Covered:
 //!
 //! 1. `Memory.write_u8` stores exactly `i8` to the byte it computed, and
-//!    `Memory.read_u8` loads exactly `i8` from it. A wider access is the
-//!    reported "overreads the allocation by 7 bytes" defect.
+//!    `Memory.read_u8` loads exactly `i8` from it.
 //! 2. Every native-handle constructor lowers its handle to the layout kind
 //!    the registry declares (scalar `i64`, pair `{ ptr, i64 }`, triple
-//!    `{ ptr, i64, i64 }`) and writes exactly that layout's slots. A
-//!    handle is moved by value, so a skipped slot is uninitialized stack
-//!    at the first move.
-//! 3. `Memory.deallocate` frees the pointer held in the handle's data
-//!    field, not some other field.
+//!    `{ ptr, i64, i64 }`) and writes exactly that layout's slots.
+//! 3. `Memory.deallocate` frees the pointer held in the handle's data field.
 //! 4. `Terminal.read_line` reports a failed buffer growth instead of
-//!    returning the bytes that fit. A failed `realloc` is unreachable from a
-//!    Cinnabar program for the same reason the checkers above are unusable,
-//!    so the path is asserted where it is written.
+//!    returning the bytes that fit.
 //!
 //! **Invariants:**
-//! - These assertions read the emitted IR, which means they are coupled to
-//!   how it is written. That cost is deliberate: it buys coverage of
-//!   properties no runtime oracle here can observe, and the behavioural
-//!   fixture covers what a runtime oracle can.
-//! - An assertion belongs here only when a running program genuinely
-//!   cannot observe the property. Anything a fixture can detect at runtime
-//!   is pinned as a fixture instead.
+//! - Assertions read the emitted IR, covering properties no runtime oracle
+//!   here can observe (e.g. a never-initialized handle field read as garbage).
+//! - An assertion belongs here only when a running program cannot observe
+//!   the property; anything runtime-detectable is pinned as a fixture instead.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -51,9 +32,7 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(format!("{}.cnb", name))
 }
 
-// One directory per test: the tests in this file run concurrently, so a
-// shared per-process directory would let the first one to finish delete
-// the IR the others are still reading.
+// Per-test directory: concurrent tests must not share IR output.
 fn temp_dir(test: &str) -> PathBuf {
     std::env::temp_dir().join(format!("cinnabar_native_memory_{}_{}", std::process::id(), test))
 }
@@ -93,9 +72,7 @@ fn emit_ir(dir: &Path, fixture: &str) -> String {
 }
 
 /// The body of the first LLVM function whose `define` line mentions
-/// `marker`, without the `define` line or the closing brace. Emitted
-/// function names carry a symbol-id suffix (`@Memory_write_u8_3472`), so
-/// the marker is the unsuffixed name.
+/// `marker` (unsuffixed; emitted names carry a symbol-id suffix).
 fn function_body(ir: &str, marker: &str) -> String {
     let mut body = String::new();
     let mut inside = false;
@@ -115,9 +92,8 @@ fn function_body(ir: &str, marker: &str) -> String {
     body
 }
 
-/// The SSA name defined by the first instruction whose right-hand side
-/// starts with `rhs`: `%22 = getelementptr i8, ptr %5, i64 %8` yields
-/// `%22` for the prefix `getelementptr i8, ptr`.
+/// The SSA name defined by the first instruction whose RHS starts with `rhs`
+/// (`%22 = getelementptr ...` yields `%22` for prefix `getelementptr`).
 fn ssa_defined_by(body: &str, rhs: &str) -> String {
     for line in body.lines() {
         let (name, value) = match line.split_once(" = ") {
@@ -222,8 +198,6 @@ fn assert_slots_written(body: &str, handle: &str, what: &str, gep_count: usize) 
 
 /// The lowered layout every native handle shares (`native_llvm` in
 /// `src/codegen/types.rs`): data pointer, length, capacity.
-
-
 #[test]
 fn memory_natives_access_exactly_one_byte() {
     let dir = temp_dir("access_width");
@@ -237,9 +211,8 @@ fn memory_natives_access_exactly_one_byte() {
     let guard = TempDirGuard(dir.clone());
     let ir = emit_ir(&dir, "mem_byte_access");
 
-    // `write_u8` computes the target byte with a `getelementptr i8` over
-    // the block's data pointer; the store landing there must be one byte
-    // wide. An `i64` store here is the reported 7-byte overrun.
+    // `write_u8` computes the target byte with a `getelementptr i8`; the
+    // store landing there must be one byte wide.
     let write = function_body(&ir, "@Memory_write_u8");
     assert!(!write.is_empty(), "no Memory.write_u8 in the emitted IR");
     let write_target = ssa_defined_by(&write, "getelementptr i8, ptr");
@@ -252,8 +225,7 @@ fn memory_natives_access_exactly_one_byte() {
         store
     );
 
-    // `read_u8` computes its address the same way; the load must be one
-    // byte wide, or a read near the end of an allocation runs off it.
+    // The load through the same address computation must be one byte wide.
     let read = function_body(&ir, "@Memory_read_u8");
     assert!(!read.is_empty(), "no Memory.read_u8 in the emitted IR");
     let read_target = ssa_defined_by(&read, "getelementptr i8, ptr");
@@ -281,8 +253,7 @@ fn native_handle_constructors_write_their_declared_layout() {
     }
     let guard = TempDirGuard(dir.clone());
 
-    // Pair handles (data pointer + length): both slots written, no capacity
-    // slot left over from the old uniform triple envelope.
+    // Pair handles (data pointer + length): both slots written, no capacity slot.
     let mem_ir = emit_ir(&dir, "mem_byte_access");
     let mem_body = function_body(&mem_ir, "@Memory_allocate");
     let block = handle_alloc_of(&mem_body, "Memory.allocate", "block", PAIR_HANDLE_TY);
@@ -304,8 +275,7 @@ fn native_handle_constructors_write_their_declared_layout() {
     let map = handle_alloc_of(&map_body, "Collections.hash_map_new", "map", TRIPLE_HANDLE_TY);
     assert_slots_written(&map_body, &map, "Collections.hash_map_new", 3);
 
-    // Scalar handles: the bare descriptor integer, one direct store, no
-    // struct envelope at all.
+    // Scalar handles: one direct store of the bare descriptor integer, no struct.
     let file_ir = emit_ir(&dir, "file_roundtrip");
     let file_body = function_body(&file_ir, "@File_open");
     let file = handle_alloc_of(&file_body, "File.open", "file", SCALAR_HANDLE_TY);
@@ -337,17 +307,8 @@ fn deallocate_unmaps_the_handles_address_and_length() {
     let guard = TempDirGuard(dir.clone());
     let ir = emit_ir(&dir, "mem_byte_access");
 
-    // `Memory.deallocate` unmaps the mapping `allocate` made, and `munmap`
-    // needs *both* halves of the handle: the address from field 0 and the
-    // length from field 1. Releasing a pointer from any other field is the
-    // reported garbage-pointer free, and passing a length from anywhere but
-    // the handle would unmap memory the program still owns — which is the
-    // second reason a handle must be fully initialized.
-    //
-    // The assertion is on the data flow, not on a syscall number: `munmap`
-    // is a C/POSIX call whose `(address, length)` signature is the same on
-    // every platform, so the architecture-specific numbering lives in the C
-    // runtime and the data flow is what a regression would break.
+    // `munmap` needs both handle halves: address from field 0, length from
+    // field 1. The assertion is on that data flow, not a syscall number.
     let body = function_body(&ir, "@Memory_deallocate");
     assert!(!body.is_empty(), "no Memory.deallocate in the emitted IR");
 
@@ -366,9 +327,7 @@ fn deallocate_unmaps_the_handles_address_and_length() {
     let length_ssa = ssa_defined_by(&body, &format!("load i64, ptr {},", length_field));
     assert!(!length_ssa.is_empty(), "Memory.deallocate does not load the handle's length");
 
-    // `munmap` is an external C call that takes the pointer and length
-    // directly, so the loaded pointer reaches it without the `ptrtoint` a
-    // raw syscall would have needed.
+    // The loaded pointer reaches `@munmap` directly, no `ptrtoint`.
     let unmap = match body.lines().find(|line| line.contains("@munmap")) {
         Some(line) => line.to_string(),
         None => {
@@ -391,8 +350,7 @@ fn deallocate_unmaps_the_handles_address_and_length() {
 }
 
 /// The instructions of the basic block labelled `label`, up to the next
-/// label. `function_body` has already trimmed indentation, so a label is a
-/// line whose first token ends in a colon and an instruction never is.
+/// label (a line whose first token ends in a colon).
 fn basic_block(body: &str, label: &str) -> String {
     let opener = format!("{}:", label);
     let mut block = String::new();
@@ -417,21 +375,8 @@ fn basic_block(body: &str, label: &str) -> String {
     block
 }
 
-/// `Terminal.read_line` reports a failed buffer growth rather than
-/// returning the bytes that happened to fit.
-///
-/// A null from `realloc` cannot be reproduced from a Cinnabar program — the
-/// binary links a musl `libc.a` embedded in the compiler with no dynamic
-/// section, so there is no interposition point to fail an allocation from —
-/// which is the same reason every other property in this file is asserted
-/// against the IR.
-///
-/// The byte that triggered the growth has already been taken off the
-/// descriptor and cannot be put back. Returning the bytes read so far would
-/// drop it and everything after it while reporting `Ok`, and no caller could
-/// distinguish that truncated line from a complete one. So the failure path
-/// must release the buffer `realloc` left valid and report the allocation
-/// failure — never reach the construction of a line value.
+/// `Terminal.read_line` reports a failed buffer growth instead of
+/// returning a short line.
 #[test]
 fn read_line_reports_a_failed_growth_rather_than_a_short_line() {
     let dir = temp_dir("read_line_growth");
@@ -447,9 +392,7 @@ fn read_line_reports_a_failed_growth_rather_than_a_short_line() {
     let body = function_body(&ir, "Terminal_read_line");
     assert!(!body.is_empty(), "runtime_io must emit Terminal.read_line");
 
-    // Reachability first: a failure block that nothing branches to would
-    // satisfy every assertion below while the null still fell through to the
-    // finish path.
+    // Reachability first: nothing may fall through the failure block.
     let growth = basic_block(&body, "line_grow");
     assert!(
         growth.contains("label %line_grow_fail"),
