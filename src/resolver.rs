@@ -2211,9 +2211,7 @@ fn walk_item(state: &mut State, scope: i64, item: i64) {
     let kind = node_a(state.1, item);
     // A module is a namespace, owning nothing; `resolve_impl` owns the
     // impl's attribution instead.
-    let owner = if kind == ITEM_MODULE {
-        NONE
-    } else if kind == ITEM_IMPL {
+    let owner = if kind == ITEM_MODULE || kind == ITEM_IMPL {
         NONE
     } else {
         let sym = item_sym_of(state.1, item);
