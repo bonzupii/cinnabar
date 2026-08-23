@@ -1,5 +1,5 @@
 import { OG_CONTENT_TYPE, OG_SIZE } from "@/lib/constants";
-import { renderOgImage } from "@/lib/og-template";
+import { og } from "@/lib/og-template";
 
 /*
  * Social images, as ordinary route handlers at `<route>/og-image`.
@@ -25,17 +25,12 @@ export type OgCopy = {
 
 /** The GET handler a route's `og-image/route.tsx` exports. */
 export function ogImageHandler(copy: OgCopy) {
-  return () => renderOgImage(copy);
+  return og.handler(copy);
 }
 
 /** The image descriptor for a route, for use inside an existing metadata block. */
 export function ogImage(route: string, copy: OgCopy) {
-  return {
-    url: route === "/" ? "/og-image" : `${route}og-image`,
-    width: OG_SIZE.width,
-    height: OG_SIZE.height,
-    alt: copy.alt,
-  };
+  return og.image(route, copy);
 }
 
 /**
@@ -49,11 +44,7 @@ export function ogImage(route: string, copy: OgCopy) {
  * exists, use `ogImage` inside it instead.
  */
 export function ogImageMetadata(route: string, copy: OgCopy) {
-  const image = ogImage(route, copy);
-  return {
-    openGraph: { images: [image] },
-    twitter: { images: [image] },
-  };
+  return og.metadata(route, copy);
 }
 
 export { OG_CONTENT_TYPE, OG_SIZE };
