@@ -1,6 +1,4 @@
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
+import { packageFontLoader, type LoadedFont } from "metaplate/fonts";
 
 /*
  * Fonts for the social images.
@@ -25,71 +23,34 @@ import path from "node:path";
  * a workspace root as well as a local one.
  */
 
-/** Finds an installed package's directory, or throws saying where it looked. */
-function packageDir(name: string): string {
-  const searched: string[] = [];
-  let directory = process.cwd();
-
-  for (;;) {
-    const candidate = path.join(directory, "node_modules", name);
-    searched.push(candidate);
-    if (existsSync(candidate)) return candidate;
-
-    const parent = path.dirname(directory);
-    if (parent === directory) break;
-    directory = parent;
-  }
-
-  throw new Error(
-    `cannot find ${name}; the social images need it for their fonts. Looked in:\n  ${searched.join("\n  ")}`,
-  );
-}
-
 const FONTS = [
   {
     name: "Schibsted Grotesk",
     package: "@fontsource/schibsted-grotesk",
-    file: "schibsted-grotesk-latin-800-normal.woff",
+    file: "files/schibsted-grotesk-latin-800-normal.woff",
     weight: 800,
   },
   {
     name: "Schibsted Grotesk",
     package: "@fontsource/schibsted-grotesk",
-    file: "schibsted-grotesk-latin-700-normal.woff",
+    file: "files/schibsted-grotesk-latin-700-normal.woff",
     weight: 700,
   },
   {
     name: "Schibsted Grotesk",
     package: "@fontsource/schibsted-grotesk",
-    file: "schibsted-grotesk-latin-400-normal.woff",
+    file: "files/schibsted-grotesk-latin-400-normal.woff",
     weight: 400,
   },
   {
     name: "IBM Plex Mono",
     package: "@fontsource/ibm-plex-mono",
-    file: "ibm-plex-mono-latin-500-normal.woff",
+    file: "files/ibm-plex-mono-latin-500-normal.woff",
     weight: 500,
   },
 ] as const;
 
-/** The subset of CSS weights these faces ship, matching Satori's own union. */
-type FontWeight = 400 | 500 | 700 | 800;
-
-export type OgFont = {
-  name: string;
-  data: Buffer;
-  weight: FontWeight;
-  style: "normal";
-};
+export type OgFont = LoadedFont;
 
 /** Loads the four faces the social images set, in Satori's expected shape. */
-export async function loadOgFonts(): Promise<OgFont[]> {
-  return Promise.all(
-    FONTS.map(async (font) => ({
-      name: font.name,
-      data: await readFile(path.join(packageDir(font.package), "files", font.file)),
-      weight: font.weight as FontWeight,
-      style: "normal" as const,
-    })),
-  );
-}
+export const loadOgFonts = packageFontLoader(FONTS);

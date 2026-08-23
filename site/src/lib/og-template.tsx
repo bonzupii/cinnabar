@@ -1,4 +1,4 @@
-import { ImageResponse } from "next/og";
+import { createNextOg } from "metaplate/next";
 import {
   BRAND_THEMES,
   OG_SIZE,
@@ -31,6 +31,15 @@ import {
 export const ogSize = OG_SIZE;
 
 export type CanvasSize = { width: number; height: number };
+
+export type OgRenderCopy = {
+  eyebrow: string;
+  title: string;
+  description: string;
+  alt?: string;
+  theme?: BrandTheme;
+  size?: CanvasSize;
+};
 
 /**
  * The wordmark: the drawn C followed by INNABAR.
@@ -71,22 +80,13 @@ export function OgWordmark({
   );
 }
 
-export async function renderOgImage({
+function OgTemplate({
   eyebrow,
   title,
   description,
   theme = "dark",
   size = OG_SIZE,
-}: {
-  eyebrow: string;
-  title: string;
-  description: string;
-  /** Defaults to dark, which is the brand's default and every route's card. */
-  theme?: BrandTheme;
-  /** Defaults to the 1.91:1 social card. */
-  size?: CanvasSize;
-}) {
-  const fonts = await loadOgFonts();
+}: OgRenderCopy) {
   const palette = BRAND_THEMES[theme];
   const {
     ground: GROUND,
@@ -97,8 +97,7 @@ export async function renderOgImage({
     cinnabar: CINNABAR,
   } = palette;
 
-  return new ImageResponse(
-    (
+  return (
       <div
         style={{
           width: size.width,
@@ -205,7 +204,17 @@ export async function renderOgImage({
           </div>
         </div>
       </div>
-    ),
-    { ...size, fonts },
   );
+}
+
+export const og = createNextOg<OgRenderCopy>({
+  alt: (copy) => copy.alt ?? copy.title,
+  fonts: loadOgFonts,
+  component: OgTemplate,
+});
+
+/** Renders route cards and custom-sized downloadable brand banners alike. */
+export function renderOgImage(copy: OgRenderCopy) {
+  const size = copy.size ?? OG_SIZE;
+  return og.render(copy, { size });
 }
